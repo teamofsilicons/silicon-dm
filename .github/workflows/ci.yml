@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: true
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check all targets
+        run: cargo check --locked --all-targets --all-features
+
+      - name: Run tests
+        run: cargo test --locked --all-targets --all-features
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Validate OpenAPI contract
+        run: npx --yes @redocly/cli@2.49.0 lint openapi.yaml
+
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check advisories, licenses, bans, and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check
+
+  container-smoke:
+    name: Release image smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build release image
+        run: docker build --tag silicon-dm:ci .
+
+      - name: Start isolated PostgreSQL
+        run: |
+          docker network create silicon-dm-ci
+          docker run --detach --name dm-postgres --network silicon-dm-ci \
+            --network-alias postgres \
+            --env POSTGRES_PASSWORD=postgres \
+            postgres:16-bookworm
+          for attempt in {1..30}; do
+            if docker exec dm-postgres pg_isready --username postgres --dbname postgres; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs dm-postgres
+          exit 1
+
+      - name: Create distinct database roles
+        run: |
+          docker exec dm-postgres psql --username postgres --dbname postgres \
+            --set ON_ERROR_STOP=1 \
+            --command "CREATE ROLE dm_migrator LOGIN PASSWORD 'migration-pass'"
+          docker exec dm-postgres psql --username postgres --dbname postgres \
+            --set ON_ERROR_STOP=1 \
+            --command "CREATE ROLE dm_runtime LOGIN PASSWORD 'runtime-pass'"
+          docker exec dm-postgres psql --username postgres --dbname postgres \
+            --set ON_ERROR_STOP=1 \
+            --command "CREATE DATABASE silicon_dm OWNER dm_migrator"
+
+      - name: Migrate and grant runtime privileges
+        run: |
+          docker run --rm --network silicon-dm-ci \
+            --env DM_ENVIRONMENT=test \
+            --env DM_DATABASE_URL=postgres://dm_migrator:migration-pass@postgres:5432/silicon_dm \
+            silicon-dm:ci dm-migrate
+          docker cp deploy/runtime-grants.sql dm-postgres:/tmp/runtime-grants.sql
+          docker exec --env PGPASSWORD=migration-pass dm-postgres \
+            psql --username dm_migrator --dbname silicon_dm \
+            --set ON_ERROR_STOP=1 --set runtime_role=dm_runtime \
+            --file /tmp/runtime-grants.sql
+
+      - name: Boot API and worker as the runtime role
+        run: |
+          runtime_env=(
+            --env DM_ENVIRONMENT=test
+            --env DM_PUBLIC_BASE_URL=http://localhost:8080/api/v1
+            --env DM_DATABASE_URL=postgres://dm_runtime:runtime-pass@postgres:5432/silicon_dm
+            --env DM_DATABASE_MAX_CONNECTIONS=4
+            --env DM_IAM_BASE_URL=http://localhost:8081
+            --env DM_IAM_APP_ID=silicon-dm
+            --env DM_IAM_APP_SECRET=ci-only-secret
+            --env DM_BRIEFCASE_BASE_URL=http://localhost:8082/api/v1
+            --env DM_WAVEFORM_BASE_URL=http://localhost:8083/api/v1
+          )
+          docker run --detach --name dm-api --network silicon-dm-ci \
+            --publish 8080:8080 "${runtime_env[@]}" silicon-dm:ci dm-api
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8080/live --output /dev/null \
+              && curl --fail --silent http://127.0.0.1:8080/ready --output /dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs dm-api
+              exit 1
+            fi
+            sleep 1
+          done
+          docker run --detach --name dm-worker --network silicon-dm-ci \
+            "${runtime_env[@]}" silicon-dm:ci dm-worker
+          sleep 3
+          test "$(docker inspect --format '{{.State.Running}}' dm-worker)" = true
+
+      - name: Show runtime logs on failure
+        if: failure()
+        run: |
+          docker logs dm-api || true
+          docker logs dm-worker || true
+          docker logs dm-postgres || true
+
+      - name: Remove smoke-test containers
+        if: always()
+        run: |
+          docker rm --force dm-api dm-worker dm-postgres || true
+          docker network rm silicon-dm-ci || true
