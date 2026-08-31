@@ -1,0 +1,5 @@
+# OpenAPI has no native WebSocket message-channel construct. SocketFrame is
+# intentionally exposed through the /ws vendor extension for protocol clients.
+openapi.yaml:
+  no-unused-components:
+    - '#/components/schemas/SocketFrame'

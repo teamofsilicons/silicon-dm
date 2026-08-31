@@ -2,48 +2,58 @@ openapi: 3.1.0
 info:
   title: Silicon DM API
   version: 0.1.0
+  license: { name: Proprietary, identifier: LicenseRef-Proprietary }
   description: Reliable real-time messaging among Carbons and Silicons. WebSocket frame schemas are documented under components.schemas.SocketFrame.
 servers:
   - url: https://dm.teamofsilicons.com/api/v1
 security:
   - bearerAuth: []
   - oboAccess: []
+    oboAppId: []
 tags:
-  - name: Realtime
-  - name: Conversations
-  - name: Messages
-  - name: Bundles
-  - name: Drafts
-  - name: Presence
-  - name: GIFs
-  - name: Internal
+  - { name: Realtime, description: Authenticated WebSocket sessions and durable actor streams }
+  - { name: Conversations, description: Exact-participant-set conversations }
+  - { name: Messages, description: 'Durable content, receipts, and attachment access' }
+  - { name: Bundles, description: Non-destructive Silicon message bundles }
+  - { name: Drafts, description: Private cross-device draft synchronization }
+  - { name: Presence, description: Authorized availability and transient activity }
+  - { name: GIFs, description: Safe Giphy discovery and recent history }
+  - { name: Internal, description: Service-authenticated Silicon Hook ingress }
 paths:
   /ws:
     get:
       tags: [Realtime]
       operationId: openRealtimeConnection
       summary: Upgrade to the DM WebSocket protocol
-      description: Authenticate with an IAM token and declare one or more authorized actor IDs. Server ping frames arrive every 30 seconds; clients echo ping_id in pong. Two minutes without a valid pong closes with application code 4000.
+      security: [{ bearerAuth: [] }]
+      description: Authenticate with an IAM bearer token and declare one or more authorized actor IDs in one organization. Server ping frames arrive every 30 seconds; clients echo ping_id in pong. Two minutes without a valid pong closes with application code 4000. Durable frames carry an actor delivery sequence and stable delivery ID; clients resume and cumulatively ACK each actor stream.
+      x-websocket-frame: { $ref: '#/components/schemas/SocketFrame' }
       parameters:
-        - { name: actors, in: query, required: true, schema: { type: array, minItems: 1, items: { type: string } } }
+        - { name: actors, in: query, required: true, schema: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: { type: string } } }
+        - { name: org_id, in: query, required: true, schema: { type: string }, description: IAM-verified organization context for every represented actor }
+        - { name: device_id, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 255, pattern: '^[^\u0000-\u001F\u007F]{1,255}$' }, description: Stable consumer identifier used for resume and device-aware receipts }
       responses:
         '101': { description: Switching Protocols }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /conversations:
     get:
       tags: [Conversations]
       operationId: listConversations
+      summary: List the current actor's conversations
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
-        - { name: include_bundled_members, in: query, schema: { type: boolean, default: false }, description: Include original messages hidden behind display messages }
       responses:
         '200': { description: Conversations, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Conversation' } }, next_cursor: { type: [string, 'null'] } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
     post:
       tags: [Conversations]
       operationId: createConversation
+      summary: Create or resolve an exact-participant-set conversation
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -51,25 +61,30 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object, required: [participant_ids], properties: { participant_ids: { type: array, minItems: 1, uniqueItems: true, items: { type: string } } } }
+            schema: { type: object, required: [participant_ids], properties: { participant_ids: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: { type: string }, description: 'IAM actor IDs; DM adds the authenticated actor, allows at most 100 total unique participants, and resolves the exact participant set to one conversation.' } } }
       responses:
         '201': { description: Conversation, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /conversations/{conversation_id}/messages:
     get:
       tags: [Messages]
       operationId: listMessages
+      summary: List durable conversation messages
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/ConversationId'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
+        - { name: include_bundled_members, in: query, schema: { type: boolean, default: false }, description: Include original messages hidden behind bundle display messages }
       responses:
         '200': { description: Messages in stable sequence order, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Message' } }, next_cursor: { type: [string, 'null'] } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
     post:
       tags: [Messages]
       operationId: sendMessage
+      summary: Durably accept and queue a message
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/ConversationId'
@@ -81,11 +96,13 @@ paths:
             schema: { $ref: '#/components/schemas/MessageCreate' }
       responses:
         '202': { description: Message durably accepted, content: { application/json: { schema: { $ref: '#/components/schemas/Message' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /conversations/{conversation_id}/messages/{message_id}/receipts:
     post:
       tags: [Messages]
       operationId: recordMessageReceipt
+      summary: Record a monotonic device receipt
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/ConversationId'
@@ -94,9 +111,10 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object, required: [status, device_id], properties: { status: { type: string, enum: [delivered, read] }, device_id: { type: string } } }
+            schema: { type: object, required: [status, device_id], properties: { status: { type: string, enum: [delivered, read] }, device_id: { type: string, minLength: 1, maxLength: 255, pattern: '^[^\u0000-\u001F\u007F]{1,255}$' } } }
       responses:
         '200': { description: Aggregate receipt state, content: { application/json: { schema: { $ref: '#/components/schemas/Message' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /conversations/{conversation_id}/bundles:
     post:
@@ -115,6 +133,7 @@ paths:
             schema: { $ref: '#/components/schemas/BundleCreate' }
       responses:
         '201': { description: Bundle and display message created, content: { application/json: { schema: { $ref: '#/components/schemas/Bundle' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /conversations/{conversation_id}/bundles/{bundle_id}:
     get:
@@ -127,25 +146,29 @@ paths:
         - { name: bundle_id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         '200': { description: Bundle with display and original messages, content: { application/json: { schema: { $ref: '#/components/schemas/BundleDetail' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /conversations/{conversation_id}/draft:
     get:
       tags: [Drafts]
       operationId: getDraft
+      summary: Get the current actor's draft
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/ConversationId'
       responses:
         '200': { description: Current actor's synchronized draft, content: { application/json: { schema: { $ref: '#/components/schemas/Draft' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { description: No draft }
         default: { $ref: '#/components/responses/Error' }
     put:
       tags: [Drafts]
       operationId: putDraft
+      summary: Create or conditionally replace a draft
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/ConversationId'
-        - { name: If-Match, in: header, schema: { type: integer, minimum: 0 }, description: Last observed draft version }
+        - { name: If-Match, in: header, schema: { type: integer, minimum: 0 }, description: Exact last observed draft version. Omit or send 0 only when creating a draft that does not yet exist. }
       requestBody:
         required: true
         content:
@@ -153,67 +176,91 @@ paths:
             schema: { $ref: '#/components/schemas/DraftInput' }
       responses:
         '200': { description: Draft stored, content: { application/json: { schema: { $ref: '#/components/schemas/Draft' } } } }
-        '409': { description: Version conflict, content: { application/json: { schema: { $ref: '#/components/schemas/Draft' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: Version conflict. Returns the current draft when one exists, or an error envelope when it was deleted after the supplied version was observed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Draft'
+                  - $ref: '#/components/schemas/Error'
         default: { $ref: '#/components/responses/Error' }
     delete:
       tags: [Drafts]
       operationId: deleteDraft
+      summary: Delete the current actor's draft
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/ConversationId'
       responses:
         '204': { description: Draft deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /presence/{actor_id}:
     get:
       tags: [Presence]
       operationId: getPresence
+      summary: Get an authorized actor's presence
+      security: [{ bearerAuth: [] }]
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - { name: actor_id, in: path, required: true, schema: { type: string } }
       responses:
         '200': { description: Presence, content: { application/json: { schema: { $ref: '#/components/schemas/Presence' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /attachments/temporary-url:
     post:
       tags: [Messages]
       operationId: createAttachmentTemporaryUrl
+      summary: Exchange a permanent attachment URL for temporary access
+      security: [{ bearerAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/OrgId' }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [permanent_url], properties: { permanent_url: { type: string, format: uri } } } } } }
       responses:
         '201': { description: Briefcase temporary URL, content: { application/json: { schema: { type: object, required: [url, expires_at], properties: { url: { type: string, format: uri }, expires_at: { type: string, format: date-time } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /gifs/trending:
     get:
       tags: [GIFs]
       operationId: listTrendingGifs
+      summary: List safe trending GIFs
       parameters: [{ $ref: '#/components/parameters/OrgId' }]
       responses:
         '200': { description: Trending Giphy results, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Gif' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /gifs/search:
     get:
       tags: [GIFs]
       operationId: searchGifs
+      summary: Search safe GIF results
       parameters:
         - $ref: '#/components/parameters/OrgId'
-        - { name: q, in: query, required: true, schema: { type: string } }
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 50, pattern: '^[^\u0000-\u001F\u007F]{1,50}$' } }
       responses:
         '200': { description: Giphy results, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Gif' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /gifs/recent:
     get:
       tags: [GIFs]
       operationId: listRecentGifs
+      summary: List the current Carbon's recent GIFs
       parameters: [{ $ref: '#/components/parameters/OrgId' }]
       responses:
         '200': { description: Current Carbon's last 20 GIFs, content: { application/json: { schema: { type: object, properties: { items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/Gif' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
   /internal/hook-events:
     post:
       tags: [Internal]
       operationId: deliverHookEvent
+      summary: Durably queue an authorized Silicon Hook event
       security: [{ serviceAuth: [] }]
+      description: Requires an introspected Silicon Hook service token with dm.hook_events.deliver and accepts at most 1 MiB of serialized payload.
       requestBody:
         required: true
         content:
@@ -221,20 +268,23 @@ paths:
             schema: { $ref: '#/components/schemas/SystemEvent' }
       responses:
         '202': { description: Event durably queued for the authorized Silicon }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
-    oboAccess: { type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: Short-lived IAM OBO Access proof; X-App-ID is also required }
+    oboAccess: { type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: Short-lived IAM OBO Access proof }
+    oboAppId: { type: apiKey, in: header, name: X-App-ID, description: Originating application ID required together with X-IAM-OBO-Access-Proof }
     serviceAuth: { type: http, scheme: bearer, bearerFormat: IAM service token }
   parameters:
     OrgId: { name: X-Org-ID, in: header, required: true, schema: { type: string } }
     ConversationId: { name: conversation_id, in: path, required: true, schema: { type: string, format: uuid } }
-    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 255 } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]{8,255}$' } }
     Cursor: { name: cursor, in: query, schema: { type: string } }
     Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
   responses:
     Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Unauthorized: { description: Authentication credentials are missing or invalid, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   schemas:
     ActorRef:
       type: object
@@ -247,21 +297,37 @@ components:
     Attachment:
       type: object
       required: [permanent_url]
-      properties: { permanent_url: { type: string, format: uri }, name: { type: string }, content_type: { type: string }, size: { type: integer, minimum: 0 } }
+      properties:
+        permanent_url: { type: string, format: uri, maxLength: 8192, pattern: '^https://' }
+        name: { type: string, minLength: 1, maxLength: 1024 }
+        content_type: { type: string, minLength: 1, maxLength: 255 }
+        size: { type: integer, minimum: 0, maximum: 5368709120, description: Client-declared size; Briefcase metadata remains authoritative. }
     Gif:
       type: object
       required: [provider_id, url]
-      properties: { provider_id: { type: string }, url: { type: string, format: uri }, preview_url: { type: string, format: uri }, title: { type: string } }
+      properties:
+        provider_id: { type: string, minLength: 1, maxLength: 255 }
+        url: { type: string, format: uri, maxLength: 8192, pattern: '^https://' }
+        preview_url: { type: string, format: uri, maxLength: 8192, pattern: '^https://' }
+        title: { type: string, maxLength: 1000 }
     MessageCreate:
       type: object
-      minProperties: 1
       properties:
         sender_id: { type: string, description: Required when a connection represents multiple actors }
-        text: { type: string, maxLength: 100000000 }
-        attachments: { type: array, items: { $ref: '#/components/schemas/Attachment' } }
-        voice: { $ref: '#/components/schemas/Attachment' }
-        voice_transcript: { type: [string, 'null'], description: Transcript or null when transcription failed }
+        text: { type: string, minLength: 1, maxLength: 100000000 }
+        attachments: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/Attachment' }, description: Combined attachment and voice item count may not exceed 100. }
+        voice: { $ref: '#/components/schemas/Attachment', description: Counts toward the combined 100 attachment-item maximum. }
+        voice_transcript: { type: [string, 'null'], description: DM always submits voice to Waveform; a successful provider transcript replaces this client value and terminal provider failure stores null. }
         gif: { $ref: '#/components/schemas/Gif' }
+      anyOf:
+        - required: [text]
+          properties: { text: {} }
+        - required: [attachments]
+          properties: { attachments: { minItems: 1 } }
+        - required: [voice]
+          properties: { voice: {} }
+        - required: [gif]
+          properties: { gif: {} }
     Message:
       allOf:
         - $ref: '#/components/schemas/MessageCreate'
@@ -296,7 +362,7 @@ components:
           properties: { original_messages: { type: array, minItems: 1, maxItems: 100, items: { $ref: '#/components/schemas/Message' } } }
     DraftInput:
       type: object
-      properties: { message_content: { type: string, maxLength: 100000000 }, attachments: { type: array, items: { $ref: '#/components/schemas/Attachment' } }, voice: { $ref: '#/components/schemas/Attachment' }, gif: { $ref: '#/components/schemas/Gif' } }
+      properties: { message_content: { type: string, maxLength: 100000000 }, attachments: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/Attachment' }, description: Combined attachment and voice item count may not exceed 100. }, voice: { $ref: '#/components/schemas/Attachment', description: Counts toward the combined 100 attachment-item maximum. }, gif: { $ref: '#/components/schemas/Gif' } }
     Draft:
       allOf:
         - $ref: '#/components/schemas/DraftInput'
@@ -310,14 +376,94 @@ components:
     SystemEvent:
       type: object
       required: [event_id, org_id, silicon_id, type, payload]
-      properties: { event_id: { type: string, format: uuid }, org_id: { type: string }, silicon_id: { type: string }, type: { type: string }, trace_id: { type: string }, payload: { type: object, additionalProperties: true } }
-    SocketFrame:
+      properties:
+        event_id: { type: string, format: uuid }
+        org_id: { type: string }
+        silicon_id: { type: string }
+        type: { type: string, minLength: 1, maxLength: 255, pattern: '^[^\u0000-\u001F\u007F]{1,255}$' }
+        trace_id: { type: string, minLength: 1, maxLength: 255, pattern: '^[^\u0000-\u001F\u007F]{1,255}$' }
+        payload: { type: object, additionalProperties: true, description: Serialized object must not exceed 1 MiB. }
+    ClientSocketFrame:
       oneOf:
-        - { type: object, required: [type, ping_id], properties: { type: { const: ping }, ping_id: { type: string } } }
-        - { type: object, required: [type, ping_id], properties: { type: { const: pong }, ping_id: { type: string } } }
-        - { type: object, required: [type, message], properties: { type: { const: message }, message: { $ref: '#/components/schemas/Message' } } }
-        - { type: object, required: [type, event], properties: { type: { const: system_event }, event: { $ref: '#/components/schemas/SystemEvent' } } }
-        - { type: object, required: [type, message_id, status], properties: { type: { const: receipt }, message_id: { type: string, format: uuid }, status: { type: string, enum: [sent, delivered, read, failed] } } }
+        - $ref: '#/components/schemas/PongFrame'
+        - $ref: '#/components/schemas/AckFrame'
+        - $ref: '#/components/schemas/ResumeFrame'
+        - $ref: '#/components/schemas/PresenceFrame'
+        - $ref: '#/components/schemas/ReceiptCommandFrame'
+        - $ref: '#/components/schemas/SendMessageFrame'
+    ServerSocketFrame:
+      oneOf:
+        - $ref: '#/components/schemas/ReadyFrame'
+        - $ref: '#/components/schemas/PingFrame'
+        - $ref: '#/components/schemas/MessageAcceptedFrame'
+        - $ref: '#/components/schemas/ReceiptRecordedFrame'
+        - $ref: '#/components/schemas/MessageDeliveryFrame'
+        - $ref: '#/components/schemas/SystemEventDeliveryFrame'
+        - $ref: '#/components/schemas/ReceiptDeliveryFrame'
+        - $ref: '#/components/schemas/SocketErrorFrame'
+    SocketFrame:
+      description: Union of client-to-server and server-to-client application frames.
+      oneOf:
+        - $ref: '#/components/schemas/ClientSocketFrame'
+        - $ref: '#/components/schemas/ServerSocketFrame'
+    PongFrame:
+      type: object
+      required: [type, ping_id]
+      properties: { type: { const: pong }, ping_id: { type: string } }
+    AckFrame:
+      type: object
+      required: [type, actor_id, through_sequence]
+      properties: { type: { const: ack }, actor_id: { type: string }, through_sequence: { type: integer, minimum: 0 } }
+    ResumeFrame:
+      type: object
+      required: [type, actor_id, after_sequence]
+      properties: { type: { const: resume }, actor_id: { type: string }, after_sequence: { type: integer, minimum: 0 } }
+    PresenceFrame:
+      type: object
+      required: [type, actor_id, activity]
+      properties: { type: { const: presence }, actor_id: { type: string }, activity: { type: [string, 'null'], enum: [typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, null] } }
+    ReceiptCommandFrame:
+      type: object
+      required: [type, actor_id, conversation_id, message_id, status, device_id]
+      properties: { type: { const: receipt }, actor_id: { type: string }, conversation_id: { type: string, format: uuid }, message_id: { type: string, format: uuid }, status: { type: string, enum: [delivered, read] }, device_id: { type: string, minLength: 1, maxLength: 255, pattern: '^[^\u0000-\u001F\u007F]{1,255}$' } }
+    SendMessageFrame:
+      type: object
+      required: [type, actor_id, org_id, conversation_id, idempotency_key, message]
+      properties: { type: { const: send_message }, actor_id: { type: string }, org_id: { type: string }, conversation_id: { type: string, format: uuid }, idempotency_key: { type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]{8,255}$' }, message: { $ref: '#/components/schemas/MessageCreate' } }
+    ReadyFrame:
+      type: object
+      required: [type, protocol_version, connection_id, actors, acknowledged_through]
+      properties: { type: { const: ready }, protocol_version: { const: 1 }, connection_id: { type: string, format: uuid }, actors: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: { type: string } }, acknowledged_through: { type: object, additionalProperties: { type: integer, minimum: 0 } } }
+    PingFrame:
+      type: object
+      required: [type, ping_id]
+      properties: { type: { const: ping }, ping_id: { type: string } }
+    MessageAcceptedFrame:
+      type: object
+      description: Ephemeral confirmation that a send_message command was durably accepted. It does not consume a delivery sequence and is not ACKed.
+      required: [type, idempotency_key, message]
+      properties: { type: { const: message_accepted }, idempotency_key: { type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]{8,255}$' }, message: { $ref: '#/components/schemas/Message' } }
+    ReceiptRecordedFrame:
+      type: object
+      description: Ephemeral confirmation that a device receipt was durably recorded. It does not consume a delivery sequence and is not ACKed.
+      required: [type, message_id, status]
+      properties: { type: { const: receipt_recorded }, message_id: { type: string, format: uuid }, status: { type: string, enum: [delivered, read] } }
+    MessageDeliveryFrame:
+      type: object
+      required: [type, delivery_id, actor_id, delivery_sequence, message]
+      properties: { type: { const: message }, delivery_id: { type: string, format: uuid }, actor_id: { type: string }, delivery_sequence: { type: integer, minimum: 1 }, message: { $ref: '#/components/schemas/Message' } }
+    SystemEventDeliveryFrame:
+      type: object
+      required: [type, delivery_id, actor_id, delivery_sequence, event]
+      properties: { type: { const: system_event }, delivery_id: { type: string, format: uuid }, actor_id: { type: string }, delivery_sequence: { type: integer, minimum: 1 }, event: { $ref: '#/components/schemas/SystemEvent' } }
+    ReceiptDeliveryFrame:
+      type: object
+      required: [type, delivery_id, actor_id, delivery_sequence, message_id, status]
+      properties: { type: { const: receipt }, delivery_id: { type: string, format: uuid }, actor_id: { type: string }, delivery_sequence: { type: integer, minimum: 1 }, message_id: { type: string, format: uuid }, status: { type: string, enum: [sent, delivered, read, failed] } }
+    SocketErrorFrame:
+      type: object
+      required: [type, code, message, recoverable]
+      properties: { type: { const: error }, code: { type: string }, message: { type: string }, recoverable: { type: boolean } }
     Error:
       type: object
       required: [error]
