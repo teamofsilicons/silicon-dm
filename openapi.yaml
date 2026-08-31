@@ -1,0 +1,324 @@
+openapi: 3.1.0
+info:
+  title: Silicon DM API
+  version: 0.1.0
+  description: Reliable real-time messaging among Carbons and Silicons. WebSocket frame schemas are documented under components.schemas.SocketFrame.
+servers:
+  - url: https://dm.teamofsilicons.com/api/v1
+security:
+  - bearerAuth: []
+  - oboAccess: []
+tags:
+  - name: Realtime
+  - name: Conversations
+  - name: Messages
+  - name: Bundles
+  - name: Drafts
+  - name: Presence
+  - name: GIFs
+  - name: Internal
+paths:
+  /ws:
+    get:
+      tags: [Realtime]
+      operationId: openRealtimeConnection
+      summary: Upgrade to the DM WebSocket protocol
+      description: Authenticate with an IAM token and declare one or more authorized actor IDs. Server ping frames arrive every 30 seconds; clients echo ping_id in pong. Two minutes without a valid pong closes with application code 4000.
+      parameters:
+        - { name: actors, in: query, required: true, schema: { type: array, minItems: 1, items: { type: string } } }
+      responses:
+        '101': { description: Switching Protocols }
+        default: { $ref: '#/components/responses/Error' }
+  /conversations:
+    get:
+      tags: [Conversations]
+      operationId: listConversations
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - { name: include_bundled_members, in: query, schema: { type: boolean, default: false }, description: Include original messages hidden behind display messages }
+      responses:
+        '200': { description: Conversations, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Conversation' } }, next_cursor: { type: [string, 'null'] } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Conversations]
+      operationId: createConversation
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [participant_ids], properties: { participant_ids: { type: array, minItems: 1, uniqueItems: true, items: { type: string } } } }
+      responses:
+        '201': { description: Conversation, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /conversations/{conversation_id}/messages:
+    get:
+      tags: [Messages]
+      operationId: listMessages
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { description: Messages in stable sequence order, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Message' } }, next_cursor: { type: [string, 'null'] } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Messages]
+      operationId: sendMessage
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageCreate' }
+      responses:
+        '202': { description: Message durably accepted, content: { application/json: { schema: { $ref: '#/components/schemas/Message' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /conversations/{conversation_id}/messages/{message_id}/receipts:
+    post:
+      tags: [Messages]
+      operationId: recordMessageReceipt
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ConversationId'
+        - { name: message_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [status, device_id], properties: { status: { type: string, enum: [delivered, read] }, device_id: { type: string } } }
+      responses:
+        '200': { description: Aggregate receipt state, content: { application/json: { schema: { $ref: '#/components/schemas/Message' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /conversations/{conversation_id}/bundles:
+    post:
+      tags: [Bundles]
+      operationId: createMessageBundle
+      summary: Bundle existing messages behind one display message
+      description: Only an authenticated Silicon may create a bundle. The operation is non-destructive; each original message remains stored and records the created bundle ID.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BundleCreate' }
+      responses:
+        '201': { description: Bundle and display message created, content: { application/json: { schema: { $ref: '#/components/schemas/Bundle' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /conversations/{conversation_id}/bundles/{bundle_id}:
+    get:
+      tags: [Bundles]
+      operationId: getMessageBundle
+      summary: Retrieve a bundle and its original messages
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ConversationId'
+        - { name: bundle_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Bundle with display and original messages, content: { application/json: { schema: { $ref: '#/components/schemas/BundleDetail' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /conversations/{conversation_id}/draft:
+    get:
+      tags: [Drafts]
+      operationId: getDraft
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200': { description: Current actor's synchronized draft, content: { application/json: { schema: { $ref: '#/components/schemas/Draft' } } } }
+        '404': { description: No draft }
+        default: { $ref: '#/components/responses/Error' }
+    put:
+      tags: [Drafts]
+      operationId: putDraft
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ConversationId'
+        - { name: If-Match, in: header, schema: { type: integer, minimum: 0 }, description: Last observed draft version }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DraftInput' }
+      responses:
+        '200': { description: Draft stored, content: { application/json: { schema: { $ref: '#/components/schemas/Draft' } } } }
+        '409': { description: Version conflict, content: { application/json: { schema: { $ref: '#/components/schemas/Draft' } } } }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Drafts]
+      operationId: deleteDraft
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '204': { description: Draft deleted }
+        default: { $ref: '#/components/responses/Error' }
+  /presence/{actor_id}:
+    get:
+      tags: [Presence]
+      operationId: getPresence
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: actor_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Presence, content: { application/json: { schema: { $ref: '#/components/schemas/Presence' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /attachments/temporary-url:
+    post:
+      tags: [Messages]
+      operationId: createAttachmentTemporaryUrl
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [permanent_url], properties: { permanent_url: { type: string, format: uri } } } } } }
+      responses:
+        '201': { description: Briefcase temporary URL, content: { application/json: { schema: { type: object, required: [url, expires_at], properties: { url: { type: string, format: uri }, expires_at: { type: string, format: date-time } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /gifs/trending:
+    get:
+      tags: [GIFs]
+      operationId: listTrendingGifs
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      responses:
+        '200': { description: Trending Giphy results, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Gif' } } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /gifs/search:
+    get:
+      tags: [GIFs]
+      operationId: searchGifs
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: q, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Giphy results, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Gif' } } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /gifs/recent:
+    get:
+      tags: [GIFs]
+      operationId: listRecentGifs
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      responses:
+        '200': { description: Current Carbon's last 20 GIFs, content: { application/json: { schema: { type: object, properties: { items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/Gif' } } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /internal/hook-events:
+    post:
+      tags: [Internal]
+      operationId: deliverHookEvent
+      security: [{ serviceAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SystemEvent' }
+      responses:
+        '202': { description: Event durably queued for the authorized Silicon }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
+    oboAccess: { type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: Short-lived IAM OBO Access proof; X-App-ID is also required }
+    serviceAuth: { type: http, scheme: bearer, bearerFormat: IAM service token }
+  parameters:
+    OrgId: { name: X-Org-ID, in: header, required: true, schema: { type: string } }
+    ConversationId: { name: conversation_id, in: path, required: true, schema: { type: string, format: uuid } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 255 } }
+    Cursor: { name: cursor, in: query, schema: { type: string } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+  responses:
+    Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    ActorRef:
+      type: object
+      required: [type, id]
+      properties: { type: { type: string, enum: [carbon, silicon] }, id: { type: string } }
+    Conversation:
+      type: object
+      required: [id, org_id, participants, created_at, updated_at]
+      properties: { id: { type: string, format: uuid }, org_id: { type: string }, participants: { type: array, minItems: 2, items: { $ref: '#/components/schemas/ActorRef' } }, last_message: { anyOf: [{ $ref: '#/components/schemas/Message' }, { type: 'null' }] }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time } }
+    Attachment:
+      type: object
+      required: [permanent_url]
+      properties: { permanent_url: { type: string, format: uri }, name: { type: string }, content_type: { type: string }, size: { type: integer, minimum: 0 } }
+    Gif:
+      type: object
+      required: [provider_id, url]
+      properties: { provider_id: { type: string }, url: { type: string, format: uri }, preview_url: { type: string, format: uri }, title: { type: string } }
+    MessageCreate:
+      type: object
+      minProperties: 1
+      properties:
+        sender_id: { type: string, description: Required when a connection represents multiple actors }
+        text: { type: string, maxLength: 100000000 }
+        attachments: { type: array, items: { $ref: '#/components/schemas/Attachment' } }
+        voice: { $ref: '#/components/schemas/Attachment' }
+        voice_transcript: { type: [string, 'null'], description: Transcript or null when transcription failed }
+        gif: { $ref: '#/components/schemas/Gif' }
+    Message:
+      allOf:
+        - $ref: '#/components/schemas/MessageCreate'
+        - type: object
+          required: [id, conversation_id, sender, sequence, status, created_at]
+          properties: { id: { type: string, format: uuid }, conversation_id: { type: string, format: uuid }, sender: { $ref: '#/components/schemas/ActorRef' }, sequence: { type: integer, minimum: 1 }, status: { type: string, enum: [waiting, sent, delivered, read, failed] }, bundle: { anyOf: [{ $ref: '#/components/schemas/BundleRef' }, { type: 'null' }] }, created_at: { type: string, format: date-time }, delivered_at: { type: [string, 'null'], format: date-time }, read_at: { type: [string, 'null'], format: date-time }, failure_reason: { type: [string, 'null'] } }
+    BundleRef:
+      type: object
+      required: [id, role]
+      properties: { id: { type: string, format: uuid }, role: { type: string, enum: [display, member] } }
+    BundleCreate:
+      type: object
+      required: [message_ids, display_message]
+      properties:
+        message_ids: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: { type: string, format: uuid } }
+        display_message: { $ref: '#/components/schemas/MessageCreate' }
+    Bundle:
+      type: object
+      required: [id, conversation_id, original_message_ids, display_message, created_by, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        original_message_ids: { type: array, minItems: 1, maxItems: 100, items: { type: string, format: uuid } }
+        display_message: { $ref: '#/components/schemas/Message' }
+        created_by: { $ref: '#/components/schemas/ActorRef' }
+        created_at: { type: string, format: date-time }
+    BundleDetail:
+      allOf:
+        - $ref: '#/components/schemas/Bundle'
+        - type: object
+          required: [original_messages]
+          properties: { original_messages: { type: array, minItems: 1, maxItems: 100, items: { $ref: '#/components/schemas/Message' } } }
+    DraftInput:
+      type: object
+      properties: { message_content: { type: string, maxLength: 100000000 }, attachments: { type: array, items: { $ref: '#/components/schemas/Attachment' } }, voice: { $ref: '#/components/schemas/Attachment' }, gif: { $ref: '#/components/schemas/Gif' } }
+    Draft:
+      allOf:
+        - $ref: '#/components/schemas/DraftInput'
+        - type: object
+          required: [conversation_id, actor_id, version, updated_at]
+          properties: { conversation_id: { type: string, format: uuid }, actor_id: { type: string }, version: { type: integer, minimum: 1 }, updated_at: { type: string, format: date-time } }
+    Presence:
+      type: object
+      required: [actor_id, availability]
+      properties: { actor_id: { type: string }, availability: { type: string, enum: [online, offline] }, activity: { type: [string, 'null'], enum: [typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, null] }, last_seen_at: { type: [string, 'null'], format: date-time } }
+    SystemEvent:
+      type: object
+      required: [event_id, org_id, silicon_id, type, payload]
+      properties: { event_id: { type: string, format: uuid }, org_id: { type: string }, silicon_id: { type: string }, type: { type: string }, trace_id: { type: string }, payload: { type: object, additionalProperties: true } }
+    SocketFrame:
+      oneOf:
+        - { type: object, required: [type, ping_id], properties: { type: { const: ping }, ping_id: { type: string } } }
+        - { type: object, required: [type, ping_id], properties: { type: { const: pong }, ping_id: { type: string } } }
+        - { type: object, required: [type, message], properties: { type: { const: message }, message: { $ref: '#/components/schemas/Message' } } }
+        - { type: object, required: [type, event], properties: { type: { const: system_event }, event: { $ref: '#/components/schemas/SystemEvent' } } }
+        - { type: object, required: [type, message_id, status], properties: { type: { const: receipt }, message_id: { type: string, format: uuid }, status: { type: string, enum: [sent, delivered, read, failed] } } }
+    Error:
+      type: object
+      required: [error]
+      properties: { error: { type: object, required: [code, message], properties: { code: { type: string }, message: { type: string }, request_id: { type: string } } } }
