@@ -1,0 +1,1080 @@
+//! Message, receipt, GIF-history, and Hook-event persistence.
+
+use serde::Serialize;
+use sqlx::{FromRow, Postgres, Transaction};
+use uuid::Uuid;
+
+use crate::{
+    AppError, AppResult,
+    application::commands::{AcceptSystemEventCommand, RecordReceiptCommand, SendMessageCommand},
+    domain::{
+        ActorRef, ActorType, Cursor, Gif, GifPage, MAX_VOICE_DURATION_MILLISECONDS, Message,
+        MessageCreate, MessagePage, MessageStatus, OrganizationId, PageRequest, ReceiptStatus,
+        SystemEvent,
+    },
+};
+
+use super::{
+    PostgresStore,
+    directory::refresh_directory_in,
+    idempotency::{IdempotencyClaim, IdempotencyResult, claim, complete, request_hash},
+    map_constraint_error,
+    rows::{MessageRecord, parse_actor_id, parse_actor_type, parse_message_status, parse_url},
+};
+
+const SEND_MESSAGE_OPERATION: &str = "messages.create";
+
+#[derive(Serialize)]
+struct MessageIdempotencyContent<'a> {
+    conversation_id: Uuid,
+    content_hash: &'a [u8],
+}
+
+#[derive(FromRow)]
+struct ParticipantRecord {
+    actor_kind: String,
+    actor_id: String,
+}
+
+#[derive(FromRow)]
+struct ReceiptRecord {
+    id: Uuid,
+}
+
+#[derive(FromRow)]
+struct MessageSenderRecord {
+    sender_kind: String,
+    sender_id: String,
+    status: String,
+}
+
+#[derive(FromRow)]
+struct RecentGifRecord {
+    provider_id: String,
+    url: String,
+    preview_url: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(FromRow)]
+struct StoredSystemEvent {
+    organization_id: String,
+    target_silicon_id: String,
+    event_type: String,
+    trace_id: Option<String>,
+    payload: serde_json::Value,
+}
+
+struct MessageAttachmentInsert<'a> {
+    message_id: Uuid,
+    conversation_id: Uuid,
+    organization_id: &'a OrganizationId,
+    position: usize,
+    kind: &'a str,
+    attachment: &'a crate::domain::Attachment,
+    duration_milliseconds: Option<u64>,
+}
+
+impl PostgresStore {
+    /// Lists stable conversation history in newest-first sequence order.
+    ///
+    /// # Errors
+    ///
+    /// Returns not found for non-participants and validation errors for an
+    /// incompatible cursor or limit.
+    pub async fn list_messages(
+        &self,
+        organization_id: &OrganizationId,
+        actor: &ActorRef,
+        conversation_id: Uuid,
+        page: &PageRequest,
+        include_bundled_members: bool,
+    ) -> AppResult<MessagePage> {
+        self.require_participant(organization_id, actor, conversation_id)
+            .await?;
+        let limit = page.validated_limit()?;
+        let cursor = page
+            .cursor
+            .as_deref()
+            .map(|value| Cursor::decode(value, "messages"))
+            .transpose()?;
+        if cursor
+            .as_ref()
+            .is_some_and(|value| value.sequence().is_none())
+        {
+            return Err(AppError::validation(
+                "cursor is invalid for message pagination",
+            ));
+        }
+        let before_sequence = cursor.as_ref().and_then(Cursor::sequence);
+        let records = sqlx::query_as::<_, MessageRecord>(
+            r#"
+            SELECT
+                message.id,
+                message.conversation_id,
+                message.sender_kind::text AS sender_kind,
+                message.sender_id,
+                message.sequence,
+                message.status::text AS status,
+                message.text_content,
+                message.voice_transcript,
+                message.failure_reason,
+                message.created_at,
+                message.delivered_at,
+                message.read_at
+            FROM dm.messages AS message
+            WHERE message.conversation_id = $1
+              AND message.organization_id = $2
+              AND ($3::bigint IS NULL OR message.sequence < $3)
+              AND (
+                    $4
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM dm.message_bundle_items AS bundle_item
+                        WHERE bundle_item.message_id = message.id
+                          AND bundle_item.role = 'member'
+                    )
+              )
+            ORDER BY message.sequence DESC
+            LIMIT $5
+            "#,
+        )
+        .bind(conversation_id)
+        .bind(organization_id.as_str())
+        .bind(before_sequence)
+        .bind(include_bundled_members)
+        .bind(i64::from(limit) + 1)
+        .fetch_all(self.pool())
+        .await?;
+        let has_next = records.len() > usize::from(limit);
+        let records = records
+            .into_iter()
+            .take(usize::from(limit))
+            .collect::<Vec<_>>();
+        let ids = records.iter().map(|record| record.id).collect::<Vec<_>>();
+        let items = self.hydrate_messages(records, &ids).await?;
+        let next_cursor = if has_next {
+            items
+                .last()
+                .map(|message| Cursor::new("messages", message.sequence).encode())
+                .transpose()?
+        } else {
+            None
+        };
+        Ok(MessagePage { items, next_cursor })
+    }
+
+    /// Durably accepts a message, assigns its sequence, and enqueues all
+    /// recipient deliveries in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid content, sender mismatch, excessive known voice
+    /// duration, non-participant access, and conflicting idempotency reuse.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "message acceptance, outbox creation, history update, draft clear, and idempotency form one transaction"
+    )]
+    pub async fn send_message(&self, command: SendMessageCommand) -> AppResult<Message> {
+        command.content.validate().map_err(AppError::validation)?;
+        if command
+            .content
+            .sender_id
+            .as_ref()
+            .is_some_and(|sender_id| *sender_id != command.sender.id)
+        {
+            return Err(AppError::Forbidden);
+        }
+        if command
+            .voice_duration_milliseconds
+            .is_some_and(|duration| duration > MAX_VOICE_DURATION_MILLISECONDS)
+        {
+            return Err(AppError::validation(
+                "voice message duration may not exceed 48 hours",
+            ));
+        }
+        let content_hash = command.content.content_digest();
+        let hash = request_hash(&MessageIdempotencyContent {
+            conversation_id: command.conversation_id,
+            content_hash: content_hash.as_bytes(),
+        })?;
+        let mut transaction = self.pool().begin().await?;
+        refresh_directory_in(
+            &mut transaction,
+            &command.organization_id,
+            std::slice::from_ref(&command.sender),
+        )
+        .await?;
+        require_participant_in(
+            &mut transaction,
+            &command.organization_id,
+            &command.sender,
+            command.conversation_id,
+        )
+        .await?;
+        let claim = claim(
+            &mut transaction,
+            &command.organization_id,
+            &command.sender,
+            SEND_MESSAGE_OPERATION,
+            &command.idempotency_key,
+            &hash,
+        )
+        .await?;
+        let message_id = match claim {
+            IdempotencyClaim::Replay(resource_id) => resource_id,
+            IdempotencyClaim::Acquired => {
+                let message_id = insert_message_in(
+                    &mut transaction,
+                    &command.organization_id,
+                    command.conversation_id,
+                    &command.sender,
+                    &command.content,
+                    command.voice_duration_milliseconds,
+                )
+                .await?;
+                enqueue_message_deliveries_in(
+                    &mut transaction,
+                    &command.organization_id,
+                    command.conversation_id,
+                    message_id,
+                    &command.sender,
+                )
+                .await?;
+                update_recent_gif_in(
+                    &mut transaction,
+                    &command.organization_id,
+                    &command.sender,
+                    message_id,
+                    command.content.gif.as_ref(),
+                )
+                .await?;
+                let matching_draft = sqlx::query(
+                    r#"
+                    UPDATE dm.drafts
+                    SET version = version + 1
+                    WHERE conversation_id = $1
+                      AND organization_id = $2
+                      AND actor_kind = $3::text::dm.actor_kind
+                      AND actor_id = $4
+                      AND content_hash = $5
+                    "#,
+                )
+                .bind(command.conversation_id)
+                .bind(command.organization_id.as_str())
+                .bind(command.sender.actor_type.as_str())
+                .bind(command.sender.id.as_str())
+                .bind(command.content.content_digest().as_bytes().as_slice())
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_constraint_error)?;
+                if matching_draft.rows_affected() == 1 {
+                    sqlx::query(
+                        r#"
+                        DELETE FROM dm.draft_attachments
+                        WHERE conversation_id = $1
+                          AND organization_id = $2
+                          AND actor_kind = $3::text::dm.actor_kind
+                          AND actor_id = $4
+                        "#,
+                    )
+                    .bind(command.conversation_id)
+                    .bind(command.organization_id.as_str())
+                    .bind(command.sender.actor_type.as_str())
+                    .bind(command.sender.id.as_str())
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_constraint_error)?;
+                    sqlx::query(
+                        r#"
+                        DELETE FROM dm.draft_gifs
+                        WHERE conversation_id = $1
+                          AND organization_id = $2
+                          AND actor_kind = $3::text::dm.actor_kind
+                          AND actor_id = $4
+                        "#,
+                    )
+                    .bind(command.conversation_id)
+                    .bind(command.organization_id.as_str())
+                    .bind(command.sender.actor_type.as_str())
+                    .bind(command.sender.id.as_str())
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_constraint_error)?;
+                    sqlx::query(
+                        r#"
+                        DELETE FROM dm.drafts
+                        WHERE conversation_id = $1
+                          AND organization_id = $2
+                          AND actor_kind = $3::text::dm.actor_kind
+                          AND actor_id = $4
+                        "#,
+                    )
+                    .bind(command.conversation_id)
+                    .bind(command.organization_id.as_str())
+                    .bind(command.sender.actor_type.as_str())
+                    .bind(command.sender.id.as_str())
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_constraint_error)?;
+                }
+                complete(
+                    &mut transaction,
+                    &command.organization_id,
+                    &command.sender,
+                    SEND_MESSAGE_OPERATION,
+                    &command.idempotency_key,
+                    IdempotencyResult {
+                        resource_type: "message",
+                        resource_id: message_id,
+                        response_status: 202,
+                    },
+                )
+                .await?;
+                message_id
+            }
+        };
+        transaction.commit().await.map_err(map_constraint_error)?;
+        self.load_message(message_id).await
+    }
+
+    /// Records an idempotent monotonic device receipt and durably notifies the
+    /// original sender of a newly reached state.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed device IDs, sender self-receipts, non-participant
+    /// access, missing messages, and durable invariant violations.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "device receipt normalization and aggregate-status outbox transition must be inspected atomically"
+    )]
+    pub async fn record_receipt(&self, command: RecordReceiptCommand) -> AppResult<Message> {
+        validate_device_id(&command.device_id)?;
+        let mut transaction = self.pool().begin().await?;
+        refresh_directory_in(
+            &mut transaction,
+            &command.organization_id,
+            std::slice::from_ref(&command.recipient),
+        )
+        .await?;
+        require_participant_in(
+            &mut transaction,
+            &command.organization_id,
+            &command.recipient,
+            command.conversation_id,
+        )
+        .await?;
+        let message = sqlx::query_as::<_, MessageSenderRecord>(
+            r#"
+            SELECT
+                sender_kind::text AS sender_kind,
+                sender_id,
+                status::text AS status
+            FROM dm.messages
+            WHERE id = $1 AND conversation_id = $2 AND organization_id = $3
+            FOR UPDATE
+            "#,
+        )
+        .bind(command.message_id)
+        .bind(command.conversation_id)
+        .bind(command.organization_id.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(AppError::NotFound)?;
+        let previous_aggregate_status = parse_message_status(&message.status)?;
+        let sender = ActorRef {
+            actor_type: parse_actor_type(&message.sender_kind)?,
+            id: parse_actor_id(&message.sender_id)?,
+        };
+        if sender == command.recipient {
+            return Err(AppError::validation(
+                "a message sender cannot acknowledge their own message",
+            ));
+        }
+        let existing = sqlx::query_as::<_, ReceiptRecord>(
+            r#"
+            SELECT id
+            FROM dm.message_receipts
+            WHERE message_id = $1
+              AND recipient_kind = $2::text::dm.actor_kind
+              AND recipient_id = $3
+              AND device_id = $4
+            FOR UPDATE
+            "#,
+        )
+        .bind(command.message_id)
+        .bind(command.recipient.actor_type.as_str())
+        .bind(command.recipient.id.as_str())
+        .bind(&command.device_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let requested_status = receipt_status_name(command.status);
+        let receipt_id = existing
+            .as_ref()
+            .map_or_else(Uuid::now_v7, |record| record.id);
+        sqlx::query(
+            r#"
+            INSERT INTO dm.message_receipts (
+                id,
+                message_id,
+                conversation_id,
+                organization_id,
+                recipient_kind,
+                recipient_id,
+                device_id,
+                status,
+                read_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5::text::dm.actor_kind, $6, $7,
+                $8::text::dm.receipt_status,
+                CASE WHEN $8 = 'read' THEN clock_timestamp() ELSE NULL END
+            )
+            ON CONFLICT (message_id, recipient_kind, recipient_id, device_id) DO UPDATE
+            SET status = CASE
+                    WHEN dm.message_receipts.status = 'read' THEN 'read'
+                    ELSE EXCLUDED.status
+                END,
+                read_at = CASE
+                    WHEN dm.message_receipts.status = 'read' THEN dm.message_receipts.read_at
+                    WHEN EXCLUDED.status = 'read' THEN GREATEST(
+                        dm.message_receipts.delivered_at,
+                        clock_timestamp()
+                    )
+                    ELSE NULL
+                END
+            "#,
+        )
+        .bind(receipt_id)
+        .bind(command.message_id)
+        .bind(command.conversation_id)
+        .bind(command.organization_id.as_str())
+        .bind(command.recipient.actor_type.as_str())
+        .bind(command.recipient.id.as_str())
+        .bind(&command.device_id)
+        .bind(requested_status)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_constraint_error)?;
+
+        let aggregate_status = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT status::text
+            FROM dm.messages
+            WHERE id = $1
+            "#,
+        )
+        .bind(command.message_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(map_constraint_error)
+        .and_then(|status| parse_message_status(&status))?;
+        if aggregate_status != previous_aggregate_status
+            && matches!(
+                aggregate_status,
+                MessageStatus::Delivered | MessageStatus::Read
+            )
+        {
+            enqueue_message_status_delivery_in(
+                &mut transaction,
+                &command.organization_id,
+                command.conversation_id,
+                command.message_id,
+                receipt_id,
+                aggregate_status,
+                &sender,
+            )
+            .await?;
+        }
+        transaction.commit().await.map_err(map_constraint_error)?;
+        self.load_message(command.message_id).await
+    }
+
+    /// Returns a Carbon's durable 20-item GIF MRU; Silicons have no history.
+    ///
+    /// # Errors
+    ///
+    /// Propagates database failures and reports malformed durable GIF data as
+    /// an internal error.
+    pub async fn recent_gifs(
+        &self,
+        organization_id: &OrganizationId,
+        actor: &ActorRef,
+    ) -> AppResult<GifPage> {
+        if actor.actor_type == ActorType::Silicon {
+            return Ok(GifPage { items: Vec::new() });
+        }
+        let records = sqlx::query_as::<_, RecentGifRecord>(
+            r#"
+            SELECT provider_id, url, preview_url, title
+            FROM dm.recent_gifs
+            WHERE organization_id = $1 AND carbon_id = $2
+            ORDER BY last_used_at DESC, provider_id DESC
+            LIMIT 20
+            "#,
+        )
+        .bind(organization_id.as_str())
+        .bind(actor.id.as_str())
+        .fetch_all(self.pool())
+        .await?;
+        let items = records
+            .into_iter()
+            .map(|record| {
+                Ok(Gif {
+                    provider_id: record.provider_id,
+                    url: parse_url(&record.url, "recent GIF URL")?,
+                    preview_url: record
+                        .preview_url
+                        .as_deref()
+                        .map(|url| parse_url(url, "recent GIF preview URL"))
+                        .transpose()?,
+                    title: record.title,
+                })
+            })
+            .collect::<AppResult<Vec<_>>>()?;
+        Ok(GifPage { items })
+    }
+
+    /// Idempotently stores and enqueues one verified Silicon Hook event.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid or mismatched event targets, conflicts when an event ID
+    /// is reused with different content, and propagates database failures.
+    pub async fn accept_system_event(&self, command: AcceptSystemEventCommand) -> AppResult<()> {
+        command.event.validate().map_err(AppError::validation)?;
+        if command.event.event_type.trim() != command.event.event_type
+            || command.event.event_type.chars().any(char::is_control)
+        {
+            return Err(AppError::validation(
+                "system event type must be trimmed and contain no control characters",
+            ));
+        }
+        if command.event.trace_id.as_ref().is_some_and(|trace_id| {
+            trace_id.is_empty() || trace_id.len() > 255 || trace_id.chars().any(char::is_control)
+        }) {
+            return Err(AppError::validation(
+                "system event trace_id must contain 1 to 255 non-control characters",
+            ));
+        }
+        if command.target.actor_type != ActorType::Silicon
+            || command.target.id != command.event.silicon_id
+        {
+            return Err(AppError::Forbidden);
+        }
+        let mut transaction = self.pool().begin().await?;
+        refresh_directory_in(
+            &mut transaction,
+            &command.event.org_id,
+            std::slice::from_ref(&command.target),
+        )
+        .await?;
+        let inserted = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO dm.system_events (
+                event_id,
+                organization_id,
+                target_silicon_id,
+                event_type,
+                trace_id,
+                payload
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (event_id) DO NOTHING
+            RETURNING event_id
+            "#,
+        )
+        .bind(command.event.event_id)
+        .bind(command.event.org_id.as_str())
+        .bind(command.event.silicon_id.as_str())
+        .bind(&command.event.event_type)
+        .bind(&command.event.trace_id)
+        .bind(serde_json::Value::Object(command.event.payload.clone()))
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(map_constraint_error)?;
+        if inserted.is_some() {
+            enqueue_system_event_delivery_in(
+                &mut transaction,
+                &command.event.org_id,
+                command.event.event_id,
+                &command.target,
+            )
+            .await?;
+        } else {
+            let stored = sqlx::query_as::<_, StoredSystemEvent>(
+                r#"
+                SELECT
+                    organization_id,
+                    target_silicon_id,
+                    event_type,
+                    trace_id,
+                    payload
+                FROM dm.system_events
+                WHERE event_id = $1
+                FOR UPDATE
+                "#,
+            )
+            .bind(command.event.event_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !system_event_matches(&stored, &command.event) {
+                return Err(AppError::conflict(
+                    "event_id was already used with different event content",
+                ));
+            }
+        }
+        transaction.commit().await.map_err(map_constraint_error)?;
+        Ok(())
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the helper inserts one sealed message aggregate and all content children in a single transaction"
+)]
+pub(crate) async fn insert_message_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &OrganizationId,
+    conversation_id: Uuid,
+    sender: &ActorRef,
+    content: &MessageCreate,
+    voice_duration_milliseconds: Option<u64>,
+) -> AppResult<Uuid> {
+    let message_id = Uuid::now_v7();
+    let transcription_result = if content.voice.is_some() {
+        if content.voice_transcript.is_some() {
+            "succeeded"
+        } else {
+            "failed"
+        }
+    } else {
+        "not_applicable"
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO dm.messages (
+            id,
+            conversation_id,
+            organization_id,
+            sender_kind,
+            sender_id,
+            sequence,
+            status,
+            text_content,
+            voice_transcript,
+            transcription_result,
+            content_hash
+        )
+        VALUES (
+            $1, $2, $3, $4::text::dm.actor_kind, $5, 1, 'sent', $6, $7,
+            $8::text::dm.transcription_result, $9
+        )
+        "#,
+    )
+    .bind(message_id)
+    .bind(conversation_id)
+    .bind(organization_id.as_str())
+    .bind(sender.actor_type.as_str())
+    .bind(sender.id.as_str())
+    .bind(&content.text)
+    .bind(&content.voice_transcript)
+    .bind(transcription_result)
+    .bind(content.content_digest().as_bytes().as_slice())
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_constraint_error)?;
+
+    for (position, attachment) in content.attachments.iter().enumerate() {
+        insert_attachment_in(
+            transaction,
+            MessageAttachmentInsert {
+                message_id,
+                conversation_id,
+                organization_id,
+                position,
+                kind: "attachment",
+                attachment,
+                duration_milliseconds: None,
+            },
+        )
+        .await?;
+    }
+    if let Some(voice) = &content.voice {
+        insert_attachment_in(
+            transaction,
+            MessageAttachmentInsert {
+                message_id,
+                conversation_id,
+                organization_id,
+                position: 100,
+                kind: "voice",
+                attachment: voice,
+                duration_milliseconds: voice_duration_milliseconds,
+            },
+        )
+        .await?;
+    }
+    if let Some(gif) = &content.gif {
+        sqlx::query(
+            r#"
+            INSERT INTO dm.message_gifs (
+                message_id,
+                conversation_id,
+                organization_id,
+                provider_id,
+                url,
+                preview_url,
+                title
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(message_id)
+        .bind(conversation_id)
+        .bind(organization_id.as_str())
+        .bind(&gif.provider_id)
+        .bind(gif.url.as_str())
+        .bind(gif.preview_url.as_ref().map(url::Url::as_str))
+        .bind(&gif.title)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_constraint_error)?;
+    }
+    sqlx::query(
+        r#"
+        UPDATE dm.conversations
+        SET updated_at = transaction_timestamp()
+        WHERE id = $1 AND organization_id = $2
+        "#,
+    )
+    .bind(conversation_id)
+    .bind(organization_id.as_str())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(message_id)
+}
+
+pub(crate) async fn enqueue_message_deliveries_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &OrganizationId,
+    conversation_id: Uuid,
+    message_id: Uuid,
+    sender: &ActorRef,
+) -> AppResult<()> {
+    let participants =
+        participant_records_in(transaction, organization_id, conversation_id).await?;
+    for participant in participants {
+        let target = ActorRef {
+            actor_type: parse_actor_type(&participant.actor_kind)?,
+            id: parse_actor_id(&participant.actor_id)?,
+        };
+        if target == *sender {
+            continue;
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO dm.actor_deliveries (
+                id,
+                organization_id,
+                target_kind,
+                target_id,
+                sequence,
+                delivery_kind,
+                conversation_id,
+                message_id
+            )
+            VALUES ($1, $2, $3::text::dm.actor_kind, $4, 1, 'message', $5, $6)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(organization_id.as_str())
+        .bind(target.actor_type.as_str())
+        .bind(target.id.as_str())
+        .bind(conversation_id)
+        .bind(message_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_constraint_error)?;
+        notify_actor_in(transaction, organization_id, &target).await?;
+    }
+    Ok(())
+}
+
+async fn insert_attachment_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    input: MessageAttachmentInsert<'_>,
+) -> AppResult<()> {
+    let position = i16::try_from(input.position)
+        .map_err(|_| AppError::validation("attachment position exceeds supported range"))?;
+    let size = input
+        .attachment
+        .size
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| AppError::validation("attachment size exceeds supported range"))?;
+    let duration = input
+        .duration_milliseconds
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| AppError::validation("voice duration exceeds supported range"))?;
+    sqlx::query(
+        r#"
+        INSERT INTO dm.message_attachments (
+            message_id,
+            conversation_id,
+            organization_id,
+            position,
+            attachment_kind,
+            permanent_url,
+            name,
+            content_type,
+            declared_size_bytes,
+            duration_milliseconds
+        )
+        VALUES ($1, $2, $3, $4, $5::text::dm.attachment_kind, $6, $7, $8, $9, $10)
+        "#,
+    )
+    .bind(input.message_id)
+    .bind(input.conversation_id)
+    .bind(input.organization_id.as_str())
+    .bind(position)
+    .bind(input.kind)
+    .bind(input.attachment.permanent_url.as_str())
+    .bind(&input.attachment.name)
+    .bind(&input.attachment.content_type)
+    .bind(size)
+    .bind(duration)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_constraint_error)?;
+    Ok(())
+}
+
+async fn update_recent_gif_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &OrganizationId,
+    sender: &ActorRef,
+    message_id: Uuid,
+    gif: Option<&Gif>,
+) -> AppResult<()> {
+    let Some(gif) = gif else {
+        return Ok(());
+    };
+    if sender.actor_type != ActorType::Carbon {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO dm.recent_gifs (
+            organization_id,
+            carbon_id,
+            provider_id,
+            url,
+            preview_url,
+            title,
+            last_message_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (organization_id, carbon_id, provider_id) DO UPDATE
+        SET url = EXCLUDED.url,
+            preview_url = EXCLUDED.preview_url,
+            title = EXCLUDED.title,
+            last_message_id = EXCLUDED.last_message_id,
+            last_used_at = transaction_timestamp()
+        "#,
+    )
+    .bind(organization_id.as_str())
+    .bind(sender.id.as_str())
+    .bind(&gif.provider_id)
+    .bind(gif.url.as_str())
+    .bind(gif.preview_url.as_ref().map(url::Url::as_str))
+    .bind(&gif.title)
+    .bind(message_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_constraint_error)?;
+    Ok(())
+}
+
+async fn enqueue_message_status_delivery_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &OrganizationId,
+    conversation_id: Uuid,
+    message_id: Uuid,
+    causal_receipt_id: Uuid,
+    status: MessageStatus,
+    sender: &ActorRef,
+) -> AppResult<()> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO dm.actor_deliveries (
+            id,
+            organization_id,
+            target_kind,
+            target_id,
+            delivery_kind,
+            conversation_id,
+            message_id,
+            receipt_id,
+            aggregate_status
+        )
+        VALUES (
+            $1, $2, $3::text::dm.actor_kind, $4, 'message_status', $5, $6,
+            $7, $8::text::dm.message_status
+        )
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(organization_id.as_str())
+    .bind(sender.actor_type.as_str())
+    .bind(sender.id.as_str())
+    .bind(conversation_id)
+    .bind(message_id)
+    .bind(causal_receipt_id)
+    .bind(message_status_name(status))
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_constraint_error)?;
+    if result.rows_affected() == 1 {
+        notify_actor_in(transaction, organization_id, sender).await?;
+    }
+    Ok(())
+}
+
+async fn enqueue_system_event_delivery_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &OrganizationId,
+    event_id: Uuid,
+    target: &ActorRef,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO dm.actor_deliveries (
+            id,
+            organization_id,
+            target_kind,
+            target_id,
+            sequence,
+            delivery_kind,
+            system_event_id
+        )
+        VALUES ($1, $2, $3::text::dm.actor_kind, $4, 1, 'system_event', $5)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(organization_id.as_str())
+    .bind(target.actor_type.as_str())
+    .bind(target.id.as_str())
+    .bind(event_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_constraint_error)?;
+    notify_actor_in(transaction, organization_id, target).await
+}
+
+pub(crate) async fn notify_actor_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &OrganizationId,
+    actor: &ActorRef,
+) -> AppResult<()> {
+    let payload = serde_json::json!({
+        "org_id": organization_id.as_str(),
+        "actor_type": actor.actor_type.as_str(),
+        "actor_id": actor.id.as_str(),
+    })
+    .to_string();
+    sqlx::query("SELECT pg_notify('dm_delivery', $1)")
+        .bind(payload)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
+async fn participant_records_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &OrganizationId,
+    conversation_id: Uuid,
+) -> AppResult<Vec<ParticipantRecord>> {
+    sqlx::query_as::<_, ParticipantRecord>(
+        r#"
+        SELECT actor_kind::text AS actor_kind, actor_id
+        FROM dm.conversation_participants
+        WHERE conversation_id = $1 AND organization_id = $2
+        ORDER BY actor_kind, actor_id
+        "#,
+    )
+    .bind(conversation_id)
+    .bind(organization_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(AppError::Database)
+}
+
+pub(crate) async fn require_participant_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &OrganizationId,
+    actor: &ActorRef,
+    conversation_id: Uuid,
+) -> AppResult<()> {
+    let allowed = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM dm.conversation_participants
+            WHERE conversation_id = $1
+              AND organization_id = $2
+              AND actor_kind = $3::text::dm.actor_kind
+              AND actor_id = $4
+        )
+        "#,
+    )
+    .bind(conversation_id)
+    .bind(organization_id.as_str())
+    .bind(actor.actor_type.as_str())
+    .bind(actor.id.as_str())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
+fn validate_device_id(device_id: &str) -> AppResult<()> {
+    if device_id.is_empty() || device_id.len() > 255 || device_id.chars().any(char::is_control) {
+        return Err(AppError::validation(
+            "device_id must contain 1 to 255 non-control characters",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) const fn receipt_status_name(status: ReceiptStatus) -> &'static str {
+    match status {
+        ReceiptStatus::Delivered => "delivered",
+        ReceiptStatus::Read => "read",
+    }
+}
+
+const fn message_status_name(status: MessageStatus) -> &'static str {
+    match status {
+        MessageStatus::Waiting => "waiting",
+        MessageStatus::Sent => "sent",
+        MessageStatus::Delivered => "delivered",
+        MessageStatus::Read => "read",
+        MessageStatus::Failed => "failed",
+    }
+}
+
+fn system_event_matches(stored: &StoredSystemEvent, event: &SystemEvent) -> bool {
+    stored.organization_id == event.org_id.as_str()
+        && stored.target_silicon_id == event.silicon_id.as_str()
+        && stored.event_type == event.event_type
+        && stored.trace_id == event.trace_id
+        && stored.payload == serde_json::Value::Object(event.payload.clone())
+}
