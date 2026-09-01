@@ -106,6 +106,9 @@ jobs:
             psql --username dm_migrator --dbname silicon_dm \
             --set ON_ERROR_STOP=1 --set runtime_role=dm_runtime \
             --file /tmp/runtime-grants.sql
+          test "$(docker exec --env PGPASSWORD=runtime-pass dm-postgres \
+            psql --username dm_runtime --dbname silicon_dm --tuples-only --no-align \
+            --command "SELECT has_table_privilege(current_user, 'dm.system_events', 'SELECT')::text")" = false
 
       - name: Boot API and worker as the runtime role
         run: |
@@ -118,7 +121,7 @@ jobs:
             --env DM_IAM_APP_ID=silicon-dm
             --env DM_IAM_APP_SECRET=ci-only-secret
             --env DM_BRIEFCASE_BASE_URL=http://localhost:8082/api/v1
-            --env DM_WAVEFORM_BASE_URL=http://localhost:8083/api/v1
+            --env DM_GIPHY_API_KEY=ci-only-key
           )
           docker run --detach --name dm-api --network silicon-dm-ci \
             --publish 8080:8080 "${runtime_env[@]}" silicon-dm:ci dm-api
