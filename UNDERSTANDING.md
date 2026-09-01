@@ -36,6 +36,7 @@ In backend only the permanent link of the said attachment is stored.
 
 There must be endpoints in backend for generating the said temporary link.
 
+The attachment link can also be link other than the link to silicon-briefcase. We just have support for silicon-briefcase so temporary link generation endpoint for that case. Otherwise it would just be rendered in place.
 
 # How to use other application
 
@@ -77,14 +78,12 @@ These drafts should automatically be cleared once a message has been successfull
 
 # Voice Message
 
-For any given voice message sent they must go through their own Speech to text to transcribe, and until transcription successfully happens or fails the voice message is not sent. Even if the transcription fails the voice message must be sent. 
-
-The transcription for the voice message must happen via the STT features of [../silicon-waveform/UNDERSTANDING.md]. 
+It should also be possible to be able to send voice messages via Silicon DM, for the said voice message store the basic metadata, total time, url to voice message. It should also be possible to attach the transcript of the voice message to the voice message. So when the voice message is sent it should include the transcript along with the voice message.
 
 
 # GIF's
 
-For gif's we are using giphy, let's also store last 20 used gifs by the carbon that we can display. Also it should return the tranding gif's by default.
+For gif's we are using giphy - the api key for giphy would be configured in the env, let's also store last 20 used gifs by the carbon that we can display. Also it should return the trending gif's.
 
 
 # Bundle
@@ -97,12 +96,3 @@ It's also possible for silicon to be able to bundle multiple messages, it can se
 When a user is typing, they would have the state typing, when recording a voice message - recording voice message, transcribing voice message, when uplading something - uploading a file, looking for gif's.
 
 There are also gonna be states in which the user is Online, last seen {x}.
-
-
-# Requests recieved from Silicon Hook
-
-You would get requests from official silicon hook. Refer how silicon hook works [../silicon-hook/UNDERSTANDING.md]. For the said silicon for the websocket connection initiated with that silicon or if the WS connection is not active, it should be treated the same as messages but from silicon hook. 
-
-These should just be sent to the said authorized silicon. 
-
-Ensure the requests are actually from the official silicon hook. 
