@@ -594,7 +594,7 @@ loopback.
 
 ## D-046 — Published identity contracts are a release integration gate
 
-**Status:** Accepted integration constraint
+**Status:** Accepted integration constraint; Hook portion superseded by D-049 and Waveform portion superseded by D-048
 
 DM targets the reviewed IAM, Briefcase, and Waveform machine contracts and does
 not translate missing delegated actions into broader organization
@@ -619,3 +619,103 @@ Carbon and Silicon bearer authentication, Hook service authentication, every
 DM OBO action, Briefcase temporary-URL delegation, and Waveform transcription.
 Database readiness remains DM-local and intentionally does not report an
 upstream contract mismatch as a local schema failure.
+
+## D-047 — External attachment references are passive HTTPS content
+
+**Status:** Accepted contract change; supersedes the Briefcase-only storage portion of D-013
+
+Messages and drafts may store either a canonical permanent Briefcase entry URL
+or another absolute HTTPS URL. Every reference is bounded, must have a host,
+and cannot contain embedded credentials. A URL whose origin matches the
+configured Briefcase service must retain the exact canonical entry shape so a
+temporary or misleading same-origin URL cannot be persisted as a permanent
+entry.
+
+DM never fetches, proxies, scans, signs, or follows redirects for an external
+attachment reference. This keeps arbitrary links outside the server-side SSRF
+boundary. Only the explicit temporary-URL endpoint contacts Briefcase, and that
+endpoint continues to reject every non-Briefcase URL. DM guarantees durable
+storage of an external reference, not the availability, safety, or privacy of
+third-party content rendered by a client.
+
+## D-048 — Voice metadata and transcript are supplied message content
+
+**Status:** Accepted contract change; supersedes D-012, D-028, the voice portion of D-038, the Waveform portion of D-039, and the Waveform portion of D-046
+
+A voice item is represented by a distinct typed structure containing its URL,
+basic display metadata, and required `duration_milliseconds`. New voice writes
+must declare a positive duration no greater than 48 hours. Duration, size,
+media type, and transcript are caller-supplied metadata unless another content
+service independently verifies them.
+
+`voice_transcript` is optional client-owned content. DM preserves it and
+includes both transcript and voice duration in message, bundle, draft,
+idempotency, and safe-draft-clearing hashes. Reusing an idempotency key with a
+different transcript or duration therefore conflicts instead of silently
+replaying different content.
+
+DM no longer performs blocking Waveform speech-to-text, exchanges a
+Waveform-scoped proof, overwrites a supplied transcript, or requires Waveform
+configuration at startup. This aligns voice acceptance with arbitrary external
+audio references and removes a provider dependency from the durable send path.
+
+The forward migration retains the deprecated transcription-outcome column and
+enum so an upgrade does not erase historical provider results; an insert-only
+database guard requires new writes to leave that field at `not_applicable`.
+Historical voice rows whose provider never supplied duration remain readable
+with `duration_milliseconds: null`; DM does not invent playback metadata or
+mutate sealed message content. `NOT VALID` attachment checks preserve those
+rows while PostgreSQL still enforces required duration and credential-free URLs
+for every new or changed attachment.
+
+Message and draft hashes are explicitly versioned. Existing rows remain v1,
+while this release writes v2 hashes that include duration and transcript. A send
+computes both shapes so a matching v1 draft can still be cleared before its
+parent is deleted. Pre-v2 voice idempotency keys intentionally conflict when
+retried with newly required duration rather than risking a duplicate message;
+their existing completed responses and immutable request hashes remain intact
+until ordinary idempotency retention expires.
+
+## D-049 — Silicon Hook ingress is retired without erasing history
+
+**Status:** Accepted scope removal; supersedes the Hook portions of D-004, D-007, D-018, D-019, D-022, and D-046
+
+The product contract no longer includes Silicon Hook requests. DM therefore
+removes the internal Hook route, service-token authentication path, Hook target
+authorization, `SystemEvent` domain/API types, and public realtime system-event
+frames. Keeping an undocumented authenticated ingress would create a shadow
+attack surface.
+
+Previously applied migrations remain immutable. The retirement migration keeps
+historical system-event rows for an explicit future retention policy, marks
+unacknowledged legacy deliveries dead-lettered with a stable removal reason,
+prevents new deliveries of the retired kind, and prevents runtime claim or
+replay code from hydrating it. Deployment also revokes the API/worker role's
+direct privileges on historical Hook sources. No Hook payload is silently
+reclassified as a conversation message and no historical row is destructively
+purged by this release.
+
+## D-050 — Giphy credentials are required runtime configuration
+
+**Status:** Accepted configuration clarification
+
+`DM_GIPHY_API_KEY` is required for API and worker startup instead of allowing a
+partially configured process whose GIF calls fail later. The key remains a
+redacted secret, is added only to outbound Giphy query parameters, and is never
+logged or returned. Trending remains an explicit authenticated endpoint with a
+bounded process-local cache; there is no implicit fallback request mode.
+
+## D-051 — Realtime protocol version 2 removes system-event frames
+
+**Status:** Accepted breaking protocol revision
+
+The server advertises realtime protocol version 2 after removing the retired
+`system_event` delivery frame and adding required voice-duration metadata to
+new message content. Historical voice rows may carry a null duration when that
+metadata never existed. Existing message and receipt delivery IDs, actor sequences,
+cumulative ACKs, replay behavior, heartbeats, and command confirmations remain
+unchanged. A version bump makes the wire incompatibility explicit instead of
+letting an older client infer support from a version-1 ready frame.
+
+The pre-1.0 Rust package and OpenAPI document advance together to `0.2.0` for
+the same breaking contract boundary.

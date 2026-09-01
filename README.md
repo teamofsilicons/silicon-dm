@@ -3,7 +3,7 @@
 Silicon DM is the Rust backend for organization-scoped direct messaging across
 Silicon actors. It exposes the REST and WebSocket APIs described in
 [`API_DOCS.md`](API_DOCS.md) and [`openapi.yaml`](openapi.yaml), persists durable
-state in PostgreSQL, and integrates with IAM, Briefcase, Waveform, and Giphy.
+state in PostgreSQL, and integrates with IAM, Briefcase, and Giphy.
 
 ## Architecture
 
@@ -26,19 +26,20 @@ caches.
 
 - Rust 1.98.0 (the pinned toolchain is installed automatically by `rustup`)
 - PostgreSQL 16, or Docker with Compose for the development database
-- Reachable IAM, Briefcase, and Waveform services for end-to-end operation
+- Reachable IAM and Briefcase services for end-to-end operation
 - A verified DM IAM application whose actor tokens include `obo.issue` and
-  whose reviewed grants permit the configured Briefcase and Waveform actions
-- A Giphy API key to enable Giphy-backed endpoints
+  whose reviewed grants permit the configured Briefcase action
+- A Giphy API key configured through `DM_GIPHY_API_KEY`
 
 End-to-end release also requires the sibling services to implement their
 published machine contracts. At the time of this repository snapshot, the
 sibling IAM implementation does not mount its documented generic token
 introspection endpoint and its closed OBO action registry does not admit the
-DM, Briefcase, or Waveform actions used here. Briefcase and Waveform also have
-unresolved delegated-authorization paths. DM deliberately fails these calls
-closed; see the integration gate in [`API_DOCS.md`](API_DOCS.md) and D-046 in
-[`decisions.md`](decisions.md) before promoting a multi-service deployment.
+DM or Briefcase actions used here. Briefcase also has an unresolved
+delegated-authorization path. DM deliberately fails these calls
+closed; see the integration gate in [`API_DOCS.md`](API_DOCS.md) and D-046 as
+narrowed by D-048 and D-049 in [`decisions.md`](decisions.md) before promoting
+a multi-service deployment.
 
 `cargo-deny` is optional locally and is installed by CI for dependency policy
 checks.
@@ -128,7 +129,7 @@ Tests that use Testcontainers require a running Docker daemon.
   that separate runtime role; readiness verifies its migration-table and DM
   schema access.
 - Set `DM_ENVIRONMENT=production`. Production configuration rejects non-HTTPS
-  public, IAM, Briefcase, Waveform, and Giphy URLs.
+  public, IAM, Briefcase, and Giphy URLs.
 - Inject `DM_IAM_APP_SECRET`, `DM_GIPHY_API_KEY`, and database credentials from
   a secret manager. Never bake them into an image or commit a populated `.env`.
 - Production configuration requires `sslmode=verify-full` for PostgreSQL. Use a

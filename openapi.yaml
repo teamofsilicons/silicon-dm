@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon DM API
-  version: 0.1.0
+  version: 0.2.0
   license: { name: Proprietary, identifier: LicenseRef-Proprietary }
   description: Reliable real-time messaging among Carbons and Silicons. WebSocket frame schemas are documented under components.schemas.SocketFrame.
 servers:
@@ -18,7 +18,6 @@ tags:
   - { name: Drafts, description: Private cross-device draft synchronization }
   - { name: Presence, description: Authorized availability and transient activity }
   - { name: GIFs, description: Safe Giphy discovery and recent history }
-  - { name: Internal, description: Service-authenticated Silicon Hook ingress }
 paths:
   /ws:
     get:
@@ -217,7 +216,7 @@ paths:
       summary: Exchange a permanent attachment URL for temporary access
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/OrgId' }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [permanent_url], properties: { permanent_url: { type: string, format: uri } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [permanent_url], properties: { permanent_url: { type: string, format: uri, maxLength: 8192, pattern: '^https://(?![^/?#]*@)[^/?#]+(?:[/?#]|$)', description: Canonical credential-free permanent entry URL on the configured Briefcase origin; external attachment URLs are rejected. } } } } } }
       responses:
         '201': { description: Briefcase temporary URL, content: { application/json: { schema: { type: object, required: [url, expires_at], properties: { url: { type: string, format: uri }, expires_at: { type: string, format: date-time } } } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -254,28 +253,11 @@ paths:
         '200': { description: Current Carbon's last 20 GIFs, content: { application/json: { schema: { type: object, properties: { items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/Gif' } } } } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
-  /internal/hook-events:
-    post:
-      tags: [Internal]
-      operationId: deliverHookEvent
-      summary: Durably queue an authorized Silicon Hook event
-      security: [{ serviceAuth: [] }]
-      description: Requires an introspected Silicon Hook service token with dm.hook_events.deliver and accepts at most 1 MiB of serialized payload.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/SystemEvent' }
-      responses:
-        '202': { description: Event durably queued for the authorized Silicon }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
     oboAccess: { type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: Short-lived IAM OBO Access proof }
     oboAppId: { type: apiKey, in: header, name: X-App-ID, description: Originating application ID required together with X-IAM-OBO-Access-Proof }
-    serviceAuth: { type: http, scheme: bearer, bearerFormat: IAM service token }
   parameters:
     OrgId: { name: X-Org-ID, in: header, required: true, schema: { type: string } }
     ConversationId: { name: conversation_id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -298,10 +280,24 @@ components:
       type: object
       required: [permanent_url]
       properties:
-        permanent_url: { type: string, format: uri, maxLength: 8192, pattern: '^https://' }
+        permanent_url: { type: string, format: uri, maxLength: 8192, pattern: '^https://(?![^/?#]*@)[^/?#]+(?:[/?#]|$)', description: Canonical Briefcase permanent entry or another credential-free external HTTPS reference. DM never fetches external attachment URLs. }
         name: { type: string, minLength: 1, maxLength: 1024 }
         content_type: { type: string, minLength: 1, maxLength: 255 }
-        size: { type: integer, minimum: 0, maximum: 5368709120, description: Client-declared size; Briefcase metadata remains authoritative. }
+        size: { type: integer, minimum: 0, maximum: 5368709120, description: Untrusted client-declared byte size. }
+    VoiceAttachment:
+      allOf:
+        - $ref: '#/components/schemas/Attachment'
+        - type: object
+          required: [duration_milliseconds]
+          properties:
+            duration_milliseconds: { type: integer, minimum: 1, maximum: 172800000, description: 'Untrusted caller-supplied total playback duration, capped at 48 hours.' }
+    StoredVoiceAttachment:
+      allOf:
+        - $ref: '#/components/schemas/Attachment'
+        - type: object
+          required: [duration_milliseconds]
+          properties:
+            duration_milliseconds: { type: [integer, 'null'], minimum: 1, maximum: 172800000, description: 'Total playback duration. Null is returned only for a historical pre-v2 voice row whose provider did not supply duration metadata.' }
     Gif:
       type: object
       required: [provider_id, url]
@@ -316,8 +312,8 @@ components:
         sender_id: { type: string, description: Required when a connection represents multiple actors }
         text: { type: string, minLength: 1, maxLength: 100000000 }
         attachments: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/Attachment' }, description: Combined attachment and voice item count may not exceed 100. }
-        voice: { $ref: '#/components/schemas/Attachment', description: Counts toward the combined 100 attachment-item maximum. }
-        voice_transcript: { type: [string, 'null'], description: DM always submits voice to Waveform; a successful provider transcript replaces this client value and terminal provider failure stores null. }
+        voice: { $ref: '#/components/schemas/VoiceAttachment', description: Counts toward the combined 100 attachment-item maximum. }
+        voice_transcript: { type: [string, 'null'], maxLength: 100000000, description: Optional client-supplied transcript preserved as message content; requires voice. }
         gif: { $ref: '#/components/schemas/Gif' }
       anyOf:
         - required: [text]
@@ -328,12 +324,44 @@ components:
           properties: { voice: {} }
         - required: [gif]
           properties: { gif: {} }
-    Message:
       allOf:
-        - $ref: '#/components/schemas/MessageCreate'
-        - type: object
-          required: [id, conversation_id, sender, sequence, status, created_at]
-          properties: { id: { type: string, format: uuid }, conversation_id: { type: string, format: uuid }, sender: { $ref: '#/components/schemas/ActorRef' }, sequence: { type: integer, minimum: 1 }, status: { type: string, enum: [waiting, sent, delivered, read, failed] }, bundle: { anyOf: [{ $ref: '#/components/schemas/BundleRef' }, { type: 'null' }] }, created_at: { type: string, format: date-time }, delivered_at: { type: [string, 'null'], format: date-time }, read_at: { type: [string, 'null'], format: date-time }, failure_reason: { type: [string, 'null'] } }
+        - if:
+            required: [voice_transcript]
+            properties: { voice_transcript: { type: string } }
+          then: { required: [voice], properties: { voice: {} } }
+    Message:
+      type: object
+      required: [id, conversation_id, sender, sequence, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        sender: { $ref: '#/components/schemas/ActorRef' }
+        sequence: { type: integer, minimum: 1 }
+        status: { type: string, enum: [waiting, sent, delivered, read, failed] }
+        text: { type: string, minLength: 1, maxLength: 100000000 }
+        attachments: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/Attachment' }, description: Combined attachment and voice item count may not exceed 100. }
+        voice: { $ref: '#/components/schemas/StoredVoiceAttachment' }
+        voice_transcript: { type: [string, 'null'], maxLength: 100000000 }
+        gif: { $ref: '#/components/schemas/Gif' }
+        bundle: { anyOf: [{ $ref: '#/components/schemas/BundleRef' }, { type: 'null' }] }
+        created_at: { type: string, format: date-time }
+        delivered_at: { type: [string, 'null'], format: date-time }
+        read_at: { type: [string, 'null'], format: date-time }
+        failure_reason: { type: [string, 'null'] }
+      anyOf:
+        - required: [text]
+          properties: { text: {} }
+        - required: [attachments]
+          properties: { attachments: { minItems: 1 } }
+        - required: [voice]
+          properties: { voice: {} }
+        - required: [gif]
+          properties: { gif: {} }
+      allOf:
+        - if:
+            required: [voice_transcript]
+            properties: { voice_transcript: { type: string } }
+          then: { required: [voice], properties: { voice: {} } }
     BundleRef:
       type: object
       required: [id, role]
@@ -362,27 +390,34 @@ components:
           properties: { original_messages: { type: array, minItems: 1, maxItems: 100, items: { $ref: '#/components/schemas/Message' } } }
     DraftInput:
       type: object
-      properties: { message_content: { type: string, maxLength: 100000000 }, attachments: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/Attachment' }, description: Combined attachment and voice item count may not exceed 100. }, voice: { $ref: '#/components/schemas/Attachment', description: Counts toward the combined 100 attachment-item maximum. }, gif: { $ref: '#/components/schemas/Gif' } }
-    Draft:
+      properties: { message_content: { type: string, maxLength: 100000000 }, attachments: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/Attachment' }, description: Combined attachment and voice item count may not exceed 100. }, voice: { $ref: '#/components/schemas/VoiceAttachment', description: Counts toward the combined 100 attachment-item maximum. }, voice_transcript: { type: [string, 'null'], maxLength: 100000000, description: Optional synchronized client-supplied transcript; requires voice. }, gif: { $ref: '#/components/schemas/Gif' } }
       allOf:
-        - $ref: '#/components/schemas/DraftInput'
-        - type: object
-          required: [conversation_id, actor_id, version, updated_at]
-          properties: { conversation_id: { type: string, format: uuid }, actor_id: { type: string }, version: { type: integer, minimum: 1 }, updated_at: { type: string, format: date-time } }
+        - if:
+            required: [voice_transcript]
+            properties: { voice_transcript: { type: string } }
+          then: { required: [voice], properties: { voice: {} } }
+    Draft:
+      type: object
+      required: [conversation_id, actor_id, version, updated_at]
+      properties:
+        conversation_id: { type: string, format: uuid }
+        actor_id: { type: string }
+        version: { type: integer, minimum: 1 }
+        message_content: { type: string, maxLength: 100000000 }
+        attachments: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/Attachment' } }
+        voice: { $ref: '#/components/schemas/StoredVoiceAttachment' }
+        voice_transcript: { type: [string, 'null'], maxLength: 100000000 }
+        gif: { $ref: '#/components/schemas/Gif' }
+        updated_at: { type: string, format: date-time }
+      allOf:
+        - if:
+            required: [voice_transcript]
+            properties: { voice_transcript: { type: string } }
+          then: { required: [voice], properties: { voice: {} } }
     Presence:
       type: object
       required: [actor_id, availability]
       properties: { actor_id: { type: string }, availability: { type: string, enum: [online, offline] }, activity: { type: [string, 'null'], enum: [typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, null] }, last_seen_at: { type: [string, 'null'], format: date-time } }
-    SystemEvent:
-      type: object
-      required: [event_id, org_id, silicon_id, type, payload]
-      properties:
-        event_id: { type: string, format: uuid }
-        org_id: { type: string }
-        silicon_id: { type: string }
-        type: { type: string, minLength: 1, maxLength: 255, pattern: '^[^\u0000-\u001F\u007F]{1,255}$' }
-        trace_id: { type: string, minLength: 1, maxLength: 255, pattern: '^[^\u0000-\u001F\u007F]{1,255}$' }
-        payload: { type: object, additionalProperties: true, description: Serialized object must not exceed 1 MiB. }
     ClientSocketFrame:
       oneOf:
         - $ref: '#/components/schemas/PongFrame'
@@ -398,7 +433,6 @@ components:
         - $ref: '#/components/schemas/MessageAcceptedFrame'
         - $ref: '#/components/schemas/ReceiptRecordedFrame'
         - $ref: '#/components/schemas/MessageDeliveryFrame'
-        - $ref: '#/components/schemas/SystemEventDeliveryFrame'
         - $ref: '#/components/schemas/ReceiptDeliveryFrame'
         - $ref: '#/components/schemas/SocketErrorFrame'
     SocketFrame:
@@ -433,7 +467,7 @@ components:
     ReadyFrame:
       type: object
       required: [type, protocol_version, connection_id, actors, acknowledged_through]
-      properties: { type: { const: ready }, protocol_version: { const: 1 }, connection_id: { type: string, format: uuid }, actors: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: { type: string } }, acknowledged_through: { type: object, additionalProperties: { type: integer, minimum: 0 } } }
+      properties: { type: { const: ready }, protocol_version: { const: 2 }, connection_id: { type: string, format: uuid }, actors: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: { type: string } }, acknowledged_through: { type: object, additionalProperties: { type: integer, minimum: 0 } } }
     PingFrame:
       type: object
       required: [type, ping_id]
@@ -452,10 +486,6 @@ components:
       type: object
       required: [type, delivery_id, actor_id, delivery_sequence, message]
       properties: { type: { const: message }, delivery_id: { type: string, format: uuid }, actor_id: { type: string }, delivery_sequence: { type: integer, minimum: 1 }, message: { $ref: '#/components/schemas/Message' } }
-    SystemEventDeliveryFrame:
-      type: object
-      required: [type, delivery_id, actor_id, delivery_sequence, event]
-      properties: { type: { const: system_event }, delivery_id: { type: string, format: uuid }, actor_id: { type: string }, delivery_sequence: { type: integer, minimum: 1 }, event: { $ref: '#/components/schemas/SystemEvent' } }
     ReceiptDeliveryFrame:
       type: object
       required: [type, delivery_id, actor_id, delivery_sequence, message_id, status]

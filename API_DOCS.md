@@ -10,13 +10,12 @@ This document explains every operation in the Silicon DM OpenAPI contract. The m
 https://dm.teamofsilicons.com/api/v1
 ```
 
-DM provides reliable messaging among Carbons and Silicons. REST operations create and recover durable state; WebSocket frames provide low-latency delivery, receipts, activity, and system events.
+DM provides reliable messaging among Carbons and Silicons. REST operations create and recover durable state; WebSocket frames provide low-latency delivery, receipts, and activity.
 
 ### Authentication
 
 - **Bearer authentication:** IAM access token for a Carbon or Silicon.
 - **OBO Access:** `X-IAM-OBO-Access-Proof` and `X-App-ID` together for an application acting for an actor. Route-specific security below is authoritative where IAM cannot safely delegate a required directory or downstream-provider call.
-- **Service authentication:** IAM service token for internal Hook delivery.
 - **Organization context:** Normal API operations require `X-Org-ID`.
 - **Idempotency:** Conversation and message creation require `Idempotency-Key`.
 
@@ -54,13 +53,12 @@ Supported frame families are:
 - `ping` and `pong` heartbeat frames.
 - Durable conversation messages.
 - Message receipts.
-- System events received through Hook.
 
 Heartbeats are not persisted and do not consume delivery sequence numbers.
 
-After upgrade, DM sends a `ready` frame with protocol version 1, the connection
+After upgrade, DM sends a `ready` frame with protocol version 2, the connection
 ID, authorized actors, and the server's acknowledged cursor for each actor. A
-durable `message`, `system_event`, or `receipt` frame contains a stable
+durable `message` or `receipt` frame contains a stable
 `delivery_id`, its target `actor_id`, and a monotonically increasing
 `delivery_sequence` in that actor's stream. The client deduplicates by delivery
 ID and sends a cumulative `ack` through the highest contiguous sequence it has
@@ -149,26 +147,33 @@ Sends a message.
 
 - **Authentication:** Bearer or OBO Access.
 - **Required header:** `Idempotency-Key`.
-- **Input:** Any supported combination of text, attachments, voice, transcript, and GIF.
+- **Input:** Any supported combination of text, attachments, voice, optional transcript, and GIF.
 - **Returns:** Durably accepted message in `sent` state.
 
-Attachments and voice files are stored as permanent Briefcase URLs. Temporary CDN URLs must never be persisted in message content.
+Attachment and voice references may be canonical permanent Briefcase URLs or
+external HTTPS URLs. DM stores and returns external links but never fetches,
+proxies, scans, or signs them; clients render those references directly. A URL
+on the configured Briefcase origin must identify one canonical entry and must
+not be a temporary signed URL.
 
-Every voice attachment is sent through Waveform by DM, including when a client
-supplies `voice_transcript`; a successful provider result overwrites that field.
-A bearer-authenticated request is exchanged through IAM for a new proof bound
-to the configured Waveform audience and `waveform.stt`; DM never forwards the
-incoming bearer. An incoming DM-audience OBO proof cannot be chained, so an OBO
-message containing voice is rejected while non-voice OBO messages remain
-supported.
-A terminal Waveform transport, timeout, rate-limit, server, or malformed-response
-failure stores a null transcript and does not block the voice message. Invalid
-attachments and authentication/authorization failures still reject the request.
+A voice item carries its URL, basic metadata, and required
+`duration_milliseconds` from 1 through 172,800,000 (48 hours). The optional
+`voice_transcript` is client-supplied content and is preserved exactly. DM does
+not run blocking speech-to-text or replace the transcript. Both duration and
+transcript participate in idempotency and draft-clearing identity.
+
+New message and draft writes must always provide duration. A historical voice
+row created before protocol v2 may be returned with
+`duration_milliseconds: null` when its former provider did not record that
+metadata; DM preserves the row instead of inventing a duration. Pre-v2 voice
+idempotency keys fail closed with a conflict when retried under the v2 content
+shape, while compatible legacy draft hashes are still recognized and cleared.
 
 A message must contain actual text, one or more attachments, voice, or a GIF;
 `sender_id` alone is not content. Up to 100 attachment items including voice are
-accepted, each with a maximum declared size of 5 GiB. Briefcase metadata remains authoritative over
-the client-declared size.
+accepted, each with a maximum declared size of 5 GiB. Sizes, media types,
+durations, and transcripts are untrusted display metadata unless a separate
+content provider verifies them.
 
 The 100,000,000-character text limit is a decoded-content limit. HTTP and
 WebSocket JSON frames also have a 128 MiB encoded-size ceiling so adversarial
@@ -201,8 +206,7 @@ By default, `GET /conversations/{conversation_id}/messages` hides bundle-member 
 Creates a message bundle.
 
 - **Authentication:** Silicon bearer or OBO Access; Carbons cannot bundle
-  messages. An OBO bundle whose display message needs voice transcription is
-  rejected until IAM supports chaining a consumed proof into a new audience.
+  messages.
 - **Required header:** `Idempotency-Key`.
 - **Input:** Between 1 and 100 unique `message_ids` and a `display_message` using the normal message-content shape.
 - **Returns:** Bundle metadata and the newly created display message.
@@ -244,7 +248,7 @@ Drafts are private to the actor and are not visible to other conversation partic
 Creates or replaces the current draft.
 
 - **Authentication:** Bearer or OBO Access.
-- **Input:** Message content, attachments, voice, and GIF.
+- **Input:** Message content, attachments, voice metadata, optional voice transcript, and GIF.
 - **Concurrency:** `If-Match` contains the last observed version.
 - **Returns:** Stored draft and incremented version.
 
@@ -278,6 +282,11 @@ Activity can include typing, recording voice, transcribing voice, uploading a fi
 
 ## Attachments
 
+Messages and drafts may contain any bounded, credential-free HTTPS attachment
+reference. DM does not make outbound requests to external attachment hosts.
+Only canonical entries on the configured Briefcase origin support temporary
+URL generation.
+
 ### `POST /attachments/temporary-url`
 
 Requests a temporary Briefcase URL for an attachment.
@@ -304,7 +313,8 @@ Returns current trending GIFs from Giphy.
 - **Authentication:** Bearer or OBO Access.
 - **Returns:** GIF identifiers, URLs, previews, and titles.
 
-Provider credentials stay on the backend. Results are cached and requested at
+The required Giphy API key is read from `DM_GIPHY_API_KEY` and stays on the
+backend. Results are cached and requested at
 Giphy's `g` rating, the safest fixed policy, until IAM publishes an
 organization-specific GIF-safety setting.
 
@@ -328,22 +338,6 @@ Returns the current Carbon's last 20 selected GIFs.
 The current contract describes this history for Carbons. An authenticated
 Silicon receives an empty list and does not accumulate GIF history.
 
-## Internal Hook delivery
-
-### `POST /internal/hook-events`
-
-Accepts a persisted Silicon Hook event for realtime delivery.
-
-- **Authentication:** IAM service token belonging to Silicon Hook.
-- **Input:** Event ID, organization, target Silicon, type, trace ID, and payload.
-- **Returns:** `202 Accepted` after durable queueing.
-
-The service token must carry `dm.hook_events.deliver`. Serialized payload is
-limited to 1 MiB. Repeating an event ID with identical content is accepted
-idempotently; using the same ID for different content conflicts.
-
-DM validates the Hook service identity and target Silicon. If the Silicon is connected, the event is sent as a `system_event` WebSocket frame. If offline, it remains recoverable for later delivery. System events are not conversation messages and do not appear as if a Carbon sent them.
-
 ## Complete flows
 
 ### Normal message
@@ -361,24 +355,12 @@ Client creates an idempotency key
 ### Voice message
 
 ```text
-Upload audio to Briefcase
-  -> send DM the permanent audio URL
-  -> DM exchanges the actor bearer for a Waveform-scoped OBO proof
-  -> DM requests Waveform transcription as the represented actor
-  -> DM waits for success or a terminal/timeout failure
-  -> DM stores the permanent URL with transcript or null
+Choose a Briefcase or external HTTPS audio URL
+  -> send DM the URL, duration, basic metadata, and optional transcript
+  -> DM validates and stores the supplied voice metadata atomically
   -> DM durably queues the message
-  -> recipient requests a temporary Briefcase URL for playback
-```
-
-### Hook event
-
-```text
-Hook persists incoming event
-  -> Hook calls DM internal endpoint
-  -> DM durably queues the system event
-  -> active Silicon receives it over WebSocket
-  -> offline Silicon receives it after reconnecting
+  -> recipient requests a temporary URL only when the source is Briefcase
+  -> recipient renders an external source URL directly
 ```
 
 ### Message bundle
@@ -401,32 +383,26 @@ Silicon selects 1-100 messages in one conversation
   introspection route, permits only its organization-capability action enum for
   OBO exchange/verification, exposes Carbon-only OAuth userinfo, and does not
   authorize an app-bound OAuth token to read the organization membership needed
-  to cross-bind a public actor ID. Consequently Silicon bearer auth, Hook
-  service auth, DM OBO operations, and the provider exchanges fail closed
-  against that runtime. Briefcase expects delegated organization fields IAM
-  does not return, while Waveform's production delegation and media-source
-  adapters remain fail-closed. These are upstream release blockers, not
+  to cross-bind a public actor ID. Consequently Silicon bearer auth, DM OBO
+  operations, and the Briefcase provider exchange fail closed against that
+  runtime. Briefcase expects delegated organization fields IAM does not return.
+  These are upstream release blockers, not
   permissions DM can safely infer or remap. The integration gate is recorded in
-  D-046.
+  D-046 as narrowed by D-048 and D-049.
 - IAM can mint a first-hop OBO proof from an actor token owned by the calling
   app, but it cannot chain DM's consumed proof into a new audience-bound proof.
   DM does not receive the originating app's actor token. Consequently a
-  DM-audience OBO request cannot yet be delegated to Briefcase or Waveform;
-  the temporary-URL path rejects OBO at the authentication boundary, while
-  voice transcription fails unsupported OBO delegation closed. Bearer-originated
-  calls use IAM's published first-hop exchange.
+  DM-audience OBO request cannot yet be delegated to Briefcase; the
+  temporary-URL path rejects OBO at the authentication boundary.
+  Bearer-originated calls use IAM's published first-hop exchange.
 - IAM still needs a normative multi-actor representation/contactability
-  decision and a dedicated service-authenticated Hook-target lookup. Until
-  then, WebSockets represent only the bearer principal, bearer authentication
+  decision. Until then, WebSockets represent only the bearer principal, bearer authentication
   is required for conversation creation and non-self presence, and active
   same-organization directory membership is not treated as proof of a finer
   pairwise privacy policy.
 - Product policy still needs to define whether a sender may preserve an
   attachment that one or more conversation recipients cannot access. Briefcase
   remains authoritative for each actor's temporary-URL permission.
-- Waveform's synchronous STT contract is not suitable for 48-hour audio and has
-  no durable async job/retry state. DM records success or terminal failure, but
-  a future contract should expose transcription progress and operator retry.
 - Conversation membership mutation and separately named groups are absent.
 - Message editing, deletion, reply, reaction, forwarding, and search are
   undefined and outside this version.
@@ -438,8 +414,6 @@ Silicon selects 1-100 messages in one conversation
   event that updates a Carbon's recent history.
 - Presence update frames exist, but organization contact/privacy settings still
   require a normative IAM authorization decision.
-- Hook-to-DM retry intervals, dead-letter operations, and operator replay remain
-  undefined in Hook's outward contract.
 - Exactly-once user experience depends on idempotency, stable IDs, sequencing,
   and client deduplication; the contract does not promise impossible physical
   exactly-once delivery.
