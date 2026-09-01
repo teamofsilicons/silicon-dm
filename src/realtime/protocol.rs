@@ -7,11 +7,10 @@ use uuid::Uuid;
 
 use crate::domain::{
     Activity, ActorId, IdempotencyKey, Message, MessageCreate, OrganizationId, ReceiptStatus,
-    SystemEvent,
 };
 
 /// Current application-level WebSocket protocol version.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Frames accepted from an authenticated client.
 #[derive(Clone, Debug, Deserialize)]
@@ -80,11 +79,6 @@ pub enum DeliveryPayload {
         /// Durable message.
         message: Box<Message>,
     },
-    /// Hook-originated event.
-    SystemEvent {
-        /// Durable system event.
-        event: Box<SystemEvent>,
-    },
     /// Aggregate message state update.
     Receipt {
         /// Stable message identifier.
@@ -139,17 +133,6 @@ pub enum ServerFrame {
         /// Durable message.
         message: Box<Message>,
     },
-    /// Durable Hook-event delivery.
-    SystemEvent {
-        /// Stable actor-delivery identifier used for deduplication.
-        delivery_id: Uuid,
-        /// Delivery stream owner.
-        actor_id: ActorId,
-        /// Stable sequence within the actor stream.
-        delivery_sequence: i64,
-        /// Durable system event.
-        event: Box<SystemEvent>,
-    },
     /// Durable aggregate receipt update.
     Receipt {
         /// Stable actor-delivery identifier used for deduplication.
@@ -184,11 +167,6 @@ impl ServerFrame {
                 delivery_sequence,
                 ..
             }
-            | Self::SystemEvent {
-                actor_id,
-                delivery_sequence,
-                ..
-            }
             | Self::Receipt {
                 actor_id,
                 delivery_sequence,
@@ -217,12 +195,6 @@ impl ServerFrame {
                 delivery_sequence,
                 message,
             },
-            DeliveryPayload::SystemEvent { event } => Self::SystemEvent {
-                delivery_id,
-                actor_id,
-                delivery_sequence,
-                event,
-            },
             DeliveryPayload::Receipt { message_id, status } => Self::Receipt {
                 delivery_id,
                 actor_id,
@@ -246,6 +218,10 @@ impl ServerFrame {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use uuid::Uuid;
+
     use super::{ClientFrame, PROTOCOL_VERSION, ServerFrame};
 
     #[test]
@@ -262,7 +238,78 @@ mod tests {
         })?;
         assert_eq!(encoded.get("type"), Some(&serde_json::json!("ping")));
         assert!(encoded.get("delivery_sequence").is_none());
-        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(PROTOCOL_VERSION, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn retired_system_event_payload_is_not_part_of_protocol_v2() {
+        let legacy = serde_json::json!({
+            "kind": "system_event",
+            "event": {
+                "event_id": "018f0d52-7b2a-7e29-a41d-7c02b93f6f42"
+            }
+        });
+        assert!(serde_json::from_value::<super::DeliveryPayload>(legacy).is_err());
+    }
+
+    #[test]
+    fn ready_frame_advertises_protocol_version_two() -> Result<(), Box<dyn std::error::Error>> {
+        let encoded = serde_json::to_value(ServerFrame::Ready {
+            protocol_version: PROTOCOL_VERSION,
+            connection_id: Uuid::nil(),
+            actors: vec!["carbon-1".parse()?],
+            acknowledged_through: BTreeMap::from([("carbon-1".to_owned(), 7)]),
+        })?;
+        assert_eq!(encoded.get("type"), Some(&serde_json::json!("ready")));
+        assert_eq!(encoded.get("protocol_version"), Some(&serde_json::json!(2)));
+        Ok(())
+    }
+
+    #[test]
+    fn protocol_v2_voice_command_requires_duration_and_preserves_transcript()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = serde_json::json!({
+            "type": "send_message",
+            "actor_id": "carbon-1",
+            "org_id": "organization-1",
+            "conversation_id": "018f0d52-7b2a-7e29-a41d-7c02b93f6f42",
+            "idempotency_key": "voice-command-1",
+            "message": {
+                "voice": {
+                    "permanent_url": "https://media.example/voice.ogg",
+                    "content_type": "audio/ogg",
+                    "duration_milliseconds": 42_000
+                },
+                "voice_transcript": "client transcript"
+            }
+        });
+        let decoded: ClientFrame = serde_json::from_value(frame.clone())?;
+        let ClientFrame::SendMessage { message, .. } = decoded else {
+            return Err("voice command decoded as the wrong frame variant".into());
+        };
+        assert_eq!(
+            message
+                .voice
+                .as_ref()
+                .and_then(|voice| voice.duration_milliseconds),
+            Some(42_000)
+        );
+        assert_eq!(
+            message.voice_transcript.as_deref(),
+            Some("client transcript")
+        );
+        assert!(message.validate().is_ok());
+
+        let mut missing_duration = frame;
+        if let Some(voice) = missing_duration
+            .get_mut("message")
+            .and_then(|message| message.get_mut("voice"))
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            voice.remove("duration_milliseconds");
+        }
+        assert!(serde_json::from_value::<ClientFrame>(missing_duration).is_err());
         Ok(())
     }
 }

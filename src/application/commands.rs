@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     domain::{
         Activity, ActorId, ActorRef, BundleCreate, Draft, DraftInput, IdempotencyKey,
-        MessageCreate, OrganizationId, ReceiptStatus, SystemEvent,
+        MessageCreate, OrganizationId, ReceiptStatus,
     },
     realtime::DeliveryPayload,
 };
@@ -31,10 +31,8 @@ pub struct SendMessageCommand {
     pub conversation_id: Uuid,
     /// Authenticated sender.
     pub sender: ActorRef,
-    /// Validated content, including terminal transcript result.
+    /// Validated content, including any client-provided voice transcript.
     pub content: MessageCreate,
-    /// Known Waveform duration used for the 48-hour invariant.
-    pub voice_duration_milliseconds: Option<u64>,
     /// Retry-safe client key.
     pub idempotency_key: IdempotencyKey,
 }
@@ -65,8 +63,6 @@ pub struct CreateBundleCommand {
     pub creator: ActorRef,
     /// Original members and display message.
     pub bundle: BundleCreate,
-    /// Known Waveform duration for a voice display message.
-    pub voice_duration_milliseconds: Option<u64>,
     /// Retry-safe client key.
     pub idempotency_key: IdempotencyKey,
 }
@@ -91,14 +87,6 @@ pub enum PutDraftOutcome {
     Saved(Draft),
     /// A newer server value won the race.
     Conflict(Draft),
-}
-
-/// Durably accept a Hook event for one verified Silicon.
-pub struct AcceptSystemEventCommand {
-    /// Verified target Silicon ref.
-    pub target: ActorRef,
-    /// Contracted event envelope.
-    pub event: SystemEvent,
 }
 
 /// One replayable actor-delivery row.

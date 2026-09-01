@@ -13,7 +13,6 @@ use crate::{
     config::{MigrationSettings, Settings},
     infrastructure::{
         briefcase::BriefcaseClient, giphy::GiphyClient, iam::IamClient, postgres::PostgresStore,
-        waveform::WaveformClient,
     },
     realtime::RealtimeHub,
     shutdown,
@@ -32,7 +31,6 @@ use crate::{
 pub async fn build_app_state(settings: Settings) -> AppResult<AppState> {
     let identity = Arc::new(IamClient::new(&settings.iam)?);
     let attachments = Arc::new(BriefcaseClient::new(&settings.providers)?);
-    let transcription = Arc::new(WaveformClient::new(&settings.providers)?);
     let gifs = Arc::new(GiphyClient::new(&settings.providers)?);
     let store = PostgresStore::connect(&settings.database).await?;
     store.readiness().await?;
@@ -43,7 +41,6 @@ pub async fn build_app_state(settings: Settings) -> AppResult<AppState> {
         store,
         identity,
         attachments,
-        transcription,
         gifs,
         realtime: RealtimeHub::default(),
     })

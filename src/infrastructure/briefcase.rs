@@ -112,8 +112,8 @@ struct TemporaryUrlDocument {
 
 /// Validates and extracts a Briefcase entry UUID from a permanent URL.
 ///
-/// This is shared with the Waveform adapter so both integration paths enforce
-/// the same SSRF boundary before forwarding a user-supplied URL.
+/// The adapter enforces this SSRF boundary before forwarding a user-supplied
+/// URL to Briefcase.
 pub(super) fn validate_permanent_url(
     permanent_url: &Url,
     briefcase_base_url: &Url,
@@ -405,10 +405,8 @@ mod tests {
         let settings = ProviderSettings {
             briefcase_base_url: format!("{}/api/v1", server.uri()).parse()?,
             briefcase_iam_audience: "silicon-briefcase".to_owned(),
-            waveform_base_url: "https://waveform.example/api/v1".parse()?,
-            waveform_iam_audience: "waveform".to_owned(),
             giphy_api_base_url: "https://api.giphy.com/v1/gifs".parse()?,
-            giphy_api_key: None,
+            giphy_api_key: SecretString::from("test-key".to_owned()),
             request_timeout: Duration::from_secs(2),
             trending_cache_ttl: Duration::from_secs(60),
         };

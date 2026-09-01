@@ -8,7 +8,6 @@ mod idempotency;
 mod message;
 mod pagination;
 mod presence;
-mod system_event;
 
 pub use actor::{ActorId, ActorRef, ActorType, OrganizationId};
 pub use bundle::{Bundle, BundleCreate, BundleDetail, BundleRef, BundleRole};
@@ -17,10 +16,10 @@ pub use draft::{Draft, DraftInput};
 pub use idempotency::IdempotencyKey;
 pub use message::{
     Attachment, Gif, GifPage, Message, MessageCreate, MessagePage, MessageStatus, ReceiptStatus,
+    VoiceAttachment,
 };
 pub use pagination::{Cursor, PageRequest};
 pub use presence::{Activity, Availability, Presence};
-pub use system_event::SystemEvent;
 
 /// Maximum number of Unicode scalar values in message or draft text.
 pub const MAX_TEXT_CHARACTERS: usize = 100_000_000;

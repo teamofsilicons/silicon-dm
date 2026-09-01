@@ -18,8 +18,6 @@ use tower_http::{
 use super::handlers;
 use crate::{AppError, application::state::AppState};
 
-const HOOK_BODY_LIMIT_BYTES: usize = 1024 * 1024 + 16 * 1024;
-
 /// Builds the versioned DM router.
 pub fn build_router(state: AppState) -> Router {
     let public_api = Router::new()
@@ -58,14 +56,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/gifs/search", get(handlers::search_gifs))
         .route("/gifs/recent", get(handlers::list_recent_gifs));
 
-    let internal_api = Router::new().route(
-        "/internal/hook-events",
-        post(handlers::deliver_hook_event).layer(DefaultBodyLimit::max(HOOK_BODY_LIMIT_BYTES)),
-    );
     let timed_routes = Router::new()
         .route("/live", get(handlers::liveness))
         .route("/ready", get(handlers::readiness))
-        .nest("/api/v1", public_api.merge(internal_api))
+        .nest("/api/v1", public_api)
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             state.settings.server.request_timeout,

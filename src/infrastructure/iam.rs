@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::{
     AppError, AppResult,
     application::{
-        auth::{AuthContext, DelegatedCredential, PresentedCredential, ServiceContext},
+        auth::{AuthContext, DelegatedCredential, PresentedCredential},
         ports::{AuthenticationRequest, DelegationRequest, IdentityProvider},
     },
     config::IamSettings,
@@ -31,7 +31,6 @@ const MAX_OBO_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_OBO_LIFETIME_SECONDS: u64 = 60;
 const DIRECTORY_PAGE_SIZE: &str = "100";
 const MAX_DIRECTORY_PAGES: usize = 100;
-const HOOK_DELIVERY_CAPABILITY: &str = "dm.hook_events.deliver";
 
 /// Reqwest-backed Silicon IAM client.
 #[derive(Clone)]
@@ -44,7 +43,6 @@ pub struct IamClient {
     api_base_url: Url,
     app_id: String,
     app_secret: SecretString,
-    hook_service_id: String,
 }
 
 impl IamClient {
@@ -71,7 +69,6 @@ impl IamClient {
             api_base_url,
             app_id: settings.app_id.clone(),
             app_secret: settings.app_secret.clone(),
-            hook_service_id: settings.hook_service_id.clone(),
         })
     }
 
@@ -385,28 +382,6 @@ impl IdentityProvider for IamClient {
         }
     }
 
-    async fn authenticate_service(&self, token: &SecretString) -> AppResult<ServiceContext> {
-        let introspection = self.introspect(token, None).await?;
-        validate_active_introspection(&introspection, None, Some(&self.app_id))?;
-        if introspection.actor_type.as_deref() != Some("service")
-            || introspection.principal_id.is_none()
-        {
-            return Err(AppError::Unauthorized);
-        }
-        let service_id = introspection
-            .client_id
-            .as_deref()
-            .ok_or(AppError::Unauthorized)?;
-        if service_id != self.hook_service_id {
-            return Err(AppError::Forbidden);
-        }
-        Ok(ServiceContext {
-            service_id: service_id.to_owned(),
-            capabilities: introspection.capabilities(),
-            credential: token.clone(),
-        })
-    }
-
     async fn exchange_actor_credential(
         &self,
         context: &AuthContext,
@@ -443,29 +418,6 @@ impl IdentityProvider for IamClient {
         }
         Ok(actor)
     }
-
-    async fn authorize_hook_target(
-        &self,
-        service: &ServiceContext,
-        organization_id: &OrganizationId,
-        silicon_id: &ActorId,
-    ) -> AppResult<ActorRef> {
-        if service.service_id != self.hook_service_id
-            || !service.capabilities.contains(HOOK_DELIVERY_CAPABILITY)
-        {
-            return Err(AppError::Forbidden);
-        }
-
-        let requested = BTreeSet::from([silicon_id.clone()]);
-        let mut actors = self
-            .lookup_directory_actors(&service.credential, organization_id, &requested)
-            .await?;
-        let actor = actors.pop().ok_or(AppError::Forbidden)?;
-        if actor.actor_type != ActorType::Silicon || actor.id != *silicon_id || !actors.is_empty() {
-            return Err(AppError::Forbidden);
-        }
-        Ok(actor)
-    }
 }
 
 #[derive(Serialize)]
@@ -480,8 +432,6 @@ struct TokenIntrospection {
     principal_id: Option<String>,
     #[serde(default)]
     actor_type: Option<String>,
-    #[serde(default)]
-    client_id: Option<String>,
     #[serde(default)]
     org_id: Option<String>,
     #[serde(default)]
@@ -856,9 +806,10 @@ mod tests {
     use secrecy::SecretString;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
     use url::Url;
+    use uuid::Uuid;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, body_string_contains, header, method, path, query_param},
+        matchers::{body_json, body_string_contains, header, method, path},
     };
 
     use super::{
@@ -879,7 +830,6 @@ mod tests {
             base_url: server.uri().parse()?,
             app_id: "silicon-dm".to_owned(),
             app_secret: SecretString::from("iam-secret".to_owned()),
-            hook_service_id: "silicon-hook".to_owned(),
             request_timeout: Duration::from_secs(2),
         })
     }
@@ -1034,7 +984,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exchanges_a_bearer_for_a_provider_scoped_proof()
+    async fn exchanges_a_bearer_for_a_briefcase_scoped_proof()
     -> Result<(), Box<dyn std::error::Error>> {
         let server = MockServer::start().await;
         let application_authorization = format!(
@@ -1049,8 +999,9 @@ mod tests {
             .and(header("x-org-id", "org-1"))
             .and(body_json(serde_json::json!({
                 "subject_token": "actor-token-for-silicon-dm-application",
-                "audience": "waveform",
-                "action": "waveform.stt",
+                "audience": "silicon-briefcase",
+                "action": "briefcase.file.temporary_url",
+                "resource": "018f0d52-7b2a-7e29-a41d-7c02b93f6f42",
                 "org_id": "org-1"
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
@@ -1076,68 +1027,16 @@ mod tests {
                 "actor-token-for-silicon-dm-application".to_owned(),
             )),
         };
+        let entry_id = Uuid::parse_str("018f0d52-7b2a-7e29-a41d-7c02b93f6f42")?;
         let credential = IamClient::new(&settings(&server)?)?
-            .exchange_actor_credential(&context, &DelegationRequest::waveform_stt("waveform"))
+            .exchange_actor_credential(
+                &context,
+                &DelegationRequest::briefcase_temporary_url("silicon-briefcase", entry_id),
+            )
             .await?;
 
         assert_eq!(credential.issuer_app_id(), "silicon-dm");
         assert!(!format!("{credential:?}").contains("obo_"));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn hook_target_lookup_uses_request_scoped_service_authority()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/tokens/introspect"))
-            .and(body_string_contains("token=hook-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "active": true,
-                "principal_id": "018f0d52-7b2a-7e29-a41d-7c02b93f6f42",
-                "actor_type": "service",
-                "client_id": "silicon-hook",
-                "scope": "dm.hook_events.deliver",
-                "audience": "silicon-dm",
-                "expires_at": 2_000_000_000
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/organizations/org-1/members"))
-            .and(query_param("limit", "100"))
-            .and(query_param("status", "active"))
-            .and(header("authorization", "Bearer hook-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "items": [{
-                    "id": "018f0d52-7b2a-7e29-a41d-7c02b93f6f44",
-                    "org_id": "org-1",
-                    "principal": {
-                        "principal_id": "018f0d52-7b2a-7e29-a41d-7c02b93f6f45",
-                        "type": "silicon",
-                        "public_id": "silicon-1"
-                    },
-                    "status": "active"
-                }],
-                "page": { "next_cursor": null, "has_more": false }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = IamClient::new(&settings(&server)?)?;
-        let service = client
-            .authenticate_service(&SecretString::from("hook-token".to_owned()))
-            .await?;
-        let organization_id = OrganizationId::from_str("org-1")?;
-        let silicon_id = ActorId::from_str("silicon-1")?;
-        let actor = client
-            .authorize_hook_target(&service, &organization_id, &silicon_id)
-            .await?;
-
-        assert_eq!(actor.actor_type, ActorType::Silicon);
-        assert_eq!(actor.id, silicon_id);
         Ok(())
     }
 }

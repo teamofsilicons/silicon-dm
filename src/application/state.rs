@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::ports::{AttachmentProvider, GifProvider, IdentityProvider, TranscriptionProvider};
+use super::ports::{AttachmentProvider, GifProvider, IdentityProvider};
 use crate::{config::Settings, infrastructure::postgres::PostgresStore, realtime::RealtimeHub};
 
 /// Cheaply cloneable dependency container used by handlers and workers.
@@ -18,8 +18,6 @@ pub struct AppState {
     pub identity: Arc<dyn IdentityProvider>,
     /// Briefcase adapter.
     pub attachments: Arc<dyn AttachmentProvider>,
-    /// Waveform adapter.
-    pub transcription: Arc<dyn TranscriptionProvider>,
     /// Giphy adapter.
     pub gifs: Arc<dyn GifProvider>,
     /// Process-local realtime connection registry.

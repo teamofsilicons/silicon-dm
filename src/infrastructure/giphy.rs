@@ -33,17 +33,13 @@ pub struct GiphyClient {
     client: Client,
     trending_url: Url,
     search_url: Url,
-    api_key: Option<SecretString>,
+    api_key: SecretString,
     cache_ttl: Duration,
     trending_cache: Arc<Mutex<Option<CachedTrending>>>,
 }
 
 impl GiphyClient {
     /// Builds a Giphy adapter from validated provider settings.
-    ///
-    /// A missing API key is intentionally accepted at startup. Calls then
-    /// return dependency-unavailable, matching the configuration contract.
-    ///
     /// # Errors
     ///
     /// Returns an internal configuration error when the HTTP client or endpoint
@@ -61,11 +57,10 @@ impl GiphyClient {
     }
 
     async fn fetch(&self, endpoint: &Url, query: Option<&str>) -> AppResult<Vec<Gif>> {
-        let api_key = self.api_key.as_ref().ok_or_else(dependency_unavailable)?;
         let mut url = endpoint.clone();
         {
             let mut parameters = url.query_pairs_mut();
-            parameters.append_pair("api_key", api_key.expose_secret());
+            parameters.append_pair("api_key", self.api_key.expose_secret());
             parameters.append_pair("limit", RESULT_LIMIT);
             parameters.append_pair("rating", SAFE_RATING);
             parameters.append_pair("bundle", RENDITION_BUNDLE);
@@ -416,10 +411,8 @@ mod tests {
         let settings = ProviderSettings {
             briefcase_base_url: "https://briefcase.example/api/v1".parse()?,
             briefcase_iam_audience: "silicon-briefcase".to_owned(),
-            waveform_base_url: "https://waveform.example/api/v1".parse()?,
-            waveform_iam_audience: "waveform".to_owned(),
             giphy_api_base_url: format!("{}/v1/gifs", server.uri()).parse()?,
-            giphy_api_key: Some(SecretString::from("test-key".to_owned())),
+            giphy_api_key: SecretString::from("test-key".to_owned()),
             request_timeout: Duration::from_secs(2),
             trending_cache_ttl: Duration::from_secs(60),
         };

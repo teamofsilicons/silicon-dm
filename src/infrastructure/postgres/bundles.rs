@@ -10,9 +10,7 @@ use uuid::Uuid;
 use crate::{
     AppError, AppResult,
     application::commands::CreateBundleCommand,
-    domain::{
-        ActorRef, ActorType, Bundle, BundleDetail, MAX_VOICE_DURATION_MILLISECONDS, OrganizationId,
-    },
+    domain::{ActorRef, ActorType, Bundle, BundleDetail, OrganizationId},
 };
 
 use super::{
@@ -73,14 +71,6 @@ impl PostgresStore {
         {
             return Err(AppError::Forbidden);
         }
-        if command
-            .voice_duration_milliseconds
-            .is_some_and(|duration| duration > MAX_VOICE_DURATION_MILLISECONDS)
-        {
-            return Err(AppError::validation(
-                "voice message duration may not exceed 48 hours",
-            ));
-        }
         let display_content_hash = command.bundle.display_message.content_digest();
         let hash = request_hash(&BundleIdempotencyContent {
             conversation_id: command.conversation_id,
@@ -126,7 +116,7 @@ impl PostgresStore {
                     command.conversation_id,
                     &command.creator,
                     &command.bundle.display_message,
-                    command.voice_duration_milliseconds,
+                    &display_content_hash,
                 )
                 .await?;
                 let bundle_id = Uuid::now_v7();

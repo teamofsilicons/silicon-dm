@@ -2,7 +2,6 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use serde_json::Value;
 use sqlx::{FromRow, Postgres, Transaction, postgres::PgListener};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -10,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     AppError, AppResult,
     application::commands::ActorDelivery,
-    domain::{ActorRef, OrganizationId, SystemEvent},
+    domain::{ActorRef, OrganizationId},
     realtime::{DeliveryPayload, RealtimeTarget},
 };
 
@@ -43,18 +42,7 @@ struct DeliveryRecord {
     delivery_kind: String,
     message_id: Option<Uuid>,
     aggregate_status: Option<String>,
-    system_event_id: Option<Uuid>,
     attempt_count: i32,
-}
-
-#[derive(Debug, FromRow)]
-struct SystemEventRecord {
-    event_id: Uuid,
-    organization_id: String,
-    target_silicon_id: String,
-    event_type: String,
-    trace_id: Option<String>,
-    payload: Value,
 }
 
 #[derive(Debug, FromRow)]
@@ -265,6 +253,7 @@ impl PostgresStore {
               AND target_id = $3
               AND sequence <= $4
               AND dead_lettered_at IS NULL
+              AND delivery_kind IN ('message', 'message_status')
             "#,
         )
         .bind(organization_id.as_str())
@@ -308,7 +297,6 @@ impl PostgresStore {
                 delivery_kind::text AS delivery_kind,
                 message_id,
                 aggregate_status::text AS aggregate_status,
-                system_event_id,
                 attempt_count
             FROM dm.actor_deliveries
             WHERE organization_id = $1
@@ -316,6 +304,7 @@ impl PostgresStore {
               AND target_id = $3
               AND sequence > $4
               AND dead_lettered_at IS NULL
+              AND delivery_kind IN ('message', 'message_status')
             ORDER BY sequence
             LIMIT $5
             "#,
@@ -363,6 +352,7 @@ impl PostgresStore {
                   AND target_id = $3
                   AND acked_at IS NULL
                   AND dead_lettered_at IS NULL
+                  AND delivery_kind IN ('message', 'message_status')
                   AND next_attempt_at <= transaction_timestamp()
                   AND (
                       lease_owner IS NULL
@@ -388,7 +378,6 @@ impl PostgresStore {
                 delivery.delivery_kind::text AS delivery_kind,
                 delivery.message_id,
                 delivery.aggregate_status::text AS aggregate_status,
-                delivery.system_event_id,
                 delivery.attempt_count
             "#,
         )
@@ -599,16 +588,6 @@ impl PostgresStore {
                         },
                     )?)?,
                 },
-                "system_event" => DeliveryPayload::SystemEvent {
-                    event: Box::new(
-                        self.load_system_event(record.system_event_id.ok_or_else(|| {
-                            AppError::internal(anyhow::anyhow!(
-                                "system event delivery has no source event"
-                            ))
-                        })?)
-                        .await?,
-                    ),
-                },
                 other => {
                     return Err(AppError::internal(anyhow::anyhow!(
                         "invalid delivery kind loaded from DM database: {other}"
@@ -624,47 +603,6 @@ impl PostgresStore {
             });
         }
         Ok(deliveries)
-    }
-
-    async fn load_system_event(&self, event_id: Uuid) -> AppResult<SystemEvent> {
-        let record = sqlx::query_as::<_, SystemEventRecord>(
-            r#"
-            SELECT
-                event_id,
-                organization_id,
-                target_silicon_id,
-                event_type,
-                trace_id,
-                payload
-            FROM dm.system_events
-            WHERE event_id = $1
-            "#,
-        )
-        .bind(event_id)
-        .fetch_optional(self.pool())
-        .await?
-        .ok_or_else(|| {
-            AppError::internal(anyhow::anyhow!(
-                "delivery references a missing system event"
-            ))
-        })?;
-        let Value::Object(payload) = record.payload else {
-            return Err(AppError::internal(anyhow::anyhow!(
-                "system event payload loaded from DM database is not an object"
-            )));
-        };
-        Ok(SystemEvent {
-            event_id: record.event_id,
-            org_id: record.organization_id.parse().map_err(|error| {
-                AppError::internal(anyhow::anyhow!(
-                    "invalid system event organization loaded from DM database: {error}"
-                ))
-            })?,
-            silicon_id: parse_actor_id(&record.target_silicon_id)?,
-            event_type: record.event_type,
-            trace_id: record.trace_id,
-            payload,
-        })
     }
 }
 

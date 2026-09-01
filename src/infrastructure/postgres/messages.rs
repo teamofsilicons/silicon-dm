@@ -1,16 +1,16 @@
-//! Message, receipt, GIF-history, and Hook-event persistence.
+//! Message, receipt, and GIF-history persistence.
 
 use serde::Serialize;
 use sqlx::{FromRow, Postgres, Transaction};
+use url::Url;
 use uuid::Uuid;
 
 use crate::{
     AppError, AppResult,
-    application::commands::{AcceptSystemEventCommand, RecordReceiptCommand, SendMessageCommand},
+    application::commands::{RecordReceiptCommand, SendMessageCommand},
     domain::{
-        ActorRef, ActorType, Cursor, Gif, GifPage, MAX_VOICE_DURATION_MILLISECONDS, Message,
-        MessageCreate, MessagePage, MessageStatus, OrganizationId, PageRequest, ReceiptStatus,
-        SystemEvent,
+        ActorRef, ActorType, Cursor, Gif, GifPage, Message, MessageCreate, MessagePage,
+        MessageStatus, OrganizationId, PageRequest, ReceiptStatus,
     },
 };
 
@@ -56,22 +56,16 @@ struct RecentGifRecord {
     title: Option<String>,
 }
 
-#[derive(FromRow)]
-struct StoredSystemEvent {
-    organization_id: String,
-    target_silicon_id: String,
-    event_type: String,
-    trace_id: Option<String>,
-    payload: serde_json::Value,
-}
-
 struct MessageAttachmentInsert<'a> {
     message_id: Uuid,
     conversation_id: Uuid,
     organization_id: &'a OrganizationId,
     position: usize,
     kind: &'a str,
-    attachment: &'a crate::domain::Attachment,
+    permanent_url: &'a Url,
+    name: Option<&'a str>,
+    content_type: Option<&'a str>,
+    size: Option<u64>,
     duration_milliseconds: Option<u64>,
 }
 
@@ -169,8 +163,8 @@ impl PostgresStore {
     ///
     /// # Errors
     ///
-    /// Rejects invalid content, sender mismatch, excessive known voice
-    /// duration, non-participant access, and conflicting idempotency reuse.
+    /// Rejects invalid content, sender mismatch, non-participant access, and
+    /// conflicting idempotency reuse.
     #[allow(
         clippy::too_many_lines,
         reason = "message acceptance, outbox creation, history update, draft clear, and idempotency form one transaction"
@@ -185,15 +179,8 @@ impl PostgresStore {
         {
             return Err(AppError::Forbidden);
         }
-        if command
-            .voice_duration_milliseconds
-            .is_some_and(|duration| duration > MAX_VOICE_DURATION_MILLISECONDS)
-        {
-            return Err(AppError::validation(
-                "voice message duration may not exceed 48 hours",
-            ));
-        }
         let content_hash = command.content.content_digest();
+        let legacy_content_hash = command.content.legacy_content_digest();
         let hash = request_hash(&MessageIdempotencyContent {
             conversation_id: command.conversation_id,
             content_hash: content_hash.as_bytes(),
@@ -230,7 +217,7 @@ impl PostgresStore {
                     command.conversation_id,
                     &command.sender,
                     &command.content,
-                    command.voice_duration_milliseconds,
+                    &content_hash,
                 )
                 .await?;
                 enqueue_message_deliveries_in(
@@ -252,19 +239,24 @@ impl PostgresStore {
                 let matching_draft = sqlx::query(
                     r#"
                     UPDATE dm.drafts
-                    SET version = version + 1
+                    SET version = version + 1,
+                        content_hash_version = 2
                     WHERE conversation_id = $1
                       AND organization_id = $2
                       AND actor_kind = $3::text::dm.actor_kind
                       AND actor_id = $4
-                      AND content_hash = $5
+                      AND (
+                            (content_hash_version = 2 AND content_hash = $5)
+                            OR (content_hash_version = 1 AND content_hash = $6)
+                      )
                     "#,
                 )
                 .bind(command.conversation_id)
                 .bind(command.organization_id.as_str())
                 .bind(command.sender.actor_type.as_str())
                 .bind(command.sender.id.as_str())
-                .bind(command.content.content_digest().as_bytes().as_slice())
+                .bind(content_hash.as_bytes().as_slice())
+                .bind(legacy_content_hash.as_bytes().as_slice())
                 .execute(&mut *transaction)
                 .await
                 .map_err(map_constraint_error)?;
@@ -535,99 +527,6 @@ impl PostgresStore {
             .collect::<AppResult<Vec<_>>>()?;
         Ok(GifPage { items })
     }
-
-    /// Idempotently stores and enqueues one verified Silicon Hook event.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid or mismatched event targets, conflicts when an event ID
-    /// is reused with different content, and propagates database failures.
-    pub async fn accept_system_event(&self, command: AcceptSystemEventCommand) -> AppResult<()> {
-        command.event.validate().map_err(AppError::validation)?;
-        if command.event.event_type.trim() != command.event.event_type
-            || command.event.event_type.chars().any(char::is_control)
-        {
-            return Err(AppError::validation(
-                "system event type must be trimmed and contain no control characters",
-            ));
-        }
-        if command.event.trace_id.as_ref().is_some_and(|trace_id| {
-            trace_id.is_empty() || trace_id.len() > 255 || trace_id.chars().any(char::is_control)
-        }) {
-            return Err(AppError::validation(
-                "system event trace_id must contain 1 to 255 non-control characters",
-            ));
-        }
-        if command.target.actor_type != ActorType::Silicon
-            || command.target.id != command.event.silicon_id
-        {
-            return Err(AppError::Forbidden);
-        }
-        let mut transaction = self.pool().begin().await?;
-        refresh_directory_in(
-            &mut transaction,
-            &command.event.org_id,
-            std::slice::from_ref(&command.target),
-        )
-        .await?;
-        let inserted = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            INSERT INTO dm.system_events (
-                event_id,
-                organization_id,
-                target_silicon_id,
-                event_type,
-                trace_id,
-                payload
-            )
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (event_id) DO NOTHING
-            RETURNING event_id
-            "#,
-        )
-        .bind(command.event.event_id)
-        .bind(command.event.org_id.as_str())
-        .bind(command.event.silicon_id.as_str())
-        .bind(&command.event.event_type)
-        .bind(&command.event.trace_id)
-        .bind(serde_json::Value::Object(command.event.payload.clone()))
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(map_constraint_error)?;
-        if inserted.is_some() {
-            enqueue_system_event_delivery_in(
-                &mut transaction,
-                &command.event.org_id,
-                command.event.event_id,
-                &command.target,
-            )
-            .await?;
-        } else {
-            let stored = sqlx::query_as::<_, StoredSystemEvent>(
-                r#"
-                SELECT
-                    organization_id,
-                    target_silicon_id,
-                    event_type,
-                    trace_id,
-                    payload
-                FROM dm.system_events
-                WHERE event_id = $1
-                FOR UPDATE
-                "#,
-            )
-            .bind(command.event.event_id)
-            .fetch_one(&mut *transaction)
-            .await?;
-            if !system_event_matches(&stored, &command.event) {
-                return Err(AppError::conflict(
-                    "event_id was already used with different event content",
-                ));
-            }
-        }
-        transaction.commit().await.map_err(map_constraint_error)?;
-        Ok(())
-    }
 }
 
 #[allow(
@@ -640,18 +539,9 @@ pub(crate) async fn insert_message_in(
     conversation_id: Uuid,
     sender: &ActorRef,
     content: &MessageCreate,
-    voice_duration_milliseconds: Option<u64>,
+    content_hash: &blake3::Hash,
 ) -> AppResult<Uuid> {
     let message_id = Uuid::now_v7();
-    let transcription_result = if content.voice.is_some() {
-        if content.voice_transcript.is_some() {
-            "succeeded"
-        } else {
-            "failed"
-        }
-    } else {
-        "not_applicable"
-    };
     sqlx::query(
         r#"
         INSERT INTO dm.messages (
@@ -664,12 +554,12 @@ pub(crate) async fn insert_message_in(
             status,
             text_content,
             voice_transcript,
-            transcription_result,
+            content_hash_version,
             content_hash
         )
         VALUES (
             $1, $2, $3, $4::text::dm.actor_kind, $5, 1, 'sent', $6, $7,
-            $8::text::dm.transcription_result, $9
+            2, $8
         )
         "#,
     )
@@ -680,8 +570,7 @@ pub(crate) async fn insert_message_in(
     .bind(sender.id.as_str())
     .bind(&content.text)
     .bind(&content.voice_transcript)
-    .bind(transcription_result)
-    .bind(content.content_digest().as_bytes().as_slice())
+    .bind(content_hash.as_bytes().as_slice())
     .execute(&mut **transaction)
     .await
     .map_err(map_constraint_error)?;
@@ -695,7 +584,10 @@ pub(crate) async fn insert_message_in(
                 organization_id,
                 position,
                 kind: "attachment",
-                attachment,
+                permanent_url: &attachment.permanent_url,
+                name: attachment.name.as_deref(),
+                content_type: attachment.content_type.as_deref(),
+                size: attachment.size,
                 duration_milliseconds: None,
             },
         )
@@ -710,8 +602,11 @@ pub(crate) async fn insert_message_in(
                 organization_id,
                 position: 100,
                 kind: "voice",
-                attachment: voice,
-                duration_milliseconds: voice_duration_milliseconds,
+                permanent_url: &voice.permanent_url,
+                name: voice.name.as_deref(),
+                content_type: voice.content_type.as_deref(),
+                size: voice.size,
+                duration_milliseconds: voice.duration_milliseconds,
             },
         )
         .await?;
@@ -810,7 +705,6 @@ async fn insert_attachment_in(
     let position = i16::try_from(input.position)
         .map_err(|_| AppError::validation("attachment position exceeds supported range"))?;
     let size = input
-        .attachment
         .size
         .map(i64::try_from)
         .transpose()
@@ -842,9 +736,9 @@ async fn insert_attachment_in(
     .bind(input.organization_id.as_str())
     .bind(position)
     .bind(input.kind)
-    .bind(input.attachment.permanent_url.as_str())
-    .bind(&input.attachment.name)
-    .bind(&input.attachment.content_type)
+    .bind(input.permanent_url.as_str())
+    .bind(input.name)
+    .bind(input.content_type)
     .bind(size)
     .bind(duration)
     .execute(&mut **transaction)
@@ -944,38 +838,6 @@ async fn enqueue_message_status_delivery_in(
     Ok(())
 }
 
-async fn enqueue_system_event_delivery_in(
-    transaction: &mut Transaction<'_, Postgres>,
-    organization_id: &OrganizationId,
-    event_id: Uuid,
-    target: &ActorRef,
-) -> AppResult<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO dm.actor_deliveries (
-            id,
-            organization_id,
-            target_kind,
-            target_id,
-            sequence,
-            delivery_kind,
-            system_event_id
-        )
-        VALUES ($1, $2, $3::text::dm.actor_kind, $4, 1, 'system_event', $5)
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(Uuid::now_v7())
-    .bind(organization_id.as_str())
-    .bind(target.actor_type.as_str())
-    .bind(target.id.as_str())
-    .bind(event_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_constraint_error)?;
-    notify_actor_in(transaction, organization_id, target).await
-}
-
 pub(crate) async fn notify_actor_in(
     transaction: &mut Transaction<'_, Postgres>,
     organization_id: &OrganizationId,
@@ -1069,12 +931,4 @@ const fn message_status_name(status: MessageStatus) -> &'static str {
         MessageStatus::Read => "read",
         MessageStatus::Failed => "failed",
     }
-}
-
-fn system_event_matches(stored: &StoredSystemEvent, event: &SystemEvent) -> bool {
-    stored.organization_id == event.org_id.as_str()
-        && stored.target_silicon_id == event.silicon_id.as_str()
-        && stored.event_type == event.event_type
-        && stored.trace_id == event.trace_id
-        && stored.payload == serde_json::Value::Object(event.payload.clone())
 }

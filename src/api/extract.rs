@@ -15,11 +15,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
     AppError, AppResult,
-    application::{
-        auth::{AuthContext, ServiceContext},
-        ports::AuthenticationRequest,
-        state::AppState,
-    },
+    application::{auth::AuthContext, ports::AuthenticationRequest, state::AppState},
     domain::{IdempotencyKey, OrganizationId},
 };
 
@@ -31,9 +27,6 @@ static IF_MATCH: HeaderName = HeaderName::from_static("if-match");
 
 /// IAM-authenticated actor request.
 pub struct Authenticated(pub AuthContext);
-
-/// IAM-authenticated internal service request.
-pub struct AuthenticatedService(pub ServiceContext);
 
 /// Validated required idempotency header.
 pub struct Idempotency(pub IdempotencyKey);
@@ -71,14 +64,6 @@ struct InputErrorDetail {
 
 impl Deref for Authenticated {
     type Target = AuthContext;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Deref for AuthenticatedService {
-    type Target = ServiceContext;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -139,26 +124,6 @@ impl FromRequestParts<AppState> for Authenticated {
             return Err(AppError::Forbidden);
         }
         Ok(Self(context))
-    }
-}
-
-impl FromRequestParts<AppState> for AuthenticatedService {
-    type Rejection = AppError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        if optional_single_header(&parts.headers, &OBO_PROOF)?.is_some() {
-            return Err(AppError::Unauthorized);
-        }
-        let authorization =
-            optional_single_header(&parts.headers, &axum::http::header::AUTHORIZATION)
-                .map_err(|_| AppError::Unauthorized)?
-                .ok_or(AppError::Unauthorized)?;
-        let token = parse_bearer(authorization)?;
-        let service = state.identity.authenticate_service(&token).await?;
-        Ok(Self(service))
     }
 }
 

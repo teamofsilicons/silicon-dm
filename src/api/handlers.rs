@@ -17,16 +17,15 @@ use url::{Url, form_urlencoded};
 use uuid::Uuid;
 
 use super::extract::{
-    ApiJson, ApiPath, ApiQuery, Authenticated, AuthenticatedService, Idempotency, IfMatch,
-    realtime_bearer,
+    ApiJson, ApiPath, ApiQuery, Authenticated, Idempotency, IfMatch, realtime_bearer,
 };
 use crate::{
     AppError, AppResult,
     application::{
         auth::AuthContext,
         commands::{
-            AcceptSystemEventCommand, CreateBundleCommand, CreateConversationCommand,
-            PutDraftCommand, PutDraftOutcome, RecordReceiptCommand, SendMessageCommand,
+            CreateBundleCommand, CreateConversationCommand, PutDraftCommand, PutDraftOutcome,
+            RecordReceiptCommand, SendMessageCommand,
         },
         messaging::{
             prepare_message_content, validate_briefcase_permanent_url, validate_device_id,
@@ -39,12 +38,9 @@ use crate::{
         ActorId, ActorRef, ActorType, Bundle, BundleCreate, BundleDetail, Conversation,
         ConversationPage, Draft, DraftInput, GifPage, MAX_CONVERSATION_PARTICIPANTS, Message,
         MessageCreate, MessagePage, OrganizationId, PageRequest, Presence, ReceiptStatus,
-        SystemEvent,
     },
     realtime::serve_socket,
 };
-
-const HOOK_DELIVERY_CAPABILITY: &str = "dm.hook_events.deliver";
 
 /// Authenticates and upgrades a durable realtime client connection.
 pub(super) async fn open_realtime_connection(
@@ -170,7 +166,7 @@ pub(super) async fn list_messages(
         .map(Json)
 }
 
-/// Transcribes (when needed), persists, and durably queues a message.
+/// Validates, persists, and durably queues a message.
 pub(super) async fn send_message(
     State(state): State<AppState>,
     Authenticated(authority): Authenticated,
@@ -183,8 +179,7 @@ pub(super) async fn send_message(
         .store
         .require_participant(&authority.organization_id, &sender, path.conversation_id)
         .await?;
-    let (content, voice_duration_milliseconds) =
-        prepare_message_content(&state, &authority, content, idempotency_key.as_str()).await?;
+    let content = prepare_message_content(&state, content)?;
     let message = state
         .store
         .send_message(SendMessageCommand {
@@ -192,7 +187,6 @@ pub(super) async fn send_message(
             conversation_id: path.conversation_id,
             sender,
             content,
-            voice_duration_milliseconds,
             idempotency_key,
         })
         .await?;
@@ -249,13 +243,7 @@ pub(super) async fn create_message_bundle(
             path.conversation_id,
         )
         .await?;
-    let (display_message, voice_duration_milliseconds) = prepare_message_content(
-        &state,
-        &context,
-        bundle.display_message,
-        idempotency_key.as_str(),
-    )
-    .await?;
+    let display_message = prepare_message_content(&state, bundle.display_message)?;
     bundle.display_message = display_message;
     let created = state
         .store
@@ -264,7 +252,6 @@ pub(super) async fn create_message_bundle(
             conversation_id: path.conversation_id,
             creator: context.actor,
             bundle,
-            voice_duration_milliseconds,
             idempotency_key,
         })
         .await?;
@@ -452,27 +439,6 @@ pub(super) async fn list_recent_gifs(
         .recent_gifs(&context.organization_id, &context.actor)
         .await
         .map(Json)
-}
-
-/// Validates and durably accepts an event from the Silicon Hook service.
-pub(super) async fn deliver_hook_event(
-    State(state): State<AppState>,
-    AuthenticatedService(service): AuthenticatedService,
-    ApiJson(event): ApiJson<SystemEvent>,
-) -> AppResult<StatusCode> {
-    if !service.capabilities.contains(HOOK_DELIVERY_CAPABILITY) {
-        return Err(AppError::Forbidden);
-    }
-    validate_hook_event(&event)?;
-    let target = state
-        .identity
-        .authorize_hook_target(&service, &event.org_id, &event.silicon_id)
-        .await?;
-    state
-        .store
-        .accept_system_event(AcceptSystemEventCommand { target, event })
-        .await?;
-    Ok(StatusCode::ACCEPTED)
 }
 
 /// Unauthenticated process liveness; no dependency check is performed.
@@ -687,18 +653,6 @@ fn validate_gif_query(query: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn validate_hook_event(event: &SystemEvent) -> AppResult<()> {
-    event.validate().map_err(AppError::validation)?;
-    if event.trace_id.as_ref().is_some_and(|trace_id| {
-        trace_id.is_empty() || trace_id.len() > 255 || trace_id.chars().any(char::is_control)
-    }) {
-        return Err(AppError::validation(
-            "trace_id must contain 1 to 255 non-control characters",
-        ));
-    }
-    Ok(())
-}
-
 fn iam_contract_error() -> AppError {
     AppError::DependencyUnavailable { dependency: "iam" }
 }
@@ -707,10 +661,8 @@ fn iam_contract_error() -> AppError {
 mod tests {
     use std::str::FromStr as _;
 
-    use super::{
-        parse_realtime_query, validate_gif_query, validate_hook_event, verify_resolved_actors,
-    };
-    use crate::domain::{ActorId, ActorRef, ActorType, OrganizationId, SystemEvent};
+    use super::{parse_realtime_query, validate_gif_query, verify_resolved_actors};
+    use crate::domain::{ActorId, ActorRef, ActorType};
 
     #[test]
     fn iam_actor_resolution_must_exactly_match_requested_set()
@@ -751,20 +703,6 @@ mod tests {
     fn gif_query_bounds_reject_control_characters() {
         assert!(validate_gif_query("celebration").is_ok());
         assert!(validate_gif_query("\n").is_err());
-    }
-
-    #[test]
-    fn hook_trace_identifier_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
-        let event = SystemEvent {
-            event_id: uuid::Uuid::now_v7(),
-            org_id: OrganizationId::from_str("org-1")?,
-            silicon_id: ActorId::from_str("silicon-1")?,
-            event_type: "calendar.updated.v1".to_owned(),
-            trace_id: Some("bad\ntrace".to_owned()),
-            payload: serde_json::Map::new(),
-        };
-        assert!(validate_hook_event(&event).is_err());
-        Ok(())
     }
 
     #[test]

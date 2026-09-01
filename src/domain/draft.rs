@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
-    ActorId, Attachment, Gif, MAX_TEXT_CHARACTERS,
+    ActorId, Attachment, Gif, MAX_TEXT_CHARACTERS, VoiceAttachment,
     message::{validate_attachments, validate_gif},
 };
 
@@ -15,12 +15,15 @@ pub struct DraftInput {
     /// Draft text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_content: Option<String>,
-    /// Permanent Briefcase attachments.
+    /// Stable HTTPS attachments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
-    /// Permanent Briefcase voice attachment.
+    /// Stable HTTPS voice attachment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice: Option<Attachment>,
+    pub voice: Option<VoiceAttachment>,
+    /// Optional client-provided voice transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_transcript: Option<String>,
     /// Optional GIF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gif: Option<Gif>,
@@ -38,12 +41,15 @@ pub struct Draft {
     /// Draft text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_content: Option<String>,
-    /// Permanent Briefcase attachments.
+    /// Stable HTTPS attachments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
-    /// Permanent Briefcase voice attachment.
+    /// Stable HTTPS voice attachment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice: Option<Attachment>,
+    pub voice: Option<VoiceAttachment>,
+    /// Optional client-provided voice transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_transcript: Option<String>,
     /// Optional GIF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gif: Option<Gif>,
@@ -69,6 +75,16 @@ impl DraftInput {
         {
             return Err("draft text exceeds 100,000,000 characters");
         }
+        if self.voice.is_none() && self.voice_transcript.is_some() {
+            return Err("voice_transcript requires a voice attachment");
+        }
+        if self
+            .voice_transcript
+            .as_ref()
+            .is_some_and(|text| text.chars().count() > MAX_TEXT_CHARACTERS)
+        {
+            return Err("voice transcript exceeds 100,000,000 characters");
+        }
         validate_attachments(&self.attachments, self.voice.as_ref())?;
         validate_gif(self.gif.as_ref())
     }
@@ -76,14 +92,12 @@ impl DraftInput {
     /// Returns the same canonical content digest used by message creation.
     #[must_use]
     pub fn content_digest(&self) -> blake3::Hash {
-        super::MessageCreate {
-            sender_id: None,
-            text: self.message_content.clone(),
-            attachments: self.attachments.clone(),
-            voice: self.voice.clone(),
-            voice_transcript: None,
-            gif: self.gif.clone(),
-        }
-        .content_digest()
+        super::message::content_digest(
+            self.message_content.as_deref(),
+            &self.attachments,
+            self.voice.as_ref(),
+            self.voice_transcript.as_deref(),
+            self.gif.as_ref(),
+        )
     }
 }

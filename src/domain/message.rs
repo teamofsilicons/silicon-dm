@@ -1,17 +1,20 @@
 //! Message content, state, and validation.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sqlx::Type;
 use time::OffsetDateTime;
 use url::Url;
 use uuid::Uuid;
 
-use super::{ActorRef, BundleRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MAX_TEXT_CHARACTERS};
+use super::{
+    ActorRef, BundleRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MAX_TEXT_CHARACTERS,
+    MAX_VOICE_DURATION_MILLISECONDS,
+};
 
-/// Durable attachment metadata. `permanent_url` must point to Briefcase.
+/// Durable metadata for a generic attachment.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Attachment {
-    /// Stable Briefcase resource URL.
+    /// Stable HTTPS resource URL.
     pub permanent_url: Url,
     /// Original display filename.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -22,6 +25,35 @@ pub struct Attachment {
     /// Declared byte size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+}
+
+/// Durable metadata for a voice attachment.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct VoiceAttachment {
+    /// Stable HTTPS resource URL.
+    pub permanent_url: Url,
+    /// Original display filename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Declared media type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// Declared byte size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// Client-supplied total duration in milliseconds.
+    ///
+    /// New writes require this value. `None` is retained only so historical
+    /// pre-v2 voice rows with unavailable provider metadata remain readable.
+    #[serde(deserialize_with = "deserialize_required_voice_duration")]
+    pub duration_milliseconds: Option<u64>,
+}
+
+fn deserialize_required_voice_duration<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<u64>::deserialize(deserializer)
 }
 
 /// Provider-independent GIF metadata stored with a message.
@@ -48,13 +80,13 @@ pub struct MessageCreate {
     /// Optional text content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// Zero or more permanent Briefcase attachments.
+    /// Zero or more stable HTTPS attachments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
-    /// Optional permanent Briefcase voice attachment.
+    /// Optional stable HTTPS voice attachment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice: Option<Attachment>,
-    /// Transcript, absent/null when transcription failed or has not run.
+    pub voice: Option<VoiceAttachment>,
+    /// Optional client-provided voice transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_transcript: Option<String>,
     /// Optional GIF.
@@ -106,13 +138,13 @@ pub struct Message {
     /// Text content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// Permanent attachment references.
+    /// Stable attachment references.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
-    /// Permanent voice reference.
+    /// Stable voice reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice: Option<Attachment>,
-    /// Voice transcript, null after a failed transcription.
+    pub voice: Option<VoiceAttachment>,
+    /// Optional client-provided voice transcript.
     #[serde(default)]
     pub voice_transcript: Option<String>,
     /// GIF content.
@@ -196,62 +228,161 @@ impl MessageCreate {
     /// values; a stable sentinel still avoids a panic if the shape changes.
     #[must_use]
     pub fn content_digest(&self) -> blake3::Hash {
-        #[derive(Serialize)]
-        struct Canonical<'a> {
-            text: &'a Option<String>,
-            attachments: &'a [Attachment],
-            voice: &'a Option<Attachment>,
-            gif: &'a Option<Gif>,
-        }
-
-        let canonical = Canonical {
-            text: &self.text,
-            attachments: &self.attachments,
-            voice: &self.voice,
-            gif: &self.gif,
-        };
-        let mut hasher = blake3::Hasher::new();
-        if serde_json::to_writer(&mut hasher, &canonical).is_err() {
-            return blake3::hash(b"invalid-content");
-        }
-        hasher.finalize()
+        content_digest(
+            self.text.as_deref(),
+            &self.attachments,
+            self.voice.as_ref(),
+            self.voice_transcript.as_deref(),
+            self.gif.as_ref(),
+        )
     }
+
+    /// Returns the v1 digest used by drafts written before voice duration and
+    /// client-owned transcripts became part of canonical content.
+    #[must_use]
+    pub(crate) fn legacy_content_digest(&self) -> blake3::Hash {
+        legacy_content_digest(
+            self.text.as_deref(),
+            &self.attachments,
+            self.voice.as_ref(),
+            self.gif.as_ref(),
+        )
+    }
+}
+
+/// Hashes canonical user-visible content without cloning potentially large
+/// message or draft fields.
+pub(crate) fn content_digest(
+    text: Option<&str>,
+    attachments: &[Attachment],
+    voice: Option<&VoiceAttachment>,
+    voice_transcript: Option<&str>,
+    gif: Option<&Gif>,
+) -> blake3::Hash {
+    #[derive(Serialize)]
+    struct Canonical<'a> {
+        text: Option<&'a str>,
+        attachments: &'a [Attachment],
+        voice: Option<&'a VoiceAttachment>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        voice_transcript: Option<&'a str>,
+        gif: Option<&'a Gif>,
+    }
+
+    let canonical = Canonical {
+        text,
+        attachments,
+        voice,
+        voice_transcript,
+        gif,
+    };
+    let mut hasher = blake3::Hasher::new();
+    if serde_json::to_writer(&mut hasher, &canonical).is_err() {
+        return blake3::hash(b"invalid-content");
+    }
+    hasher.finalize()
+}
+
+fn legacy_content_digest(
+    text: Option<&str>,
+    attachments: &[Attachment],
+    voice: Option<&VoiceAttachment>,
+    gif: Option<&Gif>,
+) -> blake3::Hash {
+    #[derive(Serialize)]
+    struct LegacyVoiceAttachment<'a> {
+        permanent_url: &'a Url,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content_type: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
+    }
+
+    #[derive(Serialize)]
+    struct Canonical<'a> {
+        text: Option<&'a str>,
+        attachments: &'a [Attachment],
+        voice: Option<LegacyVoiceAttachment<'a>>,
+        gif: Option<&'a Gif>,
+    }
+
+    let canonical = Canonical {
+        text,
+        attachments,
+        voice: voice.map(|voice| LegacyVoiceAttachment {
+            permanent_url: &voice.permanent_url,
+            name: voice.name.as_deref(),
+            content_type: voice.content_type.as_deref(),
+            size: voice.size,
+        }),
+        gif,
+    };
+    let mut hasher = blake3::Hasher::new();
+    if serde_json::to_writer(&mut hasher, &canonical).is_err() {
+        return blake3::hash(b"invalid-content");
+    }
+    hasher.finalize()
 }
 
 /// Validates attachment count and declared size.
 pub(crate) fn validate_attachments(
     attachments: &[Attachment],
-    voice: Option<&Attachment>,
+    voice: Option<&VoiceAttachment>,
 ) -> Result<(), &'static str> {
     if attachments.len() + usize::from(voice.is_some()) > MAX_ATTACHMENTS {
         return Err("a message or draft may contain at most 100 attachment items including voice");
     }
-    for attachment in attachments.iter().chain(voice) {
-        if attachment
-            .size
-            .is_some_and(|size| size > MAX_ATTACHMENT_BYTES)
+    for attachment in attachments {
+        validate_attachment_metadata(
+            &attachment.permanent_url,
+            attachment.name.as_deref(),
+            attachment.content_type.as_deref(),
+            attachment.size,
+        )?;
+    }
+    if let Some(voice) = voice {
+        validate_attachment_metadata(
+            &voice.permanent_url,
+            voice.name.as_deref(),
+            voice.content_type.as_deref(),
+            voice.size,
+        )?;
+        if !voice
+            .duration_milliseconds
+            .is_some_and(|duration| (1..=MAX_VOICE_DURATION_MILLISECONDS).contains(&duration))
         {
-            return Err("an attachment may not exceed 5 GiB");
+            return Err("voice duration must contain 1 millisecond to 48 hours");
         }
-        if attachment.permanent_url.scheme() != "https"
-            || attachment.permanent_url.as_str().len() > 8_192
-        {
-            return Err("attachments require an HTTPS permanent URL of at most 8,192 bytes");
-        }
-        if attachment
-            .name
-            .as_ref()
-            .is_some_and(|name| name.is_empty() || name.chars().count() > 1_024)
-        {
-            return Err("attachment name must contain 1 to 1,024 characters");
-        }
-        if attachment
-            .content_type
-            .as_ref()
-            .is_some_and(|value| value.is_empty() || value.len() > 255)
-        {
-            return Err("attachment content_type must contain 1 to 255 bytes");
-        }
+    }
+    Ok(())
+}
+
+fn validate_attachment_metadata(
+    permanent_url: &Url,
+    name: Option<&str>,
+    content_type: Option<&str>,
+    size: Option<u64>,
+) -> Result<(), &'static str> {
+    if size.is_some_and(|size| size > MAX_ATTACHMENT_BYTES) {
+        return Err("an attachment may not exceed 5 GiB");
+    }
+    if permanent_url.scheme() != "https"
+        || permanent_url.host_str().is_none()
+        || !permanent_url.username().is_empty()
+        || permanent_url.password().is_some()
+        || permanent_url.as_str().len() > 8_192
+    {
+        return Err(
+            "attachments require a credential-free HTTPS permanent URL of at most 8,192 bytes",
+        );
+    }
+    if name.is_some_and(|name| name.is_empty() || name.chars().count() > 1_024) {
+        return Err("attachment name must contain 1 to 1,024 characters");
+    }
+    if content_type.is_some_and(|value| value.is_empty() || value.len() > 255) {
+        return Err("attachment content_type must contain 1 to 255 bytes");
     }
     Ok(())
 }
@@ -285,7 +416,7 @@ pub(crate) fn validate_gif(gif: Option<&Gif>) -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attachment, MessageCreate};
+    use super::{Attachment, MessageCreate, VoiceAttachment};
 
     #[test]
     fn sender_alone_is_not_message_content() {
@@ -337,7 +468,88 @@ mod tests {
         };
         let mut second = first.clone();
         second.sender_id = "someone".parse().ok();
-        second.voice_transcript = Some("provider-owned transcript".to_owned());
         assert_eq!(first.content_digest(), second.content_digest());
+    }
+
+    #[test]
+    fn absent_transcript_preserves_the_existing_canonical_digest_shape() {
+        let message = MessageCreate {
+            text: Some("hello".to_owned()),
+            ..MessageCreate::default()
+        };
+        assert_eq!(
+            message.content_digest(),
+            blake3::hash(br#"{"text":"hello","attachments":[],"voice":null,"gif":null}"#)
+        );
+    }
+
+    #[test]
+    fn credentialed_attachment_urls_are_rejected() {
+        let attachment = "https://user:secret@example.com/file"
+            .parse()
+            .map(|permanent_url| Attachment {
+                permanent_url,
+                name: None,
+                content_type: None,
+                size: None,
+            });
+        assert!(attachment.is_ok_and(|attachment| {
+            MessageCreate {
+                attachments: vec![attachment],
+                ..MessageCreate::default()
+            }
+            .validate()
+            .is_err()
+        }));
+    }
+
+    #[test]
+    fn voice_duration_is_required_to_be_within_the_product_limit() {
+        for duration_milliseconds in [0, super::MAX_VOICE_DURATION_MILLISECONDS + 1] {
+            let voice = "https://media.example/voice.ogg"
+                .parse()
+                .map(|permanent_url| VoiceAttachment {
+                    permanent_url,
+                    name: None,
+                    content_type: Some("audio/ogg".to_owned()),
+                    size: None,
+                    duration_milliseconds: Some(duration_milliseconds),
+                });
+            assert!(voice.is_ok_and(|voice| {
+                MessageCreate {
+                    voice: Some(voice),
+                    ..MessageCreate::default()
+                }
+                .validate()
+                .is_err()
+            }));
+        }
+    }
+
+    #[test]
+    fn voice_duration_and_transcript_affect_the_content_digest() {
+        let first = "https://media.example/voice.ogg"
+            .parse()
+            .map(|permanent_url| MessageCreate {
+                voice: Some(VoiceAttachment {
+                    permanent_url,
+                    name: None,
+                    content_type: Some("audio/ogg".to_owned()),
+                    size: None,
+                    duration_milliseconds: Some(1_000),
+                }),
+                voice_transcript: Some("hello".to_owned()),
+                ..MessageCreate::default()
+            });
+        assert!(first.is_ok_and(|first| {
+            let mut changed_duration = first.clone();
+            if let Some(voice) = &mut changed_duration.voice {
+                voice.duration_milliseconds = voice.duration_milliseconds.map(|value| value + 1);
+            }
+            let mut changed_transcript = first.clone();
+            changed_transcript.voice_transcript = Some("goodbye".to_owned());
+            first.content_digest() != changed_duration.content_digest()
+                && first.content_digest() != changed_transcript.content_digest()
+        }));
     }
 }

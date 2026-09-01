@@ -32,8 +32,7 @@ const HEARTBEAT_CLOSE_REASON: &str = "heartbeat-timeout";
 /// Runs one already-authenticated WebSocket until disconnect or heartbeat timeout.
 ///
 /// Authentication happens before the HTTP upgrade. Credentials remain only in
-/// this task so voice commands can delegate to Waveform; they are never stored
-/// in the realtime lease.
+/// this request-scoped task and are never stored in the realtime lease.
 pub async fn serve_socket(
     mut socket: WebSocket,
     state: AppState,
@@ -400,13 +399,7 @@ impl SessionRuntime {
                     .store
                     .require_participant(&org_id, &sender, conversation_id)
                     .await?;
-                let (message, voice_duration_milliseconds) = prepare_message_content(
-                    &self.state,
-                    &self.authority,
-                    message,
-                    idempotency_key.as_str(),
-                )
-                .await?;
+                let message = prepare_message_content(&self.state, message)?;
                 let accepted = self
                     .state
                     .store
@@ -415,7 +408,6 @@ impl SessionRuntime {
                         conversation_id,
                         sender,
                         content: message,
-                        voice_duration_milliseconds,
                         idempotency_key: idempotency_key.clone(),
                     })
                     .await?;

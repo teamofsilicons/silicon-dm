@@ -5,57 +5,23 @@ use uuid::Uuid;
 
 use crate::{
     AppError, AppResult,
-    application::{auth::AuthContext, ports::DelegationRequest, state::AppState},
-    domain::{Attachment, DraftInput, MessageCreate},
+    application::state::AppState,
+    domain::{DraftInput, MessageCreate},
 };
 
-/// Validates permanent content references and completes blocking voice
-/// transcription before a message is durably accepted.
+/// Validates message content and protects configured Briefcase references from
+/// being persisted in a non-canonical form.
 ///
 /// # Errors
 ///
-/// Returns validation or dependency failures without persisting partial state.
-pub async fn prepare_message_content(
+/// Returns validation failures without mutating client-provided content.
+pub fn prepare_message_content(
     state: &AppState,
-    authority: &AuthContext,
-    mut content: MessageCreate,
-    idempotency_key: &str,
-) -> AppResult<(MessageCreate, Option<u64>)> {
+    content: MessageCreate,
+) -> AppResult<MessageCreate> {
     content.validate().map_err(AppError::validation)?;
     validate_message_urls(&content, &state.settings.providers.briefcase_base_url)?;
-    let transcription = match content.voice.as_ref() {
-        Some(voice) => {
-            let credential = state
-                .identity
-                .exchange_actor_credential(
-                    authority,
-                    &DelegationRequest::waveform_stt(
-                        &state.settings.providers.waveform_iam_audience,
-                    ),
-                )
-                .await?;
-            Some(
-                state
-                    .transcription
-                    .transcribe(
-                        &voice.permanent_url,
-                        &authority.organization_id,
-                        &credential,
-                        idempotency_key,
-                    )
-                    .await?,
-            )
-        }
-        None => None,
-    };
-    let duration = transcription
-        .as_ref()
-        .and_then(|result| result.duration_milliseconds);
-    if let Some(transcription) = transcription {
-        content.voice_transcript = transcription.transcript;
-        content.validate().map_err(AppError::validation)?;
-    }
-    Ok((content, duration))
+    Ok(content)
 }
 
 /// Validates every permanent Briefcase reference in a draft.
@@ -127,19 +93,33 @@ fn validate_message_urls(content: &MessageCreate, briefcase_base_url: &Url) -> A
 }
 
 fn validate_attachment_urls(
-    attachments: &[Attachment],
-    voice: Option<&Attachment>,
+    attachments: &[crate::domain::Attachment],
+    voice: Option<&crate::domain::VoiceAttachment>,
     briefcase_base_url: &Url,
 ) -> AppResult<()> {
-    for attachment in attachments.iter().chain(voice) {
-        validate_briefcase_permanent_url(&attachment.permanent_url, briefcase_base_url)?;
+    for attachment in attachments {
+        validate_if_configured_briefcase(&attachment.permanent_url, briefcase_base_url)?;
+    }
+    if let Some(voice) = voice {
+        validate_if_configured_briefcase(&voice.permanent_url, briefcase_base_url)?;
+    }
+    Ok(())
+}
+
+fn validate_if_configured_briefcase(permanent_url: &Url, base_url: &Url) -> AppResult<()> {
+    let uses_configured_authority = permanent_url.host_str() == base_url.host_str()
+        && permanent_url.port_or_known_default() == base_url.port_or_known_default();
+    if uses_configured_authority {
+        validate_briefcase_permanent_url(permanent_url, base_url)?;
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_briefcase_permanent_url, validate_device_id};
+    use crate::domain::{Attachment, MessageCreate};
+
+    use super::{validate_briefcase_permanent_url, validate_device_id, validate_message_urls};
 
     #[test]
     fn permanent_url_is_scoped_to_the_configured_entry_collection() {
@@ -170,5 +150,56 @@ mod tests {
     fn device_ids_reject_control_characters() {
         assert!(validate_device_id("device-1").is_ok());
         assert!(validate_device_id("bad\ndevice").is_err());
+    }
+
+    #[test]
+    fn external_https_attachments_do_not_need_a_briefcase_entry_path() {
+        let base = "https://briefcase.example/api/v1".parse();
+        let attachment = "https://cdn.example/uploads/file.pdf"
+            .parse()
+            .map(|permanent_url| Attachment {
+                permanent_url,
+                name: None,
+                content_type: None,
+                size: None,
+            });
+        assert!(
+            base.as_ref()
+                .ok()
+                .zip(attachment.ok())
+                .is_some_and(|(base, attachment)| {
+                    let content = MessageCreate {
+                        attachments: vec![attachment],
+                        ..MessageCreate::default()
+                    };
+                    validate_message_urls(&content, base).is_ok()
+                })
+        );
+    }
+
+    #[test]
+    fn configured_briefcase_authority_requires_a_canonical_entry_url() {
+        let base = "https://briefcase.example/api/v1".parse();
+        let attachment =
+            "https://briefcase.example/uploads/file.pdf"
+                .parse()
+                .map(|permanent_url| Attachment {
+                    permanent_url,
+                    name: None,
+                    content_type: None,
+                    size: None,
+                });
+        assert!(
+            base.as_ref()
+                .ok()
+                .zip(attachment.ok())
+                .is_some_and(|(base, attachment)| {
+                    let content = MessageCreate {
+                        attachments: vec![attachment],
+                        ..MessageCreate::default()
+                    };
+                    validate_message_urls(&content, base).is_err()
+                })
+        );
     }
 }

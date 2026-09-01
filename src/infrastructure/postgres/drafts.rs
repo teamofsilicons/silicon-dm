@@ -2,12 +2,16 @@
 
 use sqlx::{FromRow, Postgres, Transaction};
 use time::OffsetDateTime;
+use url::Url;
 use uuid::Uuid;
 
 use crate::{
     AppError, AppResult,
     application::commands::{PutDraftCommand, PutDraftOutcome},
-    domain::{ActorRef, Attachment, Draft, Gif, OrganizationId},
+    domain::{
+        ActorRef, Attachment, Draft, Gif, MAX_VOICE_DURATION_MILLISECONDS, OrganizationId,
+        VoiceAttachment,
+    },
 };
 
 use super::{PostgresStore, map_constraint_error, rows::parse_url};
@@ -18,6 +22,7 @@ struct DraftRecord {
     actor_id: String,
     version: i64,
     text_content: Option<String>,
+    voice_transcript: Option<String>,
     updated_at: OffsetDateTime,
 }
 
@@ -28,6 +33,17 @@ struct DraftAttachmentRecord {
     name: Option<String>,
     content_type: Option<String>,
     declared_size_bytes: Option<i64>,
+    duration_milliseconds: Option<i64>,
+}
+
+struct DraftAttachmentInsert<'a> {
+    position: usize,
+    kind: &'a str,
+    permanent_url: &'a Url,
+    name: Option<&'a str>,
+    content_type: Option<&'a str>,
+    size: Option<u64>,
+    duration_milliseconds: Option<u64>,
 }
 
 #[derive(Debug, FromRow)]
@@ -120,9 +136,11 @@ impl PostgresStore {
                         actor_kind,
                         actor_id,
                         text_content,
+                        voice_transcript,
+                        content_hash_version,
                         content_hash
                     )
-                    VALUES ($1, $2, $3::text::dm.actor_kind, $4, $5, $6)
+                    VALUES ($1, $2, $3::text::dm.actor_kind, $4, $5, $6, 2, $7)
                     "#,
                 )
                 .bind(command.conversation_id)
@@ -130,6 +148,7 @@ impl PostgresStore {
                 .bind(command.actor.actor_type.as_str())
                 .bind(command.actor.id.as_str())
                 .bind(command.input.message_content.as_deref())
+                .bind(command.input.voice_transcript.as_deref())
                 .bind(content_hash.as_bytes().as_slice())
                 .execute(&mut *transaction)
                 .await
@@ -147,7 +166,9 @@ impl PostgresStore {
                     UPDATE dm.drafts
                     SET version = version + 1,
                         text_content = $5,
-                        content_hash = $6
+                        voice_transcript = $6,
+                        content_hash_version = 2,
+                        content_hash = $7
                     WHERE conversation_id = $1
                       AND organization_id = $2
                       AND actor_kind = $3::text::dm.actor_kind
@@ -159,6 +180,7 @@ impl PostgresStore {
                 .bind(command.actor.actor_type.as_str())
                 .bind(command.actor.id.as_str())
                 .bind(command.input.message_content.as_deref())
+                .bind(command.input.voice_transcript.as_deref())
                 .bind(content_hash.as_bytes().as_slice())
                 .execute(&mut *transaction)
                 .await
@@ -273,7 +295,13 @@ async fn load_draft_in(
     // for the three hydration queries below.
     let record = sqlx::query_as::<_, DraftRecord>(
         r#"
-        SELECT conversation_id, actor_id, version, text_content, updated_at
+        SELECT
+            conversation_id,
+            actor_id,
+            version,
+            text_content,
+            voice_transcript,
+            updated_at
         FROM dm.drafts
         WHERE conversation_id = $1
           AND organization_id = $2
@@ -297,7 +325,8 @@ async fn load_draft_in(
             permanent_url,
             name,
             content_type,
-            declared_size_bytes
+            declared_size_bytes,
+            duration_milliseconds
         FROM dm.draft_attachments
         WHERE conversation_id = $1
           AND organization_id = $2
@@ -332,10 +361,9 @@ async fn load_draft_in(
     let mut attachments = Vec::new();
     let mut voice = None;
     for item in attachment_records {
-        let attachment = attachment_from_record(&item)?;
         match item.attachment_kind.as_str() {
-            "voice" => voice = Some(attachment),
-            "attachment" => attachments.push(attachment),
+            "voice" => voice = Some(voice_attachment_from_record(item)?),
+            "attachment" => attachments.push(attachment_from_record(item)?),
             _ => {
                 return Err(AppError::internal(anyhow::anyhow!(
                     "invalid draft attachment kind loaded from DM database"
@@ -356,6 +384,7 @@ async fn load_draft_in(
         message_content: record.text_content,
         attachments,
         voice,
+        voice_transcript: record.voice_transcript,
         gif,
         updated_at: record.updated_at,
     })
@@ -420,10 +449,36 @@ async fn insert_draft_children(
     command: &PutDraftCommand,
 ) -> AppResult<()> {
     for (position, attachment) in command.input.attachments.iter().enumerate() {
-        insert_attachment(transaction, command, position, "attachment", attachment).await?;
+        insert_attachment(
+            transaction,
+            command,
+            DraftAttachmentInsert {
+                position,
+                kind: "attachment",
+                permanent_url: &attachment.permanent_url,
+                name: attachment.name.as_deref(),
+                content_type: attachment.content_type.as_deref(),
+                size: attachment.size,
+                duration_milliseconds: None,
+            },
+        )
+        .await?;
     }
     if let Some(voice) = &command.input.voice {
-        insert_attachment(transaction, command, 100, "voice", voice).await?;
+        insert_attachment(
+            transaction,
+            command,
+            DraftAttachmentInsert {
+                position: 100,
+                kind: "voice",
+                permanent_url: &voice.permanent_url,
+                name: voice.name.as_deref(),
+                content_type: voice.content_type.as_deref(),
+                size: voice.size,
+                duration_milliseconds: voice.duration_milliseconds,
+            },
+        )
+        .await?;
     }
     if let Some(gif) = &command.input.gif {
         sqlx::query(
@@ -459,14 +514,17 @@ async fn insert_draft_children(
 async fn insert_attachment(
     transaction: &mut Transaction<'_, Postgres>,
     command: &PutDraftCommand,
-    position: usize,
-    attachment_kind: &str,
-    attachment: &Attachment,
+    input: DraftAttachmentInsert<'_>,
 ) -> AppResult<()> {
-    let position =
-        i16::try_from(position).map_err(|error| AppError::internal(anyhow::Error::new(error)))?;
-    let size = attachment
+    let position = i16::try_from(input.position)
+        .map_err(|error| AppError::internal(anyhow::Error::new(error)))?;
+    let size = input
         .size
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|error| AppError::validation(error.to_string()))?;
+    let duration = input
+        .duration_milliseconds
         .map(i64::try_from)
         .transpose()
         .map_err(|error| AppError::validation(error.to_string()))?;
@@ -482,9 +540,13 @@ async fn insert_attachment(
             permanent_url,
             name,
             content_type,
-            declared_size_bytes
+            declared_size_bytes,
+            duration_milliseconds
         )
-        VALUES ($1, $2, $3::text::dm.actor_kind, $4, $5, $6::text::dm.attachment_kind, $7, $8, $9, $10)
+        VALUES (
+            $1, $2, $3::text::dm.actor_kind, $4, $5,
+            $6::text::dm.attachment_kind, $7, $8, $9, $10, $11
+        )
         "#,
     )
     .bind(command.conversation_id)
@@ -492,18 +554,24 @@ async fn insert_attachment(
     .bind(command.actor.actor_type.as_str())
     .bind(command.actor.id.as_str())
     .bind(position)
-    .bind(attachment_kind)
-    .bind(attachment.permanent_url.as_str())
-    .bind(attachment.name.as_deref())
-    .bind(attachment.content_type.as_deref())
+    .bind(input.kind)
+    .bind(input.permanent_url.as_str())
+    .bind(input.name)
+    .bind(input.content_type)
     .bind(size)
+    .bind(duration)
     .execute(&mut **transaction)
     .await
     .map_err(map_constraint_error)?;
     Ok(())
 }
 
-fn attachment_from_record(record: &DraftAttachmentRecord) -> AppResult<Attachment> {
+fn attachment_from_record(record: DraftAttachmentRecord) -> AppResult<Attachment> {
+    if record.duration_milliseconds.is_some() {
+        return Err(AppError::internal(anyhow::anyhow!(
+            "non-voice draft attachment loaded with a duration"
+        )));
+    }
     let size = record
         .declared_size_bytes
         .map(u64::try_from)
@@ -511,9 +579,36 @@ fn attachment_from_record(record: &DraftAttachmentRecord) -> AppResult<Attachmen
         .map_err(|error| AppError::internal(anyhow::Error::new(error)))?;
     Ok(Attachment {
         permanent_url: parse_url(&record.permanent_url, "draft attachment permanent URL")?,
-        name: record.name.clone(),
-        content_type: record.content_type.clone(),
+        name: record.name,
+        content_type: record.content_type,
         size,
+    })
+}
+
+fn voice_attachment_from_record(record: DraftAttachmentRecord) -> AppResult<VoiceAttachment> {
+    let size = record
+        .declared_size_bytes
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|error| AppError::internal(anyhow::Error::new(error)))?;
+    let duration_milliseconds = record
+        .duration_milliseconds
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|error| AppError::internal(anyhow::Error::new(error)))?;
+    if duration_milliseconds
+        .is_some_and(|duration| !(1..=MAX_VOICE_DURATION_MILLISECONDS).contains(&duration))
+    {
+        return Err(AppError::internal(anyhow::anyhow!(
+            "draft voice duration is outside the supported range"
+        )));
+    }
+    Ok(VoiceAttachment {
+        permanent_url: parse_url(&record.permanent_url, "draft voice permanent URL")?,
+        name: record.name,
+        content_type: record.content_type,
+        size,
+        duration_milliseconds,
     })
 }
 

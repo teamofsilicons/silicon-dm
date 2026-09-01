@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::{
     AppError, AppResult,
     domain::{
-        ActorId, ActorRef, ActorType, Attachment, BundleRef, BundleRole, Gif, Message,
-        MessageStatus,
+        ActorId, ActorRef, ActorType, Attachment, BundleRef, BundleRole, Gif,
+        MAX_VOICE_DURATION_MILLISECONDS, Message, MessageStatus, VoiceAttachment,
     },
 };
 
@@ -41,6 +41,7 @@ struct AttachmentRecord {
     name: Option<String>,
     content_type: Option<String>,
     declared_size_bytes: Option<i64>,
+    duration_milliseconds: Option<i64>,
 }
 
 #[derive(Debug, FromRow)]
@@ -111,7 +112,8 @@ impl PostgresStore {
                 permanent_url,
                 name,
                 content_type,
-                declared_size_bytes
+                declared_size_bytes,
+                duration_milliseconds
             FROM dm.message_attachments
             WHERE message_id = ANY($1)
             ORDER BY message_id, position
@@ -189,12 +191,10 @@ fn map_message(
     let mut attachments = Vec::new();
     let mut voice = None;
     for record in attachment_records {
-        let is_voice = record.attachment_kind == "voice";
-        let attachment = map_attachment(record)?;
-        if is_voice {
-            voice = Some(attachment);
-        } else {
-            attachments.push(attachment);
+        match record.attachment_kind.as_str() {
+            "attachment" => attachments.push(map_attachment(record)?),
+            "voice" => voice = Some(map_voice_attachment(record)?),
+            value => return Err(data_error("attachment kind", value)),
         }
     }
     Ok(Message {
@@ -220,6 +220,12 @@ fn map_message(
 }
 
 fn map_attachment(record: AttachmentRecord) -> AppResult<Attachment> {
+    if record.duration_milliseconds.is_some() {
+        return Err(data_error(
+            "attachment duration",
+            "non-voice attachment has a duration",
+        ));
+    }
     let size = record
         .declared_size_bytes
         .map(u64::try_from)
@@ -230,6 +236,34 @@ fn map_attachment(record: AttachmentRecord) -> AppResult<Attachment> {
         name: record.name,
         content_type: record.content_type,
         size,
+    })
+}
+
+fn map_voice_attachment(record: AttachmentRecord) -> AppResult<VoiceAttachment> {
+    let size = record
+        .declared_size_bytes
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|error| data_error("voice attachment size", error))?;
+    let duration_milliseconds = record
+        .duration_milliseconds
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|error| data_error("voice duration", error))?;
+    if duration_milliseconds
+        .is_some_and(|duration| !(1..=MAX_VOICE_DURATION_MILLISECONDS).contains(&duration))
+    {
+        return Err(data_error(
+            "voice duration",
+            "duration is outside the supported range",
+        ));
+    }
+    Ok(VoiceAttachment {
+        permanent_url: parse_url(&record.permanent_url, "voice attachment permanent URL")?,
+        name: record.name,
+        content_type: record.content_type,
+        size,
+        duration_milliseconds,
     })
 }
 

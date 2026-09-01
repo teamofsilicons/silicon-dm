@@ -8,12 +8,11 @@ use uuid::Uuid;
 
 use crate::{
     AppResult,
-    application::auth::{AuthContext, DelegatedCredential, ServiceContext},
+    application::auth::{AuthContext, DelegatedCredential},
     domain::{ActorId, ActorRef, Gif, OrganizationId},
 };
 
 const BRIEFCASE_TEMPORARY_URL_ACTION: &str = "briefcase.file.temporary_url";
-const WAVEFORM_STT_ACTION: &str = "waveform.stt";
 
 /// Exact audience, action, and optional resource for one IAM child exchange.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,16 +30,6 @@ impl DelegationRequest {
             audience: audience.to_owned(),
             action: BRIEFCASE_TEMPORARY_URL_ACTION,
             resource: Some(entry_id.hyphenated().to_string()),
-        }
-    }
-
-    /// Creates the scope for Waveform speech-to-text.
-    #[must_use]
-    pub fn waveform_stt(audience: &str) -> Self {
-        Self {
-            audience: audience.to_owned(),
-            action: WAVEFORM_STT_ACTION,
-            resource: None,
         }
     }
 
@@ -93,9 +82,6 @@ pub trait IdentityProvider: Send + Sync {
     /// Authenticates and authorizes a normal API request.
     async fn authenticate(&self, request: AuthenticationRequest<'_>) -> AppResult<AuthContext>;
 
-    /// Authenticates the Silicon Hook internal service.
-    async fn authenticate_service(&self, token: &SecretString) -> AppResult<ServiceContext>;
-
     /// Exchanges the actor's bearer grant for a provider-scoped OBO proof.
     async fn exchange_actor_credential(
         &self,
@@ -115,15 +101,6 @@ pub trait IdentityProvider: Send + Sync {
         &self,
         context: &AuthContext,
         actor_id: &ActorId,
-    ) -> AppResult<ActorRef>;
-
-    /// Verifies that an internal Hook event targets an active Silicon in the
-    /// supplied organization.
-    async fn authorize_hook_target(
-        &self,
-        service: &ServiceContext,
-        organization_id: &OrganizationId,
-        silicon_id: &ActorId,
     ) -> AppResult<ActorRef>;
 }
 
@@ -146,28 +123,6 @@ pub trait AttachmentProvider: Send + Sync {
         organization_id: &OrganizationId,
         credential: &DelegatedCredential,
     ) -> AppResult<TemporaryAttachmentUrl>;
-}
-
-/// Result of a Waveform speech-to-text attempt.
-#[derive(Clone, Debug)]
-pub struct Transcription {
-    /// Transcript on success; null means Waveform recorded a provider failure.
-    pub transcript: Option<String>,
-    /// Known source duration.
-    pub duration_milliseconds: Option<u64>,
-}
-
-/// Waveform operations required by voice messages.
-#[async_trait]
-pub trait TranscriptionProvider: Send + Sync {
-    /// Runs speech-to-text as the authenticated actor.
-    async fn transcribe(
-        &self,
-        permanent_url: &Url,
-        organization_id: &OrganizationId,
-        credential: &DelegatedCredential,
-        idempotency_key: &str,
-    ) -> AppResult<Transcription>;
 }
 
 /// Giphy operations required by DM.

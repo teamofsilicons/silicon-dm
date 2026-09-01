@@ -58,8 +58,6 @@ pub enum PresentedCredential {
         /// Originating application identifier.
         app_id: String,
     },
-    /// Opaque service token accepted only by internal routes.
-    Service(SecretString),
 }
 
 /// Authority proven by IAM for one request.
@@ -89,15 +87,4 @@ impl AuthContext {
     pub fn has_capability(&self, capability: &str) -> bool {
         self.capabilities.contains(capability)
     }
-}
-
-/// IAM-verified service principal for an internal route.
-#[derive(Clone, Debug)]
-pub struct ServiceContext {
-    /// Stable service/application identifier.
-    pub service_id: String,
-    /// Granted scopes.
-    pub capabilities: BTreeSet<String>,
-    /// Request-scoped service bearer used only for IAM authorization lookups.
-    pub credential: SecretString,
 }

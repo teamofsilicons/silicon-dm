@@ -27,7 +27,7 @@ pub struct Settings {
     pub database: DatabaseSettings,
     /// IAM integration settings.
     pub iam: IamSettings,
-    /// Briefcase, Waveform, and Giphy settings.
+    /// Briefcase and Giphy settings.
     pub providers: ProviderSettings,
     /// Realtime protocol policy.
     pub realtime: RealtimeSettings,
@@ -98,8 +98,6 @@ pub struct IamSettings {
     pub app_id: String,
     /// DM application secret.
     pub app_secret: SecretString,
-    /// Expected Hook service identity.
-    pub hook_service_id: String,
     /// Outbound IAM deadline.
     pub request_timeout: Duration,
 }
@@ -111,14 +109,10 @@ pub struct ProviderSettings {
     pub briefcase_base_url: Url,
     /// IAM application audience accepted by Briefcase.
     pub briefcase_iam_audience: String,
-    /// Waveform API base URL.
-    pub waveform_base_url: Url,
-    /// IAM application audience accepted by Waveform.
-    pub waveform_iam_audience: String,
     /// Giphy API base URL.
     pub giphy_api_base_url: Url,
-    /// Optional Giphy API key; GIF endpoints return dependency unavailable when absent.
-    pub giphy_api_key: Option<SecretString>,
+    /// Required Giphy API key.
+    pub giphy_api_key: SecretString,
     /// Shared provider request deadline.
     pub request_timeout: Duration,
     /// Trending-GIF cache lifetime.
@@ -189,16 +183,13 @@ impl Settings {
             base_url: parse_required("DM_IAM_BASE_URL")?,
             app_id: required("DM_IAM_APP_ID")?,
             app_secret: SecretString::from(required("DM_IAM_APP_SECRET")?),
-            hook_service_id: parse_or("DM_HOOK_SERVICE_ID", "silicon-hook")?,
             request_timeout: duration_seconds("DM_IAM_REQUEST_TIMEOUT_SECONDS", 5)?,
         };
         let providers = ProviderSettings {
             briefcase_base_url: parse_required("DM_BRIEFCASE_BASE_URL")?,
             briefcase_iam_audience: parse_or("DM_BRIEFCASE_IAM_AUDIENCE", "silicon-briefcase")?,
-            waveform_base_url: parse_required("DM_WAVEFORM_BASE_URL")?,
-            waveform_iam_audience: parse_or("DM_WAVEFORM_IAM_AUDIENCE", "waveform")?,
             giphy_api_base_url: parse_or("DM_GIPHY_API_BASE_URL", "https://api.giphy.com/v1/gifs")?,
-            giphy_api_key: optional("DM_GIPHY_API_KEY").map(SecretString::from),
+            giphy_api_key: SecretString::from(required("DM_GIPHY_API_KEY")?),
             request_timeout: duration_seconds("DM_PROVIDER_REQUEST_TIMEOUT_SECONDS", 10)?,
             trending_cache_ttl: duration_seconds("DM_TRENDING_GIF_CACHE_SECONDS", 300)?,
         };
@@ -237,24 +228,14 @@ impl Settings {
         )?;
         validate_url("DM_IAM_BASE_URL", &self.iam.base_url, self.environment)?;
         validate_app_id("DM_IAM_APP_ID", &self.iam.app_id)?;
-        validate_app_id("DM_HOOK_SERVICE_ID", &self.iam.hook_service_id)?;
         validate_url(
             "DM_BRIEFCASE_BASE_URL",
             &self.providers.briefcase_base_url,
             self.environment,
         )?;
-        validate_url(
-            "DM_WAVEFORM_BASE_URL",
-            &self.providers.waveform_base_url,
-            self.environment,
-        )?;
         validate_app_id(
             "DM_BRIEFCASE_IAM_AUDIENCE",
             &self.providers.briefcase_iam_audience,
-        )?;
-        validate_app_id(
-            "DM_WAVEFORM_IAM_AUDIENCE",
-            &self.providers.waveform_iam_audience,
         )?;
         validate_url(
             "DM_GIPHY_API_BASE_URL",
@@ -283,13 +264,13 @@ impl Settings {
         if self.realtime.heartbeat_interval != HEARTBEAT_INTERVAL {
             return Err(invalid(
                 "DM_HEARTBEAT_INTERVAL_SECONDS",
-                "must be 30 seconds for WebSocket protocol version 1",
+                "must be 30 seconds for WebSocket protocol version 2",
             ));
         }
         if self.realtime.heartbeat_timeout != HEARTBEAT_TIMEOUT {
             return Err(invalid(
                 "DM_HEARTBEAT_TIMEOUT_SECONDS",
-                "must be 120 seconds for WebSocket protocol version 1",
+                "must be 120 seconds for WebSocket protocol version 2",
             ));
         }
         if self.worker.max_attempts == 0 {
@@ -495,13 +476,57 @@ fn invalid(name: &'static str, reason: impl std::fmt::Display) -> SettingsError 
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr as _;
+    use std::{process::Command, str::FromStr as _};
 
     use secrecy::SecretString;
 
     use url::Url;
 
-    use super::{RuntimeEnvironment, validate_app_id, validate_database_transport, validate_url};
+    use super::{
+        RuntimeEnvironment, Settings, SettingsError, validate_app_id, validate_database_transport,
+        validate_url,
+    };
+
+    #[test]
+    fn giphy_api_key_is_required() {
+        const CHILD_MARKER: &str = "DM_CONFIG_GIPHY_REQUIRED_TEST_CHILD";
+        const TEST_NAME: &str = "config::tests::giphy_api_key_is_required";
+
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            assert!(matches!(
+                Settings::from_env(),
+                Err(SettingsError::Missing("DM_GIPHY_API_KEY"))
+            ));
+            return;
+        }
+
+        let Ok(test_binary) = std::env::current_exe() else {
+            panic!("the current test executable should be available");
+        };
+        let Ok(output) = Command::new(test_binary)
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env_clear()
+            .env(CHILD_MARKER, "1")
+            .env("DM_ENVIRONMENT", "test")
+            .env("DM_PUBLIC_BASE_URL", "http://localhost:8080")
+            .env("DM_DATABASE_URL", "postgres://user:secret@localhost/dm")
+            .env("DM_IAM_BASE_URL", "http://localhost:8081")
+            .env("DM_IAM_APP_ID", "silicon-dm")
+            .env("DM_IAM_APP_SECRET", "test-secret")
+            .env("DM_BRIEFCASE_BASE_URL", "http://localhost:8082")
+            .env_remove("DM_GIPHY_API_KEY")
+            .output()
+        else {
+            panic!("the isolated configuration test process should start");
+        };
+
+        assert!(
+            output.status.success(),
+            "isolated configuration test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn runtime_environment_is_explicit() {
@@ -541,7 +566,7 @@ mod tests {
     #[test]
     fn iam_application_identifiers_follow_the_published_contract() {
         assert!(validate_app_id("DM_IAM_APP_ID", "silicon-dm").is_ok());
-        assert!(validate_app_id("DM_IAM_APP_ID", "Waveform").is_err());
+        assert!(validate_app_id("DM_IAM_APP_ID", "Silicon-DM").is_err());
         assert!(validate_app_id("DM_IAM_APP_ID", "ab").is_err());
     }
 }
