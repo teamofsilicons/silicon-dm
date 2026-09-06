@@ -96,6 +96,8 @@ pub enum ServerFrame {
     Ready {
         /// Protocol version used by this connection.
         protocol_version: u16,
+        /// Selected test data generation; null for production. Changed values reset local cursors.
+        testing_generation: Option<i64>,
         /// Unique connection identifier.
         connection_id: Uuid,
         /// IAM-authorized actors represented by the connection.
@@ -256,6 +258,7 @@ mod tests {
     #[test]
     fn ready_frame_advertises_protocol_version_two() -> Result<(), Box<dyn std::error::Error>> {
         let encoded = serde_json::to_value(ServerFrame::Ready {
+            testing_generation: None,
             protocol_version: PROTOCOL_VERSION,
             connection_id: Uuid::nil(),
             actors: vec!["carbon-1".parse()?],

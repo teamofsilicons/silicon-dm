@@ -11,23 +11,37 @@ use uuid::Uuid;
 use crate::{
     AppError, AppResult,
     application::{
-        auth::AuthContext,
+        auth::{AuthContext, PresentedCredential},
         commands::{
             OpenRealtimeSessionCommand, RecordReceiptCommand, SendMessageCommand,
             UpdateRealtimeActivityCommand,
         },
         messaging::{prepare_message_content, validate_device_id},
+        ports::AuthenticationRequest,
         state::AppState,
     },
     domain::{ActorId, ActorRef},
 };
 
-use super::{ClientFrame, HubRegistration, PROTOCOL_VERSION, RealtimeTarget, ServerFrame};
+use super::{
+    ClientFrame, DeliveryWakeup, HubRegistration, PROTOCOL_VERSION, RealtimeTarget, ServerFrame,
+};
 
 const REPLAY_BATCH_SIZE: usize = 100;
+const REPLAY_TIME_BUDGET: Duration = Duration::from_millis(25);
 const REPLAY_INTERVAL: Duration = Duration::from_secs(1);
 const HEARTBEAT_CLOSE_CODE: u16 = 4000;
 const HEARTBEAT_CLOSE_REASON: &str = "heartbeat-timeout";
+
+fn log_database_failure(error: &AppError, session_id: Uuid) {
+    if let AppError::Database(source) = error {
+        if let Some(database) = source.as_database_error() {
+            tracing::warn!(%session_id, sqlstate = ?database.code(), table = database.table(), constraint = database.constraint(), "realtime database operation failed");
+        } else {
+            tracing::warn!(%session_id, "realtime database connection or decoding failed");
+        }
+    }
+}
 
 /// Runs one already-authenticated WebSocket until disconnect or heartbeat timeout.
 ///
@@ -39,6 +53,7 @@ pub async fn serve_socket(
     authority: AuthContext,
     actors: Vec<ActorRef>,
     consumer_id: String,
+    requested_testing_generation: Option<i64>,
 ) {
     if let Err(error) = validate_device_id(&consumer_id) {
         let _ = send_error(&mut socket, &error).await;
@@ -53,6 +68,10 @@ pub async fn serve_socket(
         .realtime
         .register(targets, state.settings.realtime.outbound_capacity);
     let session_id = registration.connection_id();
+    let Ok(opening_fence) = environment_fence(&state).await else {
+        let _ = close_socket(&mut socket, 4001, "testing-environment-changed").await;
+        return;
+    };
     let lease_expires_at = lease_deadline(state.settings.realtime.heartbeat_timeout);
     let open = state
         .store
@@ -66,7 +85,9 @@ pub async fn serve_socket(
             lease_expires_at,
         })
         .await;
+    drop(opening_fence);
     if let Err(error) = open {
+        log_database_failure(&error, session_id);
         tracing::warn!(%session_id, code = error.code(), "realtime session could not open");
         let _ = send_error(&mut socket, &error).await;
         let _ = close_socket(&mut socket, 1011, "session-open-failed").await;
@@ -74,22 +95,27 @@ pub async fn serve_socket(
     }
 
     let mut runtime = SessionRuntime {
+        reset_cursors: state.testing_generation.is_some()
+            && state.testing_generation != requested_testing_generation,
         actors: actors
             .into_iter()
             .map(|actor| (actor.id.clone(), actor))
             .collect(),
         authority,
+        authorization_revision: -1,
         consumer_id,
         last_valid_pong: Instant::now(),
         pending_ping_id: None,
         registration,
         sent_through: BTreeMap::new(),
+        next_replay_actor: 0,
         session_id,
         state,
     };
     let exit = match runtime.run(&mut socket).await {
         Ok(exit) => exit,
         Err(error) => {
+            log_database_failure(&error, session_id);
             tracing::warn!(%session_id, code = error.code(), "realtime session failed");
             let _ = send_error(&mut socket, &error).await;
             SocketExit::server(1011, "internal-error")
@@ -98,36 +124,54 @@ pub async fn serve_socket(
     if exit.send_close {
         let _ = close_socket(&mut socket, exit.code, &exit.reason).await;
     }
-    if let Err(error) = runtime
-        .state
-        .store
-        .close_realtime_session(session_id, exit.code, &exit.reason)
-        .await
+    if let Ok(_closing_fence) = environment_fence(&runtime.state).await
+        && let Err(error) = runtime
+            .state
+            .store
+            .close_realtime_session(session_id, exit.code, &exit.reason)
+            .await
     {
+        log_database_failure(&error, session_id);
         tracing::warn!(%session_id, code = error.code(), "realtime session close was not persisted");
     }
 }
 
 struct SessionRuntime {
+    reset_cursors: bool,
     actors: BTreeMap<ActorId, ActorRef>,
     authority: AuthContext,
+    authorization_revision: i64,
     consumer_id: String,
     last_valid_pong: Instant,
     pending_ping_id: Option<String>,
     registration: HubRegistration,
     sent_through: BTreeMap<ActorId, i64>,
+    next_replay_actor: usize,
     session_id: Uuid,
     state: AppState,
 }
 
 impl SessionRuntime {
+    // Keep the socket event selection and its lifecycle fence in one visible loop.
+    #[allow(clippy::too_many_lines)]
     async fn run(&mut self, socket: &mut WebSocket) -> AppResult<SocketExit> {
+        let startup_fence = environment_fence(&self.state).await?;
+        let mut authorization_changes = self.state.realtime.authorization_changes();
+        let mut disconnects = self.state.realtime.disconnects();
+        self.revalidate_authority().await?;
+        self.authorization_revision =
+            crate::api::webhook::authorization_revision(&self.state).await?;
         let actors = self.actors.values().cloned().collect::<Vec<_>>();
-        let acknowledged = self
+        let mut acknowledged = self
             .state
             .store
             .acknowledged_cursors(&self.authority.organization_id, &actors, &self.consumer_id)
             .await?;
+        if self.reset_cursors {
+            for sequence in acknowledged.values_mut() {
+                *sequence = 0;
+            }
+        }
         self.sent_through = actors
             .iter()
             .map(|actor| {
@@ -139,12 +183,14 @@ impl SessionRuntime {
             socket,
             &ServerFrame::Ready {
                 protocol_version: PROTOCOL_VERSION,
+                testing_generation: self.state.testing_generation,
                 connection_id: self.session_id,
                 actors: self.actors.keys().cloned().collect(),
                 acknowledged_through: acknowledged,
             },
         )
         .await?;
+        drop(startup_fence);
 
         let heartbeat_interval = self.state.settings.realtime.heartbeat_interval;
         let mut heartbeat = interval_at(Instant::now() + heartbeat_interval, heartbeat_interval);
@@ -160,9 +206,22 @@ impl SessionRuntime {
                 },
                 _ = heartbeat.tick() => SessionEvent::Heartbeat,
                 _ = replay.tick() => SessionEvent::Replay,
+                _ = authorization_changes.changed() => SessionEvent::AuthorizationChanged,
+                _ = disconnects.changed() => SessionEvent::Disconnect,
+            };
+            // Fence every command, lease write, and delivery read against a
+            // simultaneous environment clean, key rotation, or deletion.
+            let _environment_fence = match environment_fence(&self.state).await {
+                Ok(fence) => fence,
+                Err(error) => return Ok(authority_exit(&error)),
             };
             match event {
                 SessionEvent::Incoming(Some(Ok(message))) => {
+                    if matches!(message, SocketMessage::Text(_))
+                        && let Err(error) = self.revalidate_authority().await
+                    {
+                        return Ok(authority_exit(&error));
+                    }
                     if let Some(exit) = self.handle_socket_message(socket, message).await? {
                         return Ok(exit);
                     }
@@ -175,6 +234,9 @@ impl SessionRuntime {
                     return Ok(SocketExit::peer(1000, "client-disconnected"));
                 }
                 SessionEvent::LocalDelivery(Some(frame)) => {
+                    if let Err(error) = self.check_authority_revision().await {
+                        return Ok(authority_exit(&error));
+                    }
                     self.handle_local_delivery(socket, frame.as_ref()).await?;
                 }
                 SessionEvent::LocalDelivery(None) => {
@@ -183,6 +245,17 @@ impl SessionRuntime {
                     )));
                 }
                 SessionEvent::Heartbeat => {
+                    if let Err(error) = self.revalidate_authority().await {
+                        return Ok(authority_exit(&error));
+                    }
+                    if let (Some(registry), Some(id), Some(generation)) = (
+                        &self.state.testing,
+                        self.state.testing_environment,
+                        self.state.testing_generation,
+                    ) && let Err(error) = registry.touch(id, generation).await
+                    {
+                        return Ok(authority_exit(&error));
+                    }
                     if self.last_valid_pong.elapsed()
                         >= self.state.settings.realtime.heartbeat_timeout
                     {
@@ -203,9 +276,68 @@ impl SessionRuntime {
                     self.pending_ping_id = Some(ping_id.clone());
                     send_server_frame(socket, &ServerFrame::Ping { ping_id }).await?;
                 }
-                SessionEvent::Replay => self.replay_all(socket).await?,
+                SessionEvent::Replay => {
+                    if let Err(error) = self.check_authority_revision().await {
+                        return Ok(authority_exit(&error));
+                    }
+                    self.replay_all(socket).await?;
+                }
+                SessionEvent::AuthorizationChanged => {
+                    if let Err(error) = self.revalidate_authority().await {
+                        return Ok(authority_exit(&error));
+                    }
+                }
+                SessionEvent::Disconnect => {
+                    let reason = disconnects
+                        .borrow_and_update()
+                        .clone()
+                        .unwrap_or_else(|| "authorization-changed".to_owned());
+                    return Ok(SocketExit::server(4001, &reason));
+                }
             }
         }
+    }
+
+    async fn ensure_environment_active(&self) -> AppResult<()> {
+        if let (Some(registry), Some(id), Some(generation)) = (
+            &self.state.testing,
+            self.state.testing_environment,
+            self.state.testing_generation,
+        ) {
+            registry.ensure_active(id, generation).await?;
+        }
+        Ok(())
+    }
+
+    async fn check_authority_revision(&mut self) -> AppResult<()> {
+        self.ensure_environment_active().await?;
+        let revision = crate::api::webhook::authorization_revision(&self.state).await?;
+        if revision != self.authorization_revision {
+            self.revalidate_authority().await?;
+            self.authorization_revision = revision;
+        }
+        Ok(())
+    }
+
+    async fn revalidate_authority(&mut self) -> AppResult<()> {
+        self.ensure_environment_active().await?;
+        let PresentedCredential::Bearer(token) = &self.authority.credential;
+        let current = self
+            .state
+            .identity
+            .authenticate(AuthenticationRequest::Bearer {
+                token,
+                organization_id: &self.authority.organization_id,
+            })
+            .await?;
+        if current.actor != self.authority.actor
+            || current.principal_id != self.authority.principal_id
+            || self.actors.keys().any(|id| !current.may_represent(id))
+        {
+            return Err(AppError::Unauthorized);
+        }
+        self.authority = current;
+        Ok(())
     }
 
     async fn handle_socket_message(
@@ -229,6 +361,9 @@ impl SessionRuntime {
                     .await?;
                     return Ok(None);
                 };
+                // The parsed command owns its content; release the raw frame
+                // before database work and response serialization duplicate it.
+                drop(text);
                 match self.handle_client_frame(frame).await {
                     Ok(ClientOutcome::None) => {}
                     Ok(ClientOutcome::Respond(frame)) => send_server_frame(socket, &frame).await?,
@@ -319,6 +454,11 @@ impl SessionRuntime {
                 if after_sequence < 0 {
                     return Err(AppError::validation("resume sequence must be non-negative"));
                 }
+                let after_sequence = if self.reset_cursors {
+                    0
+                } else {
+                    after_sequence
+                };
                 let actor = self.actor(&actor_id)?;
                 let high = self
                     .state
@@ -362,7 +502,7 @@ impl SessionRuntime {
                 let recipient = self.actor(&actor_id)?.clone();
                 self.state
                     .store
-                    .record_receipt(RecordReceiptCommand {
+                    .record_receipt_without_payload(RecordReceiptCommand {
                         organization_id: self.authority.organization_id.clone(),
                         conversation_id,
                         message_id,
@@ -424,67 +564,71 @@ impl SessionRuntime {
     async fn handle_local_delivery(
         &mut self,
         socket: &mut WebSocket,
-        frame: &ServerFrame,
+        wakeup: &DeliveryWakeup,
     ) -> AppResult<()> {
-        let Some((actor_id, sequence)) = frame.delivery_position() else {
-            return Err(AppError::internal(anyhow::anyhow!(
-                "local realtime hub accepted a non-delivery frame"
-            )));
-        };
-        let actor_id = actor_id.clone();
-        let sent = self.sent_through.get(&actor_id).copied().unwrap_or(0);
-        if sequence <= sent {
+        let sent = self
+            .sent_through
+            .get(&wakeup.actor_id)
+            .copied()
+            .unwrap_or(0);
+        if wakeup.sequence <= sent {
             return Ok(());
         }
-        if sequence > sent.saturating_add(1) {
-            return self.replay_actor(socket, &actor_id).await;
-        }
-        send_server_frame(socket, frame).await?;
-        self.sent_through.insert(actor_id, sequence);
-        Ok(())
+        self.replay_actor(socket, &wakeup.actor_id).await
     }
 
     async fn replay_all(&mut self, socket: &mut WebSocket) -> AppResult<()> {
         let actor_ids = self.actors.keys().cloned().collect::<Vec<_>>();
-        for actor_id in actor_ids {
-            self.replay_actor(socket, &actor_id).await?;
+        if actor_ids.is_empty() {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let start = self.next_replay_actor % actor_ids.len();
+        for offset in 0..actor_ids.len() {
+            let index = (start + offset) % actor_ids.len();
+            self.replay_actor(socket, &actor_ids[index]).await?;
+            self.next_replay_actor = (index + 1) % actor_ids.len();
+            if started.elapsed() >= REPLAY_TIME_BUDGET {
+                break;
+            }
         }
         Ok(())
     }
 
     async fn replay_actor(&mut self, socket: &mut WebSocket, actor_id: &ActorId) -> AppResult<()> {
         let actor = self.actor(actor_id)?.clone();
-        let after = self.sent_through.get(actor_id).copied().unwrap_or(0);
-        let deliveries = self
-            .state
-            .store
-            .replay_deliveries(
-                &self.authority.organization_id,
-                &actor,
-                after,
-                REPLAY_BATCH_SIZE,
-            )
-            .await?;
-        let mut last = after;
-        for delivery in deliveries {
+        let started = Instant::now();
+        // Read one payload at a time. A count-bounded batch of 100 allowed
+        // messages could otherwise hold 10 GB before the first socket write.
+        for _ in 0..REPLAY_BATCH_SIZE {
+            let after = self.sent_through.get(actor_id).copied().unwrap_or(0);
+            let deliveries = self
+                .state
+                .store
+                .replay_deliveries(&self.authority.organization_id, &actor, after, 1)
+                .await?;
+            let Some(delivery) = deliveries.into_iter().next() else {
+                break;
+            };
             if delivery.organization_id != self.authority.organization_id
                 || delivery.target != actor
-                || delivery.sequence <= last
+                || delivery.sequence <= after
             {
                 return Err(AppError::internal(anyhow::anyhow!(
-                    "actor delivery replay is not contiguous or correctly scoped"
+                    "actor delivery replay is not correctly scoped or ordered"
                 )));
             }
-            last = delivery.sequence;
-            let frame = ServerFrame::delivery(
-                delivery.id,
-                actor_id.clone(),
-                delivery.sequence,
-                delivery.payload,
-            );
+            let sequence = delivery.sequence;
+            let frame =
+                ServerFrame::delivery(delivery.id, actor_id.clone(), sequence, delivery.payload);
             send_server_frame(socket, &frame).await?;
+            self.sent_through.insert(actor_id.clone(), sequence);
+            // Return to the socket loop for ACKs, heartbeats and revocation.
+            // A single large write may exceed this budget; never start a second.
+            if started.elapsed() >= REPLAY_TIME_BUDGET {
+                break;
+            }
         }
-        self.sent_through.insert(actor_id.clone(), last);
         Ok(())
     }
 
@@ -495,9 +639,37 @@ impl SessionRuntime {
 
 enum SessionEvent {
     Incoming(Option<Result<SocketMessage, axum::Error>>),
-    LocalDelivery(Option<Arc<ServerFrame>>),
+    LocalDelivery(Option<Arc<DeliveryWakeup>>),
     Heartbeat,
     Replay,
+    AuthorizationChanged,
+    Disconnect,
+}
+
+fn authority_exit(error: &AppError) -> SocketExit {
+    if matches!(
+        error,
+        AppError::DependencyUnavailable { .. } | AppError::Database(_) | AppError::RateLimited
+    ) {
+        SocketExit::server(1013, "authorization-unavailable")
+    } else {
+        SocketExit::server(4001, "authorization-revoked")
+    }
+}
+
+async fn environment_fence(
+    state: &AppState,
+) -> AppResult<Option<sqlx::Transaction<'static, sqlx::Postgres>>> {
+    match (
+        &state.testing,
+        state.testing_environment,
+        state.testing_generation,
+    ) {
+        (Some(registry), Some(id), Some(generation)) => {
+            registry.request_fence(id, generation).await.map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 enum ClientOutcome {

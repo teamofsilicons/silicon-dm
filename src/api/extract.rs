@@ -4,10 +4,8 @@ use std::{future::Future, ops::Deref, str::FromStr as _};
 
 use axum::{
     Json,
-    extract::{
-        FromRequest, FromRequestParts, MatchedPath, Path, Query, Request, rejection::JsonRejection,
-    },
-    http::{HeaderMap, HeaderName, Method, StatusCode, request::Parts},
+    extract::{FromRequest, FromRequestParts, Path, Query, Request, rejection::JsonRejection},
+    http::{HeaderMap, HeaderName, StatusCode, request::Parts},
     response::{IntoResponse, Response},
 };
 use secrecy::SecretString;
@@ -21,7 +19,6 @@ use crate::{
 
 static ORG_ID: HeaderName = HeaderName::from_static("x-org-id");
 static OBO_PROOF: HeaderName = HeaderName::from_static("x-iam-obo-access-proof");
-static APP_ID: HeaderName = HeaderName::from_static("x-app-id");
 static IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
 static IF_MATCH: HeaderName = HeaderName::from_static("if-match");
 
@@ -78,47 +75,14 @@ impl FromRequestParts<AppState> for Authenticated {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let organization_id = parse_organization_id(&parts.headers)?;
-        let bearer = optional_single_header(&parts.headers, &axum::http::header::AUTHORIZATION)?;
-        let proof = optional_single_header(&parts.headers, &OBO_PROOF)?;
-
-        let context = match (bearer, proof) {
-            (Some(_), Some(_)) => {
-                return Err(AppError::validation(
-                    "provide either bearer authentication or OBO Access, not both",
-                ));
-            }
-            (Some(authorization), None) => {
-                let token = parse_bearer(authorization)?;
-                state
-                    .identity
-                    .authenticate(AuthenticationRequest::Bearer {
-                        token: &token,
-                        organization_id: &organization_id,
-                    })
-                    .await?
-            }
-            (None, Some(proof)) => {
-                let app_id = required_header(&parts.headers, &APP_ID)?;
-                let proof = SecretString::from(proof.to_owned());
-                let matched_path = parts
-                    .extensions
-                    .get::<MatchedPath>()
-                    .map_or(parts.uri.path(), MatchedPath::as_str);
-                let action =
-                    action_for(&parts.method, matched_path).ok_or(AppError::Unauthorized)?;
-                state
-                    .identity
-                    .authenticate(AuthenticationRequest::Obo {
-                        proof: &proof,
-                        app_id,
-                        organization_id: &organization_id,
-                        action,
-                        resource: Some(parts.uri.path()),
-                    })
-                    .await?
-            }
-            (None, None) => return Err(AppError::Unauthorized),
-        };
+        let token = realtime_bearer(&parts.headers)?;
+        let context = state
+            .identity
+            .authenticate(AuthenticationRequest::Bearer {
+                token: &token,
+                organization_id: &organization_id,
+            })
+            .await?;
 
         if context.organization_id != organization_id {
             return Err(AppError::Forbidden);
@@ -327,39 +291,11 @@ fn optional_single_header<'a>(
         .map_err(|_| AppError::validation(format!("header {} is invalid", name.as_str())))
 }
 
-fn action_for(method: &Method, matched_path: &str) -> Option<&'static str> {
-    let action = match (method, matched_path) {
-        (&Method::GET, "/api/v1/conversations") => "dm.conversations.list",
-        (&Method::GET, "/api/v1/conversations/{conversation_id}/messages") => "dm.messages.list",
-        (&Method::POST, "/api/v1/conversations/{conversation_id}/messages") => "dm.messages.create",
-        (
-            &Method::POST,
-            "/api/v1/conversations/{conversation_id}/messages/{message_id}/receipts",
-        ) => "dm.receipts.create",
-        (&Method::POST, "/api/v1/conversations/{conversation_id}/bundles") => "dm.bundles.create",
-        (&Method::GET, "/api/v1/conversations/{conversation_id}/bundles/{bundle_id}") => {
-            "dm.bundles.read"
-        }
-        (&Method::GET, "/api/v1/conversations/{conversation_id}/draft") => "dm.drafts.read",
-        (&Method::PUT, "/api/v1/conversations/{conversation_id}/draft") => "dm.drafts.write",
-        (&Method::DELETE, "/api/v1/conversations/{conversation_id}/draft") => "dm.drafts.delete",
-        (&Method::GET, "/api/v1/gifs/trending") => "dm.gifs.trending",
-        (&Method::GET, "/api/v1/gifs/search") => "dm.gifs.search",
-        (&Method::GET, "/api/v1/gifs/recent") => "dm.gifs.recent",
-        _ => return None,
-    };
-    Some(action)
-}
-
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
 
-    use axum::http::Method;
-
-    use super::{
-        IDEMPOTENCY_KEY, OBO_PROOF, action_for, parse_bearer, realtime_bearer, required_header,
-    };
+    use super::{IDEMPOTENCY_KEY, OBO_PROOF, parse_bearer, realtime_bearer, required_header};
 
     #[test]
     fn bearer_scheme_is_exact_and_nonempty() {
@@ -377,36 +313,6 @@ mod tests {
         headers.append(&IDEMPOTENCY_KEY, HeaderValue::from_static("abcdefgh"));
         headers.append(&IDEMPOTENCY_KEY, HeaderValue::from_static("ijklmnop"));
         assert!(required_header(&headers, &IDEMPOTENCY_KEY).is_err());
-    }
-
-    #[test]
-    fn unknown_obo_routes_have_no_fallback_authority() {
-        assert_eq!(action_for(&Method::DELETE, "/api/v1/conversations"), None);
-        assert_eq!(action_for(&Method::GET, "/not-a-route"), None);
-    }
-
-    #[test]
-    fn bearer_only_routes_have_no_obo_authority() {
-        assert_eq!(action_for(&Method::POST, "/api/v1/conversations"), None);
-        assert_eq!(
-            action_for(&Method::GET, "/api/v1/presence/{actor_id}"),
-            None
-        );
-        assert_eq!(
-            action_for(&Method::POST, "/api/v1/attachments/temporary-url"),
-            None
-        );
-    }
-
-    #[test]
-    fn known_obo_route_has_one_stable_action() {
-        assert_eq!(
-            action_for(
-                &Method::POST,
-                "/api/v1/conversations/{conversation_id}/messages"
-            ),
-            Some("dm.messages.create")
-        );
     }
 
     #[test]

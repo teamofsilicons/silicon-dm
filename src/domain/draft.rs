@@ -12,6 +12,12 @@ use super::{
 /// Mutable draft content owned by one actor in one conversation.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct DraftInput {
+    /// Arbitrary caller-owned metadata, preserved on every round trip.
+    #[serde(default)]
+    pub metadata: serde_json::Map<String, serde_json::Value>,
+    /// Message being replied to in the same conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<Uuid>,
     /// Draft text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_content: Option<String>,
@@ -32,6 +38,12 @@ pub struct DraftInput {
 /// Versioned synchronized draft.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Draft {
+    /// Arbitrary caller-owned metadata, preserved on every round trip.
+    #[serde(default)]
+    pub metadata: serde_json::Map<String, serde_json::Value>,
+    /// Message being replied to in the same conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<Uuid>,
     /// Parent conversation.
     pub conversation_id: Uuid,
     /// Private owner.
@@ -98,6 +110,8 @@ impl DraftInput {
             self.voice.as_ref(),
             self.voice_transcript.as_deref(),
             self.gif.as_ref(),
+            &self.metadata,
+            self.reply_to_message_id,
         )
     }
 }

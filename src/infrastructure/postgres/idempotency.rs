@@ -47,7 +47,7 @@ pub(crate) async fn claim(
     let lease_owner = Uuid::now_v7();
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO dm.idempotency_records (
+        INSERT INTO idempotency_records (
             organization_id,
             actor_kind,
             actor_id,
@@ -61,7 +61,7 @@ pub(crate) async fn claim(
         )
         VALUES (
             $1,
-            $2::text::dm.actor_kind,
+            $2::text::actor_kind,
             $3,
             $4,
             $5,
@@ -95,9 +95,9 @@ pub(crate) async fn claim(
             request_hash,
             status::text AS status,
             resource_id
-        FROM dm.idempotency_records
+        FROM idempotency_records
         WHERE organization_id = $1
-          AND actor_kind = $2::text::dm.actor_kind
+          AND actor_kind = $2::text::actor_kind
           AND actor_id = $3
           AND operation = $4
           AND idempotency_key = $5
@@ -141,7 +141,7 @@ pub(crate) async fn complete(
 ) -> AppResult<()> {
     let updated = sqlx::query(
         r#"
-        UPDATE dm.idempotency_records
+        UPDATE idempotency_records
         SET status = 'completed',
             lease_owner = NULL,
             lease_expires_at = NULL,
@@ -149,7 +149,7 @@ pub(crate) async fn complete(
             resource_id = $7,
             response_status = $8
         WHERE organization_id = $1
-          AND actor_kind = $2::text::dm.actor_kind
+          AND actor_kind = $2::text::actor_kind
           AND actor_id = $3
           AND operation = $4
           AND idempotency_key = $5

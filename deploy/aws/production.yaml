@@ -1,0 +1,776 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Silicon DM backend on private EC2, RDS, behind a dedicated public ALB; existing VPC and subnets only.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet::Id
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet::Id
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet::Id
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet::Id
+  CertificateArn:
+    Type: String
+  AppSecretArn:
+    Type: String
+    Description: Secrets Manager secret holding the IAM application and webhook credentials.
+  BackendImageUri:
+    Type: String
+    Description: Immutable ECR image URI, tagged with the commit it was built from.
+  PublicHostName:
+    Type: String
+    Default: backend.dm.teamofsilicons.com
+  IamBaseUrl:
+    Type: String
+    Default: https://backend.iam.teamofsilicons.com/
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+  InstanceType:
+    Type: String
+    Default: t4g.medium
+    AllowedValues: [t4g.medium, t4g.large, t4g.xlarge]
+  RootVolumeSizeGiB:
+    Type: Number
+    Default: 30
+    MinValue: 30
+    MaxValue: 16384
+  DatabaseEngineVersion:
+    Type: String
+    Default: "17.9"
+    Description: Exact PostgreSQL 17 version available in the deployment region.
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.t4g.small
+    AllowedValues: [db.t4g.micro, db.t4g.small, db.t4g.medium]
+  TestingDatabaseInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    AllowedValues: [db.t4g.micro, db.t4g.small]
+
+Resources:
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Silicon DM production instance; application ports are ALB-only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          Description: DM ALB to DM API
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: silicon-dm-production-instance
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  AlbToInstanceEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      DestinationSecurityGroupId: !GetAtt InstanceSecurityGroup.GroupId
+      Description: DM ALB to Silicon DM production API
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Silicon DM production and testing PostgreSQL; DM instances only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref InstanceSecurityGroup
+          Description: DM production instances
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: silicon-dm-production-database
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for Silicon DM production
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: silicon-dm-production
+      Engine: postgres
+      EngineVersion: !Ref DatabaseEngineVersion
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      DBName: silicon_dm
+      MasterUsername: dm_migrator
+      ManageMasterUserPassword: true
+      Port: 5432
+      AllocatedStorage: "30"
+      MaxAllocatedStorage: 200
+      StorageType: gp3
+      StorageEncrypted: true
+      PubliclyAccessible: false
+      MultiAZ: false
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 7
+      CopyTagsToSnapshot: true
+      DeletionProtection: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      EnableCloudwatchLogsExports: [postgresql, upgrade]
+      DBParameterGroupName: !Ref DatabaseParameters
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: silicon-dm-production
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  TestingDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: silicon-dm-testing-production
+      Engine: postgres
+      EngineVersion: !Ref DatabaseEngineVersion
+      DBInstanceClass: !Ref TestingDatabaseInstanceClass
+      DBName: silicon_dm_test
+      MasterUsername: dm_testing_migrator
+      ManageMasterUserPassword: true
+      Port: 5432
+      AllocatedStorage: "20"
+      MaxAllocatedStorage: 25
+      StorageType: gp3
+      StorageEncrypted: true
+      PubliclyAccessible: false
+      MultiAZ: false
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 1
+      CopyTagsToSnapshot: true
+      DeletionProtection: true
+      EnablePerformanceInsights: false
+      DBParameterGroupName: !Ref DatabaseParameters
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: silicon-dm-testing-production
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: testing
+
+  DatabaseParameters:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Require TLS for Silicon DM production and testing PostgreSQL
+      Family: postgres17
+      Parameters:
+        rds.force_ssl: "1"
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /silicon-dm/production/api
+      RetentionInDays: 30
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /silicon-dm/production/worker
+      RetentionInDays: 30
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: silicon-dm-production-instance
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: silicon-dm-production-runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/silicon-dm-production
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref AppSecretArn
+                  - !GetAtt Database.MasterUserSecret.SecretArn
+                  - !GetAtt TestingDatabase.MasterUserSecret.SecretArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !GetAtt ApiLogGroup.Arn
+                  - !Sub ${ApiLogGroup.Arn}:*
+                  - !GetAtt WorkerLogGroup.Arn
+                  - !Sub ${WorkerLogGroup.Arn}:*
+              - Effect: Allow
+                Action: cloudformation:SignalResource
+                Resource: !Ref AWS::StackId
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: silicon-dm-prod-api
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 8080
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /ready
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "204"
+      TargetGroupAttributes:
+        # Finish large REST requests; durable clients reconnect and replay sockets.
+        - Key: deregistration_delay.timeout_seconds
+          Value: "180"
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Silicon DM public HTTPS and HTTP redirect
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      # Non-routable placeholder suppresses the default unrestricted egress.
+      # AlbToInstanceEgress below permits only the DM target port.
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 1
+          ToPort: 1
+          CidrIp: 127.0.0.1/32
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: silicon-dm-production
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups: [!Ref AlbSecurityGroup]
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "180"
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+        - Key: deletion_protection.enabled
+          Value: "true"
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "404"
+            ContentType: text/plain
+            MessageBody: Unknown host
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            Host: !Ref PublicHostName
+            StatusCode: HTTP_301
+
+  ApiListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 1
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values: [!Ref PublicHostName]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ApiTargetGroup
+
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: silicon-dm-production
+      Description: IP rate protection without filtering arbitrary DM message bodies
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        SampledRequestsEnabled: false
+        MetricName: silicon-dm-production
+      Rules:
+        - Name: PerIpRate
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              Limit: 2000
+              EvaluationWindowSec: 300
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            SampledRequestsEnabled: false
+            MetricName: silicon-dm-production-ip-rate
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  WebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Ref LoadBalancer
+      WebACLArn: !GetAtt WebAcl.Arn
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: silicon-dm-production
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        SecurityGroupIds:
+          - !GetAtt InstanceSecurityGroup.GroupId
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          # Only host bootstrap and Docker logging need AWS credentials.
+          HttpPutResponseHopLimit: 1
+          InstanceMetadataTags: enabled
+        Monitoring:
+          Enabled: true
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              DeleteOnTermination: true
+              Encrypted: true
+              VolumeSize: !Ref RootVolumeSizeGiB
+              VolumeType: gp3
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: silicon-dm-production
+              - Key: Service
+                Value: silicon-dm
+              - Key: Environment
+                Value: production
+          - ResourceType: volume
+            Tags:
+              - Key: Service
+                Value: silicon-dm
+              - Key: Environment
+                Value: production
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            umask 077
+            export AWS_DEFAULT_REGION='${AWS::Region}'
+            APP_SECRET_ARN='${AppSecretArn}'
+            DB_SECRET_ARN='${Database.MasterUserSecret.SecretArn}'
+            TEST_DB_SECRET_ARN='${TestingDatabase.MasterUserSecret.SecretArn}'
+            export DB_HOST='${Database.Endpoint.Address}'
+            export TEST_DB_HOST='${TestingDatabase.Endpoint.Address}'
+            export BACKEND_IMAGE='${BackendImageUri}'
+            export PUBLIC_HOST='${PublicHostName}'
+            export IAM_BASE_URL='${IamBaseUrl}'
+            STACK_ID='${AWS::StackId}'
+            SIGNAL_ID=$(hostname)
+            cleanup() {
+              result=$?
+              rm -f /etc/silicon-dm/{app,master,test-master}.json /etc/silicon-dm/migration.env
+              status=FAILURE
+              if [ "$result" -eq 0 ]; then status=SUCCESS; fi
+              aws cloudformation signal-resource --stack-name "$STACK_ID" --logical-resource-id AutoScalingGroup \
+                --unique-id "$SIGNAL_ID" --status "$status" || true
+              exit "$result"
+            }
+            trap cleanup EXIT
+            
+            dnf install --assumeyes docker jq postgresql15 python3
+            systemctl enable --now docker amazon-ssm-agent
+            install -d -m 0700 /etc/silicon-dm /opt/silicon-dm
+            curl --fail --silent --show-error --location --retry 3 \
+              https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+              --output /opt/silicon-dm/aws-rds-global-bundle.pem
+            chmod 0644 /opt/silicon-dm/aws-rds-global-bundle.pem
+            
+            # Runtime containers do not need AWS credentials. Keep IMDS inaccessible from
+            # their bridge network; the host Docker log driver still uses the instance role.
+            cat > /etc/systemd/system/silicon-dm-container-network.service <<'UNIT'
+            [Unit]
+            Description=Block DM container access to EC2 metadata
+            Requires=docker.service
+            After=docker.service
+            PartOf=docker.service
+            Before=silicon-dm-api.service silicon-dm-worker.service
+            [Service]
+            Type=oneshot
+            RemainAfterExit=yes
+            ExecStart=/bin/sh -c '/usr/sbin/iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || /usr/sbin/iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP'
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+            
+            aws ecr get-login-password | docker login --username AWS --password-stdin '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com'
+            docker pull "$BACKEND_IMAGE"
+            aws secretsmanager get-secret-value --secret-id "$APP_SECRET_ARN" --query SecretString --output text > /etc/silicon-dm/app.json
+            aws secretsmanager get-secret-value --secret-id "$DB_SECRET_ARN" --query SecretString --output text > /etc/silicon-dm/master.json
+            aws secretsmanager get-secret-value --secret-id "$TEST_DB_SECRET_ARN" --query SecretString --output text > /etc/silicon-dm/test-master.json
+            
+            cat > /opt/silicon-dm/runtime-grants.sql <<'DM_RUNTIME_GRANTS'
+            \if :{?runtime_role}
+            \else
+            \echo 'runtime_role psql variable is required'
+            \quit false
+            \endif
+            
+            -- Run as the role that owns the migrated DM objects. psql identifier quoting
+            -- keeps the operator-supplied role name an identifier rather than SQL text.
+            GRANT USAGE ON SCHEMA dm TO :"runtime_role";
+            GRANT USAGE ON SCHEMA dm_private TO :"runtime_role";
+            -- Trigger bodies call these invariant validators under the runtime role.
+            -- Trigger-only functions do not need to be callable directly by that role.
+            GRANT EXECUTE ON FUNCTION dm_private.assert_conversation_participant_count(uuid) TO :"runtime_role";
+            GRANT EXECUTE ON FUNCTION dm_private.assert_message_content(uuid) TO :"runtime_role";
+            GRANT EXECUTE ON FUNCTION dm_private.assert_message_outbox_complete(uuid) TO :"runtime_role";
+            GRANT EXECUTE ON FUNCTION dm_private.assert_revision_outbox(uuid) TO :"runtime_role";
+            GRANT EXECUTE ON FUNCTION dm_private.assert_bundle_shape(uuid) TO :"runtime_role";
+            GRANT EXECUTE ON FUNCTION dm_private.assert_draft_attachment_limit(uuid, dm.actor_kind, text) TO :"runtime_role";
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA dm TO :"runtime_role";
+            -- Historical Hook sources remain owner-readable for retention and audit, but
+            -- the API/worker role has no product path that may read or mutate them.
+            REVOKE ALL PRIVILEGES ON TABLE dm.system_events FROM :"runtime_role";
+            GRANT SELECT ON TABLE public._sqlx_migrations TO :"runtime_role";
+            
+            ALTER DEFAULT PRIVILEGES IN SCHEMA dm
+                GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO :"runtime_role";
+            ALTER DEFAULT PRIVILEGES IN SCHEMA dm_private
+                REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+            DM_RUNTIME_GRANTS
+            
+            # Parse secret JSON as data. Credentials never appear in shell commands, user
+            # data, process arguments, or logs. Passwords are URL encoded for SQLx.
+            python3 <<'PYTHON'
+            import base64, json, os, pathlib, subprocess, urllib.parse
+            root = pathlib.Path('/etc/silicon-dm')
+            app = json.loads((root / 'app.json').read_text())
+            required = ['DM_IAM_APP_ID', 'DM_IAM_APP_SECRET', 'DM_IAM_WEBHOOK_SECRET',
+                        'DM_GIPHY_API_KEY', 'DM_TEST_KEY_ENCRYPTION_KEY',
+                        'DM_RUNTIME_DATABASE_PASSWORD', 'DM_TEST_DATABASE_PASSWORD']
+            for key in required:
+                value = app.get(key)
+                if not isinstance(value, str) or not value.strip() or any(c in value for c in '\r\n\x00'):
+                    raise SystemExit('Missing or invalid Secrets Manager field: ' + key)
+                if value.startswith('REPLACE_'):
+                    raise SystemExit('Incomplete Secrets Manager field: ' + key)
+            try:
+                key_bytes = base64.b64decode(app['DM_TEST_KEY_ENCRYPTION_KEY'], validate=True)
+            except ValueError:
+                raise SystemExit('DM_TEST_KEY_ENCRYPTION_KEY is not valid base64') from None
+            if len(key_bytes) != 32:
+                raise SystemExit('DM_TEST_KEY_ENCRYPTION_KEY must encode 32 bytes')
+            version = app.get('DM_IAM_WEBHOOK_KEY_VERSION')
+            if type(version) is not int or version < 1:
+                raise SystemExit('DM_IAM_WEBHOOK_KEY_VERSION must be a positive integer')
+            ca = '/opt/silicon-dm/aws-rds-global-bundle.pem'
+            ssl = 'sslmode=verify-full&sslrootcert=' + ca
+            
+            def database_url(user, password, host, database):
+                return 'postgresql://' + urllib.parse.quote(user, safe='') + ':' + urllib.parse.quote(password, safe='') + '@' + host + ':5432/' + database + '?' + ssl
+            
+            def write_env(filename, values):
+                path = root / filename
+                path.write_text(''.join(k + '=' + str(v) + '\n' for k, v in values.items()))
+                path.chmod(0o600)
+            
+            def configure_database(master_file, host, database, role, password, testing=False):
+                credentials = json.loads((root / master_file).read_text())
+                environment = dict(os.environ, PGHOST=host, PGPORT='5432', PGDATABASE=database,
+                    PGUSER=credentials['username'], PGPASSWORD=credentials['password'],
+                    PGSSLMODE='verify-full', PGSSLROOTCERT=ca, DM_ROLE_PASSWORD=password)
+                # RDS reports available before the template can launch this instance. A
+                # real authenticated TLS query proves readiness, unlike pg_isready alone.
+                subprocess.run(['psql', '-X', '--set', 'ON_ERROR_STOP=1', '--command', 'SELECT 1'],
+                               env=environment, check=True)
+                sql = r"""\getenv role_password DM_ROLE_PASSWORD
+            BEGIN;
+            DO $roles$
+            BEGIN
+              IF pg_catalog.to_regrole('%s') IS NULL THEN
+                CREATE ROLE %s LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT NOBYPASSRLS;
+              END IF;
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '%s'
+                  AND rolcanlogin
+                  AND NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls OR rolinherit)
+              ) THEN
+                RAISE EXCEPTION 'DM database role does not have the required restricted attributes';
+              END IF;
+            END;
+            $roles$;
+            ALTER ROLE %s PASSWORD :'role_password';
+            REVOKE ALL ON DATABASE %s FROM PUBLIC;
+            GRANT CONNECT ON DATABASE %s TO %s;
+            REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+            """ % (role, role, role, role, database, database, role)
+                if testing:
+                    sql += 'GRANT CREATE ON DATABASE ' + database + ' TO ' + role + ';\n'
+                sql += 'COMMIT;\n'
+                subprocess.run(['psql', '-X', '--set', 'ON_ERROR_STOP=1'], input=sql, text=True,
+                               env=environment, check=True)
+                if not testing:
+                    write_env('migration.env', {
+                        'DM_ENVIRONMENT': 'production',
+                        'DM_DATABASE_URL': database_url(credentials['username'], credentials['password'], host, database),
+                        'DM_DATABASE_MAX_CONNECTIONS': 2,
+                        'DM_DATABASE_ACQUIRE_TIMEOUT_SECONDS': 15,
+                        'DM_DATABASE_STATEMENT_TIMEOUT_SECONDS': 300,
+                        'DM_LOG_FILTER': 'silicon_dm=info',
+                    })
+                    subprocess.run(['docker', 'run', '--rm', '--read-only', '--cap-drop', 'ALL',
+                        '--security-opt', 'no-new-privileges', '--tmpfs', '/tmp:size=16m,mode=1777',
+                        '--volume', ca + ':' + ca + ':ro', '--env-file', str(root / 'migration.env'),
+                        os.environ['BACKEND_IMAGE'], 'dm-migrate'], check=True)
+                    subprocess.run(['psql', '-X', '--set', 'ON_ERROR_STOP=1', '--set', 'runtime_role=' + role,
+                                    '--file', '/opt/silicon-dm/runtime-grants.sql'], env=environment, check=True)
+            
+            configure_database('master.json', os.environ['DB_HOST'], 'silicon_dm', 'dm_runtime', app['DM_RUNTIME_DATABASE_PASSWORD'])
+            # Test schemas migrate lazily through their isolated environment lifecycle.
+            configure_database('test-master.json', os.environ['TEST_DB_HOST'], 'silicon_dm_test', 'dm_testing', app['DM_TEST_DATABASE_PASSWORD'], testing=True)
+            values = {
+                'DM_ENVIRONMENT': 'production',
+                'DM_BIND_ADDR': '0.0.0.0:8080',
+                'DM_PUBLIC_BASE_URL': 'https://' + os.environ['PUBLIC_HOST'] + '/api/v1',
+                'DM_DATABASE_URL': database_url('dm_runtime', app['DM_RUNTIME_DATABASE_PASSWORD'], os.environ['DB_HOST'], 'silicon_dm'),
+                'DM_TEST_DATABASE_URL': database_url('dm_testing', app['DM_TEST_DATABASE_PASSWORD'], os.environ['TEST_DB_HOST'], 'silicon_dm_test'),
+                'DM_DATABASE_MAX_CONNECTIONS': 16,
+                'DM_DATABASE_MIN_CONNECTIONS': 1,
+                'DM_TEST_DATABASE_MAX_CONNECTIONS': 4,
+                'DM_DATABASE_ACQUIRE_TIMEOUT_SECONDS': 10,
+                'DM_DATABASE_STATEMENT_TIMEOUT_SECONDS': 60,
+                'DM_REQUEST_TIMEOUT_SECONDS': 120,
+                'DM_SHUTDOWN_TIMEOUT_SECONDS': 130,
+                'DM_MAX_HTTP_BODY_BYTES': 134217728,
+                'DM_IAM_BASE_URL': os.environ['IAM_BASE_URL'],
+                'DM_IAM_APP_ID': app['DM_IAM_APP_ID'],
+                'DM_IAM_APP_SECRET': app['DM_IAM_APP_SECRET'],
+                'DM_IAM_WEBHOOK_SECRET': app['DM_IAM_WEBHOOK_SECRET'],
+                'DM_IAM_WEBHOOK_KEY_VERSION': version,
+                'DM_TEST_KEY_ENCRYPTION_KEY': app['DM_TEST_KEY_ENCRYPTION_KEY'],
+                'DM_GIPHY_API_KEY': app['DM_GIPHY_API_KEY'],
+                'DM_LOG_FILTER': 'info,silicon_dm=info',
+            }
+            write_env('api.env', values)
+            values['DM_DATABASE_MAX_CONNECTIONS'] = 4
+            write_env('worker.env', values)
+            PYTHON
+            
+            for component in api worker; do
+              port_option=''
+              if [ "$component" = api ]; then port_option='--publish 8080:8080'; fi
+              cat > "/etc/systemd/system/silicon-dm-$component.service" <<UNIT
+            [Unit]
+            Description=Silicon DM production $component
+            Requires=docker.service silicon-dm-container-network.service
+            After=docker.service network-online.target silicon-dm-container-network.service
+            [Service]
+            Restart=always
+            RestartSec=5
+            TimeoutStopSec=145
+            ExecStartPre=-/usr/bin/docker rm -f silicon-dm-$component
+            ExecStart=/usr/bin/docker run --name silicon-dm-$component $port_option --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=16m,mode=1777 --volume /opt/silicon-dm/aws-rds-global-bundle.pem:/opt/silicon-dm/aws-rds-global-bundle.pem:ro --env-file /etc/silicon-dm/$component.env --log-driver awslogs --log-opt awslogs-region=$AWS_DEFAULT_REGION --log-opt awslogs-group=/silicon-dm/production/$component --log-opt tag=$component "$BACKEND_IMAGE" dm-$component
+            ExecStop=/usr/bin/docker stop --time 135 silicon-dm-$component
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+            done
+            systemctl daemon-reload
+            systemctl enable --now silicon-dm-container-network silicon-dm-api silicon-dm-worker
+            for attempt in $(seq 1 120); do
+              if [ "$(curl --silent --max-time 5 --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8080/ready)" = 204 ] \
+                && systemctl is-active --quiet silicon-dm-worker; then
+                exit 0
+              fi
+              sleep 2
+            done
+            echo 'DM failed its local readiness check.' >&2
+            exit 1
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - ApiListenerRule
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT20M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT20M
+        WaitOnResourceSignals: true
+    Properties:
+      AutoScalingGroupName: silicon-dm-production
+      MinSize: "1"
+      MaxSize: "2"
+      DesiredCapacity: "1"
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref ApiTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 1200
+      NewInstancesProtectedFromScaleIn: false
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: production
+          PropagateAtLaunch: true
+
+Outputs:
+  TestingDatabaseEndpoint:
+    Value: !GetAtt TestingDatabase.Endpoint.Address
+  TestingDatabaseSecretArn:
+    Value: !GetAtt TestingDatabase.MasterUserSecret.SecretArn
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  DatabaseSecretArn:
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
+  ApiTargetGroupArn:
+    Value: !Ref ApiTargetGroup
+  PublicHostName:
+    Value: !Ref PublicHostName
+  WebhookUrl:
+    Value: !Sub https://${PublicHostName}/webhook/
+  LoadBalancerDnsName:
+    Value: !GetAtt LoadBalancer.DNSName
+  LoadBalancerArn:
+    Value: !Ref LoadBalancer
+  CertificateArn:
+    Value: !Ref CertificateArn

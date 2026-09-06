@@ -3,14 +3,21 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use dashmap::DashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
-use crate::domain::{ActorRef, OrganizationId};
+use crate::domain::{ActorId, ActorRef, OrganizationId};
 
-use super::ServerFrame;
+/// Small wakeup hint; the durable stream owns the actual message payload.
+#[derive(Clone, Debug)]
+pub struct DeliveryWakeup {
+    /// Actor whose stream advanced.
+    pub actor_id: ActorId,
+    /// Highest position observed by this wakeup.
+    pub sequence: i64,
+}
 
-type ActorConnections = DashMap<Uuid, mpsc::Sender<Arc<ServerFrame>>>;
+type ActorConnections = DashMap<Uuid, mpsc::Sender<Arc<DeliveryWakeup>>>;
 
 /// Fully scoped destination for one represented actor stream.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -25,13 +32,15 @@ pub struct RealtimeTarget {
 #[derive(Clone, Default)]
 pub struct RealtimeHub {
     actors: Arc<DashMap<RealtimeTarget, Arc<ActorConnections>>>,
+    authorization: watch::Sender<u64>,
+    disconnect: watch::Sender<Option<String>>,
 }
 
 /// One connection registration and its bounded outbound queue.
 pub struct HubRegistration {
     connection_id: Uuid,
     targets: Vec<RealtimeTarget>,
-    receiver: mpsc::Receiver<Arc<ServerFrame>>,
+    receiver: mpsc::Receiver<Arc<DeliveryWakeup>>,
     hub: RealtimeHub,
 }
 
@@ -49,6 +58,27 @@ pub struct PublishReport {
 }
 
 impl RealtimeHub {
+    /// Asks every local socket to revalidate its own token with IAM immediately.
+    pub fn invalidate_authorization(&self) {
+        self.authorization
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    /// Closes all current sockets when a testing environment changes lifecycle.
+    pub fn disconnect_all(&self, reason: &str) {
+        self.disconnect.send_replace(Some(reason.to_owned()));
+    }
+
+    /// Subscribes to authorization revalidation requests for this data plane.
+    pub(crate) fn authorization_changes(&self) -> watch::Receiver<u64> {
+        self.authorization.subscribe()
+    }
+
+    /// Subscribes to forced connection closure for this data plane.
+    pub(crate) fn disconnects(&self) -> watch::Receiver<Option<String>> {
+        self.disconnect.subscribe()
+    }
+
     /// Registers a bounded connection for one or more IAM-authorized actors.
     ///
     /// Duplicate actor IDs are canonicalized. Callers must keep the returned
@@ -92,12 +122,12 @@ impl RealtimeHub {
         }
     }
 
-    /// Attempts immediate delivery to every local connection for an actor.
+    /// Wakes every local connection without retaining message content.
     ///
     /// Saturation is intentionally non-blocking: the durable actor stream
     /// remains authoritative and the session will replay the frame.
     #[must_use]
-    pub fn publish(&self, target: &RealtimeTarget, frame: &ServerFrame) -> PublishReport {
+    pub fn publish(&self, target: &RealtimeTarget, frame: &DeliveryWakeup) -> PublishReport {
         let mut report = PublishReport::default();
         let Some(connections) = self.actors.get(target).map(|entry| entry.clone()) else {
             return report;
@@ -168,8 +198,8 @@ impl HubRegistration {
         &self.targets
     }
 
-    /// Receives the next frame accepted by this connection's local queue.
-    pub async fn recv(&mut self) -> Option<Arc<ServerFrame>> {
+    /// Receives the next wakeup accepted by this connection's local queue.
+    pub async fn recv(&mut self) -> Option<Arc<DeliveryWakeup>> {
         self.receiver.recv().await
     }
 }
@@ -187,7 +217,7 @@ mod tests {
     use super::RealtimeHub;
     use crate::{
         domain::{ActorRef, ActorType},
-        realtime::ServerFrame,
+        realtime::DeliveryWakeup,
     };
 
     fn target() -> Result<super::RealtimeTarget, Box<dyn std::error::Error>> {
@@ -207,8 +237,9 @@ mod tests {
         let capacity = NonZeroUsize::new(2).ok_or("test capacity must be non-zero")?;
         let mut first = hub.register([actor.clone()], capacity);
         let mut second = hub.register([actor.clone()], capacity);
-        let frame = ServerFrame::Ping {
-            ping_id: "p-1".to_owned(),
+        let frame = DeliveryWakeup {
+            actor_id: actor.actor.id.clone(),
+            sequence: 1,
         };
 
         let report = hub.publish(&actor, &frame);
@@ -228,8 +259,9 @@ mod tests {
         actor.actor.id = "silicon-1".parse()?;
         let capacity = NonZeroUsize::new(1).ok_or("test capacity must be non-zero")?;
         let _registration = hub.register([actor.clone()], capacity);
-        let frame = ServerFrame::Ping {
-            ping_id: "p-1".to_owned(),
+        let frame = DeliveryWakeup {
+            actor_id: actor.actor.id.clone(),
+            sequence: 1,
         };
 
         assert_eq!(hub.publish(&actor, &frame).enqueued, 1);

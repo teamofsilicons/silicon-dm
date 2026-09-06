@@ -2,7 +2,12 @@
 !Cargo.toml
 !Cargo.lock
 !rust-toolchain.toml
+!build.rs
 !migrations/
 !migrations/**
 !src/
 !src/**
+!crates/
+!crates/**
+!docs/
+!docs/**

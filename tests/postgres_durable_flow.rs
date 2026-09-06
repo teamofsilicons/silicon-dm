@@ -61,7 +61,22 @@ impl TestDatabase {
         };
         let store = PostgresStore::connect(&settings).await?;
         assert!(store.readiness().await.is_err());
-        MIGRATOR.run_to(3, store.pool()).await?;
+        // Seed the legacy schema using the same public migration journal as
+        // PostgresStore::migrate, then return the connection to its DM scope.
+        let mut migration_connection = store.pool().acquire().await?;
+        sqlx::query("SET search_path = public")
+            .execute(&mut *migration_connection)
+            .await?;
+        let seeded = MIGRATOR.run_to(3, &mut *migration_connection).await;
+        let restored = sqlx::query("SET search_path = dm")
+            .execute(&mut *migration_connection)
+            .await;
+        if restored.is_err() {
+            migration_connection.close_on_drop();
+        }
+        seeded?;
+        restored?;
+        drop(migration_connection);
         exercise_product_contract_upgrade(&store).await?;
         store.readiness().await?;
         Ok(Self {
@@ -868,6 +883,8 @@ async fn exercise_voice_draft_and_message(
     };
     let transcript = "client supplied transcript".to_owned();
     let draft_input = DraftInput {
+        metadata: serde_json::Map::new(),
+        reply_to_message_id: None,
         message_content: None,
         attachments: Vec::new(),
         voice: Some(voice.clone()),
@@ -901,6 +918,8 @@ async fn exercise_voice_draft_and_message(
             conversation_id,
             sender: scope.sender.clone(),
             content: MessageCreate {
+                metadata: serde_json::Map::new(),
+                reply_to_message_id: None,
                 sender_id: None,
                 text: None,
                 attachments: Vec::new(),
@@ -984,18 +1003,25 @@ async fn exercise_monotonic_receipts(
     let sender_deliveries = store
         .replay_deliveries(&scope.organization_id, &scope.sender, 0, 10)
         .await?;
-    assert_eq!(sender_deliveries.len(), 2);
+    // The original message is copied to sender devices before its two receipts.
+    // The voice-message exercise runs after this receipt exercise.
+    assert_eq!(sender_deliveries.len(), 3);
     assert_eq!(sender_deliveries[0].sequence, 1);
     assert_eq!(sender_deliveries[1].sequence, 2);
+    assert_eq!(sender_deliveries[2].sequence, 3);
     assert!(matches!(
         &sender_deliveries[0].payload,
+        DeliveryPayload::Message { message: original } if original.id == message.id
+    ));
+    assert!(matches!(
+        &sender_deliveries[1].payload,
         DeliveryPayload::Receipt {
             message_id,
             status: MessageStatus::Delivered,
         } if *message_id == message.id
     ));
     assert!(matches!(
-        &sender_deliveries[1].payload,
+        &sender_deliveries[2].payload,
         DeliveryPayload::Receipt {
             message_id,
             status: MessageStatus::Read,

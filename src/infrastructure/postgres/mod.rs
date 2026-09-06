@@ -5,15 +5,17 @@ mod conversations;
 mod delivery;
 mod directory;
 mod drafts;
+mod iam_directory;
 mod idempotency;
 mod messages;
 mod presence;
+mod revisions;
 mod rows;
 
 use std::time::Duration;
 
 use secrecy::ExposeSecret as _;
-use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
+use sqlx::{Connection as _, PgPool, migrate::Migrator, postgres::PgPoolOptions};
 
 use crate::{
     AppError, AppResult,
@@ -22,7 +24,7 @@ use crate::{
 
 pub use delivery::DeliveryClaim;
 
-static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+pub(crate) static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// Cloneable PostgreSQL-backed DM store.
 #[derive(Clone)]
@@ -38,13 +40,43 @@ impl PostgresStore {
     /// Returns a redacted database error when the pool cannot connect or apply
     /// its statement deadline.
     pub async fn connect(settings: &DatabaseSettings) -> AppResult<Self> {
+        Self::connect_schema(settings, "dm").await
+    }
+
+    /// Opens a pool whose every connection is permanently scoped to a trusted schema.
+    ///
+    /// # Errors
+    /// Returns invalid-schema validation errors or redacted database connection errors.
+    pub async fn connect_schema(settings: &DatabaseSettings, schema: &str) -> AppResult<Self> {
+        if schema.is_empty()
+            || schema.len() > 63
+            || !schema
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(AppError::validation("invalid database schema"));
+        }
+        let schema = schema.to_owned();
         let statement_timeout = settings.statement_timeout;
         let pool = PgPoolOptions::new()
             .max_connections(settings.max_connections.get())
             .min_connections(settings.min_connections)
             .acquire_timeout(settings.acquire_timeout)
-            .after_connect(move |connection, _metadata| {
+            .after_release(|connection, _metadata| {
                 Box::pin(async move {
+                    // A 100 MB result must not permanently enlarge every pooled
+                    // connection's read/write buffers after the request ends.
+                    connection.shrink_buffers();
+                    Ok(true)
+                })
+            })
+            .after_connect(move |connection, _metadata| {
+                let schema = schema.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT set_config('search_path', $1, false)")
+                        .bind(schema)
+                        .execute(&mut *connection)
+                        .await?;
                     let timeout = duration_as_postgres_milliseconds(statement_timeout);
                     sqlx::query("SELECT set_config('statement_timeout', $1, false)")
                         .bind(timeout)
@@ -65,9 +97,28 @@ impl PostgresStore {
     ///
     /// Returns a migration failure without exposing the connection URL.
     pub async fn migrate(&self) -> AppResult<()> {
-        MIGRATOR.run(&self.pool).await.map_err(|error| {
+        // The migration journal always lives in public, independent of the data
+        // schema selected by ordinary query pools. This preserves existing installs.
+        let mut connection = self.pool.acquire().await?;
+        let old_path: String = sqlx::query_scalar("SHOW search_path")
+            .fetch_one(&mut *connection)
+            .await?;
+        sqlx::query("SELECT set_config('search_path', 'public', false)")
+            .execute(&mut *connection)
+            .await?;
+        let migration_result = MIGRATOR.run(&mut *connection).await;
+        let restore_result = sqlx::query("SELECT set_config('search_path', $1, false)")
+            .bind(old_path)
+            .execute(&mut *connection)
+            .await;
+        if restore_result.is_err() {
+            connection.close_on_drop();
+        }
+        migration_result.map_err(|error| {
             AppError::internal(anyhow::anyhow!("database migration failed: {error}"))
-        })
+        })?;
+        restore_result?;
+        Ok(())
     }
 
     /// Opens a migration-only pool and applies embedded migrations.
@@ -125,7 +176,7 @@ impl PostgresStore {
                 )));
             }
         }
-        sqlx::query("SELECT 1 FROM dm.organization_snapshots LIMIT 0")
+        sqlx::query("SELECT 1 FROM organization_snapshots LIMIT 0")
             .execute(&self.pool)
             .await
             .map(|_| ())

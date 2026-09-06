@@ -19,7 +19,10 @@ use super::{
     directory::refresh_directory_in,
     idempotency::{IdempotencyClaim, IdempotencyResult, claim, complete, request_hash},
     map_constraint_error,
-    rows::{MessageRecord, parse_actor_id, parse_actor_type, parse_message_status, parse_url},
+    rows::{
+        MESSAGE_PAGE_BYTE_BUDGET, message_payload_bytes, parse_actor_id, parse_actor_type,
+        parse_message_status, parse_url,
+    },
 };
 
 const SEND_MESSAGE_OPERATION: &str = "messages.create";
@@ -101,22 +104,12 @@ impl PostgresStore {
             ));
         }
         let before_sequence = cursor.as_ref().and_then(Cursor::sequence);
-        let records = sqlx::query_as::<_, MessageRecord>(
+        // Fetch only positions before choosing a byte-bounded payload page.
+        // A lookahead row must never hydrate another maximum-size message.
+        let ids = sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT
-                message.id,
-                message.conversation_id,
-                message.sender_kind::text AS sender_kind,
-                message.sender_id,
-                message.sequence,
-                message.status::text AS status,
-                message.text_content,
-                message.voice_transcript,
-                message.failure_reason,
-                message.created_at,
-                message.delivered_at,
-                message.read_at
-            FROM dm.messages AS message
+            SELECT message.id
+            FROM messages AS message
             WHERE message.conversation_id = $1
               AND message.organization_id = $2
               AND ($3::bigint IS NULL OR message.sequence < $3)
@@ -124,7 +117,7 @@ impl PostgresStore {
                     $4
                     OR NOT EXISTS (
                         SELECT 1
-                        FROM dm.message_bundle_items AS bundle_item
+                        FROM message_bundle_items AS bundle_item
                         WHERE bundle_item.message_id = message.id
                           AND bundle_item.role = 'member'
                     )
@@ -140,13 +133,21 @@ impl PostgresStore {
         .bind(i64::from(limit) + 1)
         .fetch_all(self.pool())
         .await?;
-        let has_next = records.len() > usize::from(limit);
-        let records = records
-            .into_iter()
-            .take(usize::from(limit))
-            .collect::<Vec<_>>();
-        let ids = records.iter().map(|record| record.id).collect::<Vec<_>>();
-        let items = self.hydrate_messages(records, &ids).await?;
+        let mut items = Vec::with_capacity(usize::from(limit).min(ids.len()));
+        let mut payload_bytes: usize = 0;
+        for id in ids.iter().take(usize::from(limit)) {
+            let message = self.load_message(*id).await?;
+            let bytes = message_payload_bytes(&message)?;
+            if !items.is_empty() && payload_bytes.saturating_add(bytes) > MESSAGE_PAGE_BYTE_BUDGET {
+                break;
+            }
+            payload_bytes = payload_bytes.saturating_add(bytes);
+            items.push(message);
+            if payload_bytes >= MESSAGE_PAGE_BYTE_BUDGET {
+                break;
+            }
+        }
+        let has_next = items.len() < ids.len();
         let next_cursor = if has_next {
             items
                 .last()
@@ -238,15 +239,15 @@ impl PostgresStore {
                 .await?;
                 let matching_draft = sqlx::query(
                     r#"
-                    UPDATE dm.drafts
+                    UPDATE drafts
                     SET version = version + 1,
-                        content_hash_version = 2
+                        content_hash_version = 3
                     WHERE conversation_id = $1
                       AND organization_id = $2
-                      AND actor_kind = $3::text::dm.actor_kind
+                      AND actor_kind = $3::text::actor_kind
                       AND actor_id = $4
                       AND (
-                            (content_hash_version = 2 AND content_hash = $5)
+                            (content_hash_version IN (2, 3) AND content_hash = $5)
                             OR (content_hash_version = 1 AND content_hash = $6)
                       )
                     "#,
@@ -256,17 +257,25 @@ impl PostgresStore {
                 .bind(command.sender.actor_type.as_str())
                 .bind(command.sender.id.as_str())
                 .bind(content_hash.as_bytes().as_slice())
-                .bind(legacy_content_hash.as_bytes().as_slice())
+                .bind(
+                    if command.content.metadata.is_empty()
+                        && command.content.reply_to_message_id.is_none()
+                    {
+                        Some(legacy_content_hash.as_bytes().as_slice())
+                    } else {
+                        None
+                    },
+                )
                 .execute(&mut *transaction)
                 .await
                 .map_err(map_constraint_error)?;
                 if matching_draft.rows_affected() == 1 {
                     sqlx::query(
                         r#"
-                        DELETE FROM dm.draft_attachments
+                        DELETE FROM draft_attachments
                         WHERE conversation_id = $1
                           AND organization_id = $2
-                          AND actor_kind = $3::text::dm.actor_kind
+                          AND actor_kind = $3::text::actor_kind
                           AND actor_id = $4
                         "#,
                     )
@@ -279,10 +288,10 @@ impl PostgresStore {
                     .map_err(map_constraint_error)?;
                     sqlx::query(
                         r#"
-                        DELETE FROM dm.draft_gifs
+                        DELETE FROM draft_gifs
                         WHERE conversation_id = $1
                           AND organization_id = $2
-                          AND actor_kind = $3::text::dm.actor_kind
+                          AND actor_kind = $3::text::actor_kind
                           AND actor_id = $4
                         "#,
                     )
@@ -295,10 +304,10 @@ impl PostgresStore {
                     .map_err(map_constraint_error)?;
                     sqlx::query(
                         r#"
-                        DELETE FROM dm.drafts
+                        DELETE FROM drafts
                         WHERE conversation_id = $1
                           AND organization_id = $2
-                          AND actor_kind = $3::text::dm.actor_kind
+                          AND actor_kind = $3::text::actor_kind
                           AND actor_id = $4
                         "#,
                     )
@@ -327,6 +336,7 @@ impl PostgresStore {
             }
         };
         transaction.commit().await.map_err(map_constraint_error)?;
+        drop(command);
         self.load_message(message_id).await
     }
 
@@ -342,6 +352,23 @@ impl PostgresStore {
         reason = "device receipt normalization and aggregate-status outbox transition must be inspected atomically"
     )]
     pub async fn record_receipt(&self, command: RecordReceiptCommand) -> AppResult<Message> {
+        let message_id = command.message_id;
+        self.record_receipt_without_payload(command).await?;
+        self.load_message(message_id).await
+    }
+
+    /// Records a receipt when the caller only needs the acknowledged position.
+    ///
+    /// # Errors
+    /// Returns the same validation and storage failures as `record_receipt`.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "receipt persistence and aggregate-status transition are atomic"
+    )]
+    pub async fn record_receipt_without_payload(
+        &self,
+        command: RecordReceiptCommand,
+    ) -> AppResult<()> {
         validate_device_id(&command.device_id)?;
         let mut transaction = self.pool().begin().await?;
         refresh_directory_in(
@@ -363,7 +390,7 @@ impl PostgresStore {
                 sender_kind::text AS sender_kind,
                 sender_id,
                 status::text AS status
-            FROM dm.messages
+            FROM messages
             WHERE id = $1 AND conversation_id = $2 AND organization_id = $3
             FOR UPDATE
             "#,
@@ -387,9 +414,9 @@ impl PostgresStore {
         let existing = sqlx::query_as::<_, ReceiptRecord>(
             r#"
             SELECT id
-            FROM dm.message_receipts
+            FROM message_receipts
             WHERE message_id = $1
-              AND recipient_kind = $2::text::dm.actor_kind
+              AND recipient_kind = $2::text::actor_kind
               AND recipient_id = $3
               AND device_id = $4
             FOR UPDATE
@@ -407,7 +434,7 @@ impl PostgresStore {
             .map_or_else(Uuid::now_v7, |record| record.id);
         sqlx::query(
             r#"
-            INSERT INTO dm.message_receipts (
+            INSERT INTO message_receipts (
                 id,
                 message_id,
                 conversation_id,
@@ -419,19 +446,19 @@ impl PostgresStore {
                 read_at
             )
             VALUES (
-                $1, $2, $3, $4, $5::text::dm.actor_kind, $6, $7,
-                $8::text::dm.receipt_status,
+                $1, $2, $3, $4, $5::text::actor_kind, $6, $7,
+                $8::text::receipt_status,
                 CASE WHEN $8 = 'read' THEN clock_timestamp() ELSE NULL END
             )
             ON CONFLICT (message_id, recipient_kind, recipient_id, device_id) DO UPDATE
             SET status = CASE
-                    WHEN dm.message_receipts.status = 'read' THEN 'read'
+                    WHEN message_receipts.status = 'read' THEN 'read'
                     ELSE EXCLUDED.status
                 END,
                 read_at = CASE
-                    WHEN dm.message_receipts.status = 'read' THEN dm.message_receipts.read_at
+                    WHEN message_receipts.status = 'read' THEN message_receipts.read_at
                     WHEN EXCLUDED.status = 'read' THEN GREATEST(
-                        dm.message_receipts.delivered_at,
+                        message_receipts.delivered_at,
                         clock_timestamp()
                     )
                     ELSE NULL
@@ -453,7 +480,7 @@ impl PostgresStore {
         let aggregate_status = sqlx::query_scalar::<_, String>(
             r#"
             SELECT status::text
-            FROM dm.messages
+            FROM messages
             WHERE id = $1
             "#,
         )
@@ -479,8 +506,7 @@ impl PostgresStore {
             )
             .await?;
         }
-        transaction.commit().await.map_err(map_constraint_error)?;
-        self.load_message(command.message_id).await
+        transaction.commit().await.map_err(map_constraint_error)
     }
 
     /// Returns a Carbon's durable 20-item GIF MRU; Silicons have no history.
@@ -500,7 +526,7 @@ impl PostgresStore {
         let records = sqlx::query_as::<_, RecentGifRecord>(
             r#"
             SELECT provider_id, url, preview_url, title
-            FROM dm.recent_gifs
+            FROM recent_gifs
             WHERE organization_id = $1 AND carbon_id = $2
             ORDER BY last_used_at DESC, provider_id DESC
             LIMIT 20
@@ -544,7 +570,7 @@ pub(crate) async fn insert_message_in(
     let message_id = Uuid::now_v7();
     sqlx::query(
         r#"
-        INSERT INTO dm.messages (
+        INSERT INTO messages (
             id,
             conversation_id,
             organization_id,
@@ -555,11 +581,13 @@ pub(crate) async fn insert_message_in(
             text_content,
             voice_transcript,
             content_hash_version,
-            content_hash
+            content_hash,
+            metadata,
+            reply_to_message_id
         )
         VALUES (
-            $1, $2, $3, $4::text::dm.actor_kind, $5, 1, 'sent', $6, $7,
-            2, $8
+            $1, $2, $3, $4::text::actor_kind, $5, 1, 'sent', $6, $7,
+            3, $8, $9, $10
         )
         "#,
     )
@@ -571,6 +599,8 @@ pub(crate) async fn insert_message_in(
     .bind(&content.text)
     .bind(&content.voice_transcript)
     .bind(content_hash.as_bytes().as_slice())
+    .bind(sqlx::types::Json(&content.metadata))
+    .bind(content.reply_to_message_id)
     .execute(&mut **transaction)
     .await
     .map_err(map_constraint_error)?;
@@ -614,7 +644,7 @@ pub(crate) async fn insert_message_in(
     if let Some(gif) = &content.gif {
         sqlx::query(
             r#"
-            INSERT INTO dm.message_gifs (
+            INSERT INTO message_gifs (
                 message_id,
                 conversation_id,
                 organization_id,
@@ -639,7 +669,7 @@ pub(crate) async fn insert_message_in(
     }
     sqlx::query(
         r#"
-        UPDATE dm.conversations
+        UPDATE conversations
         SET updated_at = transaction_timestamp()
         WHERE id = $1 AND organization_id = $2
         "#,
@@ -656,7 +686,7 @@ pub(crate) async fn enqueue_message_deliveries_in(
     organization_id: &OrganizationId,
     conversation_id: Uuid,
     message_id: Uuid,
-    sender: &ActorRef,
+    _sender: &ActorRef,
 ) -> AppResult<()> {
     let participants =
         participant_records_in(transaction, organization_id, conversation_id).await?;
@@ -665,12 +695,9 @@ pub(crate) async fn enqueue_message_deliveries_in(
             actor_type: parse_actor_type(&participant.actor_kind)?,
             id: parse_actor_id(&participant.actor_id)?,
         };
-        if target == *sender {
-            continue;
-        }
         sqlx::query(
             r#"
-            INSERT INTO dm.actor_deliveries (
+            INSERT INTO actor_deliveries (
                 id,
                 organization_id,
                 target_kind,
@@ -680,7 +707,7 @@ pub(crate) async fn enqueue_message_deliveries_in(
                 conversation_id,
                 message_id
             )
-            VALUES ($1, $2, $3::text::dm.actor_kind, $4, 1, 'message', $5, $6)
+            VALUES ($1, $2, $3::text::actor_kind, $4, 1, 'message', $5, $6)
             ON CONFLICT DO NOTHING
             "#,
         )
@@ -716,7 +743,7 @@ async fn insert_attachment_in(
         .map_err(|_| AppError::validation("voice duration exceeds supported range"))?;
     sqlx::query(
         r#"
-        INSERT INTO dm.message_attachments (
+        INSERT INTO message_attachments (
             message_id,
             conversation_id,
             organization_id,
@@ -728,7 +755,7 @@ async fn insert_attachment_in(
             declared_size_bytes,
             duration_milliseconds
         )
-        VALUES ($1, $2, $3, $4, $5::text::dm.attachment_kind, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5::text::attachment_kind, $6, $7, $8, $9, $10)
         "#,
     )
     .bind(input.message_id)
@@ -762,7 +789,7 @@ async fn update_recent_gif_in(
     }
     sqlx::query(
         r#"
-        INSERT INTO dm.recent_gifs (
+        INSERT INTO recent_gifs (
             organization_id,
             carbon_id,
             provider_id,
@@ -804,7 +831,7 @@ async fn enqueue_message_status_delivery_in(
 ) -> AppResult<()> {
     let result = sqlx::query(
         r#"
-        INSERT INTO dm.actor_deliveries (
+        INSERT INTO actor_deliveries (
             id,
             organization_id,
             target_kind,
@@ -816,8 +843,8 @@ async fn enqueue_message_status_delivery_in(
             aggregate_status
         )
         VALUES (
-            $1, $2, $3::text::dm.actor_kind, $4, 'message_status', $5, $6,
-            $7, $8::text::dm.message_status
+            $1, $2, $3::text::actor_kind, $4, 'message_status', $5, $6,
+            $7, $8::text::message_status
         )
         "#,
     )
@@ -864,7 +891,7 @@ async fn participant_records_in(
     sqlx::query_as::<_, ParticipantRecord>(
         r#"
         SELECT actor_kind::text AS actor_kind, actor_id
-        FROM dm.conversation_participants
+        FROM conversation_participants
         WHERE conversation_id = $1 AND organization_id = $2
         ORDER BY actor_kind, actor_id
         "#,
@@ -886,10 +913,10 @@ pub(crate) async fn require_participant_in(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM dm.conversation_participants
+            FROM conversation_participants
             WHERE conversation_id = $1
               AND organization_id = $2
-              AND actor_kind = $3::text::dm.actor_kind
+              AND actor_kind = $3::text::actor_kind
               AND actor_id = $4
         )
         "#,

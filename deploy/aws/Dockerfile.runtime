@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1.7
+ARG BACKEND_IMAGE
+FROM debian:bookworm-slim AS certificates
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates curl \
+    && curl --fail --silent --show-error --location --retry 3 \
+       https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+       --output /aws-rds-global-bundle.pem \
+    && chmod 0644 /aws-rds-global-bundle.pem
+FROM ${BACKEND_IMAGE}
+COPY --from=certificates /aws-rds-global-bundle.pem /opt/silicon-dm/aws-rds-global-bundle.pem
+USER 10001:10001

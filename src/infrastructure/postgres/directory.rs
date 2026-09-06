@@ -37,7 +37,7 @@ pub(crate) async fn refresh_directory_in(
 ) -> AppResult<()> {
     sqlx::query(
         r#"
-        INSERT INTO dm.organization_snapshots (
+        INSERT INTO organization_snapshots (
             organization_id,
             status,
             iam_version,
@@ -45,9 +45,8 @@ pub(crate) async fn refresh_directory_in(
         )
         VALUES ($1, 'active', 1, clock_timestamp())
         ON CONFLICT (organization_id) DO UPDATE
-        SET status = 'active',
-            refreshed_at = GREATEST(dm.organization_snapshots.refreshed_at, clock_timestamp()),
-            iam_version = GREATEST(dm.organization_snapshots.iam_version, EXCLUDED.iam_version)
+        SET refreshed_at = GREATEST(organization_snapshots.refreshed_at, clock_timestamp()),
+            iam_version = GREATEST(organization_snapshots.iam_version, EXCLUDED.iam_version)
         "#,
     )
     .bind(organization_id.as_str())
@@ -58,7 +57,7 @@ pub(crate) async fn refresh_directory_in(
     for actor in actors {
         sqlx::query(
             r#"
-            INSERT INTO dm.actor_snapshots (
+            INSERT INTO actor_snapshots (
                 organization_id,
                 actor_kind,
                 actor_id,
@@ -66,11 +65,10 @@ pub(crate) async fn refresh_directory_in(
                 iam_version,
                 refreshed_at
             )
-            VALUES ($1, $2::text::dm.actor_kind, $3, 'active', 1, clock_timestamp())
+            VALUES ($1, $2::text::actor_kind, $3, 'active', 1, clock_timestamp())
             ON CONFLICT (organization_id, actor_kind, actor_id) DO UPDATE
-            SET status = 'active',
-                refreshed_at = GREATEST(dm.actor_snapshots.refreshed_at, clock_timestamp()),
-                iam_version = GREATEST(dm.actor_snapshots.iam_version, EXCLUDED.iam_version)
+            SET refreshed_at = GREATEST(actor_snapshots.refreshed_at, clock_timestamp()),
+                iam_version = GREATEST(actor_snapshots.iam_version, EXCLUDED.iam_version)
             "#,
         )
         .bind(organization_id.as_str())

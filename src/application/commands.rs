@@ -89,6 +89,19 @@ pub enum PutDraftOutcome {
     Conflict(Draft),
 }
 
+/// Lightweight durable delivery position used to wake local sockets.
+#[derive(Clone, Debug)]
+pub struct DeliveryNotice {
+    /// Stable delivery identifier.
+    pub id: Uuid,
+    /// Organization scope.
+    pub organization_id: OrganizationId,
+    /// Target actor.
+    pub target: ActorRef,
+    /// Actor-stream sequence.
+    pub sequence: i64,
+}
+
 /// One replayable actor-delivery row.
 #[derive(Clone, Debug)]
 pub struct ActorDelivery {

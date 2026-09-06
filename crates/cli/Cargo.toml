@@ -1,0 +1,26 @@
+[package]
+name = "silicon-dm-cli"
+version = "0.2.2"
+edition = "2024"
+rust-version = "1.98"
+license = "LicenseRef-Proprietary"
+description = "Silicon DM command line client and durable local relay"
+readme = "README.md"
+repository = "https://github.com/teamofsilicons/silicon-dm"
+
+[[bin]]
+name = "dm"
+path = "src/main.rs"
+
+[dependencies]
+silicon-dm-client = { path = "../client", version = "0.2.2", features = ["runtime"] }
+anyhow = "1.0.100"
+blake3 = "1.8.2"
+clap = { version = "4.5", features = ["derive", "env"] }
+libc = "0.2"
+rpassword = "7"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "process", "net"] }
+url = { version = "2.5.7", features = ["serde"] }
+uuid = { version = "1.26.0", features = ["serde", "v4"] }

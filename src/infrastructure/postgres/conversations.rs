@@ -103,14 +103,14 @@ impl PostgresStore {
                 let candidate_id = Uuid::now_v7();
                 let inserted = sqlx::query_scalar::<_, Uuid>(
                     r#"
-                    INSERT INTO dm.conversations (
+                    INSERT INTO conversations (
                         id,
                         organization_id,
                         participant_set_hash,
                         created_by_kind,
                         created_by_id
                     )
-                    VALUES ($1, $2, $3, $4::text::dm.actor_kind, $5)
+                    VALUES ($1, $2, $3, $4::text::actor_kind, $5)
                     ON CONFLICT (organization_id, participant_set_hash) DO NOTHING
                     RETURNING id
                     "#,
@@ -130,7 +130,7 @@ impl PostgresStore {
                     let id = sqlx::query_scalar::<_, Uuid>(
                         r#"
                             SELECT id
-                            FROM dm.conversations
+                            FROM conversations
                             WHERE organization_id = $1
                               AND participant_set_hash = $2
                             "#,
@@ -146,13 +146,13 @@ impl PostgresStore {
                     for participant in &command.participants {
                         sqlx::query(
                             r#"
-                            INSERT INTO dm.conversation_participants (
+                            INSERT INTO conversation_participants (
                                 conversation_id,
                                 organization_id,
                                 actor_kind,
                                 actor_id
                             )
-                            VALUES ($1, $2, $3::text::dm.actor_kind, $4)
+                            VALUES ($1, $2, $3::text::actor_kind, $4)
                             "#,
                         )
                         .bind(conversation_id)
@@ -222,8 +222,8 @@ impl PostgresStore {
                 conversation.organization_id,
                 (
                     SELECT message.id
-                    FROM dm.messages AS message
-                    LEFT JOIN dm.message_bundle_items AS bundle_item
+                    FROM messages AS message
+                    LEFT JOIN message_bundle_items AS bundle_item
                       ON bundle_item.message_id = message.id
                     WHERE message.conversation_id = conversation.id
                       AND (bundle_item.role IS NULL OR bundle_item.role = 'display')
@@ -232,12 +232,12 @@ impl PostgresStore {
                 ) AS last_message_id,
                 conversation.created_at,
                 conversation.updated_at
-            FROM dm.conversations AS conversation
-            JOIN dm.conversation_participants AS participant
+            FROM conversations AS conversation
+            JOIN conversation_participants AS participant
               ON participant.conversation_id = conversation.id
              AND participant.organization_id = conversation.organization_id
             WHERE conversation.organization_id = $1
-              AND participant.actor_kind = $2::text::dm.actor_kind
+              AND participant.actor_kind = $2::text::actor_kind
               AND participant.actor_id = $3
               AND (
                     $4::timestamptz IS NULL
@@ -276,8 +276,8 @@ impl PostgresStore {
                 conversation.organization_id,
                 (
                     SELECT message.id
-                    FROM dm.messages AS message
-                    LEFT JOIN dm.message_bundle_items AS bundle_item
+                    FROM messages AS message
+                    LEFT JOIN message_bundle_items AS bundle_item
                       ON bundle_item.message_id = message.id
                     WHERE message.conversation_id = conversation.id
                       AND (bundle_item.role IS NULL OR bundle_item.role = 'display')
@@ -286,13 +286,13 @@ impl PostgresStore {
                 ) AS last_message_id,
                 conversation.created_at,
                 conversation.updated_at
-            FROM dm.conversations AS conversation
-            JOIN dm.conversation_participants AS participant
+            FROM conversations AS conversation
+            JOIN conversation_participants AS participant
               ON participant.conversation_id = conversation.id
              AND participant.organization_id = conversation.organization_id
             WHERE conversation.id = $1
               AND conversation.organization_id = $2
-              AND participant.actor_kind = $3::text::dm.actor_kind
+              AND participant.actor_kind = $3::text::actor_kind
               AND participant.actor_id = $4
             "#,
         )
@@ -324,10 +324,10 @@ impl PostgresStore {
             r#"
             SELECT EXISTS (
                 SELECT 1
-                FROM dm.conversation_participants
+                FROM conversation_participants
                 WHERE conversation_id = $1
                   AND organization_id = $2
-                  AND actor_kind = $3::text::dm.actor_kind
+                  AND actor_kind = $3::text::actor_kind
                   AND actor_id = $4
             )
             "#,
@@ -350,7 +350,8 @@ impl PostgresStore {
         mut records: Vec<ConversationRecord>,
         limit: u16,
     ) -> AppResult<ConversationPage> {
-        let has_next = records.len() > usize::from(limit);
+        let total_records = records.len();
+        let has_next = total_records > usize::from(limit);
         if has_next {
             records.truncate(usize::from(limit));
         }
@@ -361,7 +362,7 @@ impl PostgresStore {
             sqlx::query_as::<_, ParticipantRecord>(
                 r#"
                 SELECT conversation_id, actor_kind::text AS actor_kind, actor_id
-                FROM dm.conversation_participants
+                FROM conversation_participants
                 WHERE conversation_id = ANY($1)
                 ORDER BY conversation_id, actor_kind, actor_id
                 "#,
@@ -378,17 +379,25 @@ impl PostgresStore {
                 .or_default()
                 .push(map_participant(&record)?);
         }
-        let message_ids = records
-            .iter()
-            .filter_map(|record| record.last_message_id)
-            .collect::<Vec<_>>();
-        let messages = self.load_messages(&message_ids).await?;
-        let messages_by_id = messages
-            .into_iter()
-            .map(|message| (message.id, message))
-            .collect::<HashMap<_, _>>();
         let mut items = Vec::with_capacity(records.len());
+        let mut payload_bytes: usize = 0;
         for record in &records {
+            let last_message = match record.last_message_id {
+                Some(id) => Some(self.load_message(id).await?),
+                None => None,
+            };
+            let message_bytes = last_message
+                .as_ref()
+                .map(super::rows::message_payload_bytes)
+                .transpose()?
+                .unwrap_or(0);
+            if !items.is_empty()
+                && payload_bytes.saturating_add(message_bytes)
+                    > super::rows::MESSAGE_PAGE_BYTE_BUDGET
+            {
+                break;
+            }
+            payload_bytes = payload_bytes.saturating_add(message_bytes);
             items.push(Conversation {
                 id: record.id,
                 org_id: record
@@ -396,17 +405,19 @@ impl PostgresStore {
                     .parse()
                     .map_err(|error| super::rows::data_error("organization ID", error))?,
                 participants: participants.remove(&record.id).unwrap_or_default(),
-                last_message: record
-                    .last_message_id
-                    .and_then(|id| messages_by_id.get(&id).cloned()),
+                last_message,
                 created_at: record.created_at,
                 updated_at: record.updated_at,
             });
+            if payload_bytes >= super::rows::MESSAGE_PAGE_BYTE_BUDGET {
+                break;
+            }
         }
+        let has_next = items.len() < total_records;
         let next_cursor = if has_next {
-            records
+            items
                 .last()
-                .map(|record| Cursor::activity("conversations", record.updated_at, record.id))
+                .map(|item| Cursor::activity("conversations", item.updated_at, item.id))
                 .map(|cursor| cursor.encode())
                 .transpose()?
         } else {

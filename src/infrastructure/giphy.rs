@@ -409,8 +409,6 @@ mod tests {
             .await;
 
         let settings = ProviderSettings {
-            briefcase_base_url: "https://briefcase.example/api/v1".parse()?,
-            briefcase_iam_audience: "silicon-briefcase".to_owned(),
             giphy_api_base_url: format!("{}/v1/gifs", server.uri()).parse()?,
             giphy_api_key: SecretString::from("test-key".to_owned()),
             request_timeout: Duration::from_secs(2),

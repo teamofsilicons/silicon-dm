@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     AppError, AppResult,
-    application::commands::ActorDelivery,
+    application::commands::{ActorDelivery, DeliveryNotice},
     domain::{ActorRef, OrganizationId},
     realtime::{DeliveryPayload, RealtimeTarget},
 };
@@ -16,7 +16,10 @@ use crate::{
 use super::{
     PostgresStore, map_constraint_error,
     messages::notify_actor_in,
-    rows::{parse_actor_id, parse_actor_type, parse_message_status},
+    rows::{
+        MESSAGE_PAGE_BYTE_BUDGET, message_payload_bytes, parse_actor_id, parse_actor_type,
+        parse_message_status,
+    },
 };
 
 const ACK_RETENTION_DAYS: i64 = 30;
@@ -26,8 +29,8 @@ const DELIVERY_NOTIFICATION_CHANNEL: &str = "dm_delivery";
 /// One worker-owned delivery claim with its pre-attempt counter.
 #[derive(Clone, Debug)]
 pub struct DeliveryClaim {
-    /// Durable delivery and fully hydrated immutable payload.
-    pub delivery: ActorDelivery,
+    /// Durable position only; payload hydration belongs to socket replay.
+    pub delivery: DeliveryNotice,
     /// Number of prior processing failures.
     pub attempt_count: u16,
 }
@@ -88,9 +91,9 @@ impl PostgresStore {
         let cursor = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT last_acked_sequence
-            FROM dm.actor_delivery_ack_cursors
+            FROM actor_delivery_ack_cursors
             WHERE organization_id = $1
-              AND actor_kind = $2::text::dm.actor_kind
+              AND actor_kind = $2::text::actor_kind
               AND actor_id = $3
               AND consumer_id = $4
             "#,
@@ -143,9 +146,9 @@ impl PostgresStore {
         let next = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT next_sequence
-            FROM dm.actor_delivery_streams
+            FROM actor_delivery_streams
             WHERE organization_id = $1
-              AND actor_kind = $2::text::dm.actor_kind
+              AND actor_kind = $2::text::actor_kind
               AND actor_id = $3
             "#,
         )
@@ -181,12 +184,12 @@ impl PostgresStore {
         let mut transaction = self.pool().begin().await?;
         sqlx::query(
             r#"
-            INSERT INTO dm.actor_delivery_streams (
+            INSERT INTO actor_delivery_streams (
                 organization_id,
                 actor_kind,
                 actor_id
             )
-            VALUES ($1, $2::text::dm.actor_kind, $3)
+            VALUES ($1, $2::text::actor_kind, $3)
             ON CONFLICT DO NOTHING
             "#,
         )
@@ -198,17 +201,17 @@ impl PostgresStore {
         .map_err(map_constraint_error)?;
         sqlx::query(
             r#"
-            INSERT INTO dm.actor_delivery_ack_cursors (
+            INSERT INTO actor_delivery_ack_cursors (
                 organization_id,
                 actor_kind,
                 actor_id,
                 consumer_id,
                 last_acked_sequence
             )
-            VALUES ($1, $2::text::dm.actor_kind, $3, $4, $5)
+            VALUES ($1, $2::text::actor_kind, $3, $4, $5)
             ON CONFLICT (organization_id, actor_kind, actor_id, consumer_id)
             DO UPDATE SET last_acked_sequence = GREATEST(
-                dm.actor_delivery_ack_cursors.last_acked_sequence,
+                actor_delivery_ack_cursors.last_acked_sequence,
                 EXCLUDED.last_acked_sequence
             )
             "#,
@@ -223,10 +226,10 @@ impl PostgresStore {
         .map_err(map_constraint_error)?;
         sqlx::query(
             r#"
-            UPDATE dm.actor_delivery_streams
+            UPDATE actor_delivery_streams
             SET last_acked_sequence = GREATEST(last_acked_sequence, $4)
             WHERE organization_id = $1
-              AND actor_kind = $2::text::dm.actor_kind
+              AND actor_kind = $2::text::actor_kind
               AND actor_id = $3
             "#,
         )
@@ -239,7 +242,7 @@ impl PostgresStore {
         .map_err(map_constraint_error)?;
         sqlx::query(
             r#"
-            UPDATE dm.actor_deliveries
+            UPDATE actor_deliveries
             SET acked_at = COALESCE(acked_at, transaction_timestamp()),
                 retain_until = COALESCE(
                     retain_until,
@@ -249,7 +252,7 @@ impl PostgresStore {
                 lease_started_at = NULL,
                 lease_expires_at = NULL
             WHERE organization_id = $1
-              AND target_kind = $2::text::dm.actor_kind
+              AND target_kind = $2::text::actor_kind
               AND target_id = $3
               AND sequence <= $4
               AND dead_lettered_at IS NULL
@@ -298,9 +301,9 @@ impl PostgresStore {
                 message_id,
                 aggregate_status::text AS aggregate_status,
                 attempt_count
-            FROM dm.actor_deliveries
+            FROM actor_deliveries
             WHERE organization_id = $1
-              AND target_kind = $2::text::dm.actor_kind
+              AND target_kind = $2::text::actor_kind
               AND target_id = $3
               AND sequence > $4
               AND dead_lettered_at IS NULL
@@ -346,9 +349,9 @@ impl PostgresStore {
             r#"
             WITH candidates AS (
                 SELECT id
-                FROM dm.actor_deliveries
+                FROM actor_deliveries
                 WHERE organization_id = $1
-                  AND target_kind = $2::text::dm.actor_kind
+                  AND target_kind = $2::text::actor_kind
                   AND target_id = $3
                   AND acked_at IS NULL
                   AND dead_lettered_at IS NULL
@@ -362,7 +365,7 @@ impl PostgresStore {
                 LIMIT $4
                 FOR UPDATE SKIP LOCKED
             )
-            UPDATE dm.actor_deliveries AS delivery
+            UPDATE actor_deliveries AS delivery
             SET lease_owner = $5,
                 lease_started_at = transaction_timestamp(),
                 lease_expires_at = transaction_timestamp()
@@ -392,18 +395,27 @@ impl PostgresStore {
         .map_err(map_constraint_error)?;
         transaction.commit().await.map_err(map_constraint_error)?;
 
-        let deliveries = self.hydrate_delivery_records(records.clone()).await?;
         records
             .into_iter()
-            .zip(deliveries)
-            .map(|(record, delivery)| {
+            .map(|record| {
                 let attempt_count = u16::try_from(record.attempt_count).map_err(|error| {
                     AppError::internal(anyhow::anyhow!(
                         "invalid delivery attempt count loaded from DM database: {error}"
                     ))
                 })?;
                 Ok(DeliveryClaim {
-                    delivery,
+                    delivery: DeliveryNotice {
+                        id: record.id,
+                        organization_id: record
+                            .organization_id
+                            .parse()
+                            .map_err(AppError::internal)?,
+                        target: ActorRef {
+                            actor_type: parse_actor_type(&record.target_kind)?,
+                            id: parse_actor_id(&record.target_id)?,
+                        },
+                        sequence: record.sequence,
+                    },
                     attempt_count,
                 })
             })
@@ -427,7 +439,7 @@ impl PostgresStore {
         validate_error_code(error_code)?;
         let result = sqlx::query(
             r#"
-            UPDATE dm.actor_deliveries
+            UPDATE actor_deliveries
             SET next_attempt_at = $3,
                 attempt_count = attempt_count + CASE WHEN $5 THEN 1 ELSE 0 END,
                 last_attempt_at = CASE
@@ -479,7 +491,7 @@ impl PostgresStore {
         let mut transaction = self.pool().begin().await?;
         let message_id = sqlx::query_scalar::<_, Option<Uuid>>(
             r#"
-            UPDATE dm.actor_deliveries
+            UPDATE actor_deliveries
             SET attempt_count = attempt_count + 1,
                 last_attempt_at = transaction_timestamp(),
                 last_error_code = $3,
@@ -522,7 +534,7 @@ impl PostgresStore {
     pub async fn compact_delivery_state(&self) -> AppResult<u64> {
         let deliveries = sqlx::query(
             r#"
-            DELETE FROM dm.actor_deliveries
+            DELETE FROM actor_deliveries
             WHERE acked_at IS NOT NULL
               AND retain_until <= transaction_timestamp()
             "#,
@@ -533,7 +545,7 @@ impl PostgresStore {
         .rows_affected();
         let idempotency = sqlx::query(
             r#"
-            DELETE FROM dm.idempotency_records
+            DELETE FROM idempotency_records
             WHERE expires_at <= transaction_timestamp()
               AND (
                   status = 'completed'
@@ -553,6 +565,8 @@ impl PostgresStore {
         records: Vec<DeliveryRecord>,
     ) -> AppResult<Vec<ActorDelivery>> {
         let mut deliveries = Vec::with_capacity(records.len());
+        let multiple_records = records.len() > 1;
+        let mut payload_bytes: usize = 0;
         for record in records {
             let organization_id = record.organization_id.parse().map_err(|error| {
                 AppError::internal(anyhow::anyhow!(
@@ -594,6 +608,22 @@ impl PostgresStore {
                     )));
                 }
             };
+            let bytes = if multiple_records {
+                match &payload {
+                    DeliveryPayload::Message { message } => message_payload_bytes(message)?,
+                    DeliveryPayload::Receipt { .. } => 256,
+                }
+            } else {
+                // Socket replay requests one envelope and can send it directly
+                // without serializing a large payload just to count its size.
+                0
+            };
+            if !deliveries.is_empty()
+                && payload_bytes.saturating_add(bytes) > MESSAGE_PAGE_BYTE_BUDGET
+            {
+                break;
+            }
+            payload_bytes = payload_bytes.saturating_add(bytes);
             deliveries.push(ActorDelivery {
                 id: record.id,
                 organization_id,
@@ -601,6 +631,9 @@ impl PostgresStore {
                 sequence: record.sequence,
                 payload,
             });
+            if payload_bytes >= MESSAGE_PAGE_BYTE_BUDGET {
+                break;
+            }
         }
         Ok(deliveries)
     }
@@ -610,7 +643,7 @@ async fn delivery_is_terminal(store: &PostgresStore, delivery_id: Uuid) -> AppRe
     sqlx::query_scalar::<_, bool>(
         r#"
         SELECT acked_at IS NOT NULL OR dead_lettered_at IS NOT NULL
-        FROM dm.actor_deliveries
+        FROM actor_deliveries
         WHERE id = $1
         "#,
     )
@@ -628,7 +661,7 @@ async fn fail_source_message_in(
 ) -> AppResult<()> {
     let source = sqlx::query_as::<_, FailedMessageSource>(
         r#"
-        UPDATE dm.messages
+        UPDATE messages
         SET status = 'failed',
             failure_reason = $2
         WHERE id = $1
@@ -660,7 +693,7 @@ async fn fail_source_message_in(
     };
     let result = sqlx::query(
         r#"
-        INSERT INTO dm.actor_deliveries (
+        INSERT INTO actor_deliveries (
             id,
             organization_id,
             target_kind,
@@ -671,7 +704,7 @@ async fn fail_source_message_in(
             aggregate_status
         )
         VALUES (
-            $1, $2, $3::text::dm.actor_kind, $4, 'message_status', $5, $6, 'failed'
+            $1, $2, $3::text::actor_kind, $4, 'message_status', $5, $6, 'failed'
         )
         "#,
     )

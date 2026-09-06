@@ -16,3 +16,6 @@ pub mod worker;
 
 pub use config::Settings;
 pub use error::{AppError, AppResult};
+
+/// Isolated testing-plane lifecycle, routing, and persistence.
+pub mod testing;

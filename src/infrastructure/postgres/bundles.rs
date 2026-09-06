@@ -19,10 +19,24 @@ use super::{
     idempotency::{IdempotencyClaim, IdempotencyResult, claim, complete, request_hash},
     map_constraint_error,
     messages::{enqueue_message_deliveries_in, insert_message_in, require_participant_in},
-    rows::{parse_actor_id, parse_actor_type},
+    rows::{MESSAGE_PAGE_BYTE_BUDGET, message_payload_bytes, parse_actor_id, parse_actor_type},
 };
 
 const CREATE_BUNDLE_OPERATION: &str = "bundles.create";
+const BUNDLE_RESPONSE_BYTE_BUDGET: usize = 128 * 1024 * 1024;
+
+// Bound aggregate expansions, while retaining room for one individually legal
+// oversized message plus ordinary display/other content.
+fn check_expansion_budget(total: usize, largest: usize) -> AppResult<()> {
+    if total > BUNDLE_RESPONSE_BYTE_BUDGET
+        && total.saturating_sub(largest) > MESSAGE_PAGE_BYTE_BUDGET
+    {
+        return Err(AppError::ResponseTooLarge(
+            "bundle expansion exceeds the response budget; retrieve the original messages individually using GET /api/v1/conversations/{conversation_id}/messages/{message_id}".to_owned(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Serialize)]
 struct BundleIdempotencyContent<'a> {
@@ -122,14 +136,14 @@ impl PostgresStore {
                 let bundle_id = Uuid::now_v7();
                 sqlx::query(
                     r#"
-                    INSERT INTO dm.message_bundles (
+                    INSERT INTO message_bundles (
                         id,
                         conversation_id,
                         organization_id,
                         created_by_kind,
                         created_by_id
                     )
-                    VALUES ($1, $2, $3, $4::text::dm.actor_kind, $5)
+                    VALUES ($1, $2, $3, $4::text::actor_kind, $5)
                     "#,
                 )
                 .bind(bundle_id)
@@ -190,7 +204,9 @@ impl PostgresStore {
             }
         };
         transaction.commit().await.map_err(map_constraint_error)?;
-        self.load_bundle(&command.organization_id, bundle_id, false)
+        let organization_id = command.organization_id;
+        drop(command.bundle);
+        self.load_bundle(&organization_id, command.conversation_id, bundle_id, false)
             .await
             .map(|detail| Bundle {
                 id: detail.id,
@@ -217,16 +233,51 @@ impl PostgresStore {
     ) -> AppResult<BundleDetail> {
         self.require_participant(organization_id, actor, conversation_id)
             .await?;
-        let detail = self.load_bundle(organization_id, bundle_id, true).await?;
-        if detail.conversation_id != conversation_id {
-            return Err(AppError::NotFound);
+        self.load_bundle(organization_id, conversation_id, bundle_id, true)
+            .await
+    }
+
+    async fn preflight_bundle_expansion(&self, ids: &[Uuid]) -> AppResult<()> {
+        // Text/transcript byte counts are lower bounds on serialized size.
+        // Return only counts, never an entire expanded bundle from PostgreSQL.
+        // The exact incremental check also covers metadata and attachments.
+        let sizes = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT CASE WHEN revision.version IS NULL THEN
+                COALESCE(octet_length(message.text_content), 0)::bigint
+                    + COALESCE(octet_length(message.voice_transcript), 0)::bigint
+            ELSE
+                COALESCE(octet_length(revision.content->>'text'), 0)::bigint
+                    + COALESCE(octet_length(revision.content->>'voice_transcript'), 0)::bigint
+            END
+            FROM messages AS message
+            LEFT JOIN LATERAL (
+                SELECT version, content
+                FROM message_revisions
+                WHERE message_id = message.id
+                ORDER BY version DESC LIMIT 1
+            ) AS revision ON true
+            WHERE message.id = ANY($1)
+            "#,
+        )
+        .bind(ids)
+        .fetch_all(self.pool())
+        .await?;
+        let mut total: usize = 0;
+        let mut largest: usize = 0;
+        for bytes in sizes {
+            let bytes = usize::try_from(bytes).map_err(AppError::internal)?;
+            total = total.saturating_add(bytes);
+            largest = largest.max(bytes);
+            check_expansion_budget(total, largest)?;
         }
-        Ok(detail)
+        Ok(())
     }
 
     async fn load_bundle(
         &self,
         organization_id: &OrganizationId,
+        conversation_id: Uuid,
         bundle_id: Uuid,
         include_originals: bool,
     ) -> AppResult<BundleDetail> {
@@ -239,22 +290,24 @@ impl PostgresStore {
                 bundle.created_by_id,
                 bundle.created_at,
                 display.message_id AS display_message_id
-            FROM dm.message_bundles AS bundle
-            JOIN dm.message_bundle_items AS display
+            FROM message_bundles AS bundle
+            JOIN message_bundle_items AS display
               ON display.bundle_id = bundle.id
              AND display.role = 'display'
             WHERE bundle.id = $1 AND bundle.organization_id = $2
+              AND bundle.conversation_id = $3
             "#,
         )
         .bind(bundle_id)
         .bind(organization_id.as_str())
+        .bind(conversation_id)
         .fetch_optional(self.pool())
         .await?
         .ok_or(AppError::NotFound)?;
         let member_records = sqlx::query_as::<_, BundleMemberRecord>(
             r#"
             SELECT message_id
-            FROM dm.message_bundle_items
+            FROM message_bundle_items
             WHERE bundle_id = $1 AND role = 'member'
             ORDER BY position
             "#,
@@ -266,12 +319,27 @@ impl PostgresStore {
             .into_iter()
             .map(|member| member.message_id)
             .collect::<Vec<_>>();
+        if include_originals {
+            let mut message_ids = original_message_ids.clone();
+            message_ids.push(record.display_message_id);
+            self.preflight_bundle_expansion(&message_ids).await?;
+        }
         let display_message = self.load_message(record.display_message_id).await?;
-        let original_messages = if include_originals {
-            self.load_messages(&original_message_ids).await?
-        } else {
-            Vec::new()
-        };
+        let mut original_messages = Vec::new();
+        if include_originals {
+            let mut total = message_payload_bytes(&display_message)?;
+            let mut largest = total;
+            for id in &original_message_ids {
+                let message = self.load_message(*id).await?;
+                let bytes = message_payload_bytes(&message)?;
+                total = total.saturating_add(bytes);
+                largest = largest.max(bytes);
+                // Check before retaining the next message. A concurrent edit
+                // cannot bypass the preflight and create an unbounded Vec.
+                check_expansion_budget(total, largest)?;
+                original_messages.push(message);
+            }
+        }
         Ok(BundleDetail {
             id: record.id,
             conversation_id: record.conversation_id,
@@ -296,13 +364,13 @@ async fn lock_bundle_members_in(
     let available = sqlx::query_scalar::<_, Uuid>(
         r#"
         SELECT message.id
-        FROM dm.messages AS message
+        FROM messages AS message
         WHERE message.id = ANY($1)
           AND message.conversation_id = $2
           AND message.organization_id = $3
           AND NOT EXISTS (
               SELECT 1
-              FROM dm.message_bundle_items AS item
+              FROM message_bundle_items AS item
               WHERE item.message_id = message.id
           )
         ORDER BY message.id
@@ -338,7 +406,7 @@ async fn insert_bundle_item_in(
 ) -> AppResult<()> {
     sqlx::query(
         r#"
-        INSERT INTO dm.message_bundle_items (
+        INSERT INTO message_bundle_items (
             bundle_id,
             conversation_id,
             organization_id,
@@ -346,7 +414,7 @@ async fn insert_bundle_item_in(
             role,
             position
         )
-        VALUES ($1, $2, $3, $4, $5::text::dm.bundle_role, $6)
+        VALUES ($1, $2, $3, $4, $5::text::bundle_role, $6)
         "#,
     )
     .bind(bundle_id)

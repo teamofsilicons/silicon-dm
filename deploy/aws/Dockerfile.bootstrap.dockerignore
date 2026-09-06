@@ -1,0 +1,5 @@
+**
+!deploy/
+!deploy/aws/
+!deploy/aws/bootstrap-task.py
+!deploy/runtime-grants.sql

@@ -22,6 +22,8 @@ struct DraftRecord {
     actor_id: String,
     version: i64,
     text_content: Option<String>,
+    metadata: sqlx::types::Json<serde_json::Map<String, serde_json::Value>>,
+    reply_to_message_id: Option<Uuid>,
     voice_transcript: Option<String>,
     updated_at: OffsetDateTime,
 }
@@ -89,10 +91,10 @@ impl PostgresStore {
         let participant_exists = sqlx::query_scalar::<_, i32>(
             r#"
             SELECT 1
-            FROM dm.conversation_participants
+            FROM conversation_participants
             WHERE conversation_id = $1
               AND organization_id = $2
-              AND actor_kind = $3::text::dm.actor_kind
+              AND actor_kind = $3::text::actor_kind
               AND actor_id = $4
             FOR UPDATE
             "#,
@@ -111,10 +113,10 @@ impl PostgresStore {
         let current_version = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT version
-            FROM dm.drafts
+            FROM drafts
             WHERE conversation_id = $1
               AND organization_id = $2
-              AND actor_kind = $3::text::dm.actor_kind
+              AND actor_kind = $3::text::actor_kind
               AND actor_id = $4
             FOR UPDATE
             "#,
@@ -130,7 +132,7 @@ impl PostgresStore {
             None if command.expected_version.unwrap_or(0) == 0 => {
                 sqlx::query(
                     r#"
-                    INSERT INTO dm.drafts (
+                    INSERT INTO drafts (
                         conversation_id,
                         organization_id,
                         actor_kind,
@@ -138,9 +140,11 @@ impl PostgresStore {
                         text_content,
                         voice_transcript,
                         content_hash_version,
-                        content_hash
+                        content_hash,
+                        metadata,
+                        reply_to_message_id
                     )
-                    VALUES ($1, $2, $3::text::dm.actor_kind, $4, $5, $6, 2, $7)
+                    VALUES ($1, $2, $3::text::actor_kind, $4, $5, $6, 3, $7, $8, $9)
                     "#,
                 )
                 .bind(command.conversation_id)
@@ -150,6 +154,8 @@ impl PostgresStore {
                 .bind(command.input.message_content.as_deref())
                 .bind(command.input.voice_transcript.as_deref())
                 .bind(content_hash.as_bytes().as_slice())
+                .bind(sqlx::types::Json(&command.input.metadata))
+                .bind(command.input.reply_to_message_id)
                 .execute(&mut *transaction)
                 .await
                 .map_err(map_constraint_error)?;
@@ -163,15 +169,17 @@ impl PostgresStore {
             Some(current) if command.expected_version == Some(current) => {
                 sqlx::query(
                     r#"
-                    UPDATE dm.drafts
+                    UPDATE drafts
                     SET version = version + 1,
                         text_content = $5,
                         voice_transcript = $6,
-                        content_hash_version = 2,
-                        content_hash = $7
+                        content_hash_version = 3,
+                        content_hash = $7,
+                        metadata = $8,
+                        reply_to_message_id = $9
                     WHERE conversation_id = $1
                       AND organization_id = $2
-                      AND actor_kind = $3::text::dm.actor_kind
+                      AND actor_kind = $3::text::actor_kind
                       AND actor_id = $4
                     "#,
                 )
@@ -182,6 +190,8 @@ impl PostgresStore {
                 .bind(command.input.message_content.as_deref())
                 .bind(command.input.voice_transcript.as_deref())
                 .bind(content_hash.as_bytes().as_slice())
+                .bind(sqlx::types::Json(&command.input.metadata))
+                .bind(command.input.reply_to_message_id)
                 .execute(&mut *transaction)
                 .await
                 .map_err(map_constraint_error)?;
@@ -189,19 +199,21 @@ impl PostgresStore {
                 delete_draft_children(&mut transaction, &command).await?;
             }
             Some(_) => {
+                drop(command.input);
+                let current = load_draft_in(
+                    &mut transaction,
+                    &command.organization_id,
+                    &command.actor,
+                    command.conversation_id,
+                )
+                .await?;
                 transaction.rollback().await?;
-                let current = self
-                    .load_draft(
-                        &command.organization_id,
-                        &command.actor,
-                        command.conversation_id,
-                    )
-                    .await?;
                 return Ok(PutDraftOutcome::Conflict(current));
             }
         }
 
         insert_draft_children(&mut transaction, &command).await?;
+        drop(command.input);
         let saved = load_draft_in(
             &mut transaction,
             &command.organization_id,
@@ -229,11 +241,11 @@ impl PostgresStore {
         let mut transaction = self.pool().begin().await?;
         let advanced = sqlx::query(
             r#"
-            UPDATE dm.drafts
+            UPDATE drafts
             SET version = version + 1
             WHERE conversation_id = $1
               AND organization_id = $2
-              AND actor_kind = $3::text::dm.actor_kind
+              AND actor_kind = $3::text::actor_kind
               AND actor_id = $4
             "#,
         )
@@ -253,10 +265,10 @@ impl PostgresStore {
             .await?;
         sqlx::query(
             r#"
-            DELETE FROM dm.drafts
+            DELETE FROM drafts
             WHERE conversation_id = $1
               AND organization_id = $2
-              AND actor_kind = $3::text::dm.actor_kind
+              AND actor_kind = $3::text::actor_kind
               AND actor_id = $4
             "#,
         )
@@ -300,12 +312,14 @@ async fn load_draft_in(
             actor_id,
             version,
             text_content,
+            metadata,
+            reply_to_message_id,
             voice_transcript,
             updated_at
-        FROM dm.drafts
+        FROM drafts
         WHERE conversation_id = $1
           AND organization_id = $2
-          AND actor_kind = $3::text::dm.actor_kind
+          AND actor_kind = $3::text::actor_kind
           AND actor_id = $4
         FOR SHARE
         "#,
@@ -327,10 +341,10 @@ async fn load_draft_in(
             content_type,
             declared_size_bytes,
             duration_milliseconds
-        FROM dm.draft_attachments
+        FROM draft_attachments
         WHERE conversation_id = $1
           AND organization_id = $2
-          AND actor_kind = $3::text::dm.actor_kind
+          AND actor_kind = $3::text::actor_kind
           AND actor_id = $4
         ORDER BY position
         "#,
@@ -344,10 +358,10 @@ async fn load_draft_in(
     let gif_record = sqlx::query_as::<_, DraftGifRecord>(
         r#"
         SELECT provider_id, url, preview_url, title
-        FROM dm.draft_gifs
+        FROM draft_gifs
         WHERE conversation_id = $1
           AND organization_id = $2
-          AND actor_kind = $3::text::dm.actor_kind
+          AND actor_kind = $3::text::actor_kind
           AND actor_id = $4
         "#,
     )
@@ -382,6 +396,8 @@ async fn load_draft_in(
         actor_id,
         version: record.version,
         message_content: record.text_content,
+        metadata: record.metadata.0,
+        reply_to_message_id: record.reply_to_message_id,
         attachments,
         voice,
         voice_transcript: record.voice_transcript,
@@ -411,10 +427,10 @@ async fn delete_draft_children_by_owner(
 ) -> AppResult<()> {
     sqlx::query(
         r#"
-        DELETE FROM dm.draft_attachments
+        DELETE FROM draft_attachments
         WHERE conversation_id = $1
           AND organization_id = $2
-          AND actor_kind = $3::text::dm.actor_kind
+          AND actor_kind = $3::text::actor_kind
           AND actor_id = $4
         "#,
     )
@@ -427,10 +443,10 @@ async fn delete_draft_children_by_owner(
     .map_err(map_constraint_error)?;
     sqlx::query(
         r#"
-        DELETE FROM dm.draft_gifs
+        DELETE FROM draft_gifs
         WHERE conversation_id = $1
           AND organization_id = $2
-          AND actor_kind = $3::text::dm.actor_kind
+          AND actor_kind = $3::text::actor_kind
           AND actor_id = $4
         "#,
     )
@@ -483,7 +499,7 @@ async fn insert_draft_children(
     if let Some(gif) = &command.input.gif {
         sqlx::query(
             r#"
-            INSERT INTO dm.draft_gifs (
+            INSERT INTO draft_gifs (
                 conversation_id,
                 organization_id,
                 actor_kind,
@@ -493,7 +509,7 @@ async fn insert_draft_children(
                 preview_url,
                 title
             )
-            VALUES ($1, $2, $3::text::dm.actor_kind, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3::text::actor_kind, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(command.conversation_id)
@@ -530,7 +546,7 @@ async fn insert_attachment(
         .map_err(|error| AppError::validation(error.to_string()))?;
     sqlx::query(
         r#"
-        INSERT INTO dm.draft_attachments (
+        INSERT INTO draft_attachments (
             conversation_id,
             organization_id,
             actor_kind,
@@ -544,8 +560,8 @@ async fn insert_attachment(
             duration_milliseconds
         )
         VALUES (
-            $1, $2, $3::text::dm.actor_kind, $4, $5,
-            $6::text::dm.attachment_kind, $7, $8, $9, $10, $11
+            $1, $2, $3::text::actor_kind, $4, $5,
+            $6::text::attachment_kind, $7, $8, $9, $10, $11
         )
         "#,
     )

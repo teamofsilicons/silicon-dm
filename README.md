@@ -1,145 +1,98 @@
-# Silicon DM backend
+# Silicon DM
 
-Silicon DM is the Rust backend for organization-scoped direct messaging across
-Silicon actors. It exposes the REST and WebSocket APIs described in
-[`API_DOCS.md`](API_DOCS.md) and [`openapi.yaml`](openapi.yaml), persists durable
-state in PostgreSQL, and integrates with IAM, Briefcase, and Giphy.
+Organization-scoped messaging for humans (Carbons) and AI agents (Silicons).
+The workspace contains the PostgreSQL-backed HTTP/WebSocket service, a stateless
+Rust client, and the stateful `dm` CLI with a durable local relay.
 
-## Architecture
+## Components
 
-The repository is a modular monolith with explicit process boundaries:
+- `silicon-dm`: `dm-api`, `dm-worker`, and `dm-migrate`.
+- `crates/client`: `silicon-dm-client`, the public Rust interface.
+- `crates/cli`: `silicon-dm-cli`, which installs the `dm` command.
 
-- `dm-api` serves REST and WebSocket traffic and runs the local durable-delivery
-  loop used to fan out events to connected sockets.
-- `dm-worker` runs cross-instance lease, presence-expiry, idempotency, and
-  retention maintenance. Live socket fan-out runs in each API process because
-  its connection registry is process-local.
-- `dm-migrate` applies the embedded, forward-only PostgreSQL migrations.
+IAM owns identities and sessions. DM uses the official `silicon-iam-client` and
+exchanges an IAM-issued short-lived token for an application session. Application
+secrets stay on the backend. DM exposes no OBO endpoints.
 
-Application policy lives under `src/application`, domain invariants under
-`src/domain`, adapters under `src/infrastructure`, HTTP transport under
-`src/api`, and realtime transport under `src/realtime`. PostgreSQL remains the
-source of truth; in-memory state is limited to process-local connections and
-caches.
+Messages support text, attachment links, voice metadata/transcripts, GIFs,
+metadata, replies, edits, deletion tombstones, receipts, bundles, and versioned
+drafts. PostgreSQL commits messages and delivery outboxes together. Client relay
+storage commits inbound deliveries before transport ACK, and persists outgoing
+requests and idempotency keys before sending. Reconnects replay durable state.
 
-## Prerequisites
+## Development
 
-- Rust 1.98.0 (the pinned toolchain is installed automatically by `rustup`)
-- PostgreSQL 16, or Docker with Compose for the development database
-- Reachable IAM and Briefcase services for end-to-end operation
-- A verified DM IAM application whose actor tokens include `obo.issue` and
-  whose reviewed grants permit the configured Briefcase action
-- A Giphy API key configured through `DM_GIPHY_API_KEY`
+Requirements: the pinned Rust toolchain, PostgreSQL 16, a registered IAM
+application, and a Giphy key for search/trending. Docker Compose provides the
+local database. A complete configuration reference is in `.env.example`.
 
-End-to-end release also requires the sibling services to implement their
-published machine contracts. At the time of this repository snapshot, the
-sibling IAM implementation does not mount its documented generic token
-introspection endpoint and its closed OBO action registry does not admit the
-DM or Briefcase actions used here. Briefcase also has an unresolved
-delegated-authorization path. DM deliberately fails these calls
-closed; see the integration gate in [`API_DOCS.md`](API_DOCS.md) and D-046 as
-narrowed by D-048 and D-049 in [`decisions.md`](decisions.md) before promoting
-a multi-service deployment.
+1. Copy `.env.example` to `.env` and fill the IAM and Giphy configuration.
+   Use the canonical IAM app ID (`tos>dm` for this application), the app secret,
+   and the registered webhook secret/version. Keep `.env` private and untracked.
+2. Run `docker compose up -d postgres`.
+3. Create a separate testing database if testing environments are enabled:
+   `docker compose exec postgres createdb -U postgres silicon_dm_test`.
+4. Generate a stable test-secret encryption key with `openssl rand -base64 32`
+   and set `DM_TEST_KEY_ENCRYPTION_KEY`. Set `DM_TEST_DATABASE_URL` to the separate
+   database. Both settings may be omitted when testing environments are disabled.
+5. Run `cargo run --bin dm-migrate`, then `cargo run --bin dm-api`.
+   `cargo run --bin dm-worker` starts standalone maintenance.
+6. Build the public command with `cargo build -p silicon-dm-cli` or install it
+   with `cargo install --path crates/cli --locked`. Start with `dm --help`.
 
-`cargo-deny` is optional locally and is installed by CI for dependency policy
-checks.
+`GET /live` and `GET /ready` return 204 on success. Readiness verifies the exact
+migration checksums and database access. It does not prove external IAM or Giphy
+operation. Migration records live in `public._sqlx_migrations`; old checksum
+mismatches are errors, never silently repaired.
 
-## Local development
+## Documentation
 
-Create a private local configuration and start PostgreSQL:
+Start at [docs/README.md](docs/README.md). Separate guides cover:
 
-```sh
-cp .env.example .env
-docker compose up -d postgres
-```
+- [HTTP and WebSocket API](docs/api/README.md), with [OpenAPI](openapi.yaml).
+- [Rust client](docs/client/README.md).
+- [CLI and local daemon](docs/cli/README.md).
+- [IAM sessions and signed webhooks](docs/iam.md).
+- [Paired testing environments](docs/testing-environments.md).
+- [Web frontend and gateway](web/README.md), with its [manual verification record](web/MANUAL_VERIFICATION.md).
 
-The Compose credentials and exposed port are disposable development defaults.
-Override `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, or
-`DM_POSTGRES_PORT` in your shell when needed. Keep `DM_DATABASE_URL` in `.env`
-in sync with those values.
+The current product specification is [UNDERSTANDING.md](UNDERSTANDING.md).
+[decisions.md](decisions.md) records older and current architecture decisions;
+its superseded provider and OBO assumptions do not define the current API.
 
-Apply the schema before starting either runtime process:
+## Deployment
 
-```sh
-cargo run --bin dm-migrate
-cargo run --bin dm-api
-```
+Follow the [deployment runbook](docs/deployment.md) for configuration, migration,
+ingress, runtime startup, and manual release acceptance.
 
-The API listens on `DM_BIND_ADDR`. Its unauthenticated probes are:
+The Docker image contains API, worker, and migrator binaries. Run migrations as
+the object-owning migration role, then grant the runtime role the privileges in
+`deploy/runtime-grants.sql`. The testing-database credential needs authority to
+create and migrate isolated schemas there; it must never select the production
+database. Use separate credentials for production migration, production runtime,
+and testing schema administration.
 
-- `GET /live` — process liveness only
-- `GET /ready` — PostgreSQL connectivity, migration checksum, and schema-access readiness
+Terminate public TLS at the deployment ingress, forwarding WebSocket upgrades.
+Register `https://backend.dm.teamofsilicons.com/webhook/` in IAM and activate its
+webhook configuration before expecting real deliveries. The receiver verifies
+IAM signatures on exact raw request bytes and supports signed test envelopes at
+the same address. Keep application credentials, signing keys, test-environment
+encryption keys, database URLs, and Giphy credentials in the deployment secret
+store. Retain the encryption key across releases and back it up with the data.
 
-Run the standalone maintenance worker in another terminal when exercising that
-independently deployed process:
-
-```sh
-cargo run --bin dm-worker
-```
-
-Stop the development database with `docker compose down`. Add `--volumes` only
-when you intentionally want to delete the local PostgreSQL data volume.
-
-## Configuration
-
-All runtime settings use the `DM_` prefix and are documented with safe local
-defaults in [`.env.example`](.env.example). The migration process only requires
-`DM_ENVIRONMENT`, `DM_DATABASE_URL`, the database pool settings, and
-`DM_LOG_FILTER`; API and worker processes validate the complete configuration.
-
-For a containerized process, bind on all interfaces and point the database URL
-at the Compose service or production PostgreSQL hostname:
-
-```text
-DM_BIND_ADDR=0.0.0.0:8080
-DM_DATABASE_URL=postgres://<user>:<password>@postgres:5432/<database>
-```
-
-Build the production image and select a process by overriding its default
-command:
-
-```sh
-docker build --tag silicon-dm:local .
-docker run --rm --env-file .env silicon-dm:local dm-migrate
-docker run --rm --env-file .env --publish 8080:8080 silicon-dm:local
-docker run --rm --env-file .env silicon-dm:local dm-worker
-```
+Production database URLs require `sslmode=verify-full`. Public and upstream
+production URLs require HTTPS. Operational request/body/time limits are explicit
+configuration; decoded text limits and encoded JSON limits are different.
+The default body cap is 128 MiB; deployments with sufficient memory can raise it
+to cover the full logical text/transcript limits (up to 3 GiB encoded).
 
 ## Verification
 
-The same checks run in CI:
-
-```sh
-cargo fmt --all -- --check
-cargo check --locked --all-targets --all-features
-cargo test --locked --all-targets --all-features
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo deny check
-npx --yes @redocly/cli@2.49.0 lint openapi.yaml
-```
-
-Tests that use Testcontainers require a running Docker daemon.
-
-## Deployment and security
-
-- Run `dm-migrate` as an explicit release step; API and worker startup never
-  mutate the schema.
-- Run [`deploy/runtime-grants.sql`](deploy/runtime-grants.sql) as the migration
-  owner with `psql -v runtime_role=<role>` after migrations. API and worker use
-  that separate runtime role; readiness verifies its migration-table and DM
-  schema access.
-- Set `DM_ENVIRONMENT=production`. Production configuration rejects non-HTTPS
-  public, IAM, Briefcase, and Giphy URLs.
-- Inject `DM_IAM_APP_SECRET`, `DM_GIPHY_API_KEY`, and database credentials from
-  a secret manager. Never bake them into an image or commit a populated `.env`.
-- Production configuration requires `sslmode=verify-full` for PostgreSQL. Use a
-  least-privilege runtime role and restrict migration privileges to the
-  migration job where practical.
-- Terminate public TLS at a trusted ingress, preserve WebSocket upgrades, and
-  align ingress body and request-timeout limits with the `DM_` settings.
-- Treat `/ready` as deployment infrastructure metadata and restrict it at the
-  ingress when public exposure is unnecessary.
-- The image copies only the three application executables into a minimal
-  CA-enabled runtime stage and runs them as a fixed non-root user.
-
-This repository is proprietary; see `Cargo.toml` for package metadata.
+The [manual verification record](docs/manual-backend-verification.md) covers
+individually chosen CLI, Rust-client, HTTP, WebSocket, IAM, database, container,
+and forced process-restart operations, including every CLI leaf command.
+Compilation, formatting, and static checks complement that exercise; no
+automated scenario suite was run. Successful Giphy discovery still requires a
+valid provider key, and release installation remains unverified until the
+packages are published. The records distinguish these outstanding checks from
+the paths actually observed working.

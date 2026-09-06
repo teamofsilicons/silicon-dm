@@ -11,11 +11,32 @@ use crate::{
     AppError, AppResult,
     domain::{
         ActorId, ActorRef, ActorType, Attachment, BundleRef, BundleRole, Gif,
-        MAX_VOICE_DURATION_MILLISECONDS, Message, MessageStatus, VoiceAttachment,
+        MAX_VOICE_DURATION_MILLISECONDS, Message, MessageCreate, MessageStatus, VoiceAttachment,
     },
 };
 
 use super::PostgresStore;
+
+/// Byte budget for a materialized history/replay page. A single larger
+/// message is always allowed, so every valid message remains retrievable.
+pub(crate) const MESSAGE_PAGE_BYTE_BUDGET: usize = 16 * 1024 * 1024;
+
+/// Counts the full wire payload without allocating a second JSON buffer.
+pub(crate) fn message_payload_bytes(message: &Message) -> AppResult<usize> {
+    struct ByteCounter(usize);
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, message).map_err(AppError::internal)?;
+    Ok(counter.0)
+}
 
 #[derive(Debug, FromRow)]
 pub(crate) struct MessageRecord {
@@ -26,11 +47,21 @@ pub(crate) struct MessageRecord {
     pub sequence: i64,
     pub status: String,
     pub text_content: Option<String>,
+    pub metadata: sqlx::types::Json<serde_json::Map<String, serde_json::Value>>,
+    pub reply_to_message_id: Option<Uuid>,
     pub voice_transcript: Option<String>,
     pub failure_reason: Option<String>,
     pub created_at: OffsetDateTime,
     pub delivered_at: Option<OffsetDateTime>,
     pub read_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, FromRow)]
+struct MessageRevisionRecord {
+    message_id: Uuid,
+    version: i64,
+    content: Option<sqlx::types::Json<MessageCreate>>,
+    deleted_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, FromRow)]
@@ -80,12 +111,14 @@ impl PostgresStore {
                 sequence,
                 status::text AS status,
                 text_content,
+                metadata,
+                reply_to_message_id,
                 voice_transcript,
                 failure_reason,
                 created_at,
                 delivered_at,
                 read_at
-            FROM dm.messages
+            FROM messages
             WHERE id = ANY($1)
             "#,
         )
@@ -114,7 +147,7 @@ impl PostgresStore {
                 content_type,
                 declared_size_bytes,
                 duration_milliseconds
-            FROM dm.message_attachments
+            FROM message_attachments
             WHERE message_id = ANY($1)
             ORDER BY message_id, position
             "#,
@@ -125,7 +158,7 @@ impl PostgresStore {
         let gifs = sqlx::query_as::<_, GifRecord>(
             r#"
             SELECT message_id, provider_id, url, preview_url, title
-            FROM dm.message_gifs
+            FROM message_gifs
             WHERE message_id = ANY($1)
             "#,
         )
@@ -135,7 +168,7 @@ impl PostgresStore {
         let bundle_references = sqlx::query_as::<_, BundleReferenceRecord>(
             r#"
             SELECT message_id, bundle_id, role::text AS role
-            FROM dm.message_bundle_items
+            FROM message_bundle_items
             WHERE message_id = ANY($1)
             "#,
         )
@@ -178,7 +211,39 @@ impl PostgresStore {
                 .transpose()?;
             messages.push(map_message(record, attachment_records, gif, bundle)?);
         }
+        self.apply_latest_revisions(&ids, &mut messages).await?;
         Ok(messages)
+    }
+
+    async fn apply_latest_revisions(
+        &self,
+        ids: &[Uuid],
+        messages: &mut [Message],
+    ) -> AppResult<()> {
+        let revisions = sqlx::query_as::<_, MessageRevisionRecord>(
+            "SELECT DISTINCT ON (message_id) message_id, version, content, deleted_at FROM message_revisions WHERE message_id = ANY($1) ORDER BY message_id, version DESC"
+        ).bind(ids).fetch_all(self.pool()).await?;
+        let mut revisions = revisions
+            .into_iter()
+            .map(|row| (row.message_id, row))
+            .collect::<HashMap<_, _>>();
+        for message in messages {
+            if let Some(revision) = revisions.remove(&message.id) {
+                message.version = revision.version;
+                message.deleted_at = revision.deleted_at;
+                let content = revision
+                    .content
+                    .map_or_else(MessageCreate::default, |content| content.0);
+                message.text = content.text;
+                message.attachments = content.attachments;
+                message.voice = content.voice;
+                message.voice_transcript = content.voice_transcript;
+                message.gif = content.gif;
+                message.metadata = content.metadata;
+                message.reply_to_message_id = content.reply_to_message_id;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -198,6 +263,8 @@ fn map_message(
         }
     }
     Ok(Message {
+        version: 1,
+        deleted_at: None,
         id: record.id,
         conversation_id: record.conversation_id,
         sender: ActorRef {
@@ -207,6 +274,8 @@ fn map_message(
         sequence: record.sequence,
         status: parse_message_status(&record.status)?,
         text: record.text_content,
+        metadata: record.metadata.0,
+        reply_to_message_id: record.reply_to_message_id,
         attachments,
         voice,
         voice_transcript: record.voice_transcript,

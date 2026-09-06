@@ -14,7 +14,7 @@ use url::Url;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_HTTP_BODY_BYTES: usize = 128 * 1024 * 1024;
+const MAX_HTTP_BODY_BYTES: usize = 3 * 1024 * 1024 * 1024;
 
 /// Complete process settings.
 #[derive(Clone, Debug)]
@@ -27,7 +27,9 @@ pub struct Settings {
     pub database: DatabaseSettings,
     /// IAM integration settings.
     pub iam: IamSettings,
-    /// Briefcase and Giphy settings.
+    /// Optional shared testing-plane configuration.
+    pub testing: Option<TestingSettings>,
+    /// Giphy settings.
     pub providers: ProviderSettings,
     /// Realtime protocol policy.
     pub realtime: RealtimeSettings,
@@ -89,6 +91,15 @@ pub struct DatabaseSettings {
     pub statement_timeout: Duration,
 }
 
+/// Shared testing database and secret encryption settings.
+#[derive(Clone, Debug)]
+pub struct TestingSettings {
+    /// Separate database shared by all isolated test schemas.
+    pub database: DatabaseSettings,
+    /// Base64-encoded 256-bit encryption key for retrievable secrets.
+    pub encryption_key: SecretString,
+}
+
 /// IAM authentication settings.
 #[derive(Clone, Debug)]
 pub struct IamSettings {
@@ -98,6 +109,10 @@ pub struct IamSettings {
     pub app_id: String,
     /// DM application secret.
     pub app_secret: SecretString,
+    /// Shared IAM webhook signing secret.
+    pub webhook_secret: SecretString,
+    /// IAM webhook secret version.
+    pub webhook_key_version: i64,
     /// Outbound IAM deadline.
     pub request_timeout: Duration,
 }
@@ -105,10 +120,6 @@ pub struct IamSettings {
 /// External content-provider settings.
 #[derive(Clone, Debug)]
 pub struct ProviderSettings {
-    /// Briefcase API base URL.
-    pub briefcase_base_url: Url,
-    /// IAM application audience accepted by Briefcase.
-    pub briefcase_iam_audience: String,
     /// Giphy API base URL.
     pub giphy_api_base_url: Url,
     /// Required Giphy API key.
@@ -183,11 +194,11 @@ impl Settings {
             base_url: parse_required("DM_IAM_BASE_URL")?,
             app_id: required("DM_IAM_APP_ID")?,
             app_secret: SecretString::from(required("DM_IAM_APP_SECRET")?),
+            webhook_secret: SecretString::from(required("DM_IAM_WEBHOOK_SECRET")?),
+            webhook_key_version: parse_or("DM_IAM_WEBHOOK_KEY_VERSION", "1")?,
             request_timeout: duration_seconds("DM_IAM_REQUEST_TIMEOUT_SECONDS", 5)?,
         };
         let providers = ProviderSettings {
-            briefcase_base_url: parse_required("DM_BRIEFCASE_BASE_URL")?,
-            briefcase_iam_audience: parse_or("DM_BRIEFCASE_IAM_AUDIENCE", "silicon-briefcase")?,
             giphy_api_base_url: parse_or("DM_GIPHY_API_BASE_URL", "https://api.giphy.com/v1/gifs")?,
             giphy_api_key: SecretString::from(required("DM_GIPHY_API_KEY")?),
             request_timeout: duration_seconds("DM_PROVIDER_REQUEST_TIMEOUT_SECONDS", 10)?,
@@ -206,11 +217,24 @@ impl Settings {
             max_attempts: parse_or("DM_DELIVERY_MAX_ATTEMPTS", "20")?,
             max_retry_delay: duration_seconds("DM_DELIVERY_MAX_RETRY_SECONDS", 300)?,
         };
+        let testing = optional("DM_TEST_DATABASE_URL")
+            .map(|url| {
+                let mut test_database = database.clone();
+                test_database.url = SecretString::from(url);
+                test_database.max_connections = parse_or("DM_TEST_DATABASE_MAX_CONNECTIONS", "4")?;
+                test_database.min_connections = 0;
+                Ok::<_, SettingsError>(TestingSettings {
+                    database: test_database,
+                    encryption_key: SecretString::from(required("DM_TEST_KEY_ENCRYPTION_KEY")?),
+                })
+            })
+            .transpose()?;
         let settings = Self {
             environment,
             server,
             database,
             iam,
+            testing,
             providers,
             realtime,
             worker,
@@ -229,15 +253,6 @@ impl Settings {
         validate_url("DM_IAM_BASE_URL", &self.iam.base_url, self.environment)?;
         validate_app_id("DM_IAM_APP_ID", &self.iam.app_id)?;
         validate_url(
-            "DM_BRIEFCASE_BASE_URL",
-            &self.providers.briefcase_base_url,
-            self.environment,
-        )?;
-        validate_app_id(
-            "DM_BRIEFCASE_IAM_AUDIENCE",
-            &self.providers.briefcase_iam_audience,
-        )?;
-        validate_url(
             "DM_GIPHY_API_BASE_URL",
             &self.providers.giphy_api_base_url,
             self.environment,
@@ -251,10 +266,22 @@ impl Settings {
         if self.server.max_body_bytes == 0 || self.server.max_body_bytes > MAX_HTTP_BODY_BYTES {
             return Err(invalid(
                 "DM_MAX_HTTP_BODY_BYTES",
-                "must be between 1 and 134217728 bytes",
+                "must be between 1 and 3221225472 bytes",
             ));
         }
         validate_database_transport(&self.database.url, self.environment)?;
+        if self.iam.webhook_key_version < 1 {
+            return Err(invalid("DM_IAM_WEBHOOK_KEY_VERSION", "must be positive"));
+        }
+        if let Some(testing) = &self.testing {
+            validate_database_transport(&testing.database.url, self.environment)?;
+            if testing.database.url.expose_secret() == self.database.url.expose_secret() {
+                return Err(invalid(
+                    "DM_TEST_DATABASE_URL",
+                    "must differ from the production database",
+                ));
+            }
+        }
         if self.realtime.heartbeat_timeout <= self.realtime.heartbeat_interval {
             return Err(invalid(
                 "DM_HEARTBEAT_TIMEOUT_SECONDS",
@@ -422,15 +449,20 @@ fn validate_url(
 }
 
 fn validate_app_id(name: &'static str, value: &str) -> Result<(), SettingsError> {
-    if !(3..=80).contains(&value.len())
-        || !value.starts_with(|character: char| character.is_ascii_lowercase())
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-        })
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            })
+    };
+    if value.len() > 255
+        || !value
+            .split_once('>')
+            .is_some_and(|(org, app)| valid_part(org) && valid_part(app))
     {
         return Err(invalid(
             name,
-            "must match IAM application identifier syntax",
+            "must be the canonical IAM application ID, such as tos>dm",
         ));
     }
     Ok(())
@@ -511,9 +543,12 @@ mod tests {
             .env("DM_PUBLIC_BASE_URL", "http://localhost:8080")
             .env("DM_DATABASE_URL", "postgres://user:secret@localhost/dm")
             .env("DM_IAM_BASE_URL", "http://localhost:8081")
-            .env("DM_IAM_APP_ID", "silicon-dm")
+            .env("DM_IAM_APP_ID", "tos>dm")
             .env("DM_IAM_APP_SECRET", "test-secret")
-            .env("DM_BRIEFCASE_BASE_URL", "http://localhost:8082")
+            .env(
+                "DM_IAM_WEBHOOK_SECRET",
+                "test-webhook-secret-at-least-thirty-two-characters",
+            )
             .env_remove("DM_GIPHY_API_KEY")
             .output()
         else {
@@ -565,7 +600,7 @@ mod tests {
 
     #[test]
     fn iam_application_identifiers_follow_the_published_contract() {
-        assert!(validate_app_id("DM_IAM_APP_ID", "silicon-dm").is_ok());
+        assert!(validate_app_id("DM_IAM_APP_ID", "tos>dm").is_ok());
         assert!(validate_app_id("DM_IAM_APP_ID", "Silicon-DM").is_err());
         assert!(validate_app_id("DM_IAM_APP_ID", "ab").is_err());
     }

@@ -719,3 +719,99 @@ letting an older client infer support from a version-1 ready frame.
 
 The pre-1.0 Rust package and OpenAPI document advance together to `0.2.0` for
 the same breaking contract boundary.
+
+## D-052 — IAM application sessions and official client
+
+**Status:** Accepted; supersedes bespoke IAM and OBO integration assumptions
+
+DM uses the official Silicon IAM Rust client. A caller exchanges an opaque,
+organization-bound IAM short-lived token through DM; the backend keeps the
+application secret and uses current IAM authorization snapshots for actor,
+organization, role, and membership checks. DM exposes no OBO endpoints and
+accepts no inbound OBO proofs. Signed IAM webhooks trigger authoritative
+revalidation instead of trusting a possibly older event projection.
+
+## D-053 — Passive attachments, metadata, replies, and revisions
+
+**Status:** Accepted; supersedes Briefcase-specific D-013/D-039/D-047 behavior
+
+DM stores supplied HTTPS attachment references and voice metadata without
+fetching, uploading, signing, or transforming media. The Briefcase temporary-URL
+endpoint and dependency are removed. Every message and draft includes a JSON
+metadata object. Metadata and same-conversation replies participate in content
+hashes so retries and draft clearing cannot silently discard them.
+
+Sender-authored edits append full replacement revisions under an exact version
+precondition. Deletion appends a content-free tombstone. Original accepted
+content remains durable; all authenticated clients receive increasing message
+versions and reconcile by message ID. Sender devices receive message copies too,
+while aggregate delivered/read state still concerns recipient actors.
+
+## D-054 — Isolated testing data and runtime selection
+
+**Status:** Accepted
+
+A separate shared PostgreSQL database holds per-environment schemas. Every test
+row carries its fixed environment UUID. Each pool resolves SQL only in its
+selected schema. Production lifecycle records encrypt retrievable roots, IAM
+roots, and test-only application credentials. Unknown/deleted keys never fall
+back to production. Lifecycle fences, generation changes, and socket disconnects
+prevent stale operations from crossing a cleanup or key rotation boundary.
+
+The same HTTP/WebSocket routes serve both planes. CLI UUID selectors resolve
+locally to secret roots. Ordinary test actions require the corresponding IAM
+actor session; root-authorized environment operations remain explicitly scoped.
+
+## D-055 — Stateless protocol client with optional shared local runtime
+
+**Status:** Accepted
+
+The default Rust client performs protocol operations without local storage or
+background processes. Its optional `runtime` feature supplies explicit
+caller-owned state directories, durable queues, local callback routing, token
+refresh, daemon launch, and in-process hosting. The CLI calls this shared
+implementation instead of maintaining its own relay. Multiple runtime instances
+can coexist in one process without a global SQLite connection or state path.
+Cancellation stops both worker tasks and existing local HTTP connections.
+
+The optional runtime also supplies a default-on hourly update policy. Rust
+applications own policy persistence and an explicit Cargo manifest to update
+and rebuild after their command finishes. Running linked code changes only
+after application restart. CLI executable updates keep their distinct install
+policy and only replace the recognized Cargo-installed command.
+
+## D-056 — Draft versions survive deletion
+
+**Status:** Accepted concurrency correction
+
+Per-participant draft counters remain after explicit deletion and automatic
+send clearing. A recreated draft receives a greater version, so an old save
+cannot overwrite a new draft through token reuse. Existing drafts are backfilled
+under a writer lock; a draft deleted before this mechanism existed has no
+recoverable historic version. Conflict snapshots are hydrated while holding
+their transaction lock.
+
+## D-057 — Delivery identity is stable while replay views may advance
+
+**Status:** Accepted protocol clarification
+
+Replay can hydrate current message state under a stable delivery ID. Local
+deduplication validates its frame kind, actor, sequence, and immutable message
+identity, retaining the first committed callback payload for that ID. It does
+not require mutable content/status to remain identical. Revisions and receipts
+also have their own durable delivery IDs; their callbacks progress the client
+view without changing the meaning of an already acknowledged callback.
+
+## D-058 — Profile transitions and archived callback completion
+
+**Status:** Accepted concurrency correction
+
+Login, refresh, and logout serialize on the same per-profile file lock, including
+across CLI and relay processes. Refresh updates only credentials and expiry,
+preserving concurrent callback settings. Logout checks the current family before
+clearing it to protect direct store writers as well.
+
+Sandbox generation adoption archives pending callbacks. An in-flight HTTP
+completion may update only a still-pending row, in the same transaction that
+queues any Delivered receipt. A late success or failure cannot revive archived
+work. Callback requests already transmitted before adoption may still arrive.

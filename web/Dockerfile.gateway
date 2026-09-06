@@ -1,0 +1,19 @@
+FROM node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY scripts/build.mjs scripts/build.mjs
+COPY server server
+RUN node scripts/build.mjs
+
+FROM node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
+WORKDIR /app
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=4315 ASSET_DIR=/app/public
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force \
+    && mkdir -p /app/public /var/lib/silicon-dm-gateway \
+    && chown 10001:10001 /var/lib/silicon-dm-gateway
+COPY --from=build /app/dist/server/node.js /app/server.js
+USER 10001:10001
+EXPOSE 4315
+CMD ["node", "server.js"]

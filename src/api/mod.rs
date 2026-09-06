@@ -5,3 +5,8 @@ pub mod handlers;
 pub mod router;
 
 pub use router::build_router;
+
+/// IAM application-session endpoints.
+pub mod auth_handlers;
+/// Signed IAM webhook receiver.
+pub mod webhook;

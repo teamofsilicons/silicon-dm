@@ -32,13 +32,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Check all targets
-        run: cargo check --locked --all-targets --all-features
+        run: cargo check --locked --workspace --all-targets --all-features
 
       - name: Run tests
         run: cargo test --locked --all-targets --all-features
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Validate OpenAPI contract
         run: npx --yes @redocly/cli@2.49.0 lint openapi.yaml
@@ -118,9 +118,9 @@ jobs:
             --env DM_DATABASE_URL=postgres://dm_runtime:runtime-pass@postgres:5432/silicon_dm
             --env DM_DATABASE_MAX_CONNECTIONS=4
             --env DM_IAM_BASE_URL=http://localhost:8081
-            --env DM_IAM_APP_ID=silicon-dm
+            --env 'DM_IAM_APP_ID=tos>dm'
             --env DM_IAM_APP_SECRET=ci-only-secret
-            --env DM_BRIEFCASE_BASE_URL=http://localhost:8082/api/v1
+            --env DM_IAM_WEBHOOK_SECRET=ci-only-webhook-secret-at-least-thirty-two-characters
             --env DM_GIPHY_API_KEY=ci-only-key
           )
           docker run --detach --name dm-api --network silicon-dm-ci \

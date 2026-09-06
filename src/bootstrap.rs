@@ -11,9 +11,7 @@ use crate::{
     api::build_router,
     application::state::AppState,
     config::{MigrationSettings, Settings},
-    infrastructure::{
-        briefcase::BriefcaseClient, giphy::GiphyClient, iam::IamClient, postgres::PostgresStore,
-    },
+    infrastructure::{giphy::GiphyClient, iam::IamClient, postgres::PostgresStore},
     realtime::RealtimeHub,
     shutdown,
     worker::DeliveryWorker,
@@ -29,18 +27,26 @@ use crate::{
 /// Returns a redacted application error when an adapter cannot be constructed,
 /// PostgreSQL cannot be reached, or its readiness query fails.
 pub async fn build_app_state(settings: Settings) -> AppResult<AppState> {
-    let identity = Arc::new(IamClient::new(&settings.iam)?);
-    let attachments = Arc::new(BriefcaseClient::new(&settings.providers)?);
+    let identity = IamClient::new(&settings.iam)?;
     let gifs = Arc::new(GiphyClient::new(&settings.providers)?);
     let store = PostgresStore::connect(&settings.database).await?;
     store.readiness().await?;
+    let identity = Arc::new(identity.with_directory(store.clone()));
+    let testing = match &settings.testing {
+        Some(configuration) => Some(Arc::new(
+            crate::testing::TestingRegistry::new(store.clone(), configuration).await?,
+        )),
+        None => None,
+    };
 
     Ok(AppState {
         instance_id: new_instance_id(),
         settings: Arc::new(settings),
         store,
         identity,
-        attachments,
+        testing,
+        testing_environment: None,
+        testing_generation: None,
         gifs,
         realtime: RealtimeHub::default(),
     })
@@ -78,8 +84,12 @@ pub async fn run_api(settings: Settings) -> anyhow::Result<()> {
         Arc::clone(&state.instance_id),
         state.settings.worker.clone(),
     );
-    let router = build_router(state);
     let cancellation = CancellationToken::new();
+    let testing_maintenance = state
+        .testing
+        .clone()
+        .map(|registry| tokio::spawn(registry.run_maintenance(cancellation.clone())));
+    let router = build_router(state);
     let server = axum::serve(listener, router)
         .with_graceful_shutdown(cancellation.clone().cancelled_owned())
         .into_future();
@@ -87,7 +97,7 @@ pub async fn run_api(settings: Settings) -> anyhow::Result<()> {
     tokio::pin!(server);
     tokio::pin!(worker_run);
 
-    tokio::select! {
+    let result = tokio::select! {
         result = &mut server => {
             cancellation.cancel();
             let worker_result = timeout(shutdown_timeout, &mut worker_run).await;
@@ -124,7 +134,12 @@ pub async fn run_api(settings: Settings) -> anyhow::Result<()> {
                 Ok(())
             }
         }
+    };
+    cancellation.cancel();
+    if let Some(maintenance) = testing_maintenance {
+        let _ = timeout(shutdown_timeout, maintenance).await;
     }
+    result
 }
 
 /// Applies embedded database migrations and closes the migration pool.

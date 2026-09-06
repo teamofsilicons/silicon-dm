@@ -6,9 +6,11 @@ FROM rust:${RUST_VERSION}-bookworm AS builder
 
 WORKDIR /build
 
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
 COPY migrations ./migrations
 COPY src ./src
+COPY crates ./crates
+COPY docs ./docs
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \

@@ -26,7 +26,7 @@ pub enum Activity {
     RecordingVoice,
     /// Waiting for speech-to-text.
     TranscribingVoice,
-    /// Uploading a file to Briefcase.
+    /// Uploading a file through the caller's chosen provider.
     UploadingFile,
     /// Searching for GIFs.
     SearchingGifs,

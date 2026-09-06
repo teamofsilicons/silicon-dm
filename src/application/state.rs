@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::ports::{AttachmentProvider, GifProvider, IdentityProvider};
+use super::ports::{GifProvider, IdentityProvider};
 use crate::{config::Settings, infrastructure::postgres::PostgresStore, realtime::RealtimeHub};
 
 /// Cheaply cloneable dependency container used by handlers and workers.
@@ -16,8 +16,12 @@ pub struct AppState {
     pub store: PostgresStore,
     /// IAM adapter.
     pub identity: Arc<dyn IdentityProvider>,
-    /// Briefcase adapter.
-    pub attachments: Arc<dyn AttachmentProvider>,
+    /// Production registry for test environment lifecycle and routing.
+    pub testing: Option<Arc<crate::testing::TestingRegistry>>,
+    /// Selected test environment, absent for production.
+    pub testing_environment: Option<uuid::Uuid>,
+    /// Lifecycle generation captured when a request or connection was admitted.
+    pub testing_generation: Option<i64>,
     /// Giphy adapter.
     pub gifs: Arc<dyn GifProvider>,
     /// Process-local realtime connection registry.

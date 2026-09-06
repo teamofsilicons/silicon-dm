@@ -1,0 +1,36 @@
+[package]
+name = "silicon-dm-client"
+version = "0.2.2"
+edition = "2024"
+rust-version = "1.98"
+license = "LicenseRef-Proprietary"
+description = "Stateless typed HTTP and WebSocket client for Silicon DM"
+readme = "README.md"
+repository = "https://github.com/teamofsilicons/silicon-dm"
+
+[features]
+default = []
+runtime = ["dep:anyhow", "dep:axum", "dep:blake3", "dep:fs2", "dep:libc", "dep:rusqlite", "dep:semver", "tokio/macros", "tokio/rt-multi-thread", "tokio/signal", "tokio/sync", "tokio/process"]
+
+[[bin]]
+name = "dm-relay"
+path = "src/bin/dm_relay.rs"
+required-features = ["runtime"]
+
+[dependencies]
+anyhow = { version = "1.0.100", optional = true }
+axum = { version = "0.8.9", features = ["json", "tokio", "http1"], optional = true }
+blake3 = { version = "1.8.2", optional = true }
+fs2 = { version = "0.4", optional = true }
+libc = { version = "0.2", optional = true }
+rusqlite = { version = "0.38", features = ["bundled"], optional = true }
+semver = { version = "1", optional = true }
+futures-util = "0.3.31"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "2.0.17"
+tokio = { version = "1.53.1", features = ["net", "time"] }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+url = { version = "2.5.7", features = ["serde"] }
+uuid = { version = "1.26.0", features = ["serde", "v4"] }

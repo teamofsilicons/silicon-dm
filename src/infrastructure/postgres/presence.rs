@@ -70,7 +70,7 @@ impl PostgresStore {
         refresh_directory_in(&mut transaction, &command.organization_id, &command.actors).await?;
         sqlx::query(
             r#"
-            INSERT INTO dm.realtime_sessions (
+            INSERT INTO realtime_sessions (
                 id,
                 instance_id,
                 consumer_id,
@@ -91,13 +91,13 @@ impl PostgresStore {
         for actor in &command.actors {
             sqlx::query(
                 r#"
-                INSERT INTO dm.realtime_session_actors (
+                INSERT INTO realtime_session_actors (
                     session_id,
                     organization_id,
                     actor_kind,
                     actor_id
                 )
-                VALUES ($1, $2, $3::text::dm.actor_kind, $4)
+                VALUES ($1, $2, $3::text::actor_kind, $4)
                 "#,
             )
             .bind(command.session_id)
@@ -129,17 +129,17 @@ impl PostgresStore {
         }
         let result = sqlx::query(
             r#"
-            WITH current_time AS MATERIALIZED (
+            WITH heartbeat_clock AS MATERIALIZED (
                 SELECT clock_timestamp() AS value
             )
-            UPDATE dm.realtime_sessions
-            SET last_heartbeat_at = GREATEST(last_heartbeat_at, current_time.value),
+            UPDATE realtime_sessions
+            SET last_heartbeat_at = GREATEST(last_heartbeat_at, heartbeat_clock.value),
                 last_pong_at = CASE
-                    WHEN $3 THEN GREATEST(last_heartbeat_at, current_time.value)
+                    WHEN $3 THEN GREATEST(last_heartbeat_at, heartbeat_clock.value)
                     ELSE last_pong_at
                 END,
                 lease_expires_at = $2
-            FROM current_time
+            FROM heartbeat_clock
             WHERE id = $1
               AND disconnected_at IS NULL
               AND lease_expires_at > clock_timestamp()
@@ -189,8 +189,8 @@ impl PostgresStore {
                     actor.organization_id,
                     actor.actor_kind,
                     actor.actor_id
-                FROM dm.realtime_session_actors AS actor
-                JOIN dm.realtime_sessions AS session ON session.id = actor.session_id
+                FROM realtime_session_actors AS actor
+                JOIN realtime_sessions AS session ON session.id = actor.session_id
                 WHERE actor.session_id = $1
                   AND actor.organization_id = $2
                   AND actor.actor_id = $3
@@ -202,8 +202,8 @@ impl PostgresStore {
                 FROM candidates
                 WHERE (SELECT count(*) FROM candidates) = 1
             )
-            UPDATE dm.realtime_session_actors AS actor
-            SET activity = $4::text::dm.presence_activity,
+            UPDATE realtime_session_actors AS actor
+            SET activity = $4::text::presence_activity,
                 activity_set_at = CASE
                     WHEN $4 IS NULL THEN NULL
                     ELSE clock_timestamp()
@@ -256,7 +256,7 @@ impl PostgresStore {
         lock_realtime_session_actors(&mut transaction, session_id).await?;
         let closed_at = sqlx::query_scalar::<_, OffsetDateTime>(
             r#"
-            UPDATE dm.realtime_sessions
+            UPDATE realtime_sessions
             SET disconnected_at = GREATEST(connected_at, clock_timestamp()),
                 close_code = $2,
                 close_reason = $3
@@ -292,15 +292,15 @@ impl PostgresStore {
             r#"
             WITH requester AS (
                 SELECT 1
-                FROM dm.actor_snapshots
+                FROM actor_snapshots
                 WHERE organization_id = $1
-                  AND actor_kind = $2::text::dm.actor_kind
+                  AND actor_kind = $2::text::actor_kind
                   AND actor_id = $3
                   AND status = 'active'
             ),
             target AS (
                 SELECT actor_kind, actor_id
-                FROM dm.actor_snapshots
+                FROM actor_snapshots
                 WHERE organization_id = $1
                   AND actor_id = $4
                   AND status = 'active'
@@ -309,11 +309,11 @@ impl PostgresStore {
             active_sessions AS (
                 SELECT actor.activity, actor.activity_expires_at, actor.updated_at
                 FROM target
-                JOIN dm.realtime_session_actors AS actor
+                JOIN realtime_session_actors AS actor
                   ON actor.organization_id = $1
                  AND actor.actor_kind = target.actor_kind
                  AND actor.actor_id = target.actor_id
-                JOIN dm.realtime_sessions AS session ON session.id = actor.session_id
+                JOIN realtime_sessions AS session ON session.id = actor.session_id
                 WHERE session.disconnected_at IS NULL
                   AND session.lease_expires_at > clock_timestamp()
             )
@@ -331,7 +331,7 @@ impl PostgresStore {
                 (
                     SELECT max(state.last_seen_at)
                     FROM target
-                    LEFT JOIN dm.actor_presence_state AS state
+                    LEFT JOIN actor_presence_state AS state
                       ON state.organization_id = $1
                      AND state.actor_kind = target.actor_kind
                      AND state.actor_id = target.actor_id
@@ -370,7 +370,7 @@ impl PostgresStore {
         let expired_count = sqlx::query_scalar::<_, i64>(
             r#"
             WITH expired AS (
-                UPDATE dm.realtime_sessions
+                UPDATE realtime_sessions
                 SET disconnected_at = lease_expires_at,
                     close_code = 4000,
                     close_reason = 'heartbeat-timeout'
@@ -385,12 +385,12 @@ impl PostgresStore {
                     actor.actor_id,
                     max(expired.lease_expires_at) AS last_seen_at
                 FROM expired
-                JOIN dm.realtime_session_actors AS actor
+                JOIN realtime_session_actors AS actor
                   ON actor.session_id = expired.id
                 WHERE NOT EXISTS (
                     SELECT 1
-                    FROM dm.realtime_session_actors AS other_actor
-                    JOIN dm.realtime_sessions AS other_session
+                    FROM realtime_session_actors AS other_actor
+                    JOIN realtime_sessions AS other_session
                       ON other_session.id = other_actor.session_id
                     WHERE other_actor.organization_id = actor.organization_id
                       AND other_actor.actor_kind = actor.actor_kind
@@ -401,7 +401,7 @@ impl PostgresStore {
                 GROUP BY actor.organization_id, actor.actor_kind, actor.actor_id
             ),
             presence_updates AS (
-                INSERT INTO dm.actor_presence_state (
+                INSERT INTO actor_presence_state (
                     organization_id,
                     actor_kind,
                     actor_id,
@@ -417,7 +417,7 @@ impl PostgresStore {
                 FROM newly_offline
                 ON CONFLICT (organization_id, actor_kind, actor_id)
                 DO UPDATE SET last_seen_at = GREATEST(
-                    dm.actor_presence_state.last_seen_at,
+                    actor_presence_state.last_seen_at,
                     EXCLUDED.last_seen_at
                 )
                 RETURNING 1
@@ -443,7 +443,7 @@ async fn lock_realtime_session_actors(
             actor.organization_id || chr(31) || actor.actor_kind::text || chr(31) || actor.actor_id,
             0
         ) AS lock_key
-        FROM dm.realtime_session_actors AS actor
+        FROM realtime_session_actors AS actor
         WHERE actor.session_id = $1
         ORDER BY lock_key
         "#,
@@ -464,8 +464,8 @@ async fn lock_expired_realtime_actors(
             actor.organization_id || chr(31) || actor.actor_kind::text || chr(31) || actor.actor_id,
             0
         ) AS lock_key
-        FROM dm.realtime_session_actors AS actor
-        JOIN dm.realtime_sessions AS session ON session.id = actor.session_id
+        FROM realtime_session_actors AS actor
+        JOIN realtime_sessions AS session ON session.id = actor.session_id
         WHERE session.disconnected_at IS NULL
           AND session.lease_expires_at <= clock_timestamp()
         ORDER BY lock_key
@@ -500,7 +500,7 @@ async fn record_offline_actors(
 ) -> AppResult<()> {
     sqlx::query(
         r#"
-        INSERT INTO dm.actor_presence_state (
+        INSERT INTO actor_presence_state (
             organization_id,
             actor_kind,
             actor_id,
@@ -513,12 +513,12 @@ async fn record_offline_actors(
             actor.actor_id,
             $2,
             $2
-        FROM dm.realtime_session_actors AS actor
+        FROM realtime_session_actors AS actor
         WHERE actor.session_id = $1
           AND NOT EXISTS (
               SELECT 1
-              FROM dm.realtime_session_actors AS other_actor
-              JOIN dm.realtime_sessions AS other_session
+              FROM realtime_session_actors AS other_actor
+              JOIN realtime_sessions AS other_session
                 ON other_session.id = other_actor.session_id
               WHERE other_actor.organization_id = actor.organization_id
                 AND other_actor.actor_kind = actor.actor_kind
@@ -528,7 +528,7 @@ async fn record_offline_actors(
           )
         ON CONFLICT (organization_id, actor_kind, actor_id)
         DO UPDATE SET last_seen_at = GREATEST(
-            dm.actor_presence_state.last_seen_at,
+            actor_presence_state.last_seen_at,
             EXCLUDED.last_seen_at
         )
         "#,

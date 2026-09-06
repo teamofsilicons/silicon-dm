@@ -3,3 +3,10 @@
 openapi.yaml:
   no-unused-components:
     - '#/components/schemas/SocketFrame'
+  # The IAM registration contract requires this exact trailing-slash callback.
+  no-path-trailing-slash:
+    - '#/paths/~1webhook~1'
+  # Public health probes have no authentication or user-input 4xx branch.
+  operation-4xx-response:
+    - '#/paths/~1live/get/responses'
+    - '#/paths/~1ready/get/responses'

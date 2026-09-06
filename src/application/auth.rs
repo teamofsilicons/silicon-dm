@@ -1,90 +1,79 @@
-//! Authenticated request context.
+//! IAM-authenticated request and application-session types.
 
-use std::{collections::BTreeSet, fmt};
+use std::collections::BTreeSet;
 
 use secrecy::SecretString;
+use serde::Serialize;
+use uuid::Uuid;
 
 use crate::domain::{ActorId, ActorRef, OrganizationId};
 
-/// Short-lived, audience-bound credential minted for one downstream service.
-#[derive(Clone)]
-pub struct DelegatedCredential {
-    proof: SecretString,
-    issuer_app_id: String,
-}
-
-impl DelegatedCredential {
-    /// Creates a credential after the IAM adapter has validated its response.
-    #[must_use]
-    pub(crate) fn new(proof: SecretString, issuer_app_id: String) -> Self {
-        Self {
-            proof,
-            issuer_app_id,
-        }
-    }
-
-    /// Borrows the audience-bound proof.
-    #[must_use]
-    pub(crate) const fn proof(&self) -> &SecretString {
-        &self.proof
-    }
-
-    /// Returns the application that exchanged the proof.
-    #[must_use]
-    pub(crate) fn issuer_app_id(&self) -> &str {
-        &self.issuer_app_id
-    }
-}
-
-impl fmt::Debug for DelegatedCredential {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("DelegatedCredential")
-            .field("proof", &"[REDACTED]")
-            .field("issuer_app_id", &self.issuer_app_id)
-            .finish()
-    }
-}
-
-/// Credential type used for one incoming request.
+/// The IAM application access token presented by this request.
 #[derive(Clone, Debug)]
 pub enum PresentedCredential {
-    /// Opaque IAM bearer token.
+    /// Opaque IAM application bearer token, redacted in diagnostic output.
     Bearer(SecretString),
-    /// Audience-bound IAM OBO proof and originating application.
-    Obo {
-        /// Proof value.
-        proof: SecretString,
-        /// Originating application identifier.
-        app_id: String,
-    },
 }
 
-/// Authority proven by IAM for one request.
+/// Authority proven by a fresh IAM application introspection.
 #[derive(Clone, Debug)]
 pub struct AuthContext {
-    /// Represented actor.
+    /// Represented Carbon or Silicon, using IAM's canonical public identifier.
     pub actor: ActorRef,
+    /// IAM's stable principal UUID.
+    pub principal_id: Uuid,
+    /// IAM session identifier when disclosed by introspection.
+    pub session_id: Option<Uuid>,
     /// Active organization selected by the request.
     pub organization_id: OrganizationId,
+    /// Current organization role, only when IAM discloses it.
+    pub org_role: Option<String>,
     /// Actors this credential may represent on a realtime connection.
     pub represented_actor_ids: BTreeSet<ActorId>,
-    /// IAM capabilities/scopes.
+    /// Effective IAM scopes; undisclosed authority is never inferred.
     pub capabilities: BTreeSet<String>,
-    /// Original credential for narrowly scoped downstream delegation.
+    /// Request-scoped token, never persisted by the backend.
     pub credential: PresentedCredential,
 }
 
 impl AuthContext {
-    /// Returns whether the principal may represent the requested actor.
+    /// Whether the principal may represent the requested actor.
     #[must_use]
     pub fn may_represent(&self, actor_id: &ActorId) -> bool {
         self.actor.id == *actor_id || self.represented_actor_ids.contains(actor_id)
     }
 
-    /// Returns whether IAM granted a named capability.
+    /// Whether IAM granted a named scope.
     #[must_use]
     pub fn has_capability(&self, capability: &str) -> bool {
         self.capabilities.contains(capability)
     }
+
+    /// Whether the disclosed current role permits organization administration.
+    #[must_use]
+    pub fn is_org_administrator(&self) -> bool {
+        matches!(
+            self.org_role.as_deref(),
+            Some("owner" | "admin" | "org_owner" | "org_admin" | "org_head")
+        )
+    }
+}
+
+/// Application session returned only by login and refresh. Never log this value.
+#[derive(Serialize)]
+pub struct ApplicationSession {
+    /// Opaque IAM application access token.
+    pub access_token: String,
+    /// Rotating IAM application refresh token; persist before using the access token.
+    pub refresh_token: String,
+    /// Always `Bearer`.
+    pub token_type: &'static str,
+    /// Access token lifetime in seconds.
+    pub expires_in: i64,
+    /// Effective space-separated scopes.
+    pub scope: String,
+    /// Verified Carbon or Silicon identity.
+    pub actor: ActorRef,
+    /// Organization to supply as `X-Org-ID` on subsequent requests.
+    pub organization_id: OrganizationId,
 }

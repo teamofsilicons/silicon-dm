@@ -10,10 +10,10 @@ use uuid::Uuid;
 
 use crate::{
     AppResult,
-    application::commands::ActorDelivery,
+    application::commands::DeliveryNotice,
     config::WorkerSettings,
     infrastructure::postgres::{DeliveryClaim, PostgresStore},
-    realtime::{RealtimeHub, RealtimeTarget, ServerFrame},
+    realtime::{DeliveryWakeup, RealtimeHub, RealtimeTarget},
 };
 
 const MINIMUM_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -192,12 +192,10 @@ impl DeliveryWorker {
         }
 
         let delivery_id = delivery.id;
-        let frame = ServerFrame::delivery(
-            delivery.id,
-            delivery.target.id,
-            delivery.sequence,
-            delivery.payload,
-        );
+        let frame = DeliveryWakeup {
+            actor_id: delivery.target.id,
+            sequence: delivery.sequence,
+        };
         let report = self.realtime.publish(target, &frame);
         tracing::debug!(
             %delivery_id,
@@ -309,7 +307,7 @@ enum Work {
     Maintain,
 }
 
-fn delivery_matches_target(delivery: &ActorDelivery, target: &RealtimeTarget) -> bool {
+fn delivery_matches_target(delivery: &DeliveryNotice, target: &RealtimeTarget) -> bool {
     delivery.organization_id == target.organization_id && delivery.target == target.actor
 }
 
@@ -362,10 +360,10 @@ mod tests {
 
     use super::{delivery_matches_target, failure_retry_delay, short_retry_delay, sort_targets};
     use crate::{
-        application::commands::ActorDelivery,
+        application::commands::DeliveryNotice,
         config::WorkerSettings,
-        domain::{ActorId, ActorRef, ActorType, MessageStatus, OrganizationId},
-        realtime::{DeliveryPayload, RealtimeTarget},
+        domain::{ActorId, ActorRef, ActorType, OrganizationId},
+        realtime::RealtimeTarget,
     };
 
     fn settings() -> Result<WorkerSettings, &'static str> {
@@ -397,15 +395,11 @@ mod tests {
     fn delivery_target_match_includes_organization_scope() -> Result<(), Box<dyn std::error::Error>>
     {
         let target = target("org-a", ActorType::Carbon, "shared-actor")?;
-        let delivery = ActorDelivery {
+        let delivery = DeliveryNotice {
             id: Uuid::nil(),
             organization_id: OrganizationId::from_str("org-b")?,
             target: target.actor.clone(),
             sequence: 1,
-            payload: DeliveryPayload::Receipt {
-                message_id: Uuid::nil(),
-                status: MessageStatus::Sent,
-            },
         };
 
         assert!(!delivery_matches_target(&delivery, &target));

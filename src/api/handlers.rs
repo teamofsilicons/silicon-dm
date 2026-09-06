@@ -11,9 +11,8 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Response,
 };
-use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
-use url::{Url, form_urlencoded};
+use serde::Deserialize;
+use url::form_urlencoded;
 use uuid::Uuid;
 
 use super::extract::{
@@ -27,11 +26,8 @@ use crate::{
             CreateBundleCommand, CreateConversationCommand, PutDraftCommand, PutDraftOutcome,
             RecordReceiptCommand, SendMessageCommand,
         },
-        messaging::{
-            prepare_message_content, validate_briefcase_permanent_url, validate_device_id,
-            validate_draft_urls,
-        },
-        ports::{AuthenticationRequest, DelegationRequest},
+        messaging::{prepare_message_content, validate_device_id},
+        ports::AuthenticationRequest,
         state::AppState,
     },
     domain::{
@@ -77,7 +73,16 @@ pub(super) async fn open_realtime_connection(
     Ok(upgrade
         .max_message_size(max_message_size)
         .max_frame_size(max_message_size)
-        .on_upgrade(move |socket| serve_socket(socket, state, authority, actors, query.device_id)))
+        .on_upgrade(move |socket| {
+            serve_socket(
+                socket,
+                state,
+                authority,
+                actors,
+                query.device_id,
+                query.testing_generation,
+            )
+        }))
 }
 
 /// Lists conversations visible to the IAM-authenticated actor.
@@ -90,6 +95,75 @@ pub(super) async fn list_conversations(
     state
         .store
         .list_conversations(&context.organization_id, &context.actor, &page)
+        .await
+        .map(Json)
+}
+
+/// Reads the latest version of an accessible conversation message.
+pub(super) async fn get_message(
+    State(state): State<AppState>,
+    Authenticated(context): Authenticated,
+    ApiPath(path): ApiPath<MessagePath>,
+) -> AppResult<Json<Message>> {
+    state
+        .store
+        .get_message(
+            &context.organization_id,
+            &context.actor,
+            path.conversation_id,
+            path.message_id,
+        )
+        .await
+        .map(Json)
+}
+
+/// Replaces the sender's message content using an exact observed version.
+pub(super) async fn edit_message(
+    State(state): State<AppState>,
+    Authenticated(context): Authenticated,
+    ApiPath(path): ApiPath<MessagePath>,
+    IfMatch(version): IfMatch,
+    Idempotency(key): Idempotency,
+    ApiJson(input): ApiJson<MessageCreate>,
+) -> AppResult<Json<Message>> {
+    let version = version
+        .ok_or_else(|| AppError::validation("If-Match is required when editing a message"))?;
+    state
+        .store
+        .revise_message(
+            &context.organization_id,
+            &context.actor,
+            path.conversation_id,
+            path.message_id,
+            version,
+            &key,
+            Some(input),
+        )
+        .await
+        .map(Json)
+}
+
+/// Deletes the sender's message by publishing a versioned tombstone.
+pub(super) async fn delete_message(
+    State(state): State<AppState>,
+    Authenticated(context): Authenticated,
+    ApiPath(path): ApiPath<MessagePath>,
+    IfMatch(version): IfMatch,
+    Idempotency(key): Idempotency,
+) -> AppResult<Json<Message>> {
+    let version = version
+        .ok_or_else(|| AppError::validation("If-Match is required when deleting a message"))?;
+    state
+        .store
+        .revise_message(
+            &context.organization_id,
+            &context.actor,
+            path.conversation_id,
+            path.message_id,
+            version,
+            &key,
+            None,
+        )
         .await
         .map(Json)
 }
@@ -310,7 +384,6 @@ pub(super) async fn put_draft(
         )
         .await?;
     input.validate().map_err(AppError::validation)?;
-    validate_draft_urls(&input, &state.settings.providers.briefcase_base_url)?;
 
     let outcome = state
         .store
@@ -364,43 +437,6 @@ pub(super) async fn get_presence(
         .get_presence(&context.organization_id, &context.actor, &path.actor_id)
         .await
         .map(Json)
-}
-
-/// Exchanges a permanent Briefcase entry URL for a temporary CDN URL.
-pub(super) async fn create_attachment_temporary_url(
-    State(state): State<AppState>,
-    Authenticated(context): Authenticated,
-    ApiJson(request): ApiJson<TemporaryUrlRequest>,
-) -> AppResult<(StatusCode, Json<TemporaryUrlResponse>)> {
-    let entry_id = validate_briefcase_permanent_url(
-        &request.permanent_url,
-        &state.settings.providers.briefcase_base_url,
-    )?;
-    let credential = state
-        .identity
-        .exchange_actor_credential(
-            &context,
-            &DelegationRequest::briefcase_temporary_url(
-                &state.settings.providers.briefcase_iam_audience,
-                entry_id,
-            ),
-        )
-        .await?;
-    let result = state
-        .attachments
-        .temporary_url(
-            &request.permanent_url,
-            &context.organization_id,
-            &credential,
-        )
-        .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(TemporaryUrlResponse {
-            url: result.url,
-            expires_at: result.expires_at,
-        }),
-    ))
 }
 
 /// Returns provider-filtered trending GIFs.
@@ -462,6 +498,7 @@ struct RealtimeConnectQuery {
     organization_id: OrganizationId,
     actor_ids: Vec<ActorId>,
     device_id: String,
+    testing_generation: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -508,19 +545,6 @@ pub(super) struct ReceiptRequest {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct TemporaryUrlRequest {
-    permanent_url: Url,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct TemporaryUrlResponse {
-    url: Url,
-    #[serde(with = "time::serde::rfc3339")]
-    expires_at: OffsetDateTime,
-}
-
-#[derive(Debug, Deserialize)]
 pub(super) struct GifSearchQuery {
     q: String,
 }
@@ -532,6 +556,7 @@ fn parse_realtime_query(raw_query: Option<&str>) -> AppResult<RealtimeConnectQue
     let mut organization_id = None;
     let mut actor_ids = Vec::new();
     let mut device_id = None;
+    let mut testing_generation = None;
 
     for (name, value) in form_urlencoded::parse(raw_query.as_bytes()) {
         if name.contains('\u{fffd}') || value.contains('\u{fffd}') {
@@ -568,6 +593,22 @@ fn parse_realtime_query(raw_query: Option<&str>) -> AppResult<RealtimeConnectQue
                 }
                 device_id = Some(value.into_owned());
             }
+            "testing_generation" => {
+                if testing_generation.is_some() {
+                    return Err(AppError::validation(
+                        "testing_generation must occur at most once",
+                    ));
+                }
+                let generation = value.parse::<i64>().map_err(|_| {
+                    AppError::validation("testing_generation must be a positive integer")
+                })?;
+                if generation < 1 {
+                    return Err(AppError::validation(
+                        "testing_generation must be a positive integer",
+                    ));
+                }
+                testing_generation = Some(generation);
+            }
             _ => {
                 return Err(AppError::validation(
                     "realtime query contains an unknown parameter",
@@ -593,6 +634,7 @@ fn parse_realtime_query(raw_query: Option<&str>) -> AppResult<RealtimeConnectQue
             .ok_or_else(|| AppError::validation("org_id must be supplied exactly once"))?,
         actor_ids,
         device_id,
+        testing_generation,
     })
 }
 

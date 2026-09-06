@@ -74,6 +74,12 @@ pub struct Gif {
 /// Content accepted when creating a message or bundle display message.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct MessageCreate {
+    /// Arbitrary caller-owned metadata, preserved on every round trip.
+    #[serde(default)]
+    pub metadata: serde_json::Map<String, serde_json::Value>,
+    /// Message being replied to in the same conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<Uuid>,
     /// Explicit sender when a connection represents more than one actor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_id: Option<super::ActorId>,
@@ -125,6 +131,18 @@ pub enum ReceiptStatus {
 /// Public durable message representation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Message {
+    /// Content version; edits and deletion advance this independently of receipts.
+    #[serde(default = "initial_message_version")]
+    pub version: i64,
+    /// A deleted message is a content-free tombstone.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub deleted_at: Option<OffsetDateTime>,
+    /// Arbitrary caller-owned metadata, preserved on every round trip.
+    #[serde(default)]
+    pub metadata: serde_json::Map<String, serde_json::Value>,
+    /// Message being replied to in the same conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<Uuid>,
     /// Stable message identifier.
     pub id: Uuid,
     /// Parent conversation.
@@ -165,6 +183,10 @@ pub struct Message {
     /// Stable operator-facing failure category, never a secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
+}
+
+const fn initial_message_version() -> i64 {
+    1
 }
 
 /// Cursor-paginated messages.
@@ -234,6 +256,8 @@ impl MessageCreate {
             self.voice.as_ref(),
             self.voice_transcript.as_deref(),
             self.gif.as_ref(),
+            &self.metadata,
+            self.reply_to_message_id,
         )
     }
 
@@ -258,6 +282,8 @@ pub(crate) fn content_digest(
     voice: Option<&VoiceAttachment>,
     voice_transcript: Option<&str>,
     gif: Option<&Gif>,
+    metadata: &serde_json::Map<String, serde_json::Value>,
+    reply_to_message_id: Option<Uuid>,
 ) -> blake3::Hash {
     #[derive(Serialize)]
     struct Canonical<'a> {
@@ -267,6 +293,10 @@ pub(crate) fn content_digest(
         #[serde(skip_serializing_if = "Option::is_none")]
         voice_transcript: Option<&'a str>,
         gif: Option<&'a Gif>,
+        #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
+        metadata: &'a serde_json::Map<String, serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reply_to_message_id: Option<Uuid>,
     }
 
     let canonical = Canonical {
@@ -275,6 +305,8 @@ pub(crate) fn content_digest(
         voice,
         voice_transcript,
         gif,
+        metadata,
+        reply_to_message_id,
     };
     let mut hasher = blake3::Hasher::new();
     if serde_json::to_writer(&mut hasher, &canonical).is_err() {

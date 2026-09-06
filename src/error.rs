@@ -26,6 +26,9 @@ pub enum AppError {
     /// Request is structurally or semantically invalid.
     #[error("{0}")]
     Validation(String),
+    /// A requested expansion cannot be safely materialized in one response.
+    #[error("{0}")]
+    ResponseTooLarge(String),
     /// Mutation conflicts with current durable state.
     #[error("{0}")]
     Conflict(String),
@@ -87,6 +90,7 @@ impl AppError {
             Self::Forbidden => "forbidden",
             Self::NotFound => "not_found",
             Self::Validation(_) => "validation_error",
+            Self::ResponseTooLarge(_) => "response_too_large",
             Self::Conflict(_) => "conflict",
             Self::PreconditionRequired(_) => "precondition_required",
             Self::DependencyUnavailable { .. } => "dependency_unavailable",
@@ -103,6 +107,7 @@ impl AppError {
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::ResponseTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::PreconditionRequired(_) => StatusCode::PRECONDITION_REQUIRED,
             Self::DependencyUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,

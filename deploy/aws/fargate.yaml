@@ -1,0 +1,919 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Silicon DM on private ARM64 ECS Fargate with dedicated ALB and separate production/testing RDS.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet::Id
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet::Id
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet::Id
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet::Id
+  CertificateArn:
+    Type: String
+  AppSecretArn:
+    Type: String
+    Description: Secrets Manager secret holding the IAM application and webhook credentials.
+  BackendImageUri:
+    Type: String
+    Description: Immutable ARM64 ECR runtime image with the AWS RDS CA bundle baked in.
+  PublicHostName:
+    Type: String
+    Default: backend.dm.teamofsilicons.com
+  IamBaseUrl:
+    Type: String
+    Default: https://backend.iam.teamofsilicons.com/
+  BootstrapImageUri:
+    Type: String
+    Description: ARM64 image containing the reviewed one-off bootstrap script and DM migrator.
+  RuntimeDesiredCount:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 1
+    Description: Keep zero until the bootstrap task has completed; then set one for API and worker.
+  DatabaseEngineVersion:
+    Type: String
+    Default: "17.9"
+    Description: Exact PostgreSQL 17 version available in the deployment region.
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.t4g.small
+    AllowedValues: [db.t4g.micro, db.t4g.small, db.t4g.medium]
+  TestingDatabaseInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    AllowedValues: [db.t4g.micro, db.t4g.small]
+
+Resources:
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Silicon DM production instance; application ports are ALB-only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          Description: DM ALB to DM API
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: silicon-dm-production-instance
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  AlbToInstanceEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      DestinationSecurityGroupId: !GetAtt InstanceSecurityGroup.GroupId
+      Description: DM ALB to Silicon DM production API
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Silicon DM production and testing PostgreSQL; DM instances only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref InstanceSecurityGroup
+          Description: DM production instances
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: silicon-dm-production-database
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for Silicon DM production
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: silicon-dm-production
+      Engine: postgres
+      EngineVersion: !Ref DatabaseEngineVersion
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      DBName: silicon_dm
+      MasterUsername: dm_migrator
+      ManageMasterUserPassword: true
+      Port: 5432
+      AllocatedStorage: "30"
+      MaxAllocatedStorage: 200
+      StorageType: gp3
+      StorageEncrypted: true
+      PubliclyAccessible: false
+      MultiAZ: false
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 7
+      CopyTagsToSnapshot: true
+      DeletionProtection: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      EnableCloudwatchLogsExports: [postgresql, upgrade]
+      DBParameterGroupName: !Ref DatabaseParameters
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: silicon-dm-production
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  TestingDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: silicon-dm-testing-production
+      Engine: postgres
+      EngineVersion: !Ref DatabaseEngineVersion
+      DBInstanceClass: !Ref TestingDatabaseInstanceClass
+      DBName: silicon_dm_test
+      MasterUsername: dm_testing_migrator
+      ManageMasterUserPassword: true
+      Port: 5432
+      AllocatedStorage: "20"
+      MaxAllocatedStorage: 25
+      StorageType: gp3
+      StorageEncrypted: true
+      PubliclyAccessible: false
+      MultiAZ: false
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 1
+      CopyTagsToSnapshot: true
+      DeletionProtection: true
+      EnablePerformanceInsights: false
+      DBParameterGroupName: !Ref DatabaseParameters
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: silicon-dm-testing-production
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: testing
+
+  DatabaseParameters:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Require TLS for Silicon DM production and testing PostgreSQL
+      Family: postgres17
+      Parameters:
+        rds.force_ssl: "1"
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /silicon-dm/production/api
+      RetentionInDays: 30
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /silicon-dm/production/worker
+      RetentionInDays: 30
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: silicon-dm-prod-ip-api
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 8080
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /ready
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "204"
+      TargetGroupAttributes:
+        # Finish large REST requests; durable clients reconnect and replay sockets.
+        - Key: deregistration_delay.timeout_seconds
+          Value: "180"
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Silicon DM public HTTPS and HTTP redirect
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      # Non-routable placeholder suppresses the default unrestricted egress.
+      # AlbToInstanceEgress below permits only the DM target port.
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 1
+          ToPort: 1
+          CidrIp: 127.0.0.1/32
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: silicon-dm-production
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups: [!Ref AlbSecurityGroup]
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "180"
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+        - Key: deletion_protection.enabled
+          Value: "true"
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "404"
+            ContentType: text/plain
+            MessageBody: Unknown host
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            Host: !Ref PublicHostName
+            StatusCode: HTTP_301
+
+  ApiListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 1
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values: [!Ref PublicHostName]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ApiTargetGroup
+
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: silicon-dm-production
+      Description: IP rate protection without filtering arbitrary DM message bodies
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        SampledRequestsEnabled: false
+        MetricName: silicon-dm-production
+      Rules:
+        - Name: PerIpRate
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              Limit: 2000
+              EvaluationWindowSec: 300
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            SampledRequestsEnabled: false
+            MetricName: silicon-dm-production-ip-rate
+      Tags:
+        - Key: Service
+          Value: silicon-dm
+        - Key: Environment
+          Value: production
+
+  WebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Ref LoadBalancer
+      WebACLArn: !GetAtt WebAcl.Arn
+
+  RuntimeSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: silicon-dm/runtime-production
+      Description: Restricted DM runtime configuration written only by the one-off bootstrap
+        task
+      Tags:
+      - Key: Service
+        Value: silicon-dm
+      - Key: Environment
+        Value: production
+  BootstrapLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /silicon-dm/production/bootstrap
+      RetentionInDays: 30
+  BootstrapExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: silicon-dm-bootstrap-execution
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ecs-tasks.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: silicon-dm-bootstrap-execution
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ecr:GetAuthorizationToken
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - ecr:BatchCheckLayerAvailability
+            - ecr:BatchGetImage
+            - ecr:GetDownloadUrlForLayer
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/silicon-dm-production
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+            - Fn::GetAtt:
+              - ApiLogGroup
+              - Arn
+            - Fn::GetAtt:
+              - WorkerLogGroup
+              - Arn
+            - Fn::GetAtt:
+              - BootstrapLogGroup
+              - Arn
+      Tags:
+      - Key: Service
+        Value: silicon-dm
+      - Key: Environment
+        Value: production
+  RuntimeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: silicon-dm-runtime-execution
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ecs-tasks.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: silicon-dm-runtime-execution
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ecr:GetAuthorizationToken
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - ecr:BatchCheckLayerAvailability
+            - ecr:BatchGetImage
+            - ecr:GetDownloadUrlForLayer
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/silicon-dm-production
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+            - Fn::GetAtt:
+              - ApiLogGroup
+              - Arn
+            - Fn::GetAtt:
+              - WorkerLogGroup
+              - Arn
+            - Fn::GetAtt:
+              - BootstrapLogGroup
+              - Arn
+          - Effect: Allow
+            Action:
+            - secretsmanager:GetSecretValue
+            Resource:
+              Ref: RuntimeSecret
+      Tags:
+      - Key: Service
+        Value: silicon-dm
+      - Key: Environment
+        Value: production
+  BootstrapTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: silicon-dm-bootstrap-task
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ecs-tasks.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: silicon-dm-bootstrap-task
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - secretsmanager:GetSecretValue
+            Resource:
+            - Ref: AppSecretArn
+            - Fn::GetAtt:
+              - Database
+              - MasterUserSecret.SecretArn
+            - Fn::GetAtt:
+              - TestingDatabase
+              - MasterUserSecret.SecretArn
+          - Effect: Allow
+            Action:
+            - secretsmanager:PutSecretValue
+            - secretsmanager:GetSecretValue
+            - secretsmanager:DescribeSecret
+            Resource:
+              Ref: RuntimeSecret
+      Tags:
+      - Key: Service
+        Value: silicon-dm
+      - Key: Environment
+        Value: production
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: silicon-dm-production
+      ClusterSettings:
+      - Name: containerInsights
+        Value: enabled
+      Tags:
+      - Key: Service
+        Value: silicon-dm
+      - Key: Environment
+        Value: production
+  BootstrapTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: silicon-dm-bootstrap
+      RequiresCompatibilities:
+      - FARGATE
+      NetworkMode: awsvpc
+      Cpu: '512'
+      Memory: '4096'
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn:
+        Fn::GetAtt:
+        - BootstrapExecutionRole
+        - Arn
+      ContainerDefinitions:
+      - Name: bootstrap
+        Image:
+          Ref: BootstrapImageUri
+        Essential: true
+        User: 10001:10001
+        ReadonlyRootFilesystem: true
+        LinuxParameters:
+          Capabilities:
+            Drop:
+            - ALL
+        StopTimeout: 120
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group:
+              Ref: BootstrapLogGroup
+            awslogs-region:
+              Ref: AWS::Region
+            awslogs-stream-prefix: bootstrap
+        Environment:
+        - Name: APP_SECRET_ARN
+          Value:
+            Ref: AppSecretArn
+        - Name: DB_SECRET_ARN
+          Value:
+            Fn::GetAtt:
+            - Database
+            - MasterUserSecret.SecretArn
+        - Name: TEST_DB_SECRET_ARN
+          Value:
+            Fn::GetAtt:
+            - TestingDatabase
+            - MasterUserSecret.SecretArn
+        - Name: DB_HOST
+          Value:
+            Fn::GetAtt:
+            - Database
+            - Endpoint.Address
+        - Name: TEST_DB_HOST
+          Value:
+            Fn::GetAtt:
+            - TestingDatabase
+            - Endpoint.Address
+        - Name: RUNTIME_SECRET_ARN
+          Value:
+            Ref: RuntimeSecret
+        - Name: AWS_DEFAULT_REGION
+          Value:
+            Ref: AWS::Region
+        - Name: PYTHONDONTWRITEBYTECODE
+          Value: '1'
+      Tags:
+      - Key: Service
+        Value: silicon-dm
+      - Key: Environment
+        Value: production
+      TaskRoleArn:
+        Fn::GetAtt:
+        - BootstrapTaskRole
+        - Arn
+  ApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: silicon-dm-api
+      RequiresCompatibilities:
+      - FARGATE
+      NetworkMode: awsvpc
+      Cpu: '2048'
+      Memory: '8192'
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn:
+        Fn::GetAtt:
+        - RuntimeExecutionRole
+        - Arn
+      ContainerDefinitions:
+      - Name: api
+        Image:
+          Ref: BackendImageUri
+        Essential: true
+        User: 10001:10001
+        ReadonlyRootFilesystem: true
+        LinuxParameters:
+          Capabilities:
+            Drop:
+            - ALL
+        StopTimeout: 120
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group:
+              Ref: ApiLogGroup
+            awslogs-region:
+              Ref: AWS::Region
+            awslogs-stream-prefix: api
+        Command:
+        - dm-api
+        Environment:
+        - Name: DM_ENVIRONMENT
+          Value: production
+        - Name: DM_BIND_ADDR
+          Value: 0.0.0.0:8080
+        - Name: DM_PUBLIC_BASE_URL
+          Value:
+            Fn::Sub: https://${PublicHostName}/api/v1
+        - Name: DM_IAM_BASE_URL
+          Value:
+            Ref: IamBaseUrl
+        - Name: DM_DATABASE_MAX_CONNECTIONS
+          Value: '16'
+        - Name: DM_DATABASE_MIN_CONNECTIONS
+          Value: '1'
+        - Name: DM_TEST_DATABASE_MAX_CONNECTIONS
+          Value: '4'
+        - Name: DM_DATABASE_ACQUIRE_TIMEOUT_SECONDS
+          Value: '10'
+        - Name: DM_DATABASE_STATEMENT_TIMEOUT_SECONDS
+          Value: '60'
+        - Name: DM_REQUEST_TIMEOUT_SECONDS
+          Value: '120'
+        - Name: DM_SHUTDOWN_TIMEOUT_SECONDS
+          Value: '110'
+        - Name: DM_MAX_HTTP_BODY_BYTES
+          Value: '134217728'
+        - Name: DM_LOG_FILTER
+          Value: info,silicon_dm=info
+        Secrets:
+        - Name: DM_IAM_APP_ID
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_IAM_APP_ID::'
+        - Name: DM_IAM_APP_SECRET
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_IAM_APP_SECRET::'
+        - Name: DM_IAM_WEBHOOK_SECRET
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_IAM_WEBHOOK_SECRET::'
+        - Name: DM_IAM_WEBHOOK_KEY_VERSION
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_IAM_WEBHOOK_KEY_VERSION::'
+        - Name: DM_GIPHY_API_KEY
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_GIPHY_API_KEY::'
+        - Name: DM_TEST_KEY_ENCRYPTION_KEY
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_TEST_KEY_ENCRYPTION_KEY::'
+        - Name: DM_DATABASE_URL
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_DATABASE_URL::'
+        - Name: DM_TEST_DATABASE_URL
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_TEST_DATABASE_URL::'
+        PortMappings:
+        - ContainerPort: 8080
+          Protocol: tcp
+      Tags:
+      - Key: Service
+        Value: silicon-dm
+      - Key: Environment
+        Value: production
+  ApiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+    - ApiListenerRule
+    Properties:
+      ServiceName: silicon-dm-api
+      Cluster:
+        Ref: Cluster
+      TaskDefinition:
+        Ref: ApiTaskDefinition
+      DesiredCount:
+        Ref: RuntimeDesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: 1.4.0
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+          - Ref: PrivateSubnetA
+          - Ref: PrivateSubnetB
+          SecurityGroups:
+          - Ref: InstanceSecurityGroup
+      PropagateTags: SERVICE
+      Tags:
+      - Key: Service
+        Value: silicon-dm
+      - Key: Environment
+        Value: production
+      HealthCheckGracePeriodSeconds: 120
+      LoadBalancers:
+      - ContainerName: api
+        ContainerPort: 8080
+        TargetGroupArn:
+          Ref: ApiTargetGroup
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: silicon-dm-worker
+      RequiresCompatibilities:
+      - FARGATE
+      NetworkMode: awsvpc
+      Cpu: '512'
+      Memory: '4096'
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn:
+        Fn::GetAtt:
+        - RuntimeExecutionRole
+        - Arn
+      ContainerDefinitions:
+      - Name: worker
+        Image:
+          Ref: BackendImageUri
+        Essential: true
+        User: 10001:10001
+        ReadonlyRootFilesystem: true
+        LinuxParameters:
+          Capabilities:
+            Drop:
+            - ALL
+        StopTimeout: 120
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group:
+              Ref: WorkerLogGroup
+            awslogs-region:
+              Ref: AWS::Region
+            awslogs-stream-prefix: worker
+        Command:
+        - dm-worker
+        Environment:
+        - Name: DM_ENVIRONMENT
+          Value: production
+        - Name: DM_BIND_ADDR
+          Value: 0.0.0.0:8080
+        - Name: DM_PUBLIC_BASE_URL
+          Value:
+            Fn::Sub: https://${PublicHostName}/api/v1
+        - Name: DM_IAM_BASE_URL
+          Value:
+            Ref: IamBaseUrl
+        - Name: DM_DATABASE_MAX_CONNECTIONS
+          Value: '4'
+        - Name: DM_DATABASE_MIN_CONNECTIONS
+          Value: '1'
+        - Name: DM_TEST_DATABASE_MAX_CONNECTIONS
+          Value: '4'
+        - Name: DM_DATABASE_ACQUIRE_TIMEOUT_SECONDS
+          Value: '10'
+        - Name: DM_DATABASE_STATEMENT_TIMEOUT_SECONDS
+          Value: '60'
+        - Name: DM_REQUEST_TIMEOUT_SECONDS
+          Value: '120'
+        - Name: DM_SHUTDOWN_TIMEOUT_SECONDS
+          Value: '110'
+        - Name: DM_MAX_HTTP_BODY_BYTES
+          Value: '134217728'
+        - Name: DM_LOG_FILTER
+          Value: info,silicon_dm=info
+        Secrets:
+        - Name: DM_IAM_APP_ID
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_IAM_APP_ID::'
+        - Name: DM_IAM_APP_SECRET
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_IAM_APP_SECRET::'
+        - Name: DM_IAM_WEBHOOK_SECRET
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_IAM_WEBHOOK_SECRET::'
+        - Name: DM_IAM_WEBHOOK_KEY_VERSION
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_IAM_WEBHOOK_KEY_VERSION::'
+        - Name: DM_GIPHY_API_KEY
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_GIPHY_API_KEY::'
+        - Name: DM_TEST_KEY_ENCRYPTION_KEY
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_TEST_KEY_ENCRYPTION_KEY::'
+        - Name: DM_DATABASE_URL
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_DATABASE_URL::'
+        - Name: DM_TEST_DATABASE_URL
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_TEST_DATABASE_URL::'
+      Tags:
+      - Key: Service
+        Value: silicon-dm
+      - Key: Environment
+        Value: production
+  WorkerService:
+    Type: AWS::ECS::Service
+    DependsOn:
+    - ApiListenerRule
+    Properties:
+      ServiceName: silicon-dm-worker
+      Cluster:
+        Ref: Cluster
+      TaskDefinition:
+        Ref: WorkerTaskDefinition
+      DesiredCount:
+        Ref: RuntimeDesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: 1.4.0
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+          - Ref: PrivateSubnetA
+          - Ref: PrivateSubnetB
+          SecurityGroups:
+          - Ref: InstanceSecurityGroup
+      PropagateTags: SERVICE
+      Tags:
+      - Key: Service
+        Value: silicon-dm
+      - Key: Environment
+        Value: production
+
+Outputs:
+  TestingDatabaseEndpoint:
+    Value: !GetAtt TestingDatabase.Endpoint.Address
+  TestingDatabaseSecretArn:
+    Value: !GetAtt TestingDatabase.MasterUserSecret.SecretArn
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  DatabaseSecretArn:
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
+  ApiTargetGroupArn:
+    Value: !Ref ApiTargetGroup
+  PublicHostName:
+    Value: !Ref PublicHostName
+  WebhookUrl:
+    Value: !Sub https://${PublicHostName}/webhook/
+  LoadBalancerDnsName:
+    Value: !GetAtt LoadBalancer.DNSName
+  LoadBalancerArn:
+    Value: !Ref LoadBalancer
+  CertificateArn:
+    Value: !Ref CertificateArn
+  ClusterName:
+    Value: !Ref Cluster
+  BootstrapTaskDefinitionArn:
+    Value: !Ref BootstrapTaskDefinition
+  RuntimeSecretArn:
+    Value: !Ref RuntimeSecret
+  TaskSecurityGroupId:
+    Value: !Ref InstanceSecurityGroup

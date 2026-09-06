@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Single persistent Silicon DM browser gateway behind the existing DM ALB.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnetId:
+    Type: AWS::EC2::Subnet::Id
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: Must be the availability zone of PrivateSubnetId.
+  AlbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  HttpsListenerArn:
+    Type: String
+  HttpListenerArn:
+    Type: String
+  CertificateArn:
+    Type: String
+    Description: Issued ACM certificate covering gateway.dm.teamofsilicons.com.
+  GatewayImageUri:
+    Type: String
+    AllowedPattern: '[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/silicon-dm-production@sha256:[a-f0-9]{64}'
+    Description: Digest-pinned ARM64 gateway image in the existing DM ECR repository.
+  GatewayHost:
+    Type: String
+    Default: gateway.dm.teamofsilicons.com
+    AllowedValues: [gateway.dm.teamofsilicons.com]
+  FrontendHost:
+    Type: String
+    Default: dm.teamofsilicons.com
+    AllowedValues: [dm.teamofsilicons.com]
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+  StateVolumeSizeGiB:
+    Type: Number
+    Default: 16
+    MinValue: 16
+    MaxValue: 64
+
+Resources:
+  GatewaySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: DM gateway accepts HTTP only from the existing DM ALB.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 4315
+          ToPort: 4315
+          SourceSecurityGroupId: !Ref AlbSecurityGroupId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS to ECR, AWS APIs, package mirrors, IAM, and DM.
+      Tags:
+        - Key: Name
+          Value: silicon-dm-gateway-production
+        - Key: Service
+          Value: silicon-dm-gateway
+  AlbGatewayEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AlbSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 4315
+      ToPort: 4315
+      DestinationSecurityGroupId: !Ref GatewaySecurityGroup
+      Description: Existing DM ALB to the browser gateway.
+  GatewayLogs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /silicon-dm/production/gateway
+      RetentionInDays: 30
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: GatewayRuntime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ec2:DescribeVolumes
+                Resource: '*'
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/silicon-dm-production
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/silicon-dm/production/gateway:log-stream:*
+              - Effect: Allow
+                Action: cloudformation:SignalResource
+                Resource: !Ref AWS::StackId
+  GatewayProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref GatewayRole]
+  StateVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZone
+      Encrypted: true
+      VolumeType: gp3
+      Size: !Ref StateVolumeSizeGiB
+      Tags:
+        - Key: Name
+          Value: silicon-dm-gateway-state
+        - Key: Service
+          Value: silicon-dm-gateway
+        - Key: Environment
+          Value: production
+  GatewayInstance:
+    Type: AWS::EC2::Instance
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    DependsOn: GatewayLogs
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t4g.medium
+      IamInstanceProfile: !Ref GatewayProfile
+      AvailabilityZone: !Ref AvailabilityZone
+      DisableApiTermination: true
+      Monitoring: true
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: false
+          SubnetId: !Ref PrivateSubnetId
+          GroupSet: [!Ref GatewaySecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            Encrypted: true
+            DeleteOnTermination: true
+            VolumeSize: 24
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: silicon-dm-gateway-production
+        - Key: Service
+          Value: silicon-dm-gateway
+        - Key: Environment
+          Value: production
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+            - ''
+            - - !Sub |
+                  #!/bin/bash
+                  export AWS_DEFAULT_REGION='${AWS::Region}'
+                  export GATEWAY_STACK_ID='${AWS::StackId}'
+                  export GATEWAY_STATE_VOLUME_ID='${StateVolume}'
+                  export GATEWAY_IMAGE='${GatewayImageUri}'
+                  export GATEWAY_ORIGIN='https://${GatewayHost}'
+                  export GATEWAY_FRONTEND_ORIGIN='https://${FrontendHost}'
+                  export GATEWAY_LOG_GROUP='${GatewayLogs}'
+              - '__GATEWAY_BOOTSTRAP__'
+  StateAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref GatewayInstance
+      VolumeId: !Ref StateVolume
+  GatewayReady:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: StateAttachment
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT20M
+  GatewayTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: [GatewayReady, AlbGatewayEgress]
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 4315
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /healthz
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '180'
+      Targets:
+        - Id: !Ref GatewayInstance
+          Port: 4315
+  GatewayCertificate:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties:
+      ListenerArn: !Ref HttpsListenerArn
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+  GatewayHttpsRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: GatewayCertificate
+    Properties:
+      ListenerArn: !Ref HttpsListenerArn
+      Priority: 2
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values: [!Ref GatewayHost]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GatewayTargetGroup
+  GatewayHttpRedirect:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListenerArn
+      Priority: 2
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values: [!Ref GatewayHost]
+      Actions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            Host: !Ref GatewayHost
+            Path: /#{path}
+            Query: '#{query}'
+            StatusCode: HTTP_301
+
+Outputs:
+  GatewayUrl:
+    Value: !Sub https://${GatewayHost}
+  InstanceId:
+    Value: !Ref GatewayInstance
+  StateVolumeId:
+    Value: !Ref StateVolume
+  GatewaySecurityGroupId:
+    Value: !Ref GatewaySecurityGroup
+  TargetGroupArn:
+    Value: !Ref GatewayTargetGroup
