@@ -71,6 +71,11 @@ export function connectRealtime(
   let lastReceivedAt = Date.now();
   const MAX_PENDING_BYTES = 128 * 1024 * 1024;
   const MAX_PENDING_FRAMES = 32;
+  // The backend sends an application ping every 30s and closes after 120s
+  // without a matching pong. Give the server the first chance to reap a dead
+  // socket, and avoid tearing down healthy sockets while a background tab's
+  // timers are throttled.
+  const CLIENT_STALE_TIMEOUT_MS = 150_000;
   const sentReceipts = new Set<string>();
   let receiptFlush: Promise<void> | undefined;
   let initialReplay: { cursor: number; requestedAt: number } | undefined;
@@ -334,17 +339,11 @@ export function connectRealtime(
       state("offline");
       return;
     }
-    if (attempt >= 8) {
-      stopWithError(
-        new Error(
-          "Realtime could not reconnect. Check your session and reconnect when ready.",
-        ),
-      );
-      return;
-    }
     state(attempt ? "reconnecting" : "connecting");
+    const backoffAttempt = Math.min(attempt++, 6);
     const delay =
-      Math.min(30_000, 500 * 2 ** attempt++) + Math.floor(Math.random() * 250);
+      Math.min(30_000, 500 * 2 ** backoffAttempt) +
+      Math.floor(Math.random() * 250);
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined;
       void open();
@@ -436,6 +435,10 @@ export function connectRealtime(
         if (epoch !== connectionEpoch || stopped || terminal) return;
         const recoveryEpoch = ++connectionEpoch;
         connected = false;
+        // Reflect the transport transition immediately. The session probe
+        // below can take a few seconds when the network is degraded; leaving
+        // the UI in "Connected" during that window makes sends look stuck.
+        state(navigator.onLine ? "reconnecting" : "offline");
         if (
           event.code === 4001 &&
           !event.reason.includes("testing-environment-changed")
@@ -498,7 +501,7 @@ export function connectRealtime(
     if (document.visibilityState === "visible") {
       if (
         socket?.readyState === WebSocket.OPEN &&
-        Date.now() - lastReceivedAt > 90_000
+        Date.now() - lastReceivedAt > CLIENT_STALE_TIMEOUT_MS
       )
         socket.close(1000, "stale-connection");
       else online();
@@ -554,7 +557,11 @@ export function connectRealtime(
       }
     };
   const watchdog = setInterval(() => {
-    if (connected && Date.now() - lastReceivedAt > 90_000)
+    if (
+      connected &&
+      document.visibilityState === "visible" &&
+      Date.now() - lastReceivedAt > CLIENT_STALE_TIMEOUT_MS
+    )
       socket?.close(1000, "heartbeat-expired");
     else if (connected) {
       if (gapReplay) requestGapReplay(gapReplay.cursor);

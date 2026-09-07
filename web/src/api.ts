@@ -617,17 +617,24 @@ export async function queueMessage(
   broadcastUpdate({ scope: scopeFor(session), kind: "outbox" });
   return entry;
 }
-const flushing = new Map<string, Promise<Message[]>>();
+export interface RetriedMessage {
+  message: Message;
+  idempotency_key: string;
+}
+const flushing = new Map<string, Promise<RetriedMessage[]>>();
 /** Explicit retry surface. Durable body/key stay unchanged across every attempt.
  * Results stop at a 16 MiB memory budget, always allowing one oversized message.
  * Remaining entries stay queued and can be flushed in the next call.
  */
-export function retryOutbox(session: Session, id?: string): Promise<Message[]> {
+export function retryOutbox(
+  session: Session,
+  id?: string,
+): Promise<RetriedMessage[]> {
   const scope = scopeFor(session);
   const existing = flushing.get(scope);
   if (existing) return existing;
   const operation = (async () => {
-    const messages: Message[] = [];
+    const messages: RetriedMessage[] = [];
     let returnedBytes = 0;
     const saved = await listOutbox(session);
     if (
@@ -655,7 +662,10 @@ export function retryOutbox(session: Session, id?: string): Promise<Message[]> {
             generation: entry.generation,
           },
         );
-        messages.push(await completeOutbox(session, entry, message));
+        messages.push({
+          message: await completeOutbox(session, entry, message),
+          idempotency_key: entry.idempotency_key,
+        });
         returnedBytes +=
           2048 +
           2 *

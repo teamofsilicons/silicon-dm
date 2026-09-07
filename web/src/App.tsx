@@ -46,6 +46,7 @@ import {
   listOutbox,
   mergeMessage,
   mergeStatus,
+  removeCachedMessage,
   removeOutbox,
 } from "./storage";
 import { connectRealtime } from "./realtime";
@@ -525,6 +526,7 @@ function Workspace(props: {
     | undefined;
   let flushing: Promise<void> | undefined;
   let flushAgain = false;
+  let optimisticSequence = Math.floor(Number.MAX_SAFE_INTEGER / 2);
   const validEnvironment = (revision: number) =>
     alive && revision === environmentRevision;
   function autoFlush() {
@@ -603,6 +605,51 @@ function Workspace(props: {
         .sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
     );
   }
+  function optimisticId(idempotencyKey: string): string {
+    return `optimistic-${idempotencyKey}`;
+  }
+  async function showOptimistic(
+    conversationId: string,
+    body: MessageCreate,
+    idempotencyKey: string,
+  ): Promise<void> {
+    const generation = await getGeneration(workspaceSession);
+    if (generation === undefined) return;
+    const message: Message = {
+      ...body,
+      id: optimisticId(idempotencyKey),
+      conversation_id: conversationId,
+      sender: workspaceSession.actor!,
+      sequence: optimisticSequence++,
+      version: 1,
+      status: "waiting",
+      created_at: new Date().toISOString(),
+    };
+    await cacheMessage(workspaceSession, message, generation);
+    merge(message);
+  }
+  async function removeOptimistic(idempotencyKey: string): Promise<void> {
+    const id = optimisticId(idempotencyKey);
+    await removeCachedMessage(workspaceSession, id);
+    if (alive)
+      setMessages((previous) => previous.filter((message) => message.id !== id));
+  }
+  async function failOptimistic(
+    idempotencyKey: string,
+    error: unknown,
+  ): Promise<void> {
+    const id = optimisticId(idempotencyKey);
+    const message = messages().find((item) => item.id === id);
+    if (!message) return;
+    const failed: Message = {
+      ...message,
+      status: "failed",
+      failure_reason: error instanceof Error ? error.message : "Message failed.",
+    };
+    const generation = await getGeneration(workspaceSession);
+    if (generation !== undefined) await cacheMessage(workspaceSession, failed, generation);
+    merge(failed);
+  }
   async function refreshOutbox() {
     try {
       const value = await listOutbox(workspaceSession);
@@ -646,9 +693,12 @@ function Workspace(props: {
           break;
         if (!id && entry.status === "fenced") continue;
         try {
-          for (const message of await retryOutbox(workspaceSession, entry.id))
-            merge(message);
+          for (const result of await retryOutbox(workspaceSession, entry.id)) {
+            await removeOptimistic(result.idempotency_key);
+            merge(result.message);
+          }
         } catch (e) {
+          await failOptimistic(entry.idempotency_key, e);
           if (alive) setError(e);
           if (id) throw e;
           if (e instanceof ApiError && (e.status === 401 || e.retryable)) break;
@@ -747,7 +797,11 @@ function Workspace(props: {
         const merged = new Map(
           (append
             ? old
-            : old.filter((message) => !initialIds.has(message.id))
+            : old.filter(
+                (message) =>
+                  !initialIds.has(message.id) ||
+                  message.id.startsWith("optimistic-"),
+              )
           ).map((message) => [message.id, message]),
         );
         for (const message of result.items)
@@ -1062,6 +1116,7 @@ function Workspace(props: {
         }
       } else {
         await queueMessage(workspaceSession, id, body, sendKey);
+        await showOptimistic(id, body, sendKey);
         if (validView(revision) && localRevision === compositionRevision) {
           replaceComposition(emptyContent(), false);
           setReplyLabel("");

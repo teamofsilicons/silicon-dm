@@ -768,3 +768,13 @@ export async function cachedMessage(
       )?.message,
   );
 }
+
+/** Remove a locally-created optimistic message after its durable request is acknowledged. */
+export async function removeCachedMessage(
+  session: Session,
+  messageId: string,
+): Promise<void> {
+  return transaction(["messages"], "readwrite", async (tx) => {
+    tx.objectStore("messages").delete(key(scopeFor(session), messageId));
+  });
+}
