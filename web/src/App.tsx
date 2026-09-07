@@ -631,8 +631,16 @@ function Workspace(props: {
   async function removeOptimistic(idempotencyKey: string): Promise<void> {
     const id = optimisticId(idempotencyKey);
     await removeCachedMessage(workspaceSession, id);
-    if (alive)
+    if (alive) {
       setMessages((previous) => previous.filter((message) => message.id !== id));
+      setConversations((previous) =>
+        previous.map((conversation) =>
+          conversation.last_message?.id === id
+            ? { ...conversation, last_message: null }
+            : conversation,
+        ),
+      );
+    }
   }
   async function failOptimistic(
     idempotencyKey: string,
@@ -1937,7 +1945,9 @@ function Workspace(props: {
               entries={outbox()}
               retry={flush}
               remove={async (id) => {
+                const entry = outbox().find((item) => item.id === id);
                 await removeOutbox(workspaceSession, id);
+                if (entry) await removeOptimistic(entry.idempotency_key);
                 await refreshOutbox();
               }}
             />
