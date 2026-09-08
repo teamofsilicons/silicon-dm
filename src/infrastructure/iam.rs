@@ -237,14 +237,45 @@ impl IamClient {
         if response.token_type.as_str() != Some("Bearer") || response.expires_in <= 0 {
             return Err(dependency_unavailable());
         }
-        let organization_id: OrganizationId = response
-            .org_id
-            .as_deref()
-            .ok_or_else(|| {
-                AppError::validation("the IAM short-lived token must be bound to an organization")
-            })?
-            .parse()
-            .map_err(|_| dependency_unavailable())?;
+        // IAM owns organization consent. An unscoped token carries the selected
+        // memberships in introspection, rather than a singular token org_id.
+        let grants = self
+            .client
+            .oauth()
+            .authorizations(&response.access_token)
+            .await
+            .map_err(map_error)?
+            .ok_or(AppError::Unauthorized)?;
+        let mut organization_ids = Vec::new();
+        for grant in grants {
+            if grant.audience != self.app_id
+                || grant.principal_id != response.actor.principal_id
+                || grant.testing_environment_id != self.environment_id
+                || iam_actor(&response.actor)?
+                    != actor_ref(
+                        match grant.actor_type {
+                            models::ApplicationAuthorizationActorType::Carbon => ActorType::Carbon,
+                            models::ApplicationAuthorizationActorType::Silicon => {
+                                ActorType::Silicon
+                            }
+                            models::ApplicationAuthorizationActorType::Other(_) => {
+                                return Err(AppError::Unauthorized);
+                            }
+                        },
+                        &grant.public_id,
+                    )?
+            {
+                return Err(AppError::Unauthorized);
+            }
+            let org: OrganizationId = grant.org_id.parse().map_err(|_| dependency_unavailable())?;
+            if !organization_ids.contains(&org) {
+                organization_ids.push(org);
+            }
+        }
+        organization_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        let organization_id = organization_ids.first().cloned().ok_or_else(|| {
+            AppError::validation("Select at least one active organization in IAM and sign in again")
+        })?;
         let context = self
             .bearer_context(
                 &SecretString::from(response.access_token.clone()),
@@ -267,6 +298,7 @@ impl IamClient {
                 .join(" "),
             actor: context.actor,
             organization_id,
+            organization_ids,
         })
     }
 

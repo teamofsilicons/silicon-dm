@@ -141,7 +141,7 @@ Resources:
     DependsOn: GatewayLogs
     Properties:
       ImageId: !Ref AmiId
-      InstanceType: t4g.medium
+      InstanceType: t4g.large
       IamInstanceProfile: !Ref GatewayProfile
       AvailabilityZone: !Ref AvailabilityZone
       DisableApiTermination: true

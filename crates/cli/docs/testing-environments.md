@@ -85,7 +85,7 @@ paired secret. Never put a webhook secret in a root-key header.
 
 ## CLI workflow
 
-First log into production DM with a DM-targeted, organization-bound IAM
+First log into production DM with a DM-targeted IAM
 short-lived token. CLI login also requires the local relay webhook URL; it is
 stored locally and is not sent to the backend.
 

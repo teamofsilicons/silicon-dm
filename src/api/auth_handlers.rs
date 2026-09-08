@@ -40,7 +40,7 @@ pub struct LogoutInput {
     pub token: SecretString,
 }
 
-/// Exchanges an org-bound SLT using the selected plane's server-side app secret.
+/// Exchanges an IAM SLT with user-selected organization grants using the selected plane's server-side app secret.
 ///
 /// # Errors
 /// Rejects invalid SLTs, IAM failures, or unavailable membership storage.

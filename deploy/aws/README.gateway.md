@@ -6,7 +6,7 @@ Its API and WebSocket traffic connects directly to
 uses the existing backend at `https://backend.dm.teamofsilicons.com`.
 
 `gateway.yaml` defines a separate gateway stack. It adds a private ARM64
-`t4g.medium` host, a dedicated security group, an encrypted 16 GiB gp3 state
+`t4g.large` host, a dedicated security group, an encrypted 16 GiB gp3 state
 volume, CloudWatch logs, and the necessary ALB host rules and certificate.
 It does not replace the backend ECS services or databases. The ALB security
 group receives one egress rule to the gateway; gateway ingress is restricted to
@@ -47,7 +47,11 @@ Changing `GatewayImageUri` in EC2 user data does not update an already-running
 container. For code updates, use SSM to pull the reviewed digest, stop the service,
 update the exact image reference in its unit, reload systemd, restart, and verify
 health and browser login. Preserve the prior unit and image digest for rollback.
-Update the template parameter as the recorded desired configuration separately.
+Updating the image parameter in EC2 user data stops and starts the host, even
+though cloud-init does not rerun the bootstrap. Schedule this separately from the
+SSM container rollout and verify capacity and ALB health afterwards. The production
+host uses `t4g.large` after a `t4g.medium` capacity shortage on 2026-09-08; its
+instance and state volume were preserved during recovery.
 
 ## Deployment
 

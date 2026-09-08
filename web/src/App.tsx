@@ -15,7 +15,6 @@ import {
   api,
   getConfig,
   getSession,
-  login,
   logout,
   queueMessage,
   retryOutbox,
@@ -131,21 +130,6 @@ export default function App() {
       .catch(setError)
       .finally(() => setLoading(false));
   });
-  async function signIn(
-    slt: string,
-    testing_environment_id?: string,
-    testing_key?: string,
-  ) {
-    setSession(
-      await login({
-        slt,
-        testing_environment_id: testing_environment_id || undefined,
-        testing_key: testing_key || undefined,
-      }),
-    );
-    setAdd();
-    setError();
-  }
   return (
     <ErrorBoundary
       fallback={(e, reset) => (
@@ -184,7 +168,7 @@ export default function App() {
           <Show
             when={session().authenticated && session().profile_id}
             keyed
-            fallback={<SignIn config={config()} submit={signIn} />}
+            fallback={<SignIn config={config()} />}
           >
             {(_profile: string) => (
               <Workspace
@@ -198,30 +182,18 @@ export default function App() {
         </Show>
       </Show>
       <Show when={add()}>
-        {(value) => (
-          <Modal
-            title="Add an account"
-            subtitle="Sign in with IAM or connect a test identity."
-            close={() => setAdd()}
-          >
-            <SignIn
-              compact
-              config={config()}
-              initial={value()}
-              submit={signIn}
-            />
-          </Modal>
-        )}
+        <Modal
+          title="Add an account"
+          subtitle="Choose your organizations securely in IAM."
+          close={() => setAdd()}
+        >
+          <SignIn compact config={config()} />
+        </Modal>
       </Show>
     </ErrorBoundary>
   );
 }
-function SignIn(props: {
-  compact?: boolean;
-  config?: AppConfig;
-  initial?: { id?: string; key?: string };
-  submit: (slt: string, id?: string, key?: string) => Promise<void>;
-}) {
+function SignIn(props: { compact?: boolean; config?: AppConfig }) {
   const iamLoginHref = () => {
     const url = new URL(
       props.config?.iam_login_url || "/auth/login",
@@ -229,12 +201,6 @@ function SignIn(props: {
     );
     return url.href;
   };
-  const [advanced, setAdvanced] = createSignal(!!props.initial?.id),
-    [slt, setSlt] = createSignal(""),
-    [testId, setTestId] = createSignal(props.initial?.id || ""),
-    [testKey, setTestKey] = createSignal(props.initial?.key || ""),
-    [busy, setBusy] = createSignal(false),
-    [error, setError] = createSignal<unknown>();
   const form = () => (
     <div class="auth-card">
       <Show when={!props.compact}>
@@ -242,77 +208,15 @@ function SignIn(props: {
         <h2>Welcome back.</h2>
         <p class="muted auth-intro">A shared space for your conversations.</p>
       </Show>
-      <Notice error={error()} />
       <div class="stack">
         <a class="button primary full" href={iamLoginHref()}>
           <img class="button-mark" src="/brand/mark.svg" alt="" />
-          Continue with Silicon IAM
+          Continue with IAM
           <Icon name="chevron" size={15} />
         </a>
         <p class="footnote">
           Sign in or create your identity securely with IAM.
         </p>
-        <button
-          class="text-button advanced-login-toggle"
-          onClick={() => setAdvanced((x) => !x)}
-        >
-          {advanced() ? "Hide" : "Use"} a short-lived token or test account
-          <Icon name="down" size={14} />
-        </button>
-        <Show when={advanced()}>
-          <form
-            class="stack advanced-login"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              setBusy(true);
-              setError();
-              try {
-                await props.submit(slt(), testId(), testKey());
-                setSlt("");
-                setTestKey("");
-              } catch (e) {
-                setError(e);
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            <label>
-              IAM short-lived token
-              <input
-                type="password"
-                autocomplete="off"
-                required
-                value={slt()}
-                onInput={(e) => setSlt(e.currentTarget.value)}
-                placeholder="Paste your DM sign-in token"
-              />
-            </label>
-            <label>
-              DM test environment ID{" "}
-              <span class="muted">Optional for production</span>
-              <input
-                value={testId()}
-                onInput={(e) => setTestId(e.currentTarget.value)}
-              />
-            </label>
-            <Show when={testId()}>
-              <label>
-                DM test environment key
-                <input
-                  type="password"
-                  autocomplete="off"
-                  required
-                  value={testKey()}
-                  onInput={(e) => setTestKey(e.currentTarget.value)}
-                />
-              </label>
-            </Show>
-            <button class="button" disabled={busy()} type="submit">
-              {busy() ? "Signing in…" : "Connect account"}
-            </button>
-          </form>
-        </Show>
       </div>
     </div>
   );
@@ -632,7 +536,9 @@ function Workspace(props: {
     const id = optimisticId(idempotencyKey);
     await removeCachedMessage(workspaceSession, id);
     if (alive) {
-      setMessages((previous) => previous.filter((message) => message.id !== id));
+      setMessages((previous) =>
+        previous.filter((message) => message.id !== id),
+      );
       setConversations((previous) =>
         previous.map((conversation) =>
           conversation.last_message?.id === id
@@ -652,10 +558,12 @@ function Workspace(props: {
     const failed: Message = {
       ...message,
       status: "failed",
-      failure_reason: error instanceof Error ? error.message : "Message failed.",
+      failure_reason:
+        error instanceof Error ? error.message : "Message failed.",
     };
     const generation = await getGeneration(workspaceSession);
-    if (generation !== undefined) await cacheMessage(workspaceSession, failed, generation);
+    if (generation !== undefined)
+      await cacheMessage(workspaceSession, failed, generation);
     merge(failed);
   }
   async function refreshOutbox() {

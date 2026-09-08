@@ -1,6 +1,6 @@
 # IAM integration
 
-Silicon IAM owns all Carbon and Silicon authentication, organization membership, organization roles, consent, application sessions, refresh rotation, and revocation. DM uses the official [`silicon-iam-client`](https://crates.io/crates/silicon-iam-client) Rust SDK (1.2.1 or a compatible newer release) for every IAM request. Application integrations do not enable the SDK's `cli-session` feature. DM has no OBO login, OBO proof exchange, delegated endpoint catalog, or inbound OBO routes.
+Silicon IAM owns all Carbon and Silicon authentication, organization membership, organization roles, consent, application sessions, refresh rotation, and revocation. DM uses the official [`silicon-iam-client`](https://crates.io/crates/silicon-iam-client) Rust SDK (1.4.0 or a compatible newer release) for every IAM request. Application integrations do not enable the SDK's `cli-session` feature. DM has no OBO login, OBO proof exchange, delegated endpoint catalog, or inbound OBO routes.
 
 ## Backend application registration
 
@@ -27,7 +27,7 @@ DM needs the IAM application to be verified and approved for `profile`, `members
 
 ## Login without collecting credentials
 
-A caller obtains an **organization-bound** short-lived token from IAM for the canonical DM application. Existing IAM CLI users can obtain one through the IAM app-login/SLT command described by `iam --help` and `iam docs client/authentication`. The DM client asks only for this SLT and the local relay webhook URL. The local webhook URL belongs to the client/CLI and is never sent to DM or IAM by the DM login route.
+A caller obtains an IAM short-lived token after explicitly selecting the organizations DM may access. Browser login starts at IAM `/login` with only `app_id` and `redirect_uri`; DM supplies no `org_id` or organization picker. Existing IAM CLI users can obtain one through the IAM app-login/SLT command described by `iam --help` and `iam docs client/authentication`. The DM client asks only for this SLT and the local relay webhook URL. The local webhook URL belongs to the client/CLI and is never sent to DM or IAM by the DM login route.
 
 ```http
 POST /api/v1/auth/login
@@ -47,11 +47,12 @@ DM calls the SDK's `oauth().login(app_id, slt, mutation)` using its server-side 
   "expires_in": 1800,
   "scope": "memberships.read offline_access organizations.read profile roles.read",
   "actor": {"type": "carbon", "id": "alice"},
-  "organization_id": "tos"
+  "organization_id": "tos",
+  "organization_ids": ["tos"]
 }
 ```
 
-The actor can also be `silicon`; its ID is IAM's canonical public Silicon ID. The sample lifetime and scopes are illustrative; use the returned values. Login and refresh responses carry `Cache-Control: no-store` and `Pragma: no-cache`. No password, OTP, Silicon credential, application secret, or user-supplied actor ID is accepted by this route. An unscoped SLT cannot establish a DM session: obtain a new SLT explicitly bound to the desired organization.
+The actor can also be `silicon`; its ID is IAM's canonical public Silicon ID. The sample lifetime and scopes are illustrative; use the returned values. Login and refresh responses carry `Cache-Control: no-store` and `Pragma: no-cache`. No password, OTP, Silicon credential, application secret, or user-supplied actor ID is accepted by this route. Unscoped SLTs are supported. DM calls `oauth().authorizations()` to retrieve IAM-selected active memberships, rejects an empty set, and verifies the initial organization with live scoped introspection. The additive `organization_ids` response field lists selected organizations; `organization_id` is the initial workspace (first handle in sorted order) for existing clients. It grants no authority beyond live IAM consent.
 
 ## Requests and identity
 
@@ -62,7 +63,7 @@ Authorization: Bearer oat_REDACTED
 X-Org-ID: tos
 ```
 
-The organization must exactly match the application token. Direct IAM Carbon (`cat_`) and Silicon (`sat_`) session tokens are not DM application tokens. Refresh tokens are accepted only by the refresh/revoke session routes. OBO proof headers are rejected, including requests that also carry a bearer token. Authentication headers must occur once; duplicate, comma-separated, empty, or malformed values fail closed.
+The organization must be among the token's selected, active memberships; every request introspects that specific organization. Direct IAM Carbon (`cat_`) and Silicon (`sat_`) session tokens are not DM application tokens. Refresh tokens are accepted only by the refresh/revoke session routes. OBO proof headers are rejected, including requests that also carry a bearer token. Authentication headers must occur once; duplicate, comma-separated, empty, or malformed values fail closed.
 
 DM performs live IAM introspection on authenticated requests. It verifies:
 

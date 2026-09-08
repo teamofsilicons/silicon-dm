@@ -2034,6 +2034,14 @@ components:
           "$ref": "#/components/schemas/ActorRef"
         organization_id:
           type: string
+          description: Initial workspace; first currently selected organization handle in sorted order.
+        organization_ids:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: Organizations explicitly selected in IAM with current active memberships. Each request still authorizes X-Org-ID.
+          items:
+            type: string
       required:
       - access_token
       - refresh_token
@@ -2042,6 +2050,7 @@ components:
       - scope
       - actor
       - organization_id
+      - organization_ids
     Identity:
       type: object
       properties:

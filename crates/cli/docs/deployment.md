@@ -184,7 +184,7 @@ Perform these actions individually after ingress and the runtime are ready:
 
 1. Read `/live` and `/ready` through the public HTTPS origin and verify 204.
    Readiness covers DM database/schema access; it does not prove IAM or Giphy.
-2. Use the installed IAM CLI to obtain a fresh organization-bound SLT for the
+2. Use the installed IAM CLI to obtain a fresh SLT with explicit IAM organization selection for the
    registered app. Log in through the DM CLI with a reachable local callback,
    and check `whoami`. Keep production and testing profiles separate.
 3. Pair a new DM sandbox with an IAM testing environment. Sign in both intended

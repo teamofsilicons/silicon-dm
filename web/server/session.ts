@@ -37,7 +37,7 @@ export type BrowserSession = {
   deadline: number;
   selected?: string;
   profiles: Profile[];
-  flow?: { state: string; deadline: number; organization_id: string };
+  flow?: { state: string; deadline: number };
 };
 export type Browser = { id: string; value: BrowserSession };
 export class GatewayError extends Error {
@@ -52,6 +52,7 @@ export class GatewayError extends Error {
 export const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const opaquePattern = /^[A-Za-z0-9_-]{43}$/;
+const maxSessionBytes = 16 * 1024 * 1024;
 const lifetime = 30 * 24 * 60 * 60 * 1000;
 
 export function publicProfile(profile: Profile) {
@@ -182,7 +183,7 @@ export class Sessions {
       let value: BrowserSession;
       try {
         const stat = await file.stat();
-        if (!stat.isFile() || stat.size > 256 * 1024)
+        if (!stat.isFile() || stat.size > maxSessionBytes)
           throw new Error("Invalid session file.");
         value = JSON.parse(await file.readFile("utf8"));
       } finally {
@@ -223,13 +224,20 @@ export class Sessions {
     };
   }
   async save(browser: Browser): Promise<void> {
+    const serialized = JSON.stringify(browser.value);
+    if (Buffer.byteLength(serialized) > maxSessionBytes)
+      throw new GatewayError(
+        409,
+        "profile_limit",
+        "Sign out of another account before adding this login.",
+      );
     const temporary = join(
       this.config.directory,
       `${browser.id}.${randomUUID()}.tmp`,
     );
     const file = await open(temporary, "wx", 0o600);
     try {
-      await file.writeFile(JSON.stringify(browser.value));
+      await file.writeFile(serialized);
       await file.sync();
     } finally {
       await file.close();

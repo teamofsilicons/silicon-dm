@@ -28,7 +28,7 @@ name = "dm-migrate"
 path = "src/bin/dm_migrate.rs"
 
 [dependencies]
-silicon-iam-client = "1.2.1"
+silicon-iam-client = "1.4.0"
 aes-gcm = "0.10.3"
 anyhow = "1.0.100"
 async-trait = "0.1.89"

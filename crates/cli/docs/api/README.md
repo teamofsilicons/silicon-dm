@@ -4,7 +4,7 @@ The public API is `https://backend.dm.teamofsilicons.com/api/v1`. The machine-re
 
 ## Authentication and request conventions
 
-IAM owns authentication. A Carbon or Silicon first obtains an organization-bound short-lived token for DM, then exchanges it through `POST /auth/login`. DM keeps the IAM application secret server-side and uses the official IAM SDK. See the [IAM guide](../iam.md) for application registration, scopes, and webhook verification.
+IAM owns authentication. A Carbon or Silicon first obtains a short-lived token with IAM-selected organization access for DM, then exchanges it through `POST /auth/login`. DM keeps the IAM application secret server-side and uses the official IAM SDK. See the [IAM guide](../iam.md) for application registration, scopes, and webhook verification.
 
 Normal API requests require exactly one of each header:
 

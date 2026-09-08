@@ -3,7 +3,7 @@
 This Node 24 gateway holds IAM-issued DM access/refresh tokens and testing root
 keys in private server-side session files. The browser receives an opaque,
 HttpOnly, SameSite=Lax cookie. HTTPS uses a `__Host-` cookie with Secure and no
-Domain attribute. Each browser can retain up to sixteen actor profiles; token
+Domain attribute. Each browser can retain up to sixteen IAM login families, each with its selected organization profiles; token
 values and testing keys are absent from public session responses.
 
 Run `npm run dev` for the Vite frontend and gateway on port 4315. The Node bundle
@@ -26,7 +26,6 @@ body limit does not restrict DM's large-message transport.
 | `DM_API_ORIGIN`          | `https://backend.dm.teamofsilicons.com`; exact DM backend origin.                                                                                                |
 | `IAM_LOGIN_ORIGIN`       | `https://auth.iam.teamofsilicons.com`; IAM browser authentication origin.                                                                                        |
 | `DM_WEB_APP_ID`          | `tos>dm`; canonical IAM application ID.                                                                                                                          |
-| `DM_WEB_DEFAULT_ORG`     | App owner's organization, `tos`; browser sign-in also accepts a validated `org_id` query parameter.                                                              |
 | `DM_WEB_STATE_DIR`       | `~/.silicon-dm/web`; absolute private directory outside the application checkout and assets.                                                                     |
 | `DM_WEB_MAX_BODY_BYTES`  | 134217728 bytes (128 MiB); configurable up to 3 GiB. This also bounds a proxied WebSocket message. Authentication JSON is separately limited to 16 KiB.          |
 | `HOST`, `PORT`           | `127.0.0.1`, `4315`; use a suitable bind address behind the hosting ingress.                                                                                     |
@@ -43,15 +42,14 @@ revocation and refresh expiry. Refresh, login, and logout serialize per browser;
 refresh retries reuse an HMAC-derived idempotency key for the same token.
 
 `GET /auth/login` creates a ten-minute, one-use state bound to the browser and
-selected organization, then redirects to IAM. IAM returns its SLT to
+login attempt, then redirects to IAM using only `app_id` and `redirect_uri`. IAM owns organization selection; DM never sends `org_id`. IAM returns its SLT to
 `/auth/callback?state=...`; the gateway exchanges it through DM and redirects to
 the frontend. IAM's current redirect contract accepts canonical HTTPS URLs or
 HTTP loopback URLs; a callback registration is not required. Hosting therefore
 needs the exact external origin, TLS, ingress routing to this gateway, and a
 working DM application registration. No app secret is needed by this gateway:
 the DM backend already holds it. Do not log callback query strings at ingress.
-Silicon sessions and testing profiles can use the explicit SLT login form;
-testing credentials are submitted once to the gateway and retained privately.
+Testing sessions remain available through the existing API and CLI. The browser sign-in screen contains only Continue with IAM.
 
 `/api/dm/*` exposes only the existing DM product routes and testing management
 routes. The gateway supplies authorization, organization, and testing headers;
@@ -121,3 +119,5 @@ login input returned 400 with readable CORS headers, foreign-origin preflight
 returned 403, a trusted-origin WebSocket without a session returned 401, and an
 untrusted-origin WebSocket returned 403. These checks made no IAM or backend
 mutations; successful live sign-in and conversation checks are recorded separately.
+
+IAM consent may return multiple organizations. DM creates an account-menu workspace for each authorized organization. These views share a token family: refresh updates all sibling credentials atomically, and logout signs out every workspace in that family. No organization is inferred from the app ID.

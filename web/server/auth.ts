@@ -17,6 +17,7 @@ type Tokens = {
   expires_in: number;
   actor: Actor;
   organization_id: string;
+  organization_ids?: string[];
 };
 export function headersFor(profile: Profile): Headers {
   const headers = new Headers({
@@ -119,7 +120,7 @@ export class Auth {
     testingKey?: string,
   ): Promise<Tokens> {
     const response = await this.authenticationRequest(path, body, testingKey);
-    const value = await responseJson(response);
+    const value = await responseJson(response, 256 * 1024);
     const actor = value.actor as Actor | undefined;
     if (
       typeof value.access_token !== "string" ||
@@ -139,12 +140,29 @@ export class Auth {
         "The backend returned an invalid session.",
       );
     }
-    return value as unknown as Tokens;
+    const organizations = value.organization_ids ?? [value.organization_id];
+    if (
+      !Array.isArray(organizations) ||
+      !organizations.length ||
+      organizations.length > 1000 ||
+      !organizations.every(
+        (org) => typeof org === "string" && /^[a-z0-9_-]{1,128}$/.test(org),
+      ) ||
+      !organizations.includes(value.organization_id)
+    )
+      throw new GatewayError(
+        502,
+        "upstream_response",
+        "The backend returned invalid organization grants.",
+      );
+    return {
+      ...value,
+      organization_ids: [...new Set(organizations)],
+    } as unknown as Tokens;
   }
   async login(
     browser: Browser,
     body: Record<string, unknown>,
-    expectedOrganization?: string,
   ): Promise<Profile> {
     if (
       typeof body.slt !== "string" ||
@@ -173,7 +191,7 @@ export class Auth {
         "Provide both the testing environment UUID and its root key.",
       );
     }
-    if (browser.value.profiles.length >= 16)
+    if (new Set(browser.value.profiles.map((p) => p.refresh_token)).size >= 16)
       throw new GatewayError(
         409,
         "profile_limit",
@@ -184,38 +202,38 @@ export class Auth {
       { slt: body.slt },
       testingKey as string | undefined,
     );
-    if (expectedOrganization && tokens.organization_id !== expectedOrganization)
-      throw new GatewayError(
-        401,
-        "identity_mismatch",
-        "IAM returned a different organization than the one selected for sign-in.",
-      );
-    const previous = browser.value.profiles.find(
-      (p) =>
-        p.actor.id === tokens.actor.id &&
-        p.actor.type === tokens.actor.type &&
-        p.organization_id === tokens.organization_id &&
-        p.testing_environment_id === environment,
+    const profiles = tokens.organization_ids!.map(
+      (organization_id): Profile => {
+        const previous = browser.value.profiles.find(
+          (p) =>
+            p.actor.id === tokens.actor.id &&
+            p.actor.type === tokens.actor.type &&
+            p.organization_id === organization_id &&
+            p.testing_environment_id === environment,
+        );
+        return {
+          profile_id: previous?.profile_id || randomUUID(),
+          actor: tokens.actor,
+          organization_id,
+          access_token: tokens.access_token,
+          refresh_token: tokens.refresh_token,
+          expires_at: Date.now() + tokens.expires_in * 1000,
+          testing_environment_id: environment as string | undefined,
+          testing_key: testingKey as string | undefined,
+        };
+      },
     );
-    const profile: Profile = {
-      profile_id: previous?.profile_id || randomUUID(),
-      actor: tokens.actor,
-      organization_id: tokens.organization_id,
-      access_token: tokens.access_token,
-      refresh_token: tokens.refresh_token,
-      expires_at: Date.now() + tokens.expires_in * 1000,
-      testing_environment_id: environment as string | undefined,
-      testing_key: testingKey as string | undefined,
-    };
+    const replaced = new Set(profiles.map((p) => p.profile_id));
     browser.value.profiles = browser.value.profiles.filter(
-      (p) => p.profile_id !== profile.profile_id,
+      (p) => !replaced.has(p.profile_id),
     );
-    browser.value.profiles.push(profile);
-    browser.value.selected = profile.profile_id;
+    browser.value.profiles.push(...profiles);
+    browser.value.selected = profiles[0]!.profile_id;
     delete browser.value.flow;
     await this.sessions.save(browser);
-    this.invalidate(browser.id, profile.profile_id);
-    return profile;
+    for (const profile of profiles)
+      this.invalidate(browser.id, profile.profile_id);
+    return profiles[0]!;
   }
   async fresh(
     id: string | undefined,
@@ -244,20 +262,35 @@ export class Auth {
           );
           if (
             tokens.actor.id !== profile.actor.id ||
-            tokens.actor.type !== profile.actor.type ||
-            tokens.organization_id !== profile.organization_id
+            tokens.actor.type !== profile.actor.type
           )
             throw new GatewayError(
               502,
               "identity_changed",
               "Refresh returned an unexpected identity.",
             );
-          Object.assign(profile, {
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
-            expires_at: Date.now() + tokens.expires_in * 1000,
-          });
+          // Each organization view shares one rotating IAM family. Update all
+          // siblings atomically before any of them can attempt another refresh.
+          const previousToken = profile.refresh_token;
+          for (const sibling of browser.value.profiles) {
+            if (sibling.refresh_token !== previousToken) continue;
+            Object.assign(sibling, {
+              access_token: tokens.access_token,
+              refresh_token: tokens.refresh_token,
+              expires_at: Date.now() + tokens.expires_in * 1000,
+              auth_required: !tokens.organization_ids!.includes(
+                sibling.organization_id,
+              ),
+            });
+            if (sibling.auth_required) this.invalidate(id, sibling.profile_id);
+          }
           await this.sessions.save(browser);
+          if (profile.auth_required)
+            throw new GatewayError(
+              401,
+              "login_required",
+              "This organization is no longer authorized. Continue with IAM to update access.",
+            );
         } catch (error) {
           if (error instanceof GatewayError && error.status === 401) {
             profile.auth_required = true;
@@ -351,13 +384,20 @@ export class Auth {
         if (!(error instanceof GatewayError) || error.status !== 401)
           throw error;
       }
-      browser.value.profiles = browser.value.profiles.filter(
-        (p) => p.profile_id !== profile.profile_id,
+      const family = browser.value.profiles.filter(
+        (p) => p.refresh_token === profile.refresh_token,
       );
-      if (browser.value.selected === profile.profile_id)
+      browser.value.profiles = browser.value.profiles.filter(
+        (p) => p.refresh_token !== profile.refresh_token,
+      );
+      if (
+        !browser.value.profiles.some(
+          (p) => p.profile_id === browser.value.selected,
+        )
+      )
         browser.value.selected = browser.value.profiles[0]?.profile_id;
       await this.sessions.save(browser);
-      this.invalidate(id, profile.profile_id);
+      for (const sibling of family) this.invalidate(id, sibling.profile_id);
     });
   }
 }

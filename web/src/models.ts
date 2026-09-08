@@ -149,7 +149,6 @@ export type AuthenticatedSession = Session & Profile & { authenticated: true };
 export interface AppConfig {
   iam_login_url: string;
   app_id: string;
-  default_organization_id?: string;
   api_origin?: string;
   gateway_origin?: string;
   frontend_origin?: string;

@@ -76,4 +76,6 @@ pub struct ApplicationSession {
     pub actor: ActorRef,
     /// Organization to supply as `X-Org-ID` on subsequent requests.
     pub organization_id: OrganizationId,
+    /// Organizations explicitly selected in IAM and currently authorized.
+    pub organization_ids: Vec<OrganizationId>,
 }

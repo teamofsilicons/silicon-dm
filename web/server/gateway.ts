@@ -183,7 +183,6 @@ export class Gateway {
         json(res, {
           iam_login_url: new URL("/auth/login", this.config.origin).href,
           app_id: this.config.appId,
-          default_organization_id: this.config.defaultOrganization,
           api_origin: this.config.api.origin,
           gateway_origin: this.config.origin.origin,
           frontend_origin: this.config.frontend.origin,
@@ -193,17 +192,6 @@ export class Gateway {
       }
       if (path === "/auth/login" && method === "GET") {
         this.authRate(req);
-        const organization =
-          url.searchParams.get("org_id") || this.config.defaultOrganization;
-        if (
-          !/^[a-z0-9_-]{1,128}$/.test(organization) ||
-          url.searchParams.getAll("org_id").length > 1
-        )
-          throw new GatewayError(
-            400,
-            "invalid_organization",
-            "Provide one organization ID for sign-in.",
-          );
         const previous = await this.sessions.read(this.sessions.cookieId(req));
         const browser = previous || (await this.sessions.create());
         const state = randomBytes(32).toString("base64url");
@@ -212,7 +200,6 @@ export class Gateway {
           current.value.flow = {
             state: this.sessions.keyFor("login-state", state),
             deadline: Date.now() + 10 * 60 * 1000,
-            organization_id: organization,
           };
           await this.sessions.save(current);
         });
@@ -220,7 +207,6 @@ export class Gateway {
         callback.searchParams.set("state", state);
         const target = new URL("/login", this.config.iam);
         target.searchParams.set("app_id", this.config.appId);
-        target.searchParams.set("org_id", organization);
         target.searchParams.set("redirect_uri", callback.href);
         res.setHeader("Set-Cookie", this.sessions.cookie(browser.id));
         res.writeHead(303, { Location: target.href });
@@ -261,7 +247,7 @@ export class Gateway {
               "login_state",
               "Login state is expired or belongs to another browser. Start sign-in again.",
             );
-          await this.auth.login(browser, { slt }, flow.organization_id);
+          await this.auth.login(browser, { slt });
         });
         res.setHeader("Set-Cookie", this.sessions.cookie(id));
         res.writeHead(303, { Location: this.config.frontend.href });

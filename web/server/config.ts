@@ -7,7 +7,6 @@ export type Config = {
   api: URL;
   iam: URL;
   appId: string;
-  defaultOrganization: string;
   directory: string;
   maxBytes: number;
   cookie: string;
@@ -68,9 +67,6 @@ export function configuration(env: NodeJS.ProcessEnv = process.env): Config {
   const appId = env.DM_WEB_APP_ID || "tos>dm";
   if (!/^[a-z0-9_-]+>[a-z0-9_-]+$/.test(appId))
     throw new Error("Invalid canonical DM app ID.");
-  const defaultOrganization = env.DM_WEB_DEFAULT_ORG || appId.split(">")[0]!;
-  if (!/^[a-z0-9_-]{1,128}$/.test(defaultOrganization))
-    throw new Error("Invalid default organization ID.");
   return {
     origin,
     frontend,
@@ -81,7 +77,6 @@ export function configuration(env: NodeJS.ProcessEnv = process.env): Config {
       env.IAM_LOGIN_ORIGIN || "https://auth.iam.teamofsilicons.com",
     ),
     appId,
-    defaultOrganization,
     directory: resolve(directory),
     maxBytes,
     production,

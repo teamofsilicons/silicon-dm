@@ -108,7 +108,6 @@ DM_FRONTEND_ORIGIN=$GATEWAY_FRONTEND_ORIGIN
 DM_API_ORIGIN=https://backend.dm.teamofsilicons.com
 IAM_LOGIN_ORIGIN=https://auth.iam.teamofsilicons.com
 DM_WEB_APP_ID=tos>dm
-DM_WEB_DEFAULT_ORG=tos
 DM_WEB_STATE_DIR=/var/lib/silicon-dm-gateway
 DM_WEB_MAX_BODY_BYTES=134217728
 EOF
