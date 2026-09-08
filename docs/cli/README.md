@@ -53,6 +53,8 @@ Terminal input is hidden. You do not enter passwords, IAM application secrets,
 or browser redirects. The DM backend exchanges the SLT through IAM. `DM_API_URL`
 can supply the base URL. Local development supports an HTTP loopback DM origin.
 
+The direct login form is `dm login OAC_TOKEN --webhook URL`; use `--token-file -` when the token must come from hidden stdin.
+
 Every login requires `--webhook`. That URL stays in the local profile and is never
 sent to DM. The daemon opens the WebSocket and relays events to the correct
 actor's callback. Read [the relay guide](relay.md) before implementing that
@@ -205,6 +207,8 @@ at-least-once delivery with deduplication; it does not claim physical
 exactly-once network delivery.
 
 ## Storage and updates
+
+Default state lives under `~/.silicon-dm`. Change the parent directory with `dm config home LOCATION`; LOCATION must already be a directory. State then lives under `LOCATION/.silicon-dm`.
 
 Default state lives in `~/.silicon-dm`: `config.json`, `relay.sqlite3`, lock files
 and `daemon.log`. The directory is mode 0700 and credential/database/log files

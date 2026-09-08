@@ -335,3 +335,50 @@ earlier failures nor adds new ones. The existing HTTP retry path was unchanged.
 The fixture daemon was stopped afterward; no real credentials, production
 state, or active messaging daemons were used for this check. The updated CLI
 build and strict Clippy checks passed without running automated tests.
+
+## Published 0.2.2 and actual upgrades
+
+Both crates were published on 2026-09-05 UTC, SDK first and CLI second. The
+backend remains version 0.2.0 and unpublished. The SDK README and CLI's embedded
+guides include the 0.2.2 runtime corrections and the final cloud verification
+available before publication. Both packages retain `LicenseRef-Proprietary`.
+
+The SDK package built with the optional runtime enabled; a separate check of
+the extracted package with no default features also passed. Its default feature
+list is empty. CLI package verification used the newly published registry SDK.
+All packaged source and guide files matched their release snapshots. The
+14-file SDK archive and 26-file CLI archive were scanned against 132 private
+credential values with no matches or private local-path markers. Four public
+CloudFormation attribute names initially collected from `Key`/`Value` records
+were identified as non-credentials and excluded from that count. The uploaded
+checksums matched crates.io's sparse index, and both versions were non-yanked:
+
+| Package | SHA-256 |
+| --- | --- |
+| `silicon-dm-client 0.2.2` | `b206f7e5f65f019c6798f3ec42c46c386a530c91370de8aadb4e0bbb55fdd051` |
+| `silicon-dm-cli 0.2.2` | `4418e6dc664565091d0b2e5a4358efa71f98838f18a941a9b3d12a824718aac1` |
+
+The following commands were invoked manually using the preserved 0.2.1
+fixtures. Their policy timestamps alone were reset to make hourly checks due.
+The CLI fixture had no actor profiles or credentials.
+
+| Individual check | Observed result |
+| --- | --- |
+| Installed 0.2.1 CLI `updates check` | Current 0.2.1, latest 0.2.2 |
+| Enable its updater, make its private timestamp due, then run ordinary `profiles list` | Empty profile JSON completed first; automatic Cargo installation replaced the isolated binary with 0.2.2; optimized build completed in 9.84 seconds |
+| New CLI `--version` and `updates status` | Reported 0.2.2 and supported Cargo-bin replacement |
+| Repeat `profiles list` within the hour | Succeeded without reinstalling; the update timestamp was unchanged |
+| New CLI `updates check`, then `updates disable` | Current/latest both 0.2.2; opt-out persisted in the isolated fixture |
+| Preserved SDK 0.2.1 consumer `check_update()` | Current 0.2.1, latest 0.2.2 |
+| Its after-command updater with the explicit private consumer manifest | Updated the registry dependency and rebuilt the release consumer in 28.28 seconds; returned `updated:true` and `restart_required:true` |
+| Inspect the consumer lockfile and invoke rebuilt consumer `check_update()` | Lockfile contained SDK 0.2.2 and its published checksum; rebuilt process reported current/latest 0.2.2 |
+| Rebuilt consumer after-command updater within the hour | Returned `disabled_or_not_due`; policy timestamp remained unchanged |
+| `cargo install silicon-dm-cli --version 0.2.2 --locked --root "$HOME/.cargo"`, reusing the verified private Cargo cache and build directory | Installed the published executable into the user's actual Cargo bin directory; cached build completed in 0.58 seconds |
+| Actual host installation `--version` and `--help`, with `SILICON_DM_HOME=/dev/null` | Reported `dm 0.2.2` and the complete command help without opening the user's state |
+| Actual host installation `docs --all` from `/tmp`, with the same unusable state path | Returned 15 embedded documents, including OpenAPI, in a 262,534-byte JSON response; every document matched the release snapshot |
+
+The frozen 0.2.1 executables and SDK lockfile remain available privately. No
+existing profiles, IAM sessions, or messaging daemons were modified by these
+upgrade and installation checks. No automated scenario suite or `cargo test`
+ran. This section was appended after publication and is therefore absent from
+the immutable 0.2.2 CLI archive.

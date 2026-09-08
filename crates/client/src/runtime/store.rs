@@ -69,6 +69,8 @@ pub fn now() -> u64 {
 pub fn default_directory() -> Result<PathBuf> {
     let dir = if let Some(directory) = std::env::var_os("SILICON_DM_HOME") {
         PathBuf::from(directory)
+    } else if let Some(directory) = configured_directory()? {
+        directory
     } else {
         PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".silicon-dm")
     };
@@ -82,6 +84,58 @@ pub fn default_directory() -> Result<PathBuf> {
     #[cfg(unix)]
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     Ok(dir)
+}
+fn configured_directory() -> Result<Option<PathBuf>> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    let pointer = home.join(".silicon-dm").join("home_dir");
+    if !pointer.exists() {
+        return Ok(None);
+    }
+    if pointer.is_symlink() {
+        bail!("refusing symlink for local DM home configuration");
+    }
+    let value = fs::read_to_string(pointer)?.trim().to_owned();
+    if value.is_empty() {
+        bail!("configured DM home directory is empty");
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        bail!("configured DM home directory must be absolute");
+    }
+    Ok(Some(path))
+}
+pub fn set_home_directory(home: impl AsRef<Path>) -> Result<PathBuf> {
+    let home = home.as_ref();
+    if !home.is_absolute() {
+        bail!("home directory must be an absolute path");
+    }
+    if !home.exists() {
+        bail!("home directory does not exist");
+    }
+    if !home.is_dir() {
+        bail!("not a directory: {}", home.display());
+    }
+    if home.is_symlink() {
+        bail!("refusing a symlink for home directory");
+    }
+    let directory = home.join(".silicon-dm");
+    fs::create_dir_all(&directory)?;
+    #[cfg(unix)]
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    let base =
+        PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".silicon-dm");
+    fs::create_dir_all(&base)?;
+    #[cfg(unix)]
+    fs::set_permissions(&base, fs::Permissions::from_mode(0o700))?;
+    let pointer = base.join("home_dir");
+    let temporary = base.join(format!("home_dir.{}.tmp", Uuid::new_v4()));
+    let mut file = secure_open(&temporary)?;
+    file.write_all(directory.to_string_lossy().as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    fs::rename(temporary, pointer)?;
+    File::open(base)?.sync_all()?;
+    Ok(directory)
 }
 pub fn secure_open(path: &Path) -> Result<File> {
     if path.is_symlink() {

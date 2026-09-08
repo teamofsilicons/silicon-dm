@@ -23,7 +23,7 @@ use uuid::Uuid;
     version,
     about = "Silicon DM: reliable messaging for Carbons and Silicons",
     arg_required_else_help = true,
-    after_help = "FIRST STEPS\n  dm login --webhook http://localhost:9000/events --token-file -\n  dm conversations create --participant ACTOR_ID\n  dm messages send CONVERSATION_ID --text 'Hello'\n  dm daemon status\n\nTESTING\n  dm environments create --data environment.json\n  dm --test ENV_UUID login --webhook http://localhost:9000/events --token-file -\n  dm --test ENV_UUID conversations list\n\nEvery command has --help. State: ~/.silicon-dm (private credentials, durable inbox/outbox)."
+    after_help = "FIRST STEPS\n  dm login OAC_TOKEN --webhook http://localhost:9000/events\n  dm conversations create --participant ACTOR_ID\n  dm messages send CONVERSATION_ID --text 'Hello'\n  dm daemon status\n\nTESTING\n  dm environments create --data environment.json\n  dm --test ENV_UUID login --webhook http://localhost:9000/events --token-file -\n  dm --test ENV_UUID conversations list\n\nEvery command has --help. State: ~/.silicon-dm (private credentials, durable inbox/outbox)."
 )]
 struct Cli {
     /// Local profile; defaults to the name selected with profiles use.
@@ -51,6 +51,8 @@ enum Command {
         after_help = "The callback URL stays local. Return HTTP 2xx and {\"acknowledged\":true,\"delivery_id\":\"received UUID\"} after durably accepting each callback. Deduplicate retries by delivery_id.\nNEXT: dm whoami; dm conversations list; dm daemon status"
     )]
     Login {
+        /// IAM short-lived token. Use --token-file - to avoid shell history.
+        slt: Option<String>,
         /// DM origin or /api/v1 base, never the IAM URL.
         #[arg(
             long,
@@ -61,8 +63,13 @@ enum Command {
         #[arg(long)]
         webhook: String,
         /// File containing the SLT; '-' reads stdin, with hidden input on terminals.
-        #[arg(long, default_value = "-")]
-        token_file: PathBuf,
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+    },
+    /// Configure the parent directory for private DM state.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
     /// Revoke the refresh-token family and stop this local profile's connection.
     Logout,
@@ -139,6 +146,11 @@ enum Command {
         #[command(flatten)]
         options: docs::DocsArgs,
     },
+}
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Store state under LOCATION/.silicon-dm. LOCATION must already be a directory.
+    Home { location: PathBuf },
 }
 #[derive(Subcommand)]
 enum Profiles {
@@ -604,12 +616,24 @@ async fn run(cli: Cli) -> Result<Value> {
     }
     let session = store::session_key(&name, cli.test);
     match cli.command {
+        Command::Config { command } => match command {
+            ConfigCommand::Home { location } => {
+                let directory = silicon_dm_client::runtime::store::set_home_directory(&location)?;
+                Ok(json!({"home_directory": directory}))
+            }
+        },
         Command::Login {
             base_url,
             webhook,
+            slt,
             token_file,
         } => {
-            let token = read_secret(&token_file)?;
+            let token = match (slt, token_file) {
+                (Some(token), None) if !token.trim().is_empty() => token,
+                (None, Some(path)) => read_secret(&path)?,
+                (Some(_), Some(_)) => bail!("provide SLT or --token-file, not both"),
+                _ => bail!("missing SLT; use dm login <slt> or --token-file -"),
+            };
             let key = if explicit_key {
                 key
             } else {
