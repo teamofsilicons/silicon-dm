@@ -105,10 +105,14 @@ fn configured_directory() -> Result<Option<PathBuf>> {
     Ok(Some(path))
 }
 pub fn set_home_directory(home: impl AsRef<Path>) -> Result<PathBuf> {
-    let home = home.as_ref();
-    if !home.is_absolute() {
-        bail!("home directory must be an absolute path");
-    }
+    let requested = home.as_ref();
+    let owned;
+    let home = if requested.is_absolute() {
+        requested
+    } else {
+        owned = std::env::current_dir()?.join(requested);
+        &owned
+    };
     if !home.exists() {
         bail!("home directory does not exist");
     }
