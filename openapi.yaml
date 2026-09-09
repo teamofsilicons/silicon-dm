@@ -2,7 +2,7 @@
 openapi: 3.1.0
 info:
   title: Silicon DM API
-  version: 0.2.0
+  version: 0.3.0
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
@@ -40,6 +40,37 @@ tags:
 - name: Operations
   description: Deployment health probes
 paths:
+  "/iam":
+    get:
+      tags:
+      - Auth
+      operationId: iamInformation
+      summary: Discover the public IAM application configuration
+      security: []
+      description: Available before login. Returns only public identifiers and URLs, never application secrets.
+      parameters:
+      - "$ref": "#/components/parameters/TestingKey"
+      responses:
+        '200':
+          description: Public application configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [app_id, iam_base_url, api_base_url]
+                properties:
+                  app_id:
+                    type: string
+                  iam_base_url:
+                    type: string
+                    format: uri
+                  api_base_url:
+                    type: string
+                    format: uri
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+        default:
+          "$ref": "#/components/responses/Error"
   "/ws":
     get:
       tags:
@@ -1307,7 +1338,14 @@ components:
       properties:
         sender_id:
           type: string
-          description: Required when a connection represents multiple actors
+          description: Explicit sender account, optionally ISI@silicon:org (for example compose@writer:tos).
+            The underlying account must be authorized by IAM; ISI requires a silicon.
+        recipient_id:
+          type: string
+          maxLength: 255
+          description: Optional intended participant address, such as deliberate@cos:tos.
+            ISI requires a silicon participant. This is routing metadata; all conversation
+            participants still receive the message and retain normal history access.
         text:
           type: string
           minLength: 1
@@ -1377,7 +1415,8 @@ components:
       description: At least one content item (text, attachments, voice, or GIF) is
         required. Metadata alone does not count as content. On PATCH this is a full
         replacement; omitted metadata becomes {}, and omitted optional fields are
-        cleared. Logical text/transcript limits apply independently; the configured
+        cleared. Routing is immutable on PATCH; omitted sender_id and recipient_id retain the original route.
+        Logical text/transcript limits apply independently; the configured
         encoded-body limit may be lower.
     Message:
       type: object
@@ -1400,6 +1439,12 @@ components:
           format: uuid
         sender:
           "$ref": "#/components/schemas/ActorRef"
+        sender_id:
+          type: string
+          description: Qualified sender address when an ISI was supplied; sender.id remains the canonical IAM identity.
+        recipient_id:
+          type: string
+          description: Intended recipient address, including the optional ISI prefix, preserved in history and delivery.
         sequence:
           type: integer
           minimum: 1

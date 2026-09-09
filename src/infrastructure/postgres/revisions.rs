@@ -17,6 +17,8 @@ use crate::{
 struct Original {
     sender_kind: String,
     sender_id: String,
+    sender_address: Option<String>,
+    recipient_address: Option<String>,
 }
 
 impl PostgresStore {
@@ -68,7 +70,7 @@ impl PostgresStore {
             if content
                 .sender_id
                 .as_ref()
-                .is_some_and(|sender| *sender != actor.id)
+                .is_some_and(|sender| !sender.addresses(actor))
             {
                 return Err(AppError::Forbidden);
             }
@@ -82,12 +84,28 @@ impl PostgresStore {
         let hash = request_hash(&(id, conversation, expected_version, &content))?;
         let mut tx = self.pool().begin().await?;
         let original = sqlx::query_as::<_, Original>(
-            "SELECT sender_kind::text AS sender_kind, sender_id FROM messages WHERE id=$1 AND conversation_id=$2 AND organization_id=$3 FOR UPDATE"
+            "SELECT sender_kind::text AS sender_kind, sender_id, sender_address, recipient_address FROM messages WHERE id=$1 AND conversation_id=$2 AND organization_id=$3 FOR UPDATE"
         ).bind(id).bind(conversation).bind(org.as_str()).fetch_optional(&mut *tx).await?.ok_or(AppError::NotFound)?;
         if original.sender_kind != actor.actor_type.as_str()
             || original.sender_id != actor.id.as_str()
         {
             return Err(AppError::Forbidden);
+        }
+        if let Some(content) = &content {
+            let sender = content
+                .sender_id
+                .as_ref()
+                .filter(|id| id.address_parts().is_ok_and(|(_, isi)| isi.is_some()));
+            if sender.is_some_and(|id| Some(id.as_str()) != original.sender_address.as_deref())
+                || content
+                    .recipient_id
+                    .as_ref()
+                    .is_some_and(|id| Some(id.as_str()) != original.recipient_address.as_deref())
+            {
+                return Err(AppError::validation(
+                    "message routing cannot change in an edit; send a new message",
+                ));
+            }
         }
         match claim(&mut tx, org, actor, operation, key, &hash).await? {
             IdempotencyClaim::Replay(_) => {

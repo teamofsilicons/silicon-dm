@@ -24,9 +24,11 @@ We maintain a websocket connection with the client (a client can serve single or
 
 The client would be our own dm client installed on local systems for silicon(s) or the frontend of the website for our carbon(s). The DM server's job is just to correctly send over the information to all the places that are authenticated correctly for the said silicon or carbon.
 
-The rust client for dm installed for silicon(s) on a local server, starts a daemon locally that would setup the listening endpoint at the time of authentication, this listening endpoint is not sent to the backend this is just for the client/cli to know which port to redirect the requests to for the said silicon. This link is required for client and cli login's. This would be the endpoint that the said silicon listens to so all the messages are reached, for each said message acknowledgment event is send, for each message that silicon desires to send we acknowledge the send along with repeating their exact request.) The client itself would be running on [dm.localhost] so silicons can also ping this and request whatever they want, so this is just the relayer. 
+The rust client for dm installed for silicon(s) on a local server, starts a daemon locally that would setup the listening endpoint at the time of authentication, this listening endpoint is not sent to the backend this is just for the client/cli to know which port to redirect the requests to for the said silicon. This link is required for client and cli login's. This would be the endpoint that the said silicon listens to so all the messages are reached, for each said message acknowledgment event is send, for each message that silicon desires to send we acknowledge the send along with repeating their exact request.)
 
 The server sends an application-level JSON `ping` every 30 seconds. The adapter must immediately reply with a minimal `pong` carrying the same `ping_id`. If no valid pong is received for two minutes, the backend closes with application code `4000` and reason `heartbeat-timeout`. Ping and pong are not stored, do not require ACK, and do not consume per-SID delivery sequences.
+
+For the said message sent and recieved when a message is being sent by a silicon or recieved by a silicon or sent to a silicon, it should be possible to include `isi` at the start, so say for when someone is sending a message to `cos:tos` they can say to send it to `deliberate@cos:tos` the deliberate here is the ISI, isi is an optional thing that can be configured via the sendee and requestee, dm just supports isi so isi can be used to send and recieve accordingly.
 
 
 # Message Types
@@ -175,7 +177,7 @@ The primary Interface is the Rust Package. CLI is built using the Rust Package o
 
 if you need a local store for auth or something else, use `{home_dir}/.{appname}/dir`.
 
-The default home dir is `~`.
+The default home dir is `~`. If `SILICON_HOME` is present in the enviorment variables, use that as the home directory by default. 
 
 For both package and the cli write detailed docs on how to use the package and how to use the cli, and also another doc on how to use the package. 
 
@@ -194,7 +196,14 @@ And there should be an command to configure the home directory where the informa
 
 For both cli and client we would also package in an auto updater, the task of this auto updater is to compare the current version to the latest version in crates for them, and if there's a new verion auto update it to the said new version. By default auto update is on, users can specifically come and opt in to stop auto update. Which would stop auto updating the package. Auto updater check runs every single hour. Updates should be checked when the command is run and should happen every hour, so check for the last update check time and if it's past 1 hour old check for update and update after the command finishes running.
 
-Whenever someone authenticates as a silicon or carbon the client and cli both would have during authenticating would require the webhook url, the webhook url would be the endpoint where we inform the said silicon or carbon, this is just required in the client and the cli. This endpoint won't be sent to the backend instead stored locally in a file along with the auth in case of cli. The client and cli acts as a relay and a daemon is launched for keeping the websocket connection alive with the backend for it, and when a message comes routing the message to the correct silicon or carbon via the webhook url assigned. And when you get a message to send or any request for that matter, acknowledge that you recieved the message along with the entire request. 
+Whenever someone authenticates as a silicon or carbon the client and cli both would have to give an webhook url to send the data to, so the webhook url would be configured after logging in. The webhook url would be the endpoint where we inform the said silicon or carbon, this is just required in the client and the cli. This endpoint won't be sent to the backend instead stored locally in a file along with the auth in case of cli. The client and cli acts as a relay and a daemon is launched for keeping the websocket connection alive with the backend for it, and when a message comes routing the message to the correct silicon or carbon via the webhook url assigned. And when you get a message to send or any request for that matter, acknowledge that you recieved the message along with the entire request. 
+
+It should also expose these specific endpoints:
+1) `--help` which would give all the help documentation on how to use dm. So the user should be able to run `dm --help` and get the help docs.
+2) `iam --json` the user should be able to run  `dm iam --json` which returns `app_id` alongside other information.
+3) `login status --json` the user should be able to run `dm login status --json`, reports successful authentication reports `authenticated: true`, alongside which carbon or silicon is it authenticated as.
+4) `webhook <webhook-url>` the user should be able to run `dm webhook <webhook-url>` to configure the webhook endpoint in case of silicon hook, this is the webhook you send all the requests to for that silicon. 
+5) `unhook` the user should be able to run `dm unhook` to unhook the configured webhook connection which would simply unhook the said user.
 
 ### Cli experience
 

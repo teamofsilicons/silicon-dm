@@ -209,3 +209,30 @@ These routes use the backend origin directly, outside `/api/v1`:
 - `GET /ready`: unauthenticated 204 when database connectivity, migration checksums, and runtime access are ready; otherwise 503.
 
 There are no client-callable internal delivery workers, OBO endpoints, attachment-upload endpoints, or temporary-link exchanges. The Rust client and CLI expose the public operations above.
+
+
+## Public IAM discovery and ISI addresses
+
+`GET /api/v1/iam` requires no login and returns `app_id`, `iam_base_url`, and
+`api_base_url`. It never returns application secrets. The testing-environment
+key header selects the sandbox using the same rules as other public routes.
+
+Message creation, replies and bundle display messages accept optional
+`sender_id` and `recipient_id` addresses such as `compose@writer:tos` and
+`deliberate@cos:tos`. Senders authorize as the canonical IAM account; recipients
+must be existing conversation participants. ISI prefixes require silicon
+accounts; carbon email identifiers are unchanged. A prefix is nonempty and
+contains no whitespace, `@`, or `:`. Conversation creation and WebSocket
+subscriptions use canonical account IDs.
+
+Responses retain canonical `sender: {type, id}` and expose the qualified
+`sender_id` when an ISI was supplied, plus `recipient_id` when supplied. These
+fields persist through history, delivery, sender copies, edits and bundles.
+They remain outside caller metadata. Routing is immutable: PATCH can omit these
+fields to preserve the original route, but cannot change it. Reusing an
+idempotency key with a different routing address conflicts.
+
+ISI is a routing hint to the receiving application. Every participant retains
+normal conversation visibility and delivery/receipt behavior. It neither grants
+IAM permissions nor creates a private conversation. The local webhook URL is
+configured after login in the client/CLI and never sent to the backend.

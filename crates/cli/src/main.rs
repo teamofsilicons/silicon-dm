@@ -23,7 +23,7 @@ use uuid::Uuid;
     version,
     about = "Silicon DM: reliable messaging for Carbons and Silicons",
     arg_required_else_help = true,
-    after_help = "FIRST STEPS\n  dm login OAC_TOKEN --webhook http://localhost:9000/events\n  dm conversations create --participant ACTOR_ID\n  dm messages send CONVERSATION_ID --text 'Hello'\n  dm daemon status\n\nTESTING\n  dm environments create --data environment.json\n  dm --test ENV_UUID login --webhook http://localhost:9000/events --token-file -\n  dm --test ENV_UUID conversations list\n\nEvery command has --help. State: ~/.silicon-dm (private credentials, durable inbox/outbox)."
+    after_help = "FIRST STEPS\n  dm iam --json\n  dm login OAC_TOKEN\n  dm webhook http://localhost:9000/events\n  dm conversations create --participant ACTOR_ID\n  dm messages send CONVERSATION_ID --text 'Hello'\n  dm daemon status\n\nTESTING\n  dm environments create --data environment.json\n  dm --test ENV_UUID login --token-file -\n  dm --test ENV_UUID conversations list\n\nEvery command has --help. State: ~/.silicon-dm (private credentials, durable inbox/outbox)."
 )]
 struct Cli {
     /// Local profile; defaults to the name selected with profiles use.
@@ -46,11 +46,17 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Exchange an IAM short-lived token, save a local webhook mapping, start the relay.
+    /// Exchange an IAM short-lived token, or run login status to verify the saved session.
     #[command(
-        after_help = "The callback URL stays local. Return HTTP 2xx and {\"acknowledged\":true,\"delivery_id\":\"received UUID\"} after durably accepting each callback. Deduplicate retries by delivery_id.\nNEXT: dm whoami; dm conversations list; dm daemon status"
+        after_help = "The callback URL stays local. Return HTTP 2xx and {\"acknowledged\":true,\"delivery_id\":\"received UUID\"} after durably accepting each callback. Deduplicate retries by delivery_id.\nNEXT: dm webhook <webhook-url>; dm login status --json; dm conversations list"
+    )]
+    #[command(
+        subcommand_precedence_over_arg = true,
+        args_conflicts_with_subcommands = true
     )]
     Login {
+        #[command(subcommand)]
+        command: Option<LoginCommand>,
         /// IAM short-lived token. Use --token-file - to avoid shell history.
         slt: Option<String>,
         /// DM origin or /api/v1 base, never the IAM URL.
@@ -60,12 +66,26 @@ enum Command {
             default_value = "https://backend.dm.teamofsilicons.com"
         )]
         base_url: String,
+        /// Optional local callback; normally configure after login with dm webhook URL.
         #[arg(long)]
-        webhook: String,
+        webhook: Option<url::Url>,
         /// File containing the SLT; '-' reads stdin, with hidden input on terminals.
         #[arg(long)]
         token_file: Option<PathBuf>,
     },
+    /// Show the public IAM app_id and service URLs without logging in.
+    Iam {
+        #[arg(
+            long,
+            env = "DM_API_URL",
+            default_value = "https://backend.dm.teamofsilicons.com"
+        )]
+        base_url: String,
+    },
+    /// Configure the selected logged-in profile's local callback.
+    Webhook { url: url::Url },
+    /// Detach the local callback, retaining authentication and queued events.
+    Unhook,
     /// Configure the parent directory for private DM state.
     Config {
         #[command(subcommand)]
@@ -148,6 +168,11 @@ enum Command {
     },
 }
 #[derive(Subcommand)]
+enum LoginCommand {
+    /// Verify the saved authentication and report the current carbon or silicon.
+    Status,
+}
+#[derive(Subcommand)]
 enum ConfigCommand {
     /// Store state under LOCATION/.silicon-dm. LOCATION must already be a directory.
     Home { location: PathBuf },
@@ -192,6 +217,12 @@ enum Conversations {
 }
 #[derive(Args)]
 struct Content {
+    /// Sender address; an optional ISI prefix is supported for silicon accounts.
+    #[arg(long, visible_alias = "from")]
+    sender_id: Option<String>,
+    /// Intended participant address, for example deliberate@cos:tos.
+    #[arg(long, visible_alias = "to")]
+    recipient_id: Option<String>,
     /// Full MessageCreate JSON file or '-'; supports voice, transcript, GIF and metadata.
     #[arg(long)]
     data: Option<PathBuf>,
@@ -214,6 +245,12 @@ impl Content {
         } else {
             MessageCreate::default()
         };
+        if self.sender_id.is_some() {
+            m.sender_id = self.sender_id;
+        }
+        if self.recipient_id.is_some() {
+            m.recipient_id = self.recipient_id;
+        }
         if let Some(text) = self.text {
             m.text = Some(text)
         }
@@ -406,7 +443,7 @@ enum Gifs {
 enum Environments {
     /// JSON: name, description?, iam_environment_id, iam_environment_key, iam_app_id, iam_app_secret.
     #[command(
-        after_help = "Uses the production profile to establish ownership. The returned DM root key is saved privately. NEXT: dm --test ENV_UUID login --webhook URL --token-file -"
+        after_help = "Uses the production profile to establish ownership. The returned DM root key is saved privately. NEXT: dm --test ENV_UUID login --token-file -"
     )]
     Create {
         #[arg(long)]
@@ -623,11 +660,17 @@ async fn run(cli: Cli) -> Result<Value> {
             }
         },
         Command::Login {
+            command,
             base_url,
             webhook,
             slt,
             token_file,
         } => {
+            if matches!(command, Some(LoginCommand::Status)) {
+                return runtime::LocalRuntime::from_environment()?
+                    .login_status(&name, cli.test)
+                    .await;
+            }
             let token = match (slt, token_file) {
                 (Some(token), None) if !token.trim().is_empty() => token,
                 (None, Some(path)) => read_secret(&path)?,
@@ -643,7 +686,7 @@ async fn run(cli: Cli) -> Result<Value> {
                 profile: &name,
                 base_url: &base_url,
                 short_lived_token: &token,
-                webhook_url: &webhook.parse()?,
+                webhook_url: webhook.as_ref(),
                 testing_environment_id: cli.test,
                 idempotency_key: &key,
             };
@@ -655,8 +698,33 @@ async fn run(cli: Cli) -> Result<Value> {
                 .login(&options, &launch)
                 .await?;
             result["idempotency_key"] = json!(key);
-            eprintln!("Logged in. Next: dm whoami; dm conversations list; dm daemon status.");
+            eprintln!(
+                "Logged in. Next: dm webhook <webhook-url>; dm login status --json; dm conversations list."
+            );
             Ok(result)
+        }
+        Command::Iam { base_url } => {
+            let mut client = Client::new(&base_url)?;
+            if let Some(id) = cli.test {
+                let key = config
+                    .testing_keys
+                    .get(&id)
+                    .context("import the testing key first")?;
+                if key.base_url.trim_end_matches('/') != base_url.trim_end_matches('/') {
+                    bail!("testing key belongs to another backend");
+                }
+                client = client.with_test_key(&key.key)?;
+            }
+            Ok(serde_json::to_value(client.iam().await?)?)
+        }
+        Command::Webhook { url } => {
+            let result =
+                runtime::LocalRuntime::from_environment()?.webhook(&name, cli.test, Some(&url))?;
+            daemon::start(None).await?;
+            Ok(result)
+        }
+        Command::Unhook => {
+            runtime::LocalRuntime::from_environment()?.webhook(&name, cli.test, None)
         }
         Command::Logout => {
             runtime::LocalRuntime::from_environment()?
@@ -689,15 +757,13 @@ async fn run(cli: Cli) -> Result<Value> {
                 Ok(json!({"default_profile":name}))
             }
             Profiles::Webhook { url } => {
-                validate_endpoint(&url.parse()?)?;
-                store::update(|c| {
-                    c.profiles
-                        .get_mut(&session)
-                        .context("log in first")?
-                        .webhook_url = url.clone();
-                    Ok(())
-                })?;
-                Ok(json!({"profile":name,"webhook_url":url}))
+                let result = runtime::LocalRuntime::from_environment()?.webhook(
+                    &name,
+                    cli.test,
+                    Some(&url.parse()?),
+                )?;
+                daemon::start(None).await?;
+                Ok(result)
             }
         },
         Command::Daemon { command } => match command {
@@ -950,7 +1016,7 @@ async fn environments(
             Ok(())
         })?;
         return Ok(
-            json!({"environment_id":id,"key_stored":true,"next":format!("dm --test {id} login --webhook URL --token-file -")}),
+            json!({"environment_id":id,"key_stored":true,"next":format!("dm --test {id} login --token-file -")}),
         );
     }
     if let Environments::Clean = command {
@@ -992,7 +1058,7 @@ async fn environments(
                 save(env.environment_id, key)?
             }
             eprintln!(
-                "Test key saved. Next: dm --test {} login --webhook URL --token-file -",
+                "Test key saved. Next: dm --test {} login --token-file -",
                 env.environment_id
             );
             serde_json::to_value(env)?
@@ -1071,4 +1137,43 @@ fn read_secret(path: &std::path::Path) -> Result<String> {
         bail!("token/key input was empty")
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    #[test]
+    fn onboarding_grammar_and_isi_flags() -> Result<()> {
+        for args in [
+            vec!["dm", "login", "OAC_TOKEN"],
+            vec!["dm", "login", "status", "--json"],
+            vec!["dm", "iam", "--json"],
+            vec!["dm", "webhook", "http://localhost:9000/events"],
+            vec!["dm", "unhook"],
+        ] {
+            Cli::try_parse_from(args)?;
+        }
+        let cli = Cli::try_parse_from([
+            "dm",
+            "messages",
+            "send",
+            "00000000-0000-0000-0000-000000000001",
+            "--from",
+            "compose@writer:tos",
+            "--to",
+            "deliberate@cos:tos",
+            "--text",
+            "hello",
+        ])?;
+        let Command::Messages {
+            command: Messages::Send { content, .. },
+        } = cli.command
+        else {
+            bail!("wrong command")
+        };
+        let message = content.read()?;
+        assert_eq!(message.sender_id.as_deref(), Some("compose@writer:tos"));
+        assert_eq!(message.recipient_id.as_deref(), Some("deliberate@cos:tos"));
+        Ok(())
+    }
 }

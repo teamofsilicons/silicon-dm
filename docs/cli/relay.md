@@ -27,6 +27,13 @@ See [the typed request example](../client/realtime.md). Arbitrary HTTP paths,
 backend administration, auth secrets and IAM internals are not exposed through
 this endpoint.
 
+Configure callbacks after authentication with `dm webhook URL`. `dm unhook`
+removes the selected mapping and retains login and durable queues. Events keep
+accumulating while unhooked and resume on reconfiguration. A callback already
+in flight may still finish. ISI routing is preserved in
+`event.message.sender_id` and `event.message.recipient_id`; your endpoint can
+route those to the appropriate local silicon handler.
+
 ## Callback wire contract
 
 For each durable server event, the daemon posts to the endpoint stored for that

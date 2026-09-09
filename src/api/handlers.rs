@@ -305,7 +305,7 @@ pub(super) async fn create_message_bundle(
         .display_message
         .sender_id
         .as_ref()
-        .is_some_and(|sender_id| *sender_id != context.actor.id)
+        .is_some_and(|sender_id| !sender_id.addresses(&context.actor))
     {
         return Err(AppError::Forbidden);
     }
@@ -646,6 +646,8 @@ async fn resolve_sender(
     let Some(requested_id) = requested_id else {
         return Ok(context.actor.clone());
     };
+    let base_id = requested_id.base_actor_id().map_err(AppError::validation)?;
+    let requested_id = &base_id;
     if *requested_id == context.actor.id {
         return Ok(context.actor.clone());
     }

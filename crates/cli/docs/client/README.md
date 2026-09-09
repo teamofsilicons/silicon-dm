@@ -9,7 +9,7 @@ state directory. The stateful `dm` CLI uses that same SDK runtime.
 
 ## Installation and configuration
 
-Add `silicon-dm-client = "0.2"` to your application's Cargo manifest to use the
+Add `silicon-dm-client = "0.3"` to your application's Cargo manifest to use the
 published package. For development against this checkout, depend on
 `crates/client` by path.
 
@@ -22,15 +22,13 @@ seconds. Credentials never appear in a `Client` debug representation.
 
 ```rust
 use silicon_dm_client::{Client, MessageCreate, PageRequest};
-use url::Url;
 use uuid::Uuid;
 
 let dm = Client::new("https://backend.dm.teamofsilicons.com")?;
-let callback: Url = "http://localhost:9000/events".parse()?;
 // Obtain the short-lived token from the actor, not their password.
-let tokens = dm.login(&short_lived_token, &callback, &Uuid::new_v4().to_string()).await?;
-// Persist this actor -> callback mapping and the tokens in your application's
-// own private store. The callback URL is validated locally and never sent to DM.
+let tokens = dm.login(&short_lived_token, &Uuid::new_v4().to_string()).await?;
+// Persist tokens privately if your application needs persistence. Configure
+// callbacks after login through LocalRuntime, or own the WebSocket directly.
 let dm = dm.with_auth(&tokens.access_token, &tokens.organization_id);
 let identity = dm.me().await?;
 let conversation = dm.create_conversation(
@@ -51,7 +49,7 @@ and actor authorization remain enforced by the backend. There is no OBO flow.
 
 ## Authentication and credential lifecycle
 
-`login(slt, webhook_url, idempotency_key)` sends only `{slt}` to DM's login
+`login(slt, idempotency_key)` sends only `{slt}` to DM's login
 endpoint. The backend performs the official IAM client exchange with its own
 application credentials. The returned `Tokens` contains `access_token`,
 `refresh_token`, `token_type`, `expires_in`, `scope`, `actor`, and
@@ -69,6 +67,26 @@ returns its actual authorization decision; a client never invents permissions.
 `me()` returns the current actor, organization, principal and session identifiers,
 organization role and disclosed capabilities. A client can represent a list of
 actors on a WebSocket only if the backend authorizes every actor.
+
+`iam()` returns the backend's public `IamInfo` (`app_id`, `iam_base_url`,
+`api_base_url`) without an authenticated session. The optional runtime's
+`login_status(profile, test).await` verifies and refreshes a persisted login;
+`webhook(profile, test, Some(&url))` configures a callback after login and
+`webhook(profile, test, None)` unhooks it. See [runtime](runtime.md).
+
+## ISI message routing
+
+Set `MessageCreate.sender_id = Some("compose@writer:tos".into())` to send with
+an ISI, or `recipient_id = Some("deliberate@cos:tos".into())` to address one.
+The sender must be the authorized silicon account and the recipient must be a
+conversation participant. Create conversations using canonical IDs (`cos:tos`).
+The returned `Message.sender.id` stays canonical; `Message.content.sender_id`
+and `Message.content.recipient_id` preserve the routing addresses. They survive
+history, WebSocket and callback delivery, replies when supplied, bundles and
+edits. Edits cannot change routing. Use a new idempotency key for a new route.
+ISI does not change conversation visibility or create another IAM principal;
+your receiving application dispatches the optional ISI. A socket's `actor_id`
+and subscription IDs remain canonical, with the prefixed sender in its message.
 
 ## Operations
 
@@ -135,7 +153,7 @@ root key; store the root key privately.
 
 ```rust
 let sandbox = Client::new(dm_base)?.with_test_key(dm_test_root_key)?;
-let tokens = sandbox.login(&iam_test_slt, &local_callback, &login_key).await?;
+let tokens = sandbox.login(&iam_test_slt, &login_key).await?;
 let sandbox = sandbox.with_auth(tokens.access_token, tokens.organization_id);
 let page = sandbox.conversations(&PageRequest::default()).await?;
 ```

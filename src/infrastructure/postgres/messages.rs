@@ -31,6 +31,8 @@ const SEND_MESSAGE_OPERATION: &str = "messages.create";
 struct MessageIdempotencyContent<'a> {
     conversation_id: Uuid,
     content_hash: &'a [u8],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routing_hash: Option<&'a [u8]>,
 }
 
 #[derive(FromRow)]
@@ -176,15 +178,17 @@ impl PostgresStore {
             .content
             .sender_id
             .as_ref()
-            .is_some_and(|sender_id| *sender_id != command.sender.id)
+            .is_some_and(|sender_id| !sender_id.addresses(&command.sender))
         {
             return Err(AppError::Forbidden);
         }
         let content_hash = command.content.content_digest();
         let legacy_content_hash = command.content.legacy_content_digest();
+        let routing_hash = command.content.routing_digest();
         let hash = request_hash(&MessageIdempotencyContent {
             conversation_id: command.conversation_id,
             content_hash: content_hash.as_bytes(),
+            routing_hash: routing_hash.as_ref().map(|hash| hash.as_bytes().as_slice()),
         })?;
         let mut transaction = self.pool().begin().await?;
         refresh_directory_in(
@@ -567,6 +571,28 @@ pub(crate) async fn insert_message_in(
     content: &MessageCreate,
     content_hash: &blake3::Hash,
 ) -> AppResult<Uuid> {
+    if let Some(recipient) = &content.recipient_id {
+        let participants =
+            participant_records_in(transaction, organization_id, conversation_id).await?;
+        let valid = participants.iter().any(|p| {
+            let Ok(id) = parse_actor_id(&p.actor_id) else {
+                return false;
+            };
+            let Ok(actor_type) = parse_actor_type(&p.actor_kind) else {
+                return false;
+            };
+            recipient.addresses(&ActorRef { actor_type, id })
+        });
+        if !valid {
+            return Err(AppError::validation(
+                "recipient_id must address a participant in this conversation; ISI requires a silicon",
+            ));
+        }
+    }
+    let sender_address = content
+        .sender_id
+        .as_ref()
+        .filter(|id| id.address_parts().is_ok_and(|(_, isi)| isi.is_some()));
     let message_id = Uuid::now_v7();
     sqlx::query(
         r#"
@@ -583,11 +609,13 @@ pub(crate) async fn insert_message_in(
             content_hash_version,
             content_hash,
             metadata,
-            reply_to_message_id
+            reply_to_message_id,
+            sender_address,
+            recipient_address
         )
         VALUES (
             $1, $2, $3, $4::text::actor_kind, $5, 1, 'sent', $6, $7,
-            3, $8, $9, $10
+            3, $8, $9, $10, $11, $12
         )
         "#,
     )
@@ -601,6 +629,13 @@ pub(crate) async fn insert_message_in(
     .bind(content_hash.as_bytes().as_slice())
     .bind(sqlx::types::Json(&content.metadata))
     .bind(content.reply_to_message_id)
+    .bind(sender_address.map(crate::domain::ActorId::as_str))
+    .bind(
+        content
+            .recipient_id
+            .as_ref()
+            .map(crate::domain::ActorId::as_str),
+    )
     .execute(&mut **transaction)
     .await
     .map_err(map_constraint_error)?;

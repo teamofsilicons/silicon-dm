@@ -530,11 +530,13 @@ impl SessionRuntime {
                 if message
                     .sender_id
                     .as_ref()
-                    .is_some_and(|requested| *requested != actor_id)
+                    .is_some_and(|requested| !requested.addresses(&sender))
                 {
                     return Err(AppError::Forbidden);
                 }
-                message.sender_id = Some(actor_id);
+                if message.sender_id.is_none() {
+                    message.sender_id = Some(actor_id);
+                }
                 self.state
                     .store
                     .require_participant(&org_id, &sender, conversation_id)

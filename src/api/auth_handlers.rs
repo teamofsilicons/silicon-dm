@@ -108,3 +108,16 @@ fn no_store() -> HeaderMap {
         (header::PRAGMA, HeaderValue::from_static("no-cache")),
     ])
 }
+
+/// Returns public IAM application discovery without requiring a session.
+pub async fn iam(State(state): State<AppState>) -> Response {
+    (
+        no_store(),
+        Json(json!({
+            "app_id": state.settings.iam.app_id,
+            "iam_base_url": state.settings.iam.base_url,
+            "api_base_url": state.settings.server.public_base_url,
+        })),
+    )
+        .into_response()
+}

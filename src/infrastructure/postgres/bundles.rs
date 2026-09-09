@@ -43,6 +43,8 @@ struct BundleIdempotencyContent<'a> {
     conversation_id: Uuid,
     message_ids: &'a [Uuid],
     display_content_hash: &'a [u8],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routing_hash: Option<&'a [u8]>,
 }
 
 #[derive(FromRow)]
@@ -81,15 +83,17 @@ impl PostgresStore {
             .display_message
             .sender_id
             .as_ref()
-            .is_some_and(|sender_id| *sender_id != command.creator.id)
+            .is_some_and(|sender_id| !sender_id.addresses(&command.creator))
         {
             return Err(AppError::Forbidden);
         }
         let display_content_hash = command.bundle.display_message.content_digest();
+        let routing_hash = command.bundle.display_message.routing_digest();
         let hash = request_hash(&BundleIdempotencyContent {
             conversation_id: command.conversation_id,
             message_ids: &command.bundle.message_ids,
             display_content_hash: display_content_hash.as_bytes(),
+            routing_hash: routing_hash.as_ref().map(|hash| hash.as_bytes().as_slice()),
         })?;
         let mut transaction = self.pool().begin().await?;
         refresh_directory_in(

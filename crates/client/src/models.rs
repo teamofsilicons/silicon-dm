@@ -51,6 +51,9 @@ pub struct Gif {
 pub struct MessageCreate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_id: Option<String>,
+    /// Optional recipient address, for example deliberate@cos:tos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default)]
@@ -349,4 +352,12 @@ impl ServerFrame {
             _ => None,
         }
     }
+}
+
+/// Public application discovery. Application secrets are never returned.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IamInfo {
+    pub app_id: String,
+    pub iam_base_url: String,
+    pub api_base_url: String,
 }

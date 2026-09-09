@@ -81,6 +81,44 @@ pub enum IdentityError {
 }
 
 impl ActorId {
+    /// Separates an optional ISI from a silicon address (`isi@silicon:org`).
+    /// Carbon email identifiers remain ordinary identifiers.
+    ///
+    /// # Errors
+    /// Returns an error for a malformed ISI prefix or silicon address.
+    pub fn address_parts(&self) -> Result<(&str, Option<&str>), &'static str> {
+        let Some((isi, actor)) = self.0.split_once('@') else {
+            return Ok((&self.0, None));
+        };
+        if !self.0.contains(':') {
+            return Ok((&self.0, None));
+        }
+        if isi.is_empty()
+            || isi.chars().any(|c| c.is_whitespace() || c == ':')
+            || actor.contains('@')
+            || actor
+                .split_once(':')
+                .is_none_or(|(name, org)| name.is_empty() || org.is_empty())
+        {
+            return Err("silicon address must be ISI@silicon:org with a non-empty ISI");
+        }
+        Ok((actor, Some(isi)))
+    }
+    /// Canonical IAM identity underlying an optional ISI address.
+    ///
+    /// # Errors
+    /// Returns an error when the routing address or underlying account is invalid.
+    pub fn base_actor_id(&self) -> Result<Self, &'static str> {
+        Self::try_from(self.address_parts()?.0.to_owned()).map_err(|_| "invalid actor address")
+    }
+    /// Checks both the underlying account and whether ISI is valid for its kind.
+    #[must_use]
+    pub fn addresses(&self, actor: &ActorRef) -> bool {
+        self.address_parts().is_ok_and(|(base, isi)| {
+            base == actor.id.as_str() && (isi.is_none() || actor.actor_type == ActorType::Silicon)
+        })
+    }
+
     /// Borrows the normalized identifier.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -160,5 +198,36 @@ mod tests {
     fn identifiers_reject_controls_and_empty_values() {
         assert_eq!(ActorId::from_str("\n"), Err(IdentityError::Invalid));
         assert_eq!(OrganizationId::from_str(""), Err(IdentityError::Invalid));
+    }
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+    #[test]
+    fn isi_is_routing_and_never_identity_authority() -> Result<(), Box<dyn std::error::Error>> {
+        let address: ActorId = "deliberate@cos:tos".parse()?;
+        assert_eq!(address.address_parts()?, ("cos:tos", Some("deliberate")));
+        assert_eq!(address.base_actor_id()?.as_str(), "cos:tos");
+        assert!(address.addresses(&ActorRef {
+            actor_type: ActorType::Silicon,
+            id: "cos:tos".parse()?
+        }));
+        assert!(!address.addresses(&ActorRef {
+            actor_type: ActorType::Carbon,
+            id: "cos:tos".parse()?
+        }));
+        assert!(!address.addresses(&ActorRef {
+            actor_type: ActorType::Silicon,
+            id: "other:tos".parse()?
+        }));
+        assert_eq!(
+            "human@example.com".parse::<ActorId>()?.address_parts()?,
+            ("human@example.com", None)
+        );
+        for invalid in ["@cos:tos", "a@b@cos:tos", "a@:tos", "a@cos:", "a b@cos:tos"] {
+            assert!(invalid.parse::<ActorId>()?.address_parts().is_err());
+        }
+        Ok(())
     }
 }

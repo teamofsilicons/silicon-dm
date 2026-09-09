@@ -83,6 +83,9 @@ pub struct MessageCreate {
     /// Explicit sender when a connection represents more than one actor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_id: Option<super::ActorId>,
+    /// Optional recipient address, including an ISI prefix for a silicon participant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_id: Option<super::ActorId>,
     /// Optional text content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -149,6 +152,12 @@ pub struct Message {
     pub conversation_id: Uuid,
     /// Typed sender.
     pub sender: ActorRef,
+    /// Optional qualified sender address; sender.id always identifies the IAM account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<super::ActorId>,
+    /// Optional intended recipient address. Conversation visibility is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_id: Option<super::ActorId>,
     /// Stable sequence within the conversation.
     pub sequence: i64,
     /// Aggregate message state.
@@ -206,12 +215,32 @@ pub struct GifPage {
 }
 
 impl MessageCreate {
+    /// Hashes ISI routing separately from draft content, preserving legacy hashes when absent.
+    #[must_use]
+    pub fn routing_digest(&self) -> Option<blake3::Hash> {
+        let sender = self
+            .sender_id
+            .as_ref()
+            .filter(|id| id.address_parts().is_ok_and(|(_, isi)| isi.is_some()));
+        if sender.is_none() && self.recipient_id.is_none() {
+            return None;
+        }
+        Some(blake3::hash(
+            serde_json::to_string(&(sender, &self.recipient_id))
+                .unwrap_or_default()
+                .as_bytes(),
+        ))
+    }
+
     /// Checks content-shape and documented resource limits.
     ///
     /// # Errors
     ///
     /// Returns a stable user-facing validation message.
     pub fn validate(&self) -> Result<(), &'static str> {
+        for address in [&self.sender_id, &self.recipient_id].into_iter().flatten() {
+            address.address_parts()?;
+        }
         if self.text.as_ref().is_some_and(String::is_empty) {
             return Err("message text must contain at least one character");
         }

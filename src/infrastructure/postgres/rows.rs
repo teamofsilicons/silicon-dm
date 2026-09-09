@@ -44,6 +44,8 @@ pub(crate) struct MessageRecord {
     pub conversation_id: Uuid,
     pub sender_kind: String,
     pub sender_id: String,
+    pub sender_address: Option<String>,
+    pub recipient_address: Option<String>,
     pub sequence: i64,
     pub status: String,
     pub text_content: Option<String>,
@@ -108,6 +110,8 @@ impl PostgresStore {
                 conversation_id,
                 sender_kind::text AS sender_kind,
                 sender_id,
+                sender_address,
+                recipient_address,
                 sequence,
                 status::text AS status,
                 text_content,
@@ -271,6 +275,16 @@ fn map_message(
             actor_type: parse_actor_type(&record.sender_kind)?,
             id: parse_actor_id(&record.sender_id)?,
         },
+        sender_id: record
+            .sender_address
+            .as_deref()
+            .map(parse_actor_id)
+            .transpose()?,
+        recipient_id: record
+            .recipient_address
+            .as_deref()
+            .map(parse_actor_id)
+            .transpose()?,
         sequence: record.sequence,
         status: parse_message_status(&record.status)?,
         text: record.text_content,

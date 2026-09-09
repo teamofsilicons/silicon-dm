@@ -584,7 +584,7 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
             .bind(upgraded_voice_message.id)
             .fetch_one(store.pool())
             .await?,
-        2
+        3
     );
     assert!(matches!(
         store
@@ -697,6 +697,7 @@ async fn durable_conversation_message_receipt_and_ack_flow() -> TestResult<()> {
     exercise_voice_draft_and_message(&database.store, &scope, conversation_id).await?;
     exercise_concurrent_final_disconnect(&database.store, &scope).await?;
 
+    exercise_isi_routing(&database.store).await?;
     database.store.pool().close().await;
     Ok(())
 }
@@ -921,6 +922,7 @@ async fn exercise_voice_draft_and_message(
                 metadata: serde_json::Map::new(),
                 reply_to_message_id: None,
                 sender_id: None,
+                recipient_id: None,
                 text: None,
                 attachments: Vec::new(),
                 voice: Some(voice),
@@ -1047,4 +1049,152 @@ fn receipt_command(
 
 fn idempotency_key(value: &str) -> TestResult<IdempotencyKey> {
     Ok(value.parse()?)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one lifecycle verifies routing through acceptance, replay, edits and bundling in the same conversation"
+)]
+async fn exercise_isi_routing(store: &PostgresStore) -> TestResult<()> {
+    let org: OrganizationId = "isi-org".parse()?;
+    let sender = ActorRef {
+        actor_type: ActorType::Silicon,
+        id: "writer:tos".parse()?,
+    };
+    let recipient = ActorRef {
+        actor_type: ActorType::Silicon,
+        id: "cos:tos".parse()?,
+    };
+    let conversation = store
+        .create_conversation(CreateConversationCommand {
+            organization_id: org.clone(),
+            creator: sender.clone(),
+            participants: vec![sender.clone(), recipient.clone()],
+            idempotency_key: idempotency_key("isi-conversation")?,
+        })
+        .await?;
+    let content = MessageCreate {
+        sender_id: Some("compose@writer:tos".parse()?),
+        recipient_id: Some("deliberate@cos:tos".parse()?),
+        text: Some("ISI round trip".into()),
+        metadata: serde_json::from_value(serde_json::json!({"keep":{"nested":true}}))?,
+        ..MessageCreate::default()
+    };
+    let command = |content: MessageCreate, key: &str| -> TestResult<SendMessageCommand> {
+        Ok(SendMessageCommand {
+            organization_id: org.clone(),
+            conversation_id: conversation.id,
+            sender: sender.clone(),
+            content,
+            idempotency_key: idempotency_key(key)?,
+        })
+    };
+    let message = store
+        .send_message(command(content.clone(), "isi-message-key")?)
+        .await?;
+    assert_eq!(message.sender, sender);
+    assert_eq!(message.sender_id, content.sender_id);
+    assert_eq!(message.recipient_id, content.recipient_id);
+    assert_eq!(message.metadata, content.metadata);
+    assert_eq!(
+        store
+            .send_message(command(content.clone(), "isi-message-key")?)
+            .await?
+            .id,
+        message.id
+    );
+    let mut changed = content.clone();
+    changed.recipient_id = Some("review@cos:tos".parse()?);
+    assert!(
+        store
+            .send_message(command(changed, "isi-message-key")?)
+            .await
+            .is_err()
+    );
+    let mut changed = content.clone();
+    changed.sender_id = Some("review@writer:tos".parse()?);
+    assert!(
+        store
+            .send_message(command(changed, "isi-message-key")?)
+            .await
+            .is_err()
+    );
+    let mut invalid = content.clone();
+    invalid.sender_id = Some("compose@cos:tos".parse()?);
+    assert!(matches!(
+        store
+            .send_message(command(invalid, "isi-impersonation")?)
+            .await,
+        Err(AppError::Forbidden)
+    ));
+    let mut invalid = content.clone();
+    invalid.recipient_id = Some("deliberate@outsider:tos".parse()?);
+    assert!(
+        store
+            .send_message(command(invalid, "isi-outsider")?)
+            .await
+            .is_err()
+    );
+    let deliveries = store.replay_deliveries(&org, &recipient, 0, 10).await?;
+    assert!(
+        matches!(&deliveries[0].payload, DeliveryPayload::Message { message: delivered }
+        if delivered.sender_id == content.sender_id && delivered.recipient_id == content.recipient_id)
+    );
+    let edited = store
+        .revise_message(
+            &org,
+            &sender,
+            conversation.id,
+            message.id,
+            1,
+            &idempotency_key("isi-edit-message")?,
+            Some(MessageCreate {
+                text: Some("edited".into()),
+                ..MessageCreate::default()
+            }),
+        )
+        .await?;
+    assert_eq!(edited.sender_id, content.sender_id);
+    assert_eq!(edited.recipient_id, content.recipient_id);
+    let history = store
+        .list_messages(
+            &org,
+            &recipient,
+            conversation.id,
+            &PageRequest::default(),
+            false,
+        )
+        .await?;
+    assert_eq!(history.items[0].recipient_id, content.recipient_id);
+    let mut reroute = content.clone();
+    reroute.recipient_id = Some("other@cos:tos".parse()?);
+    assert!(
+        store
+            .revise_message(
+                &org,
+                &sender,
+                conversation.id,
+                message.id,
+                2,
+                &idempotency_key("isi-reroute-edit")?,
+                Some(reroute)
+            )
+            .await
+            .is_err()
+    );
+    let bundle = store
+        .create_bundle(silicon_dm::application::commands::CreateBundleCommand {
+            organization_id: org.clone(),
+            conversation_id: conversation.id,
+            creator: sender.clone(),
+            bundle: silicon_dm::domain::BundleCreate {
+                message_ids: vec![message.id],
+                display_message: content.clone(),
+            },
+            idempotency_key: idempotency_key("isi-bundle-key")?,
+        })
+        .await?;
+    assert_eq!(bundle.display_message.recipient_id, content.recipient_id);
+    assert_eq!(bundle.display_message.sender_id, content.sender_id);
+    Ok(())
 }

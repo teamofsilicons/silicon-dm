@@ -39,34 +39,47 @@ Global options can appear before or after the command:
 ## Login and profiles
 
 ```sh
-dm --profile writer login \
-  --base-url https://backend.dm.teamofsilicons.com \
-  --webhook http://localhost:9000/events \
-  --token-file -
-dm --profile writer whoami
+dm --help
+dm iam --json
+dm --profile writer login OAC_TOKEN
+dm --profile writer login status --json
+dm --profile writer webhook http://localhost:9000/events
 dm profiles list
 dm profiles use writer
+dm unhook
 ```
 
-Supply the actor's IAM short-lived token on stdin, or name a private token file.
-Terminal input is hidden. You do not enter passwords, IAM application secrets,
-or browser redirects. The DM backend exchanges the SLT through IAM. `DM_API_URL`
-can supply the base URL. Local development supports an HTTP loopback DM origin.
+`dm login <slt>` exchanges the actor's IAM short-lived token and starts the
+relay. For hidden terminal input or stdin use `dm login --token-file -`.
+`--base-url` or `DM_API_URL` selects a DM backend; no IAM application secret is
+required locally. `dm iam --json` discovers that backend's public `app_id`,
+`iam_base_url`, and `api_base_url` through `GET /api/v1/iam`, before login.
+Use `dm iam --base-url URL` to select a development backend. With `--test UUID`,
+import that environment's key first and use its matching backend URL.
 
-The direct login form is `dm login OAC_TOKEN --webhook URL`; use `--token-file -` when the token must come from hidden stdin.
+Configure the webhook **after login** with `dm webhook <webhook-url>`. The URL
+is validated and saved only in the selected local profile, never sent to DM.
+The optional `login --webhook URL` form and `profiles webhook URL` remain
+available. The daemon persists incoming events even while there is no webhook;
+pending callbacks resume after configuration. See [the relay guide](relay.md)
+for the required HTTP 2xx plus JSON acknowledgement contract.
 
-Every login requires `--webhook`. That URL stays in the local profile and is never
-sent to DM. The daemon opens the WebSocket and relays events to the correct
-actor's callback. Read [the relay guide](relay.md) before implementing that
-endpoint: a plain 200 response is not a complete acknowledgement.
+`dm login status --json` verifies saved credentials with DM, refreshing them
+when necessary. A successful response includes `authenticated: true`, `actor`
+(with `type` and `id`), and `organization_id`. A missing, logged-out, or revoked
+session reports `authenticated: false`. Connection or backend failures are
+reported as errors; a saved file alone never proves successful authentication.
+Tokens are not included in status output.
 
-Login starts the daemon. `dm profiles webhook URL` changes the selected profile's
-local callback. Reusing a profile for a different actor, organization or backend
-is rejected to protect existing queues; create another profile name instead.
-`dm refresh` rotates credentials explicitly. The daemon refreshes expiring tokens
-and saves replacements atomically. `dm logout` revokes the refresh-token family,
-disables that login and clears its tokens; pending requests remain stored for
-inspection and can resume only after an authorized login is restored.
+`dm unhook` removes only the selected profile's local webhook mapping. It
+retains authentication, the relay connection and queued work. Reconfigure with
+`dm webhook URL` to resume callbacks. An HTTP request already in flight may
+finish after unhooking. `--profile` and `--test` select independent mappings.
+
+Reusing a profile for a different actor, organization or backend is rejected to
+protect existing queues; create another profile name instead. `dm refresh`
+rotates credentials explicitly. `dm logout` revokes the refresh-token family,
+disables that login and clears its tokens; pending requests remain stored.
 
 ## Messaging
 
@@ -206,16 +219,42 @@ authorization and version conflicts remain visible failures. This provides
 at-least-once delivery with deduplication; it does not claim physical
 exactly-once network delivery.
 
+## ISI addresses
+
+An ISI is optional routing information within a silicon account. Create the
+conversation using the canonical account IDs, then supply addresses per message:
+
+```sh
+dm conversations create --participant cos:tos
+dm messages send CONVERSATION_UUID --to deliberate@cos:tos --text 'Please review'
+# When authenticated as writer:tos:
+dm messages send CONVERSATION_UUID --from compose@writer:tos --to deliberate@cos:tos --text 'Draft'
+```
+
+`--from` / `--sender-id` and `--to` / `--recipient-id` set the message's
+`sender_id` and `recipient_id`; they are also accepted in `--data` JSON. ISI
+prefixes are supported only for silicon accounts and must be nonempty without
+whitespace, `@`, or `:`. Ordinary account IDs remain supported; carbon email
+identifiers retain their existing meaning. Recipients must belong to the
+conversation. ISI never grants authority to act as a different account.
+
+History, WebSocket events, sender copies, callbacks and bundle display messages
+preserve the addresses. Your callback chooses how to dispatch an ISI internally.
+All conversation participants keep their normal visibility and delivery; the
+address is not a private sub-conversation or a separate IAM identity. Edits
+retain the original addresses; changing a route requires a new message. Use a
+new idempotency key when changing either ISI. Metadata remains caller-owned.
+
 ## Storage and updates
 
-Default state lives under `~/.silicon-dm`. Change the parent directory with `dm config home LOCATION`; LOCATION must already be a directory. State then lives under `LOCATION/.silicon-dm`.
+Default state uses `$SILICON_HOME/.silicon-dm` when `SILICON_HOME` is set, otherwise `~/.silicon-dm`. `SILICON_HOME` must name an existing absolute directory. Change the parent directory with `dm config home LOCATION`; LOCATION must already be a directory. State then lives under `LOCATION/.silicon-dm`.
 
-Default state lives in `~/.silicon-dm`: `config.json`, `relay.sqlite3`, lock files
+The selected state directory contains `config.json`, `relay.sqlite3`, lock files
 and `daemon.log`. The directory is mode 0700 and credential/database/log files
 are 0600 on Unix. Tokens and root keys are private but are stored locally in
 plaintext under those permissions. SQLite WAL mode with FULL synchronous commits
 protects inbox, outbox and cursors. Use an absolute `SILICON_DM_HOME` only when
-you explicitly want an isolated state directory; normal use needs no override.
+you explicitly want an isolated state directory; it takes precedence over the configured home and `SILICON_HOME`. The `config home` pointer is stored under the default home selected by `SILICON_HOME` or `HOME`.
 
 Updates are enabled by default. After a command completes, at most once per
 hour the CLI checks crates.io. Registry failure never fails the completed

@@ -7,7 +7,7 @@ No IAM application secret belongs in either component.
 
 ```toml
 [dependencies]
-silicon-dm-client = { version = "0.2", features = ["runtime"] }
+silicon-dm-client = { version = "0.3", features = ["runtime"] }
 ```
 
 For development against this checkout, use a path dependency.
@@ -27,11 +27,15 @@ let options = LoginOptions {
     profile: "assistant",
     base_url: "https://backend.dm.teamofsilicons.com",
     short_lived_token: &slt,
-    webhook_url: &callback,
+    webhook_url: None,
     testing_environment_id: None,
     idempotency_key: &stable_login_key,
 };
 let status = runtime.login(&options, &DaemonCommand::default()).await?;
+runtime.webhook("assistant", None, Some(&callback))?;
+let identity = runtime.login_status("assistant", None).await?;
+// Later, detach callbacks while retaining the login and queues:
+// runtime.webhook("assistant", None, None)?;
 let relay = runtime.client()?;
 let daemon_status = relay.status().await?;
 ```
@@ -39,7 +43,9 @@ let daemon_status = relay.status().await?;
 `private_state_directory` must be an absolute directory path. The runtime
 creates it privately (0700 on Unix), with credential, lock, database, and log
 files restricted to the owner. Its state is compatible with the CLI's
-`SILICON_DM_HOME` layout. Different runtime directories are independent; their
+`SILICON_DM_HOME` layout. `LocalRuntime::from_environment()` uses this exact
+state override first, then the configured home, then `$SILICON_HOME/.silicon-dm`
+or `$HOME/.silicon-dm`. `SILICON_HOME` must be an existing absolute directory. Different runtime directories are independent; their
 listeners must use different ports. Configure a port before first launch:
 
 ```rust
@@ -49,8 +55,9 @@ runtime.store().update(|config| {
 })?;
 ```
 
-The callback URL is required, validated locally, and saved with the actor's
-tokens and stable device ID. Only the SLT goes to the backend. A profile cannot
+The callback URL is optional during login. Configure it afterward through
+`runtime.webhook(profile, test, Some(&url))`; `None` removes it. Configured URLs
+are validated locally and saved with the actor's tokens and stable device ID. Only the SLT goes to the backend. A profile cannot
 be reassigned to a different actor, organization, or backend, which protects
 its existing queues. Profile names accept 1–64 ASCII letters, digits,
 underscores, or hyphens. Reuse the original login key and SLT after an uncertain
@@ -87,7 +94,9 @@ stable request UUID and the original operation idempotency key when retrying.
 An ACK confirms local persistence; inspect `result(request_id)` for the backend
 outcome. See [relay protocol](../cli/relay.md) for request shapes.
 
-Each incoming delivery is persisted before the backend transport ACK. The
+Each incoming delivery is persisted before the backend transport ACK. With no
+configured webhook, callbacks stay pending without being marked delivered;
+configuring one resumes them. Unhooking retains authentication and queued work. The
 runtime posts it to the profile's callback until HTTP success and an exact
 `{"acknowledged":true,"delivery_id":"received UUID"}` response. Recipient
 message acceptance queues Delivered; Read remains explicit. A logged-out

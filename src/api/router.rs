@@ -23,6 +23,7 @@ use crate::{AppError, application::state::AppState};
 /// Builds the versioned DM router.
 fn build_plane_router(state: AppState) -> Router {
     let public_api = Router::new()
+        .route("/iam", get(auth_handlers::iam))
         .route(
             "/conversations",
             get(handlers::list_conversations).post(handlers::create_conversation),

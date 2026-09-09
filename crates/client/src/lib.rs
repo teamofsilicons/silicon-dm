@@ -172,8 +172,7 @@ impl Client {
         checked(request.send().await?).await?;
         Ok(())
     }
-    pub async fn login(&self, slt: &str, webhook_url: &Url, key: &str) -> Result<Tokens> {
-        validate_endpoint(webhook_url)?;
+    pub async fn login(&self, slt: &str, key: &str) -> Result<Tokens> {
         self.json(
             self.request(Method::POST, "auth/login")?
                 .header("Idempotency-Key", key)
@@ -196,6 +195,10 @@ impl Client {
                 .json(&json!({"token":token})),
         )
         .await
+    }
+    /// Public IAM application information; does not require login.
+    pub async fn iam(&self) -> Result<IamInfo> {
+        self.json(self.request(Method::GET, "iam")?).await
     }
     pub async fn me(&self) -> Result<Identity> {
         self.json(self.request(Method::GET, "auth/me")?).await

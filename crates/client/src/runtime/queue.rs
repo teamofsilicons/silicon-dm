@@ -390,17 +390,20 @@ pub struct WebhookWork {
     pub frame: Value,
 }
 impl Queue {
-    pub(crate) fn webhook_candidates(&self) -> Result<Vec<WebhookCandidate>> {
+    pub(crate) fn webhook_candidates(&self, profiles: &[String]) -> Result<Vec<WebhookCandidate>> {
         let conn = self.database()?;
-        let mut stmt=conn.prepare("SELECT session,delivery_id,octet_length(frame) FROM inbox i WHERE delivered=0 AND next_attempt<=?1 AND NOT EXISTS (SELECT 1 FROM inbox prior WHERE prior.session=i.session AND prior.actor=i.actor AND prior.delivered=0 AND prior.sequence<i.sequence) ORDER BY rowid LIMIT 50")?;
+        let mut stmt=conn.prepare("SELECT session,delivery_id,octet_length(frame) FROM inbox i WHERE delivered=0 AND next_attempt<=?1 AND (CASE WHEN instr(session,'#')>0 THEN substr(session,1,instr(session,'#')-1) ELSE session END) IN (SELECT value FROM json_each(?2)) AND NOT EXISTS (SELECT 1 FROM inbox prior WHERE prior.session=i.session AND prior.actor=i.actor AND prior.delivered=0 AND prior.sequence<i.sequence) ORDER BY rowid LIMIT 50")?;
         let rows = stmt
-            .query_map(params![(store::now() as i64)], |r| {
-                Ok(WebhookCandidate {
-                    session: r.get(0)?,
-                    delivery_id: r.get(1)?,
-                    payload_bytes: r.get(2)?,
-                })
-            })?
+            .query_map(
+                params![(store::now() as i64), serde_json::to_string(profiles)?],
+                |r| {
+                    Ok(WebhookCandidate {
+                        session: r.get(0)?,
+                        delivery_id: r.get(1)?,
+                        payload_bytes: r.get(2)?,
+                    })
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -484,6 +487,43 @@ impl Queue {
 impl Queue {
     pub fn expire_transient_commands(&self) -> Result<()> {
         self.database()?.execute("UPDATE outbox SET state='failed',error=?1 WHERE state='pending' AND json_extract(request,'$.request.operation')='set_presence'",params![json!({"code":"transient_expired","message":"presence change expired when the daemon stopped; send a current activity"}).to_string()])?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod webhook_tests {
+    use super::*;
+    #[test]
+    fn unhooked_profiles_do_not_starve_hooked_profiles_or_lose_events() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("dm-hook-queue-{}", Uuid::new_v4()));
+        let store = store::Store::new(&root)?;
+        let queue = Queue::open(&store)?;
+        for i in 0..60 {
+            queue.database()?.execute("INSERT INTO inbox(session,delivery_id,actor,sequence,frame) VALUES(?1,?2,'cos:tos',1,'{}')",
+                params![format!("unhooked-{i}:production"), i.to_string()])?;
+        }
+        queue.database()?.execute("INSERT INTO inbox(session,delivery_id,actor,sequence,frame) VALUES('hooked:test#3','last','cos:tos',1,'{}')", [])?;
+        assert!(queue.webhook_candidates(&[])?.is_empty());
+        let work = queue.webhook_candidates(&["hooked:test".into()])?;
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].delivery_id, "last");
+        assert_eq!(
+            queue
+                .webhook_candidates(&["unhooked-0:production".into()])?
+                .len(),
+            1
+        );
+        assert_eq!(
+            queue.database()?.query_row(
+                "SELECT count(*) FROM inbox WHERE delivered=0",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            61
+        );
+        drop(queue);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

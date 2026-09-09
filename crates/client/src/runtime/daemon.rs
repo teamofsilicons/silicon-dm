@@ -351,7 +351,7 @@ async fn supervise(context: RuntimeContext, channels: Channels, statuses: Status
                     (
                         key.clone(),
                         format!(
-                            "{}:{}:{}:{:?}",
+                            "{}:{}:{:?}:{:?}",
                             p.base_url, p.tokens.actor.id, p.webhook_url, p.testing_environment_id
                         ),
                     )
@@ -700,7 +700,10 @@ async fn webhooks(context: RuntimeContext) {
                 }
             }
             _ = polling.tick() => {
-                if let Ok(candidates) = context.queue.webhook_candidates() {
+                let Ok(config) = context.store.load() else { continue; };
+                let profiles = config.profiles.iter().filter(|(_, p)| p.enabled && p.webhook_url.is_some())
+                    .map(|(key, _)| key.clone()).collect::<Vec<_>>();
+                if let Ok(candidates) = context.queue.webhook_candidates(&profiles) {
                     for candidate in candidates {
                         if running.len() >= 16 { break; }
                         if running.values().any(|active| active == &candidate.session) { continue; }
@@ -736,6 +739,9 @@ async fn deliver_webhook(context: RuntimeContext, item: queue::WebhookWork, http
     let Some(profile) = config.profiles.get(profile_key).filter(|p| p.enabled) else {
         return;
     };
+    let Some(webhook_url) = &profile.webhook_url else {
+        return;
+    };
     // This item may have been archived after the worker selected its batch.
     // The transactional completion guard also covers resets during HTTP I/O.
     if !matches!(
@@ -754,7 +760,7 @@ async fn deliver_webhook(context: RuntimeContext, item: queue::WebhookWork, http
         event: &item.frame,
     };
     let success = match http
-        .post(&profile.webhook_url)
+        .post(webhook_url)
         .header("Idempotency-Key", &item.delivery_id)
         .json(&payload)
         .send()

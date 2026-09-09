@@ -18,7 +18,8 @@ pub struct Profile {
     pub name: String,
     pub base_url: String,
     pub tokens: Tokens,
-    pub webhook_url: String,
+    #[serde(default)]
+    pub webhook_url: Option<String>,
     pub device_id: String,
     pub expires_at: u64,
     #[serde(default)]
@@ -66,13 +67,27 @@ pub fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+fn home_directory() -> Result<PathBuf> {
+    let home = PathBuf::from(
+        std::env::var_os("SILICON_HOME")
+            .or_else(|| std::env::var_os("HOME"))
+            .context("SILICON_HOME or HOME must be set")?,
+    );
+    if !home.is_absolute() || !home.is_dir() {
+        bail!(
+            "home must be an existing absolute directory: {}",
+            home.display()
+        );
+    }
+    Ok(home)
+}
 pub fn default_directory() -> Result<PathBuf> {
     let dir = if let Some(directory) = std::env::var_os("SILICON_DM_HOME") {
         PathBuf::from(directory)
     } else if let Some(directory) = configured_directory()? {
         directory
     } else {
-        PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".silicon-dm")
+        home_directory()?.join(".silicon-dm")
     };
     if !dir.is_absolute() {
         bail!("SILICON_DM_HOME must be an absolute path")
@@ -86,7 +101,7 @@ pub fn default_directory() -> Result<PathBuf> {
     Ok(dir)
 }
 fn configured_directory() -> Result<Option<PathBuf>> {
-    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    let home = home_directory()?;
     let pointer = home.join(".silicon-dm").join("home_dir");
     if !pointer.exists() {
         return Ok(None);
@@ -126,8 +141,7 @@ pub fn set_home_directory(home: impl AsRef<Path>) -> Result<PathBuf> {
     fs::create_dir_all(&directory)?;
     #[cfg(unix)]
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-    let base =
-        PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".silicon-dm");
+    let base = home_directory()?.join(".silicon-dm");
     fs::create_dir_all(&base)?;
     #[cfg(unix)]
     fs::set_permissions(&base, fs::Permissions::from_mode(0o700))?;
@@ -199,7 +213,7 @@ pub fn session_key(name: &str, test: Option<Uuid>) -> String {
     )
 }
 pub fn profile<'a>(config: &'a Config, name: &str, test: Option<Uuid>) -> Result<&'a Profile> {
-    config.profiles.get(&session_key(name,test)).filter(|p|p.enabled).with_context(||format!("profile {name} is not logged in for {}; run dm {}--profile {name} login --webhook URL --token-file -",test.map_or("production".into(),|id|id.to_string()),test.map_or(String::new(),|id|format!("--test {id} "))))
+    config.profiles.get(&session_key(name,test)).filter(|p|p.enabled).with_context(||format!("profile {name} is not logged in for {}; run dm {}--profile {name} login --token-file -",test.map_or("production".into(),|id|id.to_string()),test.map_or(String::new(),|id|format!("--test {id} "))))
 }
 pub fn client(config: &Config, profile: &Profile) -> Result<Client> {
     let mut client = Client::new(&profile.base_url)?.with_auth(
