@@ -6,6 +6,12 @@ multiple-versions = "warn"
 wildcards = "deny"
 
 [licenses]
+# These first-party packages use the same proprietary license as the DM backend.
+# Keep this scoped to DM's own crates rather than permitting proprietary dependencies globally.
+exceptions = [
+  { name = "silicon-dm-client", allow = ["LicenseRef-Proprietary"] },
+  { name = "silicon-dm-protocol", allow = ["LicenseRef-Proprietary"] },
+]
 confidence-threshold = 0.8
 allow = [
   "Apache-2.0",
