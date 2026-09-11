@@ -54,13 +54,18 @@ actor profile. The callback URL never reaches the DM server. Example body:
     "version": 1,
     "message": "Hello",
     "metadata": {}
+  },
+  "metadata": {
+    "source": "dm",
+    "delivery_id": "53968d42-d72b-4719-aa34-9c8b0c36d3bc"
   }
 }
 ```
 
 The abbreviated `data` above also includes the remaining stored message fields.
-Only `type` and `data` exist at the root; receipt callbacks use the same envelope
-with `type: "receipt"`. The
+Local callbacks add a root `metadata` object for Silicon compatibility. It contains
+transport identifiers; caller-owned message metadata remains unchanged in
+`data.metadata`. Receipt callbacks use the same envelope with `type: "receipt"`. The
 daemon sends `Idempotency-Key` equal to the delivery ID. Your endpoint must
 durably accept/deduplicate the event and respond with HTTP 2xx and JSON:
 
@@ -68,8 +73,19 @@ durably accept/deduplicate the event and respond with HTTP 2xx and JSON:
 {"type":"ack","data":{"acknowledged":true,"delivery_id":"53968d42-d72b-4719-aa34-9c8b0c36d3bc"}}
 ```
 
+Silicon 3.5 can be the callback endpoint directly, for example
+`dm webhook http://assistant.my-org.localhost/events`. These reserved `.localhost`
+names are accepted for callbacks and pinned to loopback, bypassing DNS and proxies.
+The Host header is retained for Silicon routing. Its HTTP 2xx response
+`{"status":"ok","event_id":"NON_NIL_UUID"}` is also accepted. This means its
+event flow accepted the event, not that inference or a DM reply has finished.
+Configure Silicon flow rules to ignore sender copies, receipts, and deletion
+tombstones, and include conversation/message IDs in the prompt for replies.
+Silicon does not deduplicate event deliveries: a timeout or lost acknowledgement
+can replay work. Use a stable delivery-derived idempotency key for reply sends.
+
 Callback acknowledgement bodies are limited to 16 KiB. An oversized response,
-a mismatched ID, missing `data.acknowledged:true`, invalid JSON, non-2xx response,
+an invalid acknowledgement in both supported formats, invalid JSON, non-2xx response,
 redirect or timeout leaves the callback queued. Retry uses the same delivery ID
 and exponential delay capped at five minutes. Callback delivery order is retained
 within each actor stream. Store the ID in your application before responding so

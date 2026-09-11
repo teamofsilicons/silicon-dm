@@ -13,6 +13,20 @@ use std::path::PathBuf;
 use url::Url;
 use uuid::Uuid;
 
+fn validate_callback_endpoint(url: &Url) -> Result<()> {
+    // Silicon uses subdomains of the reserved localhost namespace. This
+    // exception is for local callbacks, not DM backend endpoint validation.
+    let mut checked = url.clone();
+    if url
+        .host_str()
+        .is_some_and(|host| host.ends_with(".localhost"))
+    {
+        checked.set_host(Some("localhost"))?;
+    }
+    crate::validate_endpoint(&checked)?;
+    Ok(())
+}
+
 /// Executable and arguments used for an independently running relay process.
 #[derive(Clone, Debug)]
 pub struct DaemonCommand {
@@ -91,7 +105,7 @@ impl LocalRuntime {
             bail!("profile names must use 1-64 letters, digits, underscores or hyphens");
         }
         if let Some(url) = options.webhook_url {
-            crate::validate_endpoint(url)?;
+            validate_callback_endpoint(url)?;
         }
         let session = store::session_key(options.profile, options.testing_environment_id);
         let lock = self.store.profile_lock(&session).await?;
@@ -164,7 +178,7 @@ impl LocalRuntime {
     /// Sets or removes a local callback without changing the IAM login or deleting queued events.
     pub fn webhook(&self, name: &str, test: Option<Uuid>, url: Option<&Url>) -> Result<Value> {
         if let Some(url) = url {
-            crate::validate_endpoint(url)?;
+            validate_callback_endpoint(url)?;
         }
         self.store.update(|config| {
             let profile = config.profiles.get_mut(&store::session_key(name, test))
@@ -220,6 +234,29 @@ mod tests {
         routing::{get, post},
     };
     use serde_json::json;
+
+    #[test]
+    fn silicon_callback_hosts_are_loopback_only() -> Result<()> {
+        for url in [
+            "http://assistant.my-org.localhost/events",
+            "http://127.0.0.1/events",
+            "https://example.com/events",
+        ] {
+            assert!(validate_callback_endpoint(&url.parse()?).is_ok());
+        }
+        for url in [
+            "http://notlocalhost/events",
+            "http://localhost.example.com/events",
+            "http://user:secret@assistant.my-org.localhost/events",
+            "ftp://assistant.my-org.localhost/events",
+        ] {
+            assert!(validate_callback_endpoint(&url.parse()?).is_err());
+        }
+        assert!(
+            crate::validate_endpoint(&"http://assistant.my-org.localhost/events".parse()?).is_err()
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn login_then_hook_status_and_unhook() -> Result<()> {

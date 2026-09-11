@@ -29,7 +29,7 @@ Global options can appear before or after the command:
 | Option | Meaning |
 | --- | --- |
 | `--profile NAME` | Select a local login; otherwise use the configured default |
-| `--test UUID` | Select a stored DM test key and that profile's separate test login |
+| `--test UUID` | Select a stored DM test key and that profile's separate test login; defaults to `SILICON_DM_TEST` when set |
 | `--idempotency-key KEY` | Original key for retrying a mutation; use 8–255 visible ASCII characters |
 | `--wait-seconds N` | Wait for a relay request's result; default 30, zero returns current queued state |
 | `--json` | Compact JSON |
@@ -268,3 +268,7 @@ daemons keep their loaded version until restarted; queues survive that restart.
 `updates enable` expose the policy. Disabling persists across invocations and
 skips automatic network checks. A statically linked Rust library needs dependency
 update plus rebuild; the library's release checker reports that honestly.
+
+For a dedicated Silicon runtime, set `SILICON_DM_TEST=ENV_UUID` in its service
+environment once. Plain `dm` commands then use that environment without a wrapper.
+An explicit `--test` overrides it. Unset it for production lifecycle management.

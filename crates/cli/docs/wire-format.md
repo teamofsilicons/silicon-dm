@@ -1,7 +1,8 @@
 # DM JSON wire format
 
 Every DM JSON request, response, WebSocket frame, and outgoing actor webhook has
-exactly two root fields: `type` and `data`. The operation/event name belongs in
+exactly two root fields: `type` and `data`, except local webhook callbacks, which
+also include transport `metadata` for the Silicon event contract. The operation/event name belongs in
 `type`; all content, routing, delivery IDs, and metadata belong inside `data`.
 Additional root fields and mismatched REST request types are rejected.
 
@@ -118,7 +119,8 @@ returns decoded typed values. The echoed `data.request` contains the full
 original request envelope.
 
 Outgoing webhook deliveries use the WebSocket event type and flattened `data`,
-plus `data.profile` and `data.testing_environment_id`. The full callback example
+plus `data.profile`, `data.testing_environment_id`, and root
+`metadata: {"source":"dm","delivery_id":"..."}`. Message metadata stays in `data.metadata`. The full callback example
 and retry behavior are in [relay callbacks](cli/relay.md). A webhook consumer
 must durably accept the event before responding with HTTP 2xx and:
 
@@ -130,3 +132,7 @@ The exact delivery ID is required. Missing/false acknowledgments, mismatched
 IDs, old flat ACKs, invalid JSON, non-2xx responses, and oversized responses all
 leave the callback pending for retry. The outgoing `Idempotency-Key` header
 remains equal to the delivery ID.
+
+Silicon webhook endpoints may instead acknowledge with HTTP 2xx and
+`{"status":"ok","event_id":"NON_NIL_UUID"}`. This alternative applies only to
+local webhook acknowledgements; REST and WebSocket envelopes are unchanged.

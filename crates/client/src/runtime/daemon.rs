@@ -741,6 +741,14 @@ struct CallbackPayload<'a> {
     #[serde(rename = "type")]
     kind: &'a str,
     data: CallbackData<'a>,
+    // Silicon's native event contract requires a root metadata object. Message
+    // metadata remains unmodified inside data; these are transport identifiers.
+    metadata: CallbackMetadata<'a>,
+}
+#[derive(Serialize)]
+struct CallbackMetadata<'a> {
+    source: &'static str,
+    delivery_id: &'a str,
 }
 #[derive(Serialize)]
 struct CallbackData<'a> {
@@ -787,6 +795,31 @@ async fn deliver_webhook(
     let Some(webhook_url) = &profile.webhook_url else {
         return;
     };
+    let http = match url::Url::parse(webhook_url) {
+        Ok(url)
+            if url
+                .host_str()
+                .is_some_and(|host| host.ends_with(".localhost")) =>
+        {
+            // Preserve the Host header for Caddy, but never ask DNS or a proxy
+            // to route a reserved localhost name outside this machine.
+            let address = std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                url.port_or_known_default().unwrap_or(80),
+            ));
+            match reqwest::Client::builder()
+                .no_proxy()
+                .resolve(url.host_str().unwrap_or("localhost"), address)
+                .timeout(Duration::from_secs(120))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+            {
+                Ok(client) => client,
+                Err(_) => return,
+            }
+        }
+        _ => http,
+    };
     // This item may have been archived after the worker selected its batch.
     // The transactional completion guard also covers resets during HTTP I/O.
     if !matches!(
@@ -810,6 +843,10 @@ async fn deliver_webhook(
             profile: &profile.name,
             testing_environment_id: profile.testing_environment_id,
             event,
+        },
+        metadata: CallbackMetadata {
+            source: "dm",
+            delivery_id: &item.delivery_id,
         },
     };
     let success = match http
@@ -856,14 +893,29 @@ async fn callback_acknowledged(mut response: reqwest::Response, delivery_id: &st
             Ok(None) => break,
         }
     }
+    acknowledges_callback(&body, delivery_id)
+}
+
+fn acknowledges_callback(body: &[u8], delivery_id: &str) -> bool {
     #[derive(Deserialize)]
     struct Acknowledgement {
         acknowledged: bool,
         delivery_id: String,
     }
-    serde_json::from_slice::<crate::Envelope<Acknowledgement>>(&body).is_ok_and(|ack| {
+    if serde_json::from_slice::<crate::Envelope<Acknowledgement>>(body).is_ok_and(|ack| {
         ack.kind == "ack" && ack.data.acknowledged && ack.data.delivery_id == delivery_id
-    })
+    }) {
+        return true;
+    }
+    // Silicon acknowledges completion of its event flow with its own event ID.
+    // This is acceptance/delivery to the provider, not a completed model reply.
+    #[derive(Deserialize)]
+    struct SiliconAcknowledgement {
+        status: String,
+        event_id: Uuid,
+    }
+    serde_json::from_slice::<SiliconAcknowledgement>(body)
+        .is_ok_and(|ack| ack.status == "ok" && !ack.event_id.is_nil())
 }
 fn delivery_receipt(item: &queue::WebhookWork, profile: &store::Profile) -> Option<RelayRequest> {
     if item.frame.get("type")?.as_str()? != "new_message" {
@@ -902,6 +954,15 @@ mod wire_tests {
 
     #[tokio::test]
     async fn queued_v2_delivery_survives_upgrade_and_retries_until_enveloped_ack() -> Result<()> {
+        queued_delivery_ack(false).await
+    }
+
+    #[tokio::test]
+    async fn queued_delivery_accepts_native_silicon_ack() -> Result<()> {
+        queued_delivery_ack(true).await
+    }
+
+    async fn queued_delivery_ack(silicon: bool) -> Result<()> {
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = attempts.clone();
         let app = Router::new().route(
@@ -909,7 +970,11 @@ mod wire_tests {
             post(move |headers: HeaderMap, Json(body): Json<Value>| {
                 let counter = counter.clone();
                 async move {
-                    assert_eq!(body.as_object().map(serde_json::Map::len), Some(2));
+                    assert_eq!(body.as_object().map(serde_json::Map::len), Some(3));
+                    assert_eq!(
+                        body["metadata"],
+                        json!({"source":"dm", "delivery_id":Uuid::nil()})
+                    );
                     assert_eq!(body["type"], "new_message");
                     assert_eq!(body["data"]["message"], "hello");
                     assert_eq!(
@@ -924,13 +989,24 @@ mod wire_tests {
                     if counter.fetch_add(1, Ordering::SeqCst) == 0 {
                         Json(ack)
                     } else {
-                        Json(json!({"type":"ack", "data":ack}))
+                        if silicon {
+                            Json(json!({"status":"ok", "event_id":Uuid::new_v4()}))
+                        } else {
+                            Json(json!({"type":"ack", "data":ack}))
+                        }
                     }
                 }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let callback = format!("http://{}/events", listener.local_addr()?);
+        let callback = if silicon {
+            format!(
+                "http://assistant.my-org.localhost:{}/events",
+                listener.local_addr()?.port()
+            )
+        } else {
+            format!("http://{}/events", listener.local_addr()?)
+        };
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let root = std::env::temp_dir().join(format!("dm-envelope-{}", Uuid::new_v4()));
         let store = store::Store::new(&root)?;
@@ -1000,5 +1076,30 @@ mod wire_tests {
         drop(context);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn native_silicon_and_dm_acknowledgements_are_explicit() {
+        let id = Uuid::new_v4().to_string();
+        let accepts =
+            |value: Value| acknowledges_callback(&serde_json::to_vec(&value).unwrap(), &id);
+        assert!(accepts(json!({"status":"ok", "event_id":Uuid::new_v4()})));
+        assert!(accepts(
+            json!({"type":"ack", "data":{"acknowledged":true,"delivery_id":id}})
+        ));
+        for invalid in [
+            json!({"status":"ok"}),
+            json!({"status":"error", "event_id":Uuid::new_v4()}),
+            json!({"status":"ok", "event_id":"not-a-uuid"}),
+            json!({"status":"ok", "event_id":Uuid::nil()}),
+            json!({"acknowledged":true,"delivery_id":id}),
+            json!({"type":"ack", "data":{"acknowledged":false,"delivery_id":id}}),
+            json!({"type":"ack", "data":{"acknowledged":true,"delivery_id":"wrong"}}),
+        ] {
+            assert!(
+                !accepts(invalid.clone()),
+                "unexpected acceptance: {invalid}"
+            );
+        }
     }
 }

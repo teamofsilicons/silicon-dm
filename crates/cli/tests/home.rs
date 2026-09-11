@@ -10,6 +10,7 @@ fn run(home: &Path, args: &[&str], override_dir: Option<&Path>) -> TestResult<Va
         .env("HOME", home.join("unused-home"))
         .env("SILICON_HOME", home)
         .env_remove("SILICON_DM_HOME")
+        .env_remove("SILICON_DM_TEST")
         .args(args);
     if let Some(directory) = override_dir {
         command.env("SILICON_DM_HOME", directory);
@@ -19,6 +20,35 @@ fn run(home: &Path, args: &[&str], override_dir: Option<&Path>) -> TestResult<Va
         return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
     }
     Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+#[test]
+fn runtime_environment_selects_scope_and_explicit_flag_overrides_it() -> TestResult<()> {
+    let home = std::env::temp_dir().join(format!("dm-scope-test-{}", Uuid::new_v4()));
+    fs::create_dir_all(&home)?;
+    run(&home, &["updates", "disable"], None)?;
+    let inherited = Uuid::new_v4().to_string();
+    let explicit = Uuid::new_v4().to_string();
+    for (args, expected) in [
+        (vec!["login", "status", "--json"], inherited.as_str()),
+        (
+            vec!["--test", explicit.as_str(), "login", "status", "--json"],
+            explicit.as_str(),
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_dm"))
+            .env("SILICON_HOME", &home)
+            .env_remove("SILICON_DM_HOME")
+            .env("SILICON_DM_TEST", &inherited)
+            .args(args)
+            .output()?;
+        assert!(output.status.success());
+        let status: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(status["testing_environment_id"], expected);
+        assert_eq!(status["authenticated"], false);
+    }
+    fs::remove_dir_all(home)?;
+    Ok(())
 }
 
 #[test]

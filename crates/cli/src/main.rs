@@ -30,7 +30,12 @@ struct Cli {
     #[arg(long, global = true)]
     profile: Option<String>,
     /// DM sandbox UUID; first create/import its key, then log in within the sandbox.
-    #[arg(long = "test", global = true, value_name = "ENV_UUID")]
+    #[arg(
+        long = "test",
+        env = "SILICON_DM_TEST",
+        global = true,
+        value_name = "ENV_UUID"
+    )]
     test: Option<Uuid>,
     /// Compact JSON. Standard output is JSON in either mode.
     #[arg(long, global = true)]
@@ -48,7 +53,7 @@ struct Cli {
 enum Command {
     /// Exchange an IAM short-lived token, or run login status to verify the saved session.
     #[command(
-        after_help = "The callback URL stays local. Return HTTP 2xx and {\"acknowledged\":true,\"delivery_id\":\"received UUID\"} after durably accepting each callback. Deduplicate retries by delivery_id.\nNEXT: dm webhook <webhook-url>; dm login status --json; dm conversations list"
+        after_help = "The callback URL stays local. Return HTTP 2xx with an enveloped DM acknowledgement or Silicon status=ok/event_id after accepting each callback. See dm docs relay. Deduplicate retries by delivery_id.\nNEXT: dm webhook <webhook-url>; dm login status --json; dm conversations list"
     )]
     #[command(
         subcommand_precedence_over_arg = true,
