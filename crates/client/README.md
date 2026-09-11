@@ -14,7 +14,7 @@ Add the published library to a Rust application:
 
 ```toml
 [dependencies]
-silicon-dm-client = "0.3"
+silicon-dm-client = "0.4"
 ```
 
 Enable `features = ["runtime"]` when the application needs durable local queues,

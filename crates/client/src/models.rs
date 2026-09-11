@@ -55,6 +55,7 @@ pub struct MessageCreate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "message", alias = "text")]
     pub text: Option<String>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
@@ -261,7 +262,12 @@ pub struct TestEnvironmentKey {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ClientFrame {
     Pong {
         ping_id: String,
@@ -285,16 +291,18 @@ pub enum ClientFrame {
         status: ReceiptStatus,
         device_id: String,
     },
+    #[serde(rename = "new_message")]
     SendMessage {
         actor_id: String,
         org_id: String,
         conversation_id: Uuid,
         idempotency_key: String,
+        #[serde(flatten)]
         message: Box<MessageCreate>,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ServerFrame {
     Ready {
         protocol_version: u16,
@@ -309,16 +317,19 @@ pub enum ServerFrame {
     },
     MessageAccepted {
         idempotency_key: String,
+        #[serde(flatten)]
         message: Box<Message>,
     },
     ReceiptRecorded {
         message_id: Uuid,
         status: ReceiptStatus,
     },
+    #[serde(rename = "new_message")]
     Message {
         delivery_id: Uuid,
         actor_id: String,
         delivery_sequence: i64,
+        #[serde(flatten)]
         message: Box<Message>,
     },
     Receipt {

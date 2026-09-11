@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4315 --strictPort",
     "check": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
     "build": "npm run check && vite build && node scripts/build.mjs",
     "start": "node dist/server/node.js",
     "format": "prettier --write src server vite.config.ts scripts"

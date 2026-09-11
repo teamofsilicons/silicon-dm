@@ -510,7 +510,7 @@ enum Daemon {
 enum Relay {
     /// Complete RelayRequest JSON. Response ACKs durable queue storage, not delivery.
     #[command(
-        after_help = "JSON: {\"request_id\":\"UUID\",\"profile\":\"default\",\"testing_environment_id\":null,\"request\":{\"operation\":\"send_message\",\"conversation_id\":\"UUID\",\"idempotency_key\":\"stable-key\",\"message\":{\"text\":\"hello\",\"metadata\":{}}}}\nNEXT: dm relay result REQUEST_ID"
+        after_help = "JSON: {\"type\":\"request\",\"data\":{\"request_id\":\"UUID\",\"profile\":\"default\",\"testing_environment_id\":null,\"request\":{\"operation\":\"send_message\",\"conversation_id\":\"UUID\",\"idempotency_key\":\"stable-key\",\"message\":{\"metadata\":{},\"message\":\"hello\"}}}}\nNEXT: dm relay result REQUEST_ID"
     )]
     Submit {
         #[arg(long)]

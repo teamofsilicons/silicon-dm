@@ -1,16 +1,17 @@
----
 openapi: 3.1.0
 info:
   title: Silicon DM API
-  version: 0.3.0
+  version: 0.4.0
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
   description: Carbon/Silicon messaging, IAM application sessions, and isolated testing
-    environments. Bearer tokens must be issued to DM and bound to the selected organization.
-    See SocketFrame for WebSocket protocol version 2; sender devices also receive
-    deliveries and clients upsert messages by (id, version). Attachments are stored
-    links and are never uploaded, fetched, or proxied by DM.
+    environments. Bearer tokens must be issued to DM and bound to the selected organization. See
+    SocketFrame for WebSocket protocol version 3; sender devices also receive deliveries and clients
+    upsert messages by (id, version). Attachments are stored links and are never uploaded, fetched,
+    or proxied by DM. Every DM JSON request and response has exactly type and data at the root.
+    Message text is data.message and metadata is data.metadata. Bodyless HTTP requests, 204
+    responses, and signed incoming IAM webhook payloads retain their HTTP/provider contracts.
 servers:
 - url: https://backend.dm.teamofsilicons.com/api/v1
 security:
@@ -33,8 +34,7 @@ tags:
 - name: Auth
   description: IAM application-session exchange and maintenance
 - name: Testing
-  description: Production-owned test environments; lifecycle control uses production
-    IAM authority
+  description: Production-owned test environments; lifecycle control uses production IAM authority
 - name: IAM webhooks
   description: Signed IAM callbacks, outside the /api/v1 base path
 - name: Operations
@@ -47,7 +47,8 @@ paths:
       operationId: iamInformation
       summary: Discover the public IAM application configuration
       security: []
-      description: Available before login. Returns only public identifiers and URLs, never application secrets.
+      description: Available before login. Returns only public identifiers and URLs, never
+        application secrets.
       parameters:
       - "$ref": "#/components/parameters/TestingKey"
       responses:
@@ -57,16 +58,26 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [app_id, iam_base_url, api_base_url]
+                additionalProperties: false
+                required:
+                - type
+                - data
                 properties:
-                  app_id:
+                  type:
                     type: string
-                  iam_base_url:
-                    type: string
-                    format: uri
-                  api_base_url:
-                    type: string
-                    format: uri
+                    const: iam
+                  data:
+                    type: object
+                    required: [app_id, iam_base_url, api_base_url]
+                    properties:
+                      app_id:
+                        type: string
+                      iam_base_url:
+                        type: string
+                        format: uri
+                      api_base_url:
+                        type: string
+                        format: uri
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -79,14 +90,14 @@ paths:
       summary: Upgrade to the DM WebSocket protocol
       security:
       - bearerAuth: []
-      description: Authenticate with a DM application bearer token. Query parameters
-        org_id and device_id occur exactly once; actors is repeated. Sends ready with
-        protocol_version=2. Server ping every 30 seconds requires same ping_id pong;120-second
-        timeout closes 4000/heartbeat-timeout. Revoked authority closes 4001/authorization-revoked
-        and unavailable authority 1013/authorization-unavailable. Durable messages,
-        version updates, tombstones and receipts use cumulative actor-stream ACKs.
-        Sender devices receive message deliveries too. Dedupe delivery_id and upsert
-        Message by id/version; do not append an edited message as a new message.
+      description: Authenticate with a DM application bearer token. Query parameters org_id and
+        device_id occur exactly once; actors is repeated. Sends ready with protocol_version=3.
+        Server ping every 30 seconds requires same ping_id pong;120-second timeout closes
+        4000/heartbeat-timeout. Revoked authority closes 4001/authorization-revoked and unavailable
+        authority 1013/authorization-unavailable. Durable messages, version updates, tombstones and
+        receipts use cumulative actor-stream ACKs. Sender devices receive message deliveries too.
+        Dedupe delivery_id and upsert Message by id/version; do not append an edited message as a
+        new message.
       x-websocket-frame:
         "$ref": "#/components/schemas/SocketFrame"
       parameters:
@@ -102,9 +113,9 @@ paths:
             type: string
         style: form
         explode: true
-        description: Repeat actors query parameter for each actor; this IAM integration
-          grants only the authenticated principal. Multiple independent accounts use
-          separate authenticated connections.
+        description: Repeat actors query parameter for each actor; this IAM integration grants only
+          the authenticated principal. Multiple independent accounts use separate authenticated
+          connections.
       - name: org_id
         in: query
         required: true
@@ -126,9 +137,8 @@ paths:
         schema:
           type: integer
           minimum: 1
-        description: Generation persisted from ready.testing_generation. Missing/mismatched
-          testing generation resets server cursor/resume to0; production does not
-          use it.
+        description: Generation persisted from ready.testing_generation. Missing/mismatched testing
+          generation resets server cursor/resume to0; production does not use it.
       responses:
         '101':
           description: Switching Protocols
@@ -154,15 +164,25 @@ paths:
             application/json:
               schema:
                 type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
                 properties:
-                  items:
-                    type: array
-                    items:
-                      "$ref": "#/components/schemas/Conversation"
-                  next_cursor:
-                    type:
-                    - string
-                    - 'null'
+                  type:
+                    type: string
+                    const: conversations
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          "$ref": "#/components/schemas/Conversation"
+                      next_cursor:
+                        type:
+                        - string
+                        - 'null'
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -172,10 +192,10 @@ paths:
       - Conversations
       operationId: createConversation
       summary: Create or resolve an exact-participant-set conversation
-      description: Recipients require an active IAM membership projection supplied by
-        a prior sign-in or verified webhook. Known recipients may be offline.
-        IAM currently provides no arbitrary-member lookup for application sessions;
-        an unknown recipient returns 422 explaining that the recipient can sign in.
+      description: Recipients require an active IAM membership projection supplied by a prior
+        sign-in or verified webhook. Known recipients may be offline. IAM currently provides no
+        arbitrary-member lookup for application sessions; an unknown recipient returns 422
+        explaining that the recipient can sign in.
       security:
       - bearerAuth: []
       parameters:
@@ -188,26 +208,46 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: false
               required:
-              - participant_ids
+              - type
+              - data
               properties:
-                participant_ids:
-                  type: array
-                  minItems: 1
-                  maxItems: 100
-                  uniqueItems: true
-                  items:
-                    type: string
-                  description: IAM actor IDs; DM adds the authenticated actor, allows
-                    at most 100 total unique participants, and resolves the exact
-                    participant set to one conversation.
+                type:
+                  type: string
+                  const: create_conversation
+                data:
+                  type: object
+                  required:
+                  - participant_ids
+                  properties:
+                    participant_ids:
+                      type: array
+                      minItems: 1
+                      maxItems: 100
+                      uniqueItems: true
+                      items:
+                        type: string
+                      description: IAM actor IDs; DM adds the authenticated actor, allows at most
+                        100 total unique participants, and resolves the exact participant set to one
+                        conversation.
       responses:
         '201':
           description: Conversation
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Conversation"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: create_conversation
+                  data:
+                    "$ref": "#/components/schemas/Conversation"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -237,15 +277,25 @@ paths:
             application/json:
               schema:
                 type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
                 properties:
-                  items:
-                    type: array
-                    items:
-                      "$ref": "#/components/schemas/Message"
-                  next_cursor:
-                    type:
-                    - string
-                    - 'null'
+                  type:
+                    type: string
+                    const: messages
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          "$ref": "#/components/schemas/Message"
+                      next_cursor:
+                        type:
+                        - string
+                        - 'null'
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -265,14 +315,34 @@ paths:
         content:
           application/json:
             schema:
-              "$ref": "#/components/schemas/MessageCreate"
+              type: object
+              additionalProperties: false
+              required:
+              - type
+              - data
+              properties:
+                type:
+                  type: string
+                  const: new_message
+                data:
+                  "$ref": "#/components/schemas/MessageCreate"
       responses:
         '202':
           description: Message durably accepted
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Message"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: new_message
+                  data:
+                    "$ref": "#/components/schemas/Message"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -299,27 +369,47 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: false
               required:
-              - status
-              - device_id
+              - type
+              - data
               properties:
-                status:
+                type:
                   type: string
-                  enum:
-                  - delivered
-                  - read
-                device_id:
-                  type: string
-                  minLength: 1
-                  maxLength: 255
-                  pattern: "^[^\\u0000-\\u001F\\u007F]{1,255}$"
+                  const: receipt
+                data:
+                  type: object
+                  required:
+                  - status
+                  - device_id
+                  properties:
+                    status:
+                      type: string
+                      enum:
+                      - delivered
+                      - read
+                    device_id:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                      pattern: "^[^\\u0000-\\u001F\\u007F]{1,255}$"
       responses:
         '200':
           description: Aggregate receipt state
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Message"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: receipt
+                  data:
+                    "$ref": "#/components/schemas/Message"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -330,9 +420,8 @@ paths:
       - Bundles
       operationId: createMessageBundle
       summary: Bundle existing messages behind one display message
-      description: Only an authenticated Silicon may create a bundle. The operation
-        is non-destructive; each original message remains stored and records the created
-        bundle ID.
+      description: Only an authenticated Silicon may create a bundle. The operation is
+        non-destructive; each original message remains stored and records the created bundle ID.
       parameters:
       - "$ref": "#/components/parameters/OrgId"
       - "$ref": "#/components/parameters/ConversationId"
@@ -343,14 +432,34 @@ paths:
         content:
           application/json:
             schema:
-              "$ref": "#/components/schemas/BundleCreate"
+              type: object
+              additionalProperties: false
+              required:
+              - type
+              - data
+              properties:
+                type:
+                  type: string
+                  const: create_bundle
+                data:
+                  "$ref": "#/components/schemas/BundleCreate"
       responses:
         '201':
           description: Bundle and display message created
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Bundle"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: create_bundle
+                  data:
+                    "$ref": "#/components/schemas/Bundle"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -362,10 +471,9 @@ paths:
       operationId: getMessageBundle
       summary: Retrieve a bundle and its original messages
       description: >-
-        Expanded message payloads are limited to 128 MiB in aggregate. One
-        individually legal oversized message is allowed when all remaining
-        message payloads total at most 16 MiB. Larger expansions return
-        413 response_too_large; retrieve originals individually by message ID.
+        Expanded message payloads are limited to 128 MiB in aggregate. One individually legal oversized
+        message is allowed when all remaining message payloads total at most 16 MiB. Larger expansions
+        return 413 response_too_large; retrieve originals individually by message ID.
       parameters:
       - "$ref": "#/components/parameters/OrgId"
       - "$ref": "#/components/parameters/ConversationId"
@@ -382,7 +490,17 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/BundleDetail"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: bundle
+                  data:
+                    "$ref": "#/components/schemas/BundleDetail"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -403,7 +521,17 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Draft"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: draft
+                  data:
+                    "$ref": "#/components/schemas/Draft"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         '404':
@@ -423,35 +551,64 @@ paths:
         schema:
           type: integer
           minimum: 0
-        description: Exact last observed draft version. Omit or send 0 only when creating
-          a draft that does not yet exist. Versions continue increasing across deletion
-          and automatic clearing; use the returned version for the next save.
+        description: Exact last observed draft version. Omit or send 0 only when creating a draft
+          that does not yet exist. Versions continue increasing across deletion and automatic
+          clearing; use the returned version for the next save.
       - "$ref": "#/components/parameters/TestingKey"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              "$ref": "#/components/schemas/DraftInput"
+              type: object
+              additionalProperties: false
+              required:
+              - type
+              - data
+              properties:
+                type:
+                  type: string
+                  const: put_draft
+                data:
+                  "$ref": "#/components/schemas/DraftInput"
       responses:
         '200':
           description: Draft stored
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Draft"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: put_draft
+                  data:
+                    "$ref": "#/components/schemas/Draft"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         '409':
-          description: Version conflict. Returns the current draft when one exists,
-            or an error envelope when it was deleted after the supplied version was
-            observed.
+          description: Version conflict. Returns the current draft when one exists, or an error
+            envelope when it was deleted after the supplied version was observed.
           content:
             application/json:
               schema:
-                oneOf:
-                - "$ref": "#/components/schemas/Draft"
-                - "$ref": "#/components/schemas/Error"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: error
+                  data:
+                    oneOf:
+                    - "$ref": "#/components/schemas/Draft"
+                    - "$ref": "#/components/schemas/Error"
         default:
           "$ref": "#/components/responses/Error"
     delete:
@@ -492,7 +649,17 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Presence"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: presence
+                  data:
+                    "$ref": "#/components/schemas/Presence"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -513,11 +680,21 @@ paths:
             application/json:
               schema:
                 type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
                 properties:
-                  items:
-                    type: array
-                    items:
-                      "$ref": "#/components/schemas/Gif"
+                  type:
+                    type: string
+                    const: gifs
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          "$ref": "#/components/schemas/Gif"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -546,11 +723,21 @@ paths:
             application/json:
               schema:
                 type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
                 properties:
-                  items:
-                    type: array
-                    items:
-                      "$ref": "#/components/schemas/Gif"
+                  type:
+                    type: string
+                    const: gifs
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          "$ref": "#/components/schemas/Gif"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -571,12 +758,22 @@ paths:
             application/json:
               schema:
                 type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
                 properties:
-                  items:
-                    type: array
-                    maxItems: 20
-                    items:
-                      "$ref": "#/components/schemas/Gif"
+                  type:
+                    type: string
+                    const: gifs
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        maxItems: 20
+                        items:
+                          "$ref": "#/components/schemas/Gif"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -591,23 +788,43 @@ paths:
       parameters:
       - "$ref": "#/components/parameters/IdempotencyKey"
       - "$ref": "#/components/parameters/TestingKey"
-      description: Maximum JSON body 16 KiB. No separate Bearer/X-Org-ID header required.
-        Repeat the exact body with the same Idempotency-Key after an uncertain result.
-        Credentials and backend app secrets must never be logged. The returned session
-        is live-verified by IAM and has no-store/no-cache response headers.
+      description: Maximum JSON body 16 KiB. No separate Bearer/X-Org-ID header required. Repeat the
+        exact body with the same Idempotency-Key after an uncertain result. Credentials and backend
+        app secrets must never be logged. The returned session is live-verified by IAM and has
+        no-store/no-cache response headers.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              "$ref": "#/components/schemas/LoginInput"
+              type: object
+              additionalProperties: false
+              required:
+              - type
+              - data
+              properties:
+                type:
+                  type: string
+                  const: login
+                data:
+                  "$ref": "#/components/schemas/LoginInput"
       responses:
         '200':
           description: Verified application session
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/ApplicationSession"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: login
+                  data:
+                    "$ref": "#/components/schemas/ApplicationSession"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -622,23 +839,43 @@ paths:
       parameters:
       - "$ref": "#/components/parameters/IdempotencyKey"
       - "$ref": "#/components/parameters/TestingKey"
-      description: Maximum JSON body 16 KiB. No separate Bearer/X-Org-ID header required.
-        Repeat the exact body with the same Idempotency-Key after an uncertain result.
-        Credentials and backend app secrets must never be logged. The returned session
-        is live-verified by IAM and has no-store/no-cache response headers.
+      description: Maximum JSON body 16 KiB. No separate Bearer/X-Org-ID header required. Repeat the
+        exact body with the same Idempotency-Key after an uncertain result. Credentials and backend
+        app secrets must never be logged. The returned session is live-verified by IAM and has
+        no-store/no-cache response headers.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              "$ref": "#/components/schemas/RefreshInput"
+              type: object
+              additionalProperties: false
+              required:
+              - type
+              - data
+              properties:
+                type:
+                  type: string
+                  const: refresh
+                data:
+                  "$ref": "#/components/schemas/RefreshInput"
       responses:
         '200':
           description: Verified application session
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/ApplicationSession"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: refresh
+                  data:
+                    "$ref": "#/components/schemas/ApplicationSession"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -653,16 +890,26 @@ paths:
       parameters:
       - "$ref": "#/components/parameters/IdempotencyKey"
       - "$ref": "#/components/parameters/TestingKey"
-      description: Maximum JSON body 16 KiB. No separate Bearer/X-Org-ID header required.
-        Repeat the exact body with the same Idempotency-Key after an uncertain result.
-        Credentials and backend app secrets must never be logged. Use the current
-        refresh token for full-family logout; an access token revokes only itself.
+      description: Maximum JSON body 16 KiB. No separate Bearer/X-Org-ID header required. Repeat the
+        exact body with the same Idempotency-Key after an uncertain result. Credentials and backend
+        app secrets must never be logged. Use the current refresh token for full-family logout; an
+        access token revokes only itself.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              "$ref": "#/components/schemas/LogoutInput"
+              type: object
+              additionalProperties: false
+              required:
+              - type
+              - data
+              properties:
+                type:
+                  type: string
+                  const: logout
+                data:
+                  "$ref": "#/components/schemas/LogoutInput"
       responses:
         '204':
           description: Token revoked
@@ -685,7 +932,17 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Identity"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: me
+                  data:
+                    "$ref": "#/components/schemas/Identity"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -707,7 +964,17 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Message"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: message
+                  data:
+                    "$ref": "#/components/schemas/Message"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -730,7 +997,17 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Message"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: edit_message
+                  data:
+                    "$ref": "#/components/schemas/Message"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -740,17 +1017,36 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Error"
-      description: Only the original sender may change the message. Idempotency covers
-        exact body, path, and observed version. Reusing the same key after a lost
-        response is safe. Deleted messages cannot be edited or resurrected; status
-        receipts never change content version.
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: error
+                  data:
+                    "$ref": "#/components/schemas/Error"
+      description: Only the original sender may change the message. Idempotency covers exact body,
+        path, and observed version. Reusing the same key after a lost response is safe. Deleted
+        messages cannot be edited or resurrected; status receipts never change content version.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              "$ref": "#/components/schemas/MessageCreate"
+              type: object
+              additionalProperties: false
+              required:
+              - type
+              - data
+              properties:
+                type:
+                  type: string
+                  const: edit_message
+                data:
+                  "$ref": "#/components/schemas/MessageCreate"
     delete:
       tags:
       - Messages
@@ -769,7 +1065,17 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Message"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: delete_message
+                  data:
+                    "$ref": "#/components/schemas/Message"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -779,11 +1085,20 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/Error"
-      description: Only the original sender may change the message. Idempotency covers
-        exact body, path, and observed version. Reusing the same key after a lost
-        response is safe. Deleted messages cannot be edited or resurrected; status
-        receipts never change content version.
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: error
+                  data:
+                    "$ref": "#/components/schemas/Error"
+      description: Only the original sender may change the message. Idempotency covers exact body,
+        path, and observed version. Reusing the same key after a lost response is safe. Deleted
+        messages cannot be edited or resurrected; status receipts never change content version.
   "/testing-environments":
     get:
       tags:
@@ -803,15 +1118,25 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/TestingEnvironmentList"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: testing_environments
+                  data:
+                    "$ref": "#/components/schemas/TestingEnvironmentList"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
           "$ref": "#/components/responses/Error"
-      description: Lifecycle authority uses a production IAM application session.
-        The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any
-        current member may create/list/read environments.
+      description: Lifecycle authority uses a production IAM application session. The DM test key
+        does not bypass production management authorization. Creator or current organization
+        administrator required for changes/key access; any current member may create/list/read
+        environments.
     post:
       tags:
       - Testing
@@ -826,25 +1151,44 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/TestingEnvironmentWithKey"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: create_testing_environment
+                  data:
+                    "$ref": "#/components/schemas/TestingEnvironmentWithKey"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
           "$ref": "#/components/responses/Error"
-      description: Lifecycle authority uses a production IAM application session.
-        The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any
-        current member may create/list/read environments. Import the canonical DM
-        application through IAM CLI first, supplying its fresh test-only app secret.
-        IAM production cannot back a DM test environment. Idempotency-Key is required.
-        Exact request replays return the original result; changed body or target with
-        the same key returns409. Responses use Cache-Control:no-store.
+      description: Lifecycle authority uses a production IAM application session. The DM test key
+        does not bypass production management authorization. Creator or current organization
+        administrator required for changes/key access; any current member may create/list/read
+        environments. Import the canonical DM application through IAM CLI first, supplying its fresh
+        test-only app secret. IAM production cannot back a DM test environment. Idempotency-Key is
+        required. Exact request replays return the original result; changed body or target with the
+        same key returns409. Responses use Cache-Control:no-store.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              "$ref": "#/components/schemas/TestingEnvironmentCreate"
+              type: object
+              additionalProperties: false
+              required:
+              - type
+              - data
+              properties:
+                type:
+                  type: string
+                  const: create_testing_environment
+                data:
+                  "$ref": "#/components/schemas/TestingEnvironmentCreate"
   "/testing-environments/{environment_id}":
     get:
       tags:
@@ -860,15 +1204,25 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/TestingEnvironment"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: testing_environment
+                  data:
+                    "$ref": "#/components/schemas/TestingEnvironment"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
           "$ref": "#/components/responses/Error"
-      description: Lifecycle authority uses a production IAM application session.
-        The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any
-        current member may create/list/read environments.
+      description: Lifecycle authority uses a production IAM application session. The DM test key
+        does not bypass production management authorization. Creator or current organization
+        administrator required for changes/key access; any current member may create/list/read
+        environments.
     patch:
       tags:
       - Testing
@@ -884,23 +1238,42 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/TestingEnvironment"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: update_testing_environment
+                  data:
+                    "$ref": "#/components/schemas/TestingEnvironment"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
           "$ref": "#/components/responses/Error"
-      description: Lifecycle authority uses a production IAM application session.
-        The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any
-        current member may create/list/read environments. Idempotency-Key is required.
-        Exact request replays return the original result; changed body or target with
-        the same key returns409. Responses use Cache-Control:no-store.
+      description: Lifecycle authority uses a production IAM application session. The DM test key
+        does not bypass production management authorization. Creator or current organization
+        administrator required for changes/key access; any current member may create/list/read
+        environments. Idempotency-Key is required. Exact request replays return the original result;
+        changed body or target with the same key returns409. Responses use Cache-Control:no-store.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              "$ref": "#/components/schemas/TestingEnvironmentUpdate"
+              type: object
+              additionalProperties: false
+              required:
+              - type
+              - data
+              properties:
+                type:
+                  type: string
+                  const: update_testing_environment
+                data:
+                  "$ref": "#/components/schemas/TestingEnvironmentUpdate"
     delete:
       tags:
       - Testing
@@ -917,12 +1290,11 @@ paths:
           "$ref": "#/components/responses/Unauthorized"
         default:
           "$ref": "#/components/responses/Error"
-      description: Lifecycle authority uses a production IAM application session.
-        The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any
-        current member may create/list/read environments. Idempotency-Key is required.
-        Exact request replays return the original result; changed body or target with
-        the same key returns409. Responses use Cache-Control:no-store.
+      description: Lifecycle authority uses a production IAM application session. The DM test key
+        does not bypass production management authorization. Creator or current organization
+        administrator required for changes/key access; any current member may create/list/read
+        environments. Idempotency-Key is required. Exact request replays return the original result;
+        changed body or target with the same key returns409. Responses use Cache-Control:no-store.
   "/testing-environments/{environment_id}/key":
     get:
       tags:
@@ -938,15 +1310,25 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/TestingEnvironmentKey"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: testing_environment_key
+                  data:
+                    "$ref": "#/components/schemas/TestingEnvironmentKey"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
           "$ref": "#/components/responses/Error"
-      description: Lifecycle authority uses a production IAM application session.
-        The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any
-        current member may create/list/read environments.
+      description: Lifecycle authority uses a production IAM application session. The DM test key
+        does not bypass production management authorization. Creator or current organization
+        administrator required for changes/key access; any current member may create/list/read
+        environments.
   "/testing-environments/{environment_id}/rotate-key":
     post:
       tags:
@@ -963,17 +1345,26 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/TestingEnvironmentWithKey"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: rotate_testing_environment_key
+                  data:
+                    "$ref": "#/components/schemas/TestingEnvironmentWithKey"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
           "$ref": "#/components/responses/Error"
-      description: Lifecycle authority uses a production IAM application session.
-        The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any
-        current member may create/list/read environments. Idempotency-Key is required.
-        Exact request replays return the original result; changed body or target with
-        the same key returns409. Responses use Cache-Control:no-store.
+      description: Lifecycle authority uses a production IAM application session. The DM test key
+        does not bypass production management authorization. Creator or current organization
+        administrator required for changes/key access; any current member may create/list/read
+        environments. Idempotency-Key is required. Exact request replays return the original result;
+        changed body or target with the same key returns409. Responses use Cache-Control:no-store.
   "/testing-environments/{environment_id}/restore":
     post:
       tags:
@@ -990,17 +1381,26 @@ paths:
           content:
             application/json:
               schema:
-                "$ref": "#/components/schemas/TestingEnvironmentWithKey"
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: restore_testing_environment
+                  data:
+                    "$ref": "#/components/schemas/TestingEnvironmentWithKey"
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
           "$ref": "#/components/responses/Error"
-      description: Lifecycle authority uses a production IAM application session.
-        The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any
-        current member may create/list/read environments. Idempotency-Key is required.
-        Exact request replays return the original result; changed body or target with
-        the same key returns409. Responses use Cache-Control:no-store.
+      description: Lifecycle authority uses a production IAM application session. The DM test key
+        does not bypass production management authorization. Creator or current organization
+        administrator required for changes/key access; any current member may create/list/read
+        environments. Idempotency-Key is required. Exact request replays return the original result;
+        changed body or target with the same key returns409. Responses use Cache-Control:no-store.
   "/testing-environments/{environment_id}/clean":
     post:
       tags:
@@ -1013,8 +1413,8 @@ paths:
         required: false
         schema:
           type: string
-        description: Required when using production bearer authorization; unnecessary
-          with test root key.
+        description: Required when using production bearer authorization; unnecessary with test root
+          key.
       - "$ref": "#/components/parameters/EnvironmentId"
       - "$ref": "#/components/parameters/TestingKey"
       - "$ref": "#/components/parameters/IdempotencyKey"
@@ -1025,12 +1425,12 @@ paths:
           "$ref": "#/components/responses/Unauthorized"
         default:
           "$ref": "#/components/responses/Error"
-      description: Authorize with this environment root key alone, or creator/admin
-        production IAM session. The path ID and key must match. Removes all message,
-        draft, delivery, receipt, presence and webhook-receipt rows; retains environment
-        metadata/key. Other environments and production are unchanged. Idempotency-Key
-        is required. Exact request replays return the original result; changed body
-        or target with the same key returns409. Responses use Cache-Control:no-store.
+      description: Authorize with this environment root key alone, or creator/admin production IAM
+        session. The path ID and key must match. Removes all message, draft, delivery, receipt,
+        presence and webhook-receipt rows; retains environment metadata/key. Other environments and
+        production are unchanged. Idempotency-Key is required. Exact request replays return the
+        original result; changed body or target with the same key returns409. Responses use
+        Cache-Control:no-store.
       security:
       - bearerAuth: []
       - testingEnvironmentKey: []
@@ -1043,16 +1443,15 @@ paths:
       servers:
       - url: https://backend.dm.teamofsilicons.com
       security: []
-      description: Backend-to-backend IAM callback. Exactly one of each signature
-        header is required. Official SDK verifies exact bytes, five-minute signing-time
-        tolerance, key version, event identity and 1 MiB limit. Test envelopes are
-        verified before matching the IAM key to an active DM test environment. Root
-        keys and raw bodies are never persisted. Duplicate event IDs are safe. Successful
-        receipt durably prompts connected token revalidation; IAM remains authoritative.
-        A bounded redacted test-key hint selects candidates; exact SDK signature and
-        environment binding are verified before initializing runtimes. One authenticated
-        IAM test event invalidates all active DM environments paired to that IAM realm,
-        including inherited/overridden signer versions. Invalid signatures cannot
+      description: Backend-to-backend IAM callback. Exactly one of each signature header is
+        required. Official SDK verifies exact bytes, five-minute signing-time tolerance, key
+        version, event identity and 1 MiB limit. Test envelopes are verified before matching the IAM
+        key to an active DM test environment. Root keys and raw bodies are never persisted.
+        Duplicate event IDs are safe. Successful receipt durably prompts connected token
+        revalidation; IAM remains authoritative. A bounded redacted test-key hint selects
+        candidates; exact SDK signature and environment binding are verified before initializing
+        runtimes. One authenticated IAM test event invalidates all active DM environments paired to
+        that IAM realm, including inherited/overridden signer versions. Invalid signatures cannot
         initialize a testing runtime.
       parameters:
       - name: X-Silicon-IAM-Event-ID
@@ -1082,8 +1481,8 @@ paths:
             schema:
               type: object
               additionalProperties: true
-              description: Exact IAM production event or signed testing envelope;
-                see official IAM WebhookEvent contract.
+              description: Exact IAM production event or signed testing envelope; see official IAM
+                WebhookEvent contract.
       responses:
         '204':
           description: Verified event committed or duplicate acknowledged
@@ -1129,8 +1528,8 @@ components:
       type: apiKey
       in: header
       name: X-Testing-Environment-Key
-      description: 32-character DM testing root key. Selects an isolated data plane;
-        normal actions still require its IAM user session.
+      description: 32-character DM testing root key. Selects an isolated data plane; normal actions
+        still require its IAM user session.
   parameters:
     OrgId:
       name: X-Org-ID
@@ -1174,8 +1573,8 @@ components:
       schema:
         type: string
         pattern: "^[A-Za-z0-9]{32}$"
-      description: DM testing environment key. Omit for production. Never send the
-        IAM test key in this header.
+      description: DM testing environment key. Omit for production. Never send the IAM test key in
+        this header.
     EnvironmentId:
       name: environment_id
       in: path
@@ -1197,22 +1596,41 @@ components:
       schema:
         type: string
         pattern: ^"?[1-9][0-9]*"?$
-      description: Exact observed positive message version, e.g. "1". PATCH replaces
-        all message content. Missing/invalid versions are 422; a stale version is
-        409.
+      description: Exact observed positive message version, e.g. "1". PATCH replaces all message
+        content. Missing/invalid versions are 422; a stale version is 409.
   responses:
     Error:
       description: Error
       content:
         application/json:
           schema:
-            "$ref": "#/components/schemas/Error"
+            type: object
+            additionalProperties: false
+            required:
+            - type
+            - data
+            properties:
+              type:
+                type: string
+                const: error
+              data:
+                "$ref": "#/components/schemas/Error"
     Unauthorized:
       description: Authentication credentials are missing or invalid
       content:
         application/json:
           schema:
-            "$ref": "#/components/schemas/Error"
+            type: object
+            additionalProperties: false
+            required:
+            - type
+            - data
+            properties:
+              type:
+                type: string
+                const: error
+              data:
+                "$ref": "#/components/schemas/Error"
   schemas:
     ActorRef:
       type: object
@@ -1266,9 +1684,8 @@ components:
           format: uri
           maxLength: 8192
           pattern: "^https://(?![^/?#]*@)[^/?#]+(?:[/?#]|$)"
-          description: Credential-free HTTPS link, at most 8192 bytes. DM stores this
-            link without contacting its host. No upload, proxy, or temporary-URL endpoint
-            exists.
+          description: Credential-free HTTPS link, at most 8192 bytes. DM stores this link without
+            contacting its host. No upload, proxy, or temporary-URL endpoint exists.
         name:
           type: string
           minLength: 1
@@ -1293,8 +1710,7 @@ components:
             type: integer
             minimum: 1
             maximum: 172800000
-            description: Untrusted caller-supplied total playback duration, capped
-              at 48 hours.
+            description: Untrusted caller-supplied total playback duration, capped at 48 hours.
     StoredVoiceAttachment:
       allOf:
       - "$ref": "#/components/schemas/Attachment"
@@ -1308,8 +1724,8 @@ components:
             - 'null'
             minimum: 1
             maximum: 172800000
-            description: Total playback duration. Null is returned only for a historical
-              pre-v 2 voice row whose provider did not supply duration metadata.
+            description: Total playback duration. Null is returned only for a historical pre-v 2
+              voice row whose provider did not supply duration metadata.
     Gif:
       type: object
       required:
@@ -1338,18 +1754,15 @@ components:
       properties:
         sender_id:
           type: string
-          description: Explicit sender account, optionally ISI@silicon:org (for example compose@writer:tos).
-            The underlying account must be authorized by IAM; ISI requires a silicon.
+          description: Explicit sender account, optionally ISI@silicon:org (for example
+            compose@writer:tos). The underlying account must be authorized by IAM; ISI requires a
+            silicon.
         recipient_id:
           type: string
           maxLength: 255
-          description: Optional intended participant address, such as deliberate@cos:tos.
-            ISI requires a silicon participant. This is routing metadata; all conversation
-            participants still receive the message and retain normal history access.
-        text:
-          type: string
-          minLength: 1
-          maxLength: 100000000
+          description: Optional intended participant address, such as deliberate@cos:tos. ISI
+            requires a silicon participant. This is routing metadata; all conversation participants
+            still receive the message and retain normal history access.
         attachments:
           type: array
           maxItems: 100
@@ -1364,29 +1777,31 @@ components:
           - string
           - 'null'
           maxLength: 100000000
-          description: Optional client-supplied transcript preserved as message content;
-            requires voice.
+          description: Optional client-supplied transcript preserved as message content; requires
+            voice.
         gif:
           "$ref": "#/components/schemas/Gif"
         metadata:
           type: object
           additionalProperties: true
           default: {}
-          description: Arbitrary caller-owned JSON object, always returned. Nested
-            JSON values are preserved. PATCH is full replacement; include the metadata
-            to retain it.
+          description: Arbitrary caller-owned JSON object, always returned. Nested JSON values are
+            preserved. PATCH is full replacement; include the metadata to retain it.
         reply_to_message_id:
           type:
           - string
           - 'null'
           format: uuid
-          description: Reply target in this same conversation. A message cannot reply
-            to itself.
+          description: Reply target in this same conversation. A message cannot reply to itself.
+        message:
+          type: string
+          minLength: 1
+          maxLength: 100000000
       anyOf:
       - required:
-        - text
+        - message
         properties:
-          text: {}
+          message: {}
       - required:
         - attachments
         properties:
@@ -1412,12 +1827,11 @@ components:
           - voice
           properties:
             voice: {}
-      description: At least one content item (text, attachments, voice, or GIF) is
-        required. Metadata alone does not count as content. On PATCH this is a full
-        replacement; omitted metadata becomes {}, and omitted optional fields are
-        cleared. Routing is immutable on PATCH; omitted sender_id and recipient_id retain the original route.
-        Logical text/transcript limits apply independently; the configured
-        encoded-body limit may be lower.
+      description: At least one content item (text, attachments, voice, or GIF) is required.
+        Metadata alone does not count as content. On PATCH this is a full replacement; omitted
+        metadata becomes {}, and omitted optional fields are cleared. Routing is immutable on PATCH;
+        omitted sender_id and recipient_id retain the original route. Logical text/transcript limits
+        apply independently; the configured encoded-body limit may be lower.
     Message:
       type: object
       required:
@@ -1441,10 +1855,12 @@ components:
           "$ref": "#/components/schemas/ActorRef"
         sender_id:
           type: string
-          description: Qualified sender address when an ISI was supplied; sender.id remains the canonical IAM identity.
+          description: Qualified sender address when an ISI was supplied; sender.id remains the
+            canonical IAM identity.
         recipient_id:
           type: string
-          description: Intended recipient address, including the optional ISI prefix, preserved in history and delivery.
+          description: Intended recipient address, including the optional ISI prefix, preserved in
+            history and delivery.
         sequence:
           type: integer
           minimum: 1
@@ -1456,10 +1872,6 @@ components:
           - delivered
           - read
           - failed
-        text:
-          type: string
-          minLength: 1
-          maxLength: 100000000
         attachments:
           type: array
           maxItems: 100
@@ -1500,26 +1912,28 @@ components:
           type: object
           additionalProperties: true
           default: {}
-          description: Arbitrary caller-owned JSON object, always returned. Nested
-            JSON values are preserved. PATCH is full replacement; include the metadata
-            to retain it.
+          description: Arbitrary caller-owned JSON object, always returned. Nested JSON values are
+            preserved. PATCH is full replacement; include the metadata to retain it.
         reply_to_message_id:
           type:
           - string
           - 'null'
           format: uuid
-          description: Reply target in this same conversation. A message cannot reply
-            to itself.
+          description: Reply target in this same conversation. A message cannot reply to itself.
         version:
           type: integer
           minimum: 1
-          description: Content version, initially 1. Edits and deletion increment
-            it; receipts do not.
+          description: Content version, initially 1. Edits and deletion increment it; receipts do
+            not.
         deleted_at:
           type:
           - string
           - 'null'
           format: date-time
+        message:
+          type: string
+          minLength: 1
+          maxLength: 100000000
       allOf:
       - if:
           required:
@@ -1532,9 +1946,9 @@ components:
           - voice
           properties:
             voice: {}
-      description: Latest version of a durable message. Deleted messages remain as
-        content-free tombstones with the same id, sequence, sender, and version. Do
-        not resurrect them from older replayed deliveries.
+      description: Latest version of a durable message. Deleted messages remain as content-free
+        tombstones with the same id, sequence, sender, and version. Do not resurrect them from older
+        replayed deliveries.
     BundleRef:
       type: object
       required:
@@ -1628,24 +2042,21 @@ components:
           - string
           - 'null'
           maxLength: 100000000
-          description: Optional synchronized client-supplied transcript; requires
-            voice.
+          description: Optional synchronized client-supplied transcript; requires voice.
         gif:
           "$ref": "#/components/schemas/Gif"
         metadata:
           type: object
           additionalProperties: true
           default: {}
-          description: Arbitrary caller-owned JSON object, always returned. Nested
-            JSON values are preserved. PATCH is full replacement; include the metadata
-            to retain it.
+          description: Arbitrary caller-owned JSON object, always returned. Nested JSON values are
+            preserved. PATCH is full replacement; include the metadata to retain it.
         reply_to_message_id:
           type:
           - string
           - 'null'
           format: uuid
-          description: Reply target in this same conversation. A message cannot reply
-            to itself.
+          description: Reply target in this same conversation. A message cannot reply to itself.
       allOf:
       - if:
           required:
@@ -1675,8 +2086,8 @@ components:
         version:
           type: integer
           minimum: 1
-          description: Monotonic token retained across draft deletion and automatic
-            clearing. Gaps are allowed. Use this returned value for the next save.
+          description: Monotonic token retained across draft deletion and automatic clearing. Gaps
+            are allowed. Use this returned value for the next save.
         message_content:
           type: string
           maxLength: 100000000
@@ -1701,16 +2112,14 @@ components:
           type: object
           additionalProperties: true
           default: {}
-          description: Arbitrary caller-owned JSON object, always returned. Nested
-            JSON values are preserved. PATCH is full replacement; include the metadata
-            to retain it.
+          description: Arbitrary caller-owned JSON object, always returned. Nested JSON values are
+            preserved. PATCH is full replacement; include the metadata to retain it.
         reply_to_message_id:
           type:
           - string
           - 'null'
           format: uuid
-          description: Reply target in this same conversation. A message cannot reply
-            to itself.
+          description: Reply target in this same conversation. A message cannot reply to itself.
       allOf:
       - if:
           required:
@@ -1746,7 +2155,7 @@ components:
           - transcribing_voice
           - uploading_file
           - searching_gifs
-          - null
+          -
         last_seen_at:
           type:
           - string
@@ -1776,275 +2185,362 @@ components:
       - "$ref": "#/components/schemas/ServerSocketFrame"
     PongFrame:
       type: object
+      additionalProperties: false
       required:
       - type
-      - ping_id
+      - data
       properties:
         type:
-          const: pong
-        ping_id:
           type: string
+          const: pong
+        data:
+          type: object
+          required:
+          - ping_id
+          properties:
+            ping_id:
+              type: string
     AckFrame:
       type: object
+      additionalProperties: false
       required:
       - type
-      - actor_id
-      - through_sequence
+      - data
       properties:
         type:
-          const: ack
-        actor_id:
           type: string
-        through_sequence:
-          type: integer
-          minimum: 0
+          const: ack
+        data:
+          type: object
+          required:
+          - actor_id
+          - through_sequence
+          properties:
+            actor_id:
+              type: string
+            through_sequence:
+              type: integer
+              minimum: 0
     ResumeFrame:
       type: object
+      additionalProperties: false
       required:
       - type
-      - actor_id
-      - after_sequence
+      - data
       properties:
         type:
-          const: resume
-        actor_id:
           type: string
-        after_sequence:
-          type: integer
-          minimum: 0
+          const: resume
+        data:
+          type: object
+          required:
+          - actor_id
+          - after_sequence
+          properties:
+            actor_id:
+              type: string
+            after_sequence:
+              type: integer
+              minimum: 0
     PresenceFrame:
       type: object
+      additionalProperties: false
       required:
       - type
-      - actor_id
-      - activity
+      - data
       properties:
         type:
-          const: presence
-        actor_id:
           type: string
-        activity:
-          type:
-          - string
-          - 'null'
-          enum:
-          - typing
-          - recording_voice
-          - transcribing_voice
-          - uploading_file
-          - searching_gifs
-          - null
+          const: presence
+        data:
+          type: object
+          required:
+          - actor_id
+          - activity
+          properties:
+            actor_id:
+              type: string
+            activity:
+              type:
+              - string
+              - 'null'
+              enum:
+              - typing
+              - recording_voice
+              - transcribing_voice
+              - uploading_file
+              - searching_gifs
+              -
     ReceiptCommandFrame:
       type: object
+      additionalProperties: false
       required:
       - type
-      - actor_id
-      - conversation_id
-      - message_id
-      - status
-      - device_id
+      - data
       properties:
         type:
+          type: string
           const: receipt
-        actor_id:
-          type: string
-        conversation_id:
-          type: string
-          format: uuid
-        message_id:
-          type: string
-          format: uuid
-        status:
-          type: string
-          enum:
-          - delivered
-          - read
-        device_id:
-          type: string
-          minLength: 1
-          maxLength: 255
-          pattern: "^[^\\u0000-\\u001F\\u007F]{1,255}$"
+        data:
+          type: object
+          required:
+          - actor_id
+          - conversation_id
+          - message_id
+          - status
+          - device_id
+          properties:
+            actor_id:
+              type: string
+            conversation_id:
+              type: string
+              format: uuid
+            message_id:
+              type: string
+              format: uuid
+            status:
+              type: string
+              enum:
+              - delivered
+              - read
+            device_id:
+              type: string
+              minLength: 1
+              maxLength: 255
+              pattern: "^[^\\u0000-\\u001F\\u007F]{1,255}$"
     SendMessageFrame:
       type: object
+      additionalProperties: false
       required:
       - type
-      - actor_id
-      - org_id
-      - conversation_id
-      - idempotency_key
-      - message
+      - data
       properties:
         type:
-          const: send_message
-        actor_id:
           type: string
-        org_id:
-          type: string
-        conversation_id:
-          type: string
-          format: uuid
-        idempotency_key:
-          type: string
-          minLength: 8
-          maxLength: 255
-          pattern: "^[!-~]{8,255}$"
-        message:
-          "$ref": "#/components/schemas/MessageCreate"
+          const: new_message
+        data:
+          allOf:
+          - type: object
+            required:
+            - actor_id
+            - org_id
+            - conversation_id
+            - idempotency_key
+            properties:
+              actor_id:
+                type: string
+              org_id:
+                type: string
+              conversation_id:
+                type: string
+                format: uuid
+              idempotency_key:
+                type: string
+                minLength: 8
+                maxLength: 255
+                pattern: "^[!-~]{8,255}$"
+          - "$ref": "#/components/schemas/MessageCreate"
     ReadyFrame:
       type: object
+      additionalProperties: false
       required:
       - type
-      - protocol_version
-      - connection_id
-      - actors
-      - acknowledged_through
-      - testing_generation
+      - data
       properties:
         type:
-          const: ready
-        protocol_version:
-          const: 2
-        connection_id:
           type: string
-          format: uuid
-        actors:
-          type: array
-          minItems: 1
-          maxItems: 100
-          uniqueItems: true
-          items:
-            type: string
-        acknowledged_through:
+          const: ready
+        data:
           type: object
-          additionalProperties:
-            type: integer
-            minimum: 0
-        testing_generation:
-          type:
-          - integer
-          - 'null'
-          minimum: 1
-          description: Current testing data generation; null in production. Changed
-            generation requires clearing old local cursors and archived inbox before
-            resume0.
+          required:
+          - protocol_version
+          - connection_id
+          - actors
+          - acknowledged_through
+          - testing_generation
+          properties:
+            protocol_version:
+              const: 3
+            connection_id:
+              type: string
+              format: uuid
+            actors:
+              type: array
+              minItems: 1
+              maxItems: 100
+              uniqueItems: true
+              items:
+                type: string
+            acknowledged_through:
+              type: object
+              additionalProperties:
+                type: integer
+                minimum: 0
+            testing_generation:
+              type:
+              - integer
+              - 'null'
+              minimum: 1
+              description: Current testing data generation; null in production. Changed generation
+                requires clearing old local cursors and archived inbox before resume0.
     PingFrame:
       type: object
+      additionalProperties: false
       required:
       - type
-      - ping_id
+      - data
       properties:
         type:
-          const: ping
-        ping_id:
           type: string
+          const: ping
+        data:
+          type: object
+          required:
+          - ping_id
+          properties:
+            ping_id:
+              type: string
     MessageAcceptedFrame:
       type: object
-      description: Ephemeral confirmation that a send_message command was durably
-        accepted. It does not consume a delivery sequence and is not ACKed.
+      additionalProperties: false
       required:
       - type
-      - idempotency_key
-      - message
+      - data
       properties:
         type:
-          const: message_accepted
-        idempotency_key:
           type: string
-          minLength: 8
-          maxLength: 255
-          pattern: "^[!-~]{8,255}$"
-        message:
-          "$ref": "#/components/schemas/Message"
+          const: message_accepted
+        data:
+          allOf:
+          - type: object
+            description: Ephemeral confirmation that a new_message command was durably accepted. It
+              does not consume a delivery sequence and is not ACKed.
+            required:
+            - idempotency_key
+            properties:
+              idempotency_key:
+                type: string
+                minLength: 8
+                maxLength: 255
+                pattern: "^[!-~]{8,255}$"
+          - "$ref": "#/components/schemas/Message"
     ReceiptRecordedFrame:
       type: object
-      description: Ephemeral confirmation that a device receipt was durably recorded.
-        It does not consume a delivery sequence and is not ACKed.
+      additionalProperties: false
       required:
       - type
-      - message_id
-      - status
+      - data
       properties:
         type:
+          type: string
           const: receipt_recorded
-        message_id:
-          type: string
-          format: uuid
-        status:
-          type: string
-          enum:
-          - delivered
-          - read
+        data:
+          type: object
+          description: Ephemeral confirmation that a device receipt was durably recorded. It does
+            not consume a delivery sequence and is not ACKed.
+          required:
+          - message_id
+          - status
+          properties:
+            message_id:
+              type: string
+              format: uuid
+            status:
+              type: string
+              enum:
+              - delivered
+              - read
     MessageDeliveryFrame:
       type: object
+      additionalProperties: false
       required:
       - type
-      - delivery_id
-      - actor_id
-      - delivery_sequence
-      - message
+      - data
       properties:
         type:
-          const: message
-        delivery_id:
           type: string
-          format: uuid
-        actor_id:
-          type: string
-        delivery_sequence:
-          type: integer
-          minimum: 1
-        message:
-          "$ref": "#/components/schemas/Message"
-      description: Durable creation, edit, or deletion delivered to every participant,
-        including sender devices. The message is the latest version; repeated or older
-        delivery records can therefore contain the same latest message. Deduplicate
-        transport by delivery_id and upsert content by message.id/version.
+          const: new_message
+        data:
+          allOf:
+          - type: object
+            required:
+            - delivery_id
+            - actor_id
+            - delivery_sequence
+            properties:
+              delivery_id:
+                type: string
+                format: uuid
+              actor_id:
+                type: string
+              delivery_sequence:
+                type: integer
+                minimum: 1
+            description: Durable creation, edit, or deletion delivered to every participant,
+              including sender devices. The message is the latest version; repeated or older
+              delivery records can therefore contain the same latest message. Deduplicate transport
+              by delivery_id and upsert content by data.id/version.
+          - "$ref": "#/components/schemas/Message"
     ReceiptDeliveryFrame:
       type: object
+      additionalProperties: false
       required:
       - type
-      - delivery_id
-      - actor_id
-      - delivery_sequence
-      - message_id
-      - status
+      - data
       properties:
         type:
+          type: string
           const: receipt
-        delivery_id:
-          type: string
-          format: uuid
-        actor_id:
-          type: string
-        delivery_sequence:
-          type: integer
-          minimum: 1
-        message_id:
-          type: string
-          format: uuid
-        status:
-          type: string
-          enum:
-          - sent
-          - delivered
-          - read
-          - failed
+        data:
+          type: object
+          required:
+          - delivery_id
+          - actor_id
+          - delivery_sequence
+          - message_id
+          - status
+          properties:
+            delivery_id:
+              type: string
+              format: uuid
+            actor_id:
+              type: string
+            delivery_sequence:
+              type: integer
+              minimum: 1
+            message_id:
+              type: string
+              format: uuid
+            status:
+              type: string
+              enum:
+              - sent
+              - delivered
+              - read
+              - failed
     SocketErrorFrame:
       type: object
+      additionalProperties: false
       required:
       - type
-      - code
-      - message
-      - recoverable
+      - data
       properties:
         type:
+          type: string
           const: error
-        code:
-          type: string
-        message:
-          type: string
-        recoverable:
-          type: boolean
+        data:
+          type: object
+          required:
+          - code
+          - message
+          - recoverable
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            recoverable:
+              type: boolean
     Error:
       type: object
       required:
@@ -2079,12 +2575,14 @@ components:
           "$ref": "#/components/schemas/ActorRef"
         organization_id:
           type: string
-          description: Initial workspace; first currently selected organization handle in sorted order.
+          description: Initial workspace; first currently selected organization handle in sorted
+            order.
         organization_ids:
           type: array
           minItems: 1
           uniqueItems: true
-          description: Organizations explicitly selected in IAM with current active memberships. Each request still authorizes X-Org-ID.
+          description: Organizations explicitly selected in IAM with current active memberships.
+            Each request still authorizes X-Org-ID.
           items:
             type: string
       required:
@@ -2132,8 +2630,8 @@ components:
         slt:
           type: string
           writeOnly: true
-          description: Opaque IAM short-lived token. Current IAM wire values use oac_;
-            the field is named slt. Never assume the field name is a token prefix.
+          description: Opaque IAM short-lived token. Current IAM wire values use oac_; the field is
+            named slt. Never assume the field name is a token prefix.
       required:
       - slt
       additionalProperties: false
@@ -2284,8 +2782,8 @@ components:
           minLength: 32
           maxLength: 512
           pattern: "^[!-~]{32,512}$"
-          description: Optional dedicated IAM test webhook signer. Supply together
-            with iam_webhook_key_version, or omit both to inherit the backend signer.
+          description: Optional dedicated IAM test webhook signer. Supply together with
+            iam_webhook_key_version, or omit both to inherit the backend signer.
         iam_webhook_key_version:
           type: integer
           minimum: 1
@@ -2312,6 +2810,5 @@ components:
           type:
           - string
           - 'null'
-          description: Empty string clears displayed description; omitted/null leaves
-            unchanged.
+          description: Empty string clears displayed description; omitted/null leaves unchanged.
       additionalProperties: false

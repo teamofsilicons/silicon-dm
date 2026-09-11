@@ -75,6 +75,7 @@ macro_rules! guide {
 }
 
 const GUIDES: &[Guide] = &[
+    guide!("wire-format", "DM JSON wire format", "wire-format.md"),
     guide!("cli", "DM CLI guide", "cli/README.md"),
     guide!("relay", "Local relay and actor callbacks", "cli/relay.md"),
     guide!("client", "Rust client guide", "client/README.md"),

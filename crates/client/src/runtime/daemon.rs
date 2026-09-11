@@ -176,6 +176,7 @@ pub async fn run(state: store::Store) -> Result<()> {
         .route("/requests/{id}/status", get(request_status))
         .route("/shutdown", post(stop))
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
+        .layer(axum::middleware::from_fn(silicon_dm_protocol::responses))
         .with_state(app);
     let mut supervisor = AbortOnDrop(tokio::spawn(supervise(
         context.clone(),
@@ -240,7 +241,17 @@ async fn submit(
             "local relay bearer token required",
         );
     }
-    let request = match RelayRequest::deserialize(&original) {
+    let envelope = match crate::Envelope::<Value>::deserialize(&original) {
+        Ok(envelope) if envelope.kind == "request" => envelope,
+        _ => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "expected exactly type: request and data: RelayRequest",
+            );
+        }
+    };
+    let request = match RelayRequest::deserialize(&envelope.data) {
         Ok(r) => r,
         Err(_) => {
             return error(
@@ -267,7 +278,7 @@ async fn submit(
             "log in to this profile and testing environment first",
         );
     }
-    let queued = context.queue.enqueue(&request, &original);
+    let queued = context.queue.enqueue(&request, &envelope.data);
     let request_id = request.request_id;
     drop(request);
     match queued {
@@ -319,7 +330,10 @@ async fn request_result(
         );
     }
     match context.queue.result(id) {
-        Ok(Some(result)) => Json(result).into_response(),
+        Ok(Some(mut result)) => {
+            result.request = json!({"type":"request", "data":result.request});
+            Json(result).into_response()
+        }
         Ok(None) => error(StatusCode::NOT_FOUND, "not_found", "unknown request ID"),
         Err(_) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -483,7 +497,7 @@ async fn connected(
                         match &frame {
                             ServerFrame::Ping{ping_id}=>socket.send(Message::Text(serde_json::to_string(&ClientFrame::Pong{ping_id:ping_id.clone()})?.into())).await?,
                             ServerFrame::Ready{protocol_version,actors,testing_generation,..}=>{
-                                if *protocol_version!=2{bail!("unsupported protocol version")}
+                                if *protocol_version!=silicon_dm_protocol::WEBSOCKET_VERSION{bail!("unsupported protocol version")}
                                 context.queue.adopt_generation(key,*testing_generation)?;
                                 stream_session=queue::stream_session(key,*testing_generation);
                                 channels.lock().await.insert(key.to_owned(), tx.clone());
@@ -724,13 +738,44 @@ async fn webhooks(context: RuntimeContext) {
 }
 #[derive(Serialize)]
 struct CallbackPayload<'a> {
-    delivery_id: &'a str,
-    actor_id: &'a str,
+    #[serde(rename = "type")]
+    kind: &'a str,
+    data: CallbackData<'a>,
+}
+#[derive(Serialize)]
+struct CallbackData<'a> {
     profile: &'a str,
     testing_environment_id: Option<Uuid>,
+    #[serde(flatten)]
     event: &'a Value,
 }
-async fn deliver_webhook(context: RuntimeContext, item: queue::WebhookWork, http: reqwest::Client) {
+
+/// Only queued v2 frames are upgraded here; live sockets require v3.
+fn upgrade_callback_frame(mut frame: Value) -> Value {
+    if frame.get("data").is_some() {
+        return frame;
+    }
+    let Some(fields) = frame.as_object_mut() else {
+        return frame;
+    };
+    let mut kind = fields.remove("type").unwrap_or(Value::Null);
+    if kind == "message" {
+        kind = json!("new_message");
+        if let Some(Value::Object(mut message)) = fields.remove("message") {
+            if let Some(text) = message.remove("text") {
+                message.insert("message".into(), text);
+            }
+            message.entry("metadata").or_insert_with(|| json!({}));
+            fields.extend(message);
+        }
+    }
+    json!({"type":kind,"data":frame})
+}
+async fn deliver_webhook(
+    context: RuntimeContext,
+    mut item: queue::WebhookWork,
+    http: reqwest::Client,
+) {
     let config = match context.store.load() {
         Ok(c) => c,
         Err(_) => return,
@@ -752,12 +797,20 @@ async fn deliver_webhook(context: RuntimeContext, item: queue::WebhookWork, http
     ) {
         return;
     }
+    item.frame = upgrade_callback_frame(item.frame);
+    let Some(kind) = item.frame.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(event) = item.frame.get("data") else {
+        return;
+    };
     let payload = CallbackPayload {
-        delivery_id: &item.delivery_id,
-        actor_id: &profile.tokens.actor.id,
-        profile: &profile.name,
-        testing_environment_id: profile.testing_environment_id,
-        event: &item.frame,
+        kind,
+        data: CallbackData {
+            profile: &profile.name,
+            testing_environment_id: profile.testing_environment_id,
+            event,
+        },
     };
     let success = match http
         .post(webhook_url)
@@ -808,14 +861,15 @@ async fn callback_acknowledged(mut response: reqwest::Response, delivery_id: &st
         acknowledged: bool,
         delivery_id: String,
     }
-    serde_json::from_slice::<Acknowledgement>(&body)
-        .is_ok_and(|ack| ack.acknowledged && ack.delivery_id == delivery_id)
+    serde_json::from_slice::<crate::Envelope<Acknowledgement>>(&body).is_ok_and(|ack| {
+        ack.kind == "ack" && ack.data.acknowledged && ack.data.delivery_id == delivery_id
+    })
 }
 fn delivery_receipt(item: &queue::WebhookWork, profile: &store::Profile) -> Option<RelayRequest> {
-    if item.frame.get("type")?.as_str()? != "message" {
+    if item.frame.get("type")?.as_str()? != "new_message" {
         return None;
     }
-    let message = item.frame.get("message")?;
+    let message = item.frame.get("data")?;
     if message.pointer("/sender/id")?.as_str()? == profile.tokens.actor.id
         || message.get("deleted_at").is_some_and(|v| !v.is_null())
     {
@@ -839,4 +893,112 @@ fn delivery_receipt(item: &queue::WebhookWork, profile: &store::Profile) -> Opti
             device_id: profile.device_id.clone(),
         },
     })
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn queued_v2_delivery_survives_upgrade_and_retries_until_enveloped_ack() -> Result<()> {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let app = Router::new().route(
+            "/events",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let counter = counter.clone();
+                async move {
+                    assert_eq!(body.as_object().map(serde_json::Map::len), Some(2));
+                    assert_eq!(body["type"], "new_message");
+                    assert_eq!(body["data"]["message"], "hello");
+                    assert_eq!(
+                        body["data"]["metadata"],
+                        json!({"type":"user", "data":{"message":"nested"}})
+                    );
+                    assert_eq!(body["data"]["profile"], "default");
+                    assert_eq!(body["data"]["recipient_id"], "deliberate@cos:tos");
+                    assert_eq!(headers["idempotency-key"], Uuid::nil().to_string());
+                    let ack = json!({"acknowledged":true,"delivery_id":Uuid::nil()});
+                    // A legacy bare ACK must not mark delivery complete.
+                    if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Json(ack)
+                    } else {
+                        Json(json!({"type":"ack", "data":ack}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let callback = format!("http://{}/events", listener.local_addr()?);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let root = std::env::temp_dir().join(format!("dm-envelope-{}", Uuid::new_v4()));
+        let store = store::Store::new(&root)?;
+        let profile: store::Profile = serde_json::from_value(json!({
+            "name":"default","base_url":"http://localhost:8080","webhook_url":callback,
+            "device_id":"device","expires_at":0,"testing_environment_id":null,"enabled":true,
+            "tokens":{"access_token":"test","refresh_token":"test","token_type":"Bearer","expires_in":3600,
+                "scope":"dm","actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos"}
+        }))?;
+        store.update(|config| {
+            config.profiles.insert("default:production".into(), profile);
+            Ok(())
+        })?;
+        let legacy = json!({
+            "type":"message","delivery_id":Uuid::nil(),"actor_id":"cos:tos","delivery_sequence":1,
+            "message":{"id":Uuid::nil(),"conversation_id":Uuid::nil(),"sender":{"type":"carbon","id":"alice"},
+                "recipient_id":"deliberate@cos:tos","text":"hello","metadata":{"type":"user","data":{"message":"nested"}},
+                "sequence":1,"status":"sent","created_at":"2026-09-11T00:00:00Z","version":1}
+        });
+        let upgraded = upgrade_callback_frame(legacy.clone());
+        let frame: ServerFrame = serde_json::from_value(upgraded.clone())?;
+        let queue = queue::Queue::open(&store)?;
+        assert_eq!(
+            queue.receive("default:production", &frame, &legacy.to_string())?,
+            1
+        );
+        drop(queue);
+        let queue = queue::Queue::open(&store)?;
+        // Replay under v3 must match the immutable identity of the saved v2 frame.
+        assert_eq!(
+            queue.receive("default:production", &frame, &upgraded.to_string())?,
+            1
+        );
+        let context = RuntimeContext {
+            store,
+            queue,
+            payload_budget: Arc::new(Semaphore::new(128)),
+        };
+        let work = context
+            .queue
+            .load_webhook("default:production", &Uuid::nil().to_string())?
+            .context("queued delivery")?;
+        deliver_webhook(context.clone(), work, reqwest::Client::new()).await;
+        assert!(
+            context
+                .queue
+                .webhook_is_pending("default:production", &Uuid::nil().to_string())?
+        );
+        deliver_webhook(
+            context.clone(),
+            queue::WebhookWork {
+                session: "default:production".into(),
+                delivery_id: Uuid::nil().to_string(),
+                frame: legacy,
+            },
+            reqwest::Client::new(),
+        )
+        .await;
+        assert!(
+            !context
+                .queue
+                .webhook_is_pending("default:production", &Uuid::nil().to_string())?
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(context.queue.request_candidates()?.len(), 1);
+        server.abort();
+        drop(context);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

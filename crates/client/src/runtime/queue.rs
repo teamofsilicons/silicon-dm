@@ -195,6 +195,16 @@ struct StoredDeliveryIdentity {
     kind: String,
     message: Option<StoredMessageIdentity>,
     message_id: Option<Uuid>,
+    data: Option<StoredDeliveryData>,
+}
+#[derive(serde::Deserialize)]
+struct StoredDeliveryData {
+    id: Option<Uuid>,
+    conversation_id: Option<Uuid>,
+    sender: Option<crate::Actor>,
+    sequence: Option<i64>,
+    created_at: Option<String>,
+    message_id: Option<Uuid>,
 }
 #[derive(serde::Deserialize)]
 struct StoredMessageIdentity {
@@ -206,7 +216,16 @@ struct StoredMessageIdentity {
 }
 fn same_delivery_identity(old: &StoredDeliveryIdentity, new: &ServerFrame) -> bool {
     match new {
-        ServerFrame::Message { message: new, .. } if old.kind == "message" => {
+        ServerFrame::Message { message: new, .. }
+            if matches!(old.kind.as_str(), "message" | "new_message") =>
+        {
+            if let Some(data) = &old.data {
+                return data.id == Some(new.id)
+                    && data.conversation_id == Some(new.conversation_id)
+                    && data.sender.as_ref() == Some(&new.sender)
+                    && data.sequence == Some(new.sequence)
+                    && data.created_at.as_ref() == Some(&new.created_at);
+            }
             let Some(old) = &old.message else {
                 return false;
             };
@@ -218,7 +237,12 @@ fn same_delivery_identity(old: &StoredDeliveryIdentity, new: &ServerFrame) -> bo
         }
         ServerFrame::Receipt {
             message_id: new, ..
-        } if old.kind == "receipt" => old.message_id.as_ref() == Some(new),
+        } if old.kind == "receipt" => {
+            old.message_id
+                .as_ref()
+                .or_else(|| old.data.as_ref().and_then(|data| data.message_id.as_ref()))
+                == Some(new)
+        }
         _ => false,
     }
 }

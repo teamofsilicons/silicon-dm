@@ -228,7 +228,7 @@ mod tests {
         let login_tokens = tokens.clone();
         let app = Router::new()
             .route("/api/v1/auth/login", post(move |Json(body): Json<Value>| async move {
-                assert_eq!(body, json!({"slt":"short-lived"}));
+                assert_eq!(body, json!({"type":"login", "data":{"slt":"short-lived"}}));
                 Json(login_tokens)
             }))
             .route("/api/v1/auth/me", get(|headers: HeaderMap| async move {
@@ -238,7 +238,8 @@ mod tests {
             }))
             .route("/api/v1/iam", get(|| async { Json(json!({"app_id":"tos>dm","iam_base_url":"https://iam.example",
                 "api_base_url":"https://dm.example/api/v1"})) }))
-            .route("/status", get(|| async { Json(json!({"running":true})) }));
+            .route("/status", get(|| async { Json(json!({"running":true})) }))
+            .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let server = tokio::spawn(async move { axum::serve(listener, app).await });

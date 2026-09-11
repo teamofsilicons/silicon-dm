@@ -177,10 +177,17 @@ where
     type Rejection = ApiInputRejection;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        Json::<T>::from_request(request, state)
+        let expected =
+            silicon_dm_protocol::http_type(request.method().as_str(), request.uri().path());
+        let Json(envelope) = Json::<silicon_dm_protocol::Envelope<T>>::from_request(request, state)
             .await
-            .map(|Json(value)| Self(value))
-            .map_err(|rejection| ApiInputRejection::from_json(&rejection))
+            .map_err(|rejection| ApiInputRejection::from_json(&rejection))?;
+        if envelope.kind != expected {
+            return Err(ApiInputRejection::validation(
+                "request type does not match this endpoint",
+            ));
+        }
+        Ok(Self(envelope.data))
     }
 }
 

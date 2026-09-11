@@ -81,7 +81,12 @@ impl PostgresStore {
         } else {
             "messages.delete"
         };
-        let hash = request_hash(&(id, conversation, expected_version, &content))?;
+        let hash = request_hash(&(
+            id,
+            conversation,
+            expected_version,
+            content.as_ref().map(MessageCreate::idempotency_content),
+        ))?;
         let mut tx = self.pool().begin().await?;
         let original = sqlx::query_as::<_, Original>(
             "SELECT sender_kind::text AS sender_kind, sender_id, sender_address, recipient_address FROM messages WHERE id=$1 AND conversation_id=$2 AND organization_id=$3 FOR UPDATE"

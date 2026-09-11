@@ -1,3 +1,4 @@
+import { httpType, unwrap } from "../src/wire.ts";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -39,7 +40,15 @@ export function json(res: ServerResponse, value: unknown, status = 200): void {
   responseHeaders(res);
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(value));
+  res.end(
+    JSON.stringify({
+      type:
+        status >= 400
+          ? "error"
+          : httpType(res.req.method || "GET", res.req.url || "/"),
+      data: value,
+    }),
+  );
 }
 export function failure(res: ServerResponse, error: unknown): void {
   if (res.headersSent) {
@@ -84,7 +93,10 @@ export async function requestJson(
     chunks.push(chunk);
   }
   try {
-    const value = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    const value = unwrap(
+      JSON.parse(Buffer.concat(chunks).toString("utf8")),
+      httpType(req.method || "GET", req.url || "/"),
+    );
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new Error();
     return value;

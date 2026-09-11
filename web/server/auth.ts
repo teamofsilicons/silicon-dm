@@ -1,3 +1,4 @@
+import { encodeRequest, unwrap } from "../src/wire.ts";
 import type { Config } from "./config.ts";
 import {
   GatewayError,
@@ -53,7 +54,7 @@ export async function responseJson(
       }
       chunks.push(part.value);
     }
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return unwrap(JSON.parse(Buffer.concat(chunks).toString("utf8")));
   } finally {
     reader.releaseLock();
   }
@@ -84,7 +85,7 @@ export class Auth {
       response = await fetch(new URL(path, this.config.api), {
         method: "POST",
         headers,
-        body: JSON.stringify(body),
+        body: JSON.stringify(encodeRequest("POST", path, body)),
         redirect: "error",
         signal: AbortSignal.timeout(20000),
       });

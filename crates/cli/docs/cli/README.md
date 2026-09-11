@@ -97,11 +97,12 @@ Participant IDs are IAM public actor IDs, not local profile names. The current
 actor is added automatically. A conversation is scoped to its exact participant
 set. Repeated `--participant` and `--attachment` flags add multiple values.
 
-For combinations of media, use `--data message.json`:
+For combinations of media, use `--data message.json`. This file is message
+content; the client adds the [wire envelope](../wire-format.md) when sending:
 
 ```json
 {
-  "text": "Voice note and attachment",
+  "message": "Voice note and attachment",
   "attachments": [{"permanent_url": "https://example.com/report.pdf"}],
   "voice": {
     "permanent_url": "https://example.com/note.ogg",

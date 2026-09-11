@@ -1,6 +1,6 @@
 # Realtime and local relay integration
 
-The public WebSocket version is 2. `Client::connect` opens the authenticated
+The public WebSocket version is 3. `Client::connect` opens the authenticated
 `/api/v1/ws` endpoint with `org_id`, repeated `actors` parameters and `device_id`.
 The socket is returned to the caller; the library does not start a hidden task,
 persist events or send an ACK automatically. The CLI's daemon implements those
@@ -13,9 +13,12 @@ configured for larger encoded payloads. Bounds are never disabled. The CLI
 supports the equivalent `DM_CLIENT_MAX_FRAME_BYTES` setting when starting its
 daemon.
 
+Every frame uses the [type/data envelope](../wire-format.md). Rust enum and
+struct field names remain source-compatible; Serde handles the wire shape.
+
 ## Socket lifecycle
 
-1. Wait for `ServerFrame::Ready`. Verify `protocol_version == 2` and the returned
+1. Wait for `ServerFrame::Ready`. Verify `protocol_version == 3` and the returned
    authorized actors. Production `testing_generation` is null.
 2. For each actor, send `Resume { after_sequence }` using the last contiguous
    cursor that your own storage has committed. Zero means replay from the start.
@@ -82,25 +85,34 @@ cleaning or rotation.
 `relay::RelayClient` accesses the loopback daemon rather than DM. Obtain its
 address/token from `dm relay credentials` and keep that local token private.
 `submit` accepts a typed `RelayRequest`; `submit_value` preserves the caller's
-entire supplied JSON in its acknowledgement. No IAM token belongs in a relay
+entire supplied type/data envelope in its acknowledgement. No IAM token belongs in a relay
 request. The daemon selects credentials from the named local profile and
 optional testing-environment UUID.
 
 ```json
 {
-  "request_id": "b0887c99-4b5c-49ba-906d-18a93707036a",
-  "profile": "writer",
-  "testing_environment_id": null,
-  "request": {
-    "operation": "send_message",
-    "conversation_id": "017a9799-61f3-449c-a26d-dee504928024",
-    "idempotency_key": "writer-job-42-message-1",
-    "message": {"text": "Ready", "metadata": {"job_id": "42"}}
+  "type": "request",
+  "data": {
+    "request_id": "b0887c99-4b5c-49ba-906d-18a93707036a",
+    "profile": "writer",
+    "testing_environment_id": null,
+    "request": {
+      "operation": "send_message",
+      "conversation_id": "017a9799-61f3-449c-a26d-dee504928024",
+      "idempotency_key": "writer-job-42-message-1",
+      "message": {
+        "metadata": {
+          "job_id": "42"
+        },
+        "message": "Ready"
+      }
+    }
   }
 }
 ```
 
-The 202 acknowledgement includes `acknowledged:true`, `request_id`, and the exact
+The 202 `type: "request"` acknowledgement includes `data.acknowledged:true`,
+`data.request_id`, and the exact
 request JSON. It means durable local acceptance. `result(request_id)` returns
 `pending`, `completed` or `failed`, with the original request and either a result
 or structured error. Repeating a request ID with identical JSON returns the same

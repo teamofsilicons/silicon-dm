@@ -7,7 +7,7 @@ No IAM application secret belongs in either component.
 
 ```toml
 [dependencies]
-silicon-dm-client = { version = "0.3", features = ["runtime"] }
+silicon-dm-client = { version = "0.4", features = ["runtime"] }
 ```
 
 For development against this checkout, use a path dependency.
@@ -98,7 +98,7 @@ Each incoming delivery is persisted before the backend transport ACK. With no
 configured webhook, callbacks stay pending without being marked delivered;
 configuring one resumes them. Unhooking retains authentication and queued work. The
 runtime posts it to the profile's callback until HTTP success and an exact
-`{"acknowledged":true,"delivery_id":"received UUID"}` response. Recipient
+`{"type":"ack","data":{"acknowledged":true,"delivery_id":"received UUID"}}` response. Recipient
 message acceptance queues Delivered; Read remains explicit. A logged-out
 profile keeps its pending work but no longer dispatches it. Sandbox generation
 changes prevent old queued mutations from reaching a cleaned environment.

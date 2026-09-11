@@ -1,0 +1,18 @@
+[package]
+name = "silicon-dm-protocol"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.98"
+license = "LicenseRef-Proprietary"
+description = "Shared JSON envelope contract for Silicon DM"
+repository = "https://github.com/teamofsilicons/silicon-dm"
+
+[features]
+http = ["dep:axum", "dep:futures-util"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = { version = "0.8.9", optional = true }
+futures-util = { version = "0.3.31", optional = true }
+

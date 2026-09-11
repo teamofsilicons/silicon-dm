@@ -283,7 +283,8 @@ impl RelayClient {
         })
     }
     pub async fn submit(&self, request: &RelayRequest) -> Result<RelayAcknowledgement> {
-        self.submit_json(request).await
+        self.submit_json(&crate::Envelope::new("request", request))
+            .await
     }
     /// Preserves unknown JSON properties when acknowledging the caller's exact request.
     pub async fn submit_value(&self, request: &Value) -> Result<RelayAcknowledgement> {
@@ -306,8 +307,9 @@ impl RelayClient {
                 .await?,
         )
         .await?
-        .json()
-        .await?)
+        .json::<crate::Envelope<RelayAcknowledgement>>()
+        .await?
+        .data)
     }
     pub async fn result(&self, id: Uuid) -> Result<RelayResult> {
         let url = self
@@ -317,8 +319,9 @@ impl RelayClient {
         Ok(
             crate::checked(self.http.get(url).bearer_auth(&self.token).send().await?)
                 .await?
-                .json()
-                .await?,
+                .json::<crate::Envelope<RelayResult>>()
+                .await?
+                .data,
         )
     }
     /// Reads progress without transferring the queued request or result body.
@@ -332,8 +335,9 @@ impl RelayClient {
         Ok(
             crate::checked(self.http.get(url).bearer_auth(&self.token).send().await?)
                 .await?
-                .json()
-                .await?,
+                .json::<crate::Envelope<RelayRequestStatus>>()
+                .await?
+                .data,
         )
     }
     pub async fn status(&self) -> Result<Value> {
@@ -344,8 +348,9 @@ impl RelayClient {
         Ok(
             crate::checked(self.http.get(url).bearer_auth(&self.token).send().await?)
                 .await?
-                .json()
-                .await?,
+                .json::<crate::Envelope<Value>>()
+                .await?
+                .data,
         )
     }
     pub async fn stop(&self) -> Result<()> {

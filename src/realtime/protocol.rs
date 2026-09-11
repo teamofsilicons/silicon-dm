@@ -10,11 +10,16 @@ use crate::domain::{
 };
 
 /// Current application-level WebSocket protocol version.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = silicon_dm_protocol::WEBSOCKET_VERSION;
 
 /// Frames accepted from an authenticated client.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ClientFrame {
     /// Application heartbeat response. It is never persisted or sequenced.
     Pong {
@@ -56,6 +61,7 @@ pub enum ClientFrame {
         device_id: String,
     },
     /// Creates a durable conversation message over the realtime connection.
+    #[serde(rename = "new_message")]
     SendMessage {
         /// Represented sender.
         actor_id: ActorId,
@@ -66,6 +72,7 @@ pub enum ClientFrame {
         /// Retry-safe client key.
         idempotency_key: IdempotencyKey,
         /// Normal message content.
+        #[serde(flatten)]
         message: Box<MessageCreate>,
     },
 }
@@ -90,7 +97,12 @@ pub enum DeliveryPayload {
 
 /// Frames emitted by DM.
 #[derive(Clone, Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ServerFrame {
     /// Initial session metadata and server-observed ACK cursors.
     Ready {
@@ -115,6 +127,7 @@ pub enum ServerFrame {
         /// Retry-safe client key associated with the command.
         idempotency_key: IdempotencyKey,
         /// Newly accepted or idempotently replayed message.
+        #[serde(flatten)]
         message: Box<Message>,
     },
     /// Confirms a monotonic device receipt was stored.
@@ -125,6 +138,7 @@ pub enum ServerFrame {
         status: ReceiptStatus,
     },
     /// Durable conversation-message delivery.
+    #[serde(rename = "new_message")]
     Message {
         /// Stable actor-delivery identifier used for deduplication.
         delivery_id: Uuid,
@@ -133,6 +147,7 @@ pub enum ServerFrame {
         /// Stable sequence within the actor stream.
         delivery_sequence: i64,
         /// Durable message.
+        #[serde(flatten)]
         message: Box<Message>,
     },
     /// Durable aggregate receipt update.
@@ -228,7 +243,8 @@ mod tests {
 
     #[test]
     fn pong_matches_published_shape() -> Result<(), serde_json::Error> {
-        let frame: ClientFrame = serde_json::from_str(r#"{"type":"pong","ping_id":"p-1"}"#)?;
+        let frame: ClientFrame =
+            serde_json::from_str(r#"{"type":"pong","data":{"ping_id":"p-1"}}"#)?;
         assert!(matches!(frame, ClientFrame::Pong { ping_id } if ping_id == "p-1"));
         Ok(())
     }
@@ -240,7 +256,7 @@ mod tests {
         })?;
         assert_eq!(encoded.get("type"), Some(&serde_json::json!("ping")));
         assert!(encoded.get("delivery_sequence").is_none());
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
         Ok(())
     }
 
@@ -256,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_frame_advertises_protocol_version_two() -> Result<(), Box<dyn std::error::Error>> {
+    fn ready_frame_advertises_protocol_version_three() -> Result<(), Box<dyn std::error::Error>> {
         let encoded = serde_json::to_value(ServerFrame::Ready {
             testing_generation: None,
             protocol_version: PROTOCOL_VERSION,
@@ -265,7 +281,10 @@ mod tests {
             acknowledged_through: BTreeMap::from([("carbon-1".to_owned(), 7)]),
         })?;
         assert_eq!(encoded.get("type"), Some(&serde_json::json!("ready")));
-        assert_eq!(encoded.get("protocol_version"), Some(&serde_json::json!(2)));
+        assert_eq!(
+            encoded.pointer("/data/protocol_version"),
+            Some(&serde_json::json!(3))
+        );
         Ok(())
     }
 
@@ -273,12 +292,12 @@ mod tests {
     fn protocol_v2_voice_command_requires_duration_and_preserves_transcript()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = serde_json::json!({
-            "type": "send_message",
+            "type": "new_message",
+            "data": {
             "actor_id": "carbon-1",
             "org_id": "organization-1",
             "conversation_id": "018f0d52-7b2a-7e29-a41d-7c02b93f6f42",
             "idempotency_key": "voice-command-1",
-            "message": {
                 "voice": {
                     "permanent_url": "https://media.example/voice.ogg",
                     "content_type": "audio/ogg",
@@ -306,8 +325,8 @@ mod tests {
 
         let mut missing_duration = frame;
         if let Some(voice) = missing_duration
-            .get_mut("message")
-            .and_then(|message| message.get_mut("voice"))
+            .get_mut("data")
+            .and_then(|data| data.get_mut("voice"))
             .and_then(serde_json::Value::as_object_mut)
         {
             voice.remove("duration_milliseconds");

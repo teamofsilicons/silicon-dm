@@ -1,5 +1,8 @@
 # DM testing environments
 
+All DM JSON HTTP bodies use the [type/data wire envelope](wire-format.md).
+The CLI adds it automatically around command input files.
+
 DM exposes the same messages, conversations, receipts, drafts, bundles, presence,
 GIF, login, refresh, logout, and WebSocket APIs in production and testing. A test
 key selects an isolated dataset and a paired IAM testing environment. It never
@@ -198,7 +201,7 @@ Authorization: Bearer <paired-IAM-test-DM-access-token>
 X-Org-Id: <test-organization-id>
 ```
 
-For test login, send the root header and `{ "slt": "..." }` to `/auth/login`;
+For test login, send the root header and `{"type":"login","data":{"slt":"..."}}` to `/auth/login`;
 no access token exists yet. Keep using the root header for refresh, logout,
 REST operations, and the WebSocket upgrade at `/api/v1/ws`. Unknown, malformed,
 rotated, or deleted keys return 401. Repeated root headers return 422. The API

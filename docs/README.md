@@ -1,5 +1,8 @@
 # Silicon DM integration guides
 
+Read [the JSON wire format](wire-format.md) for the common type/data envelope,
+WebSocket v3, operation names, and upgrade requirements.
+
 - [API](api/README.md): HTTP paths, authentication, content, errors, WebSocket frames, ACKs, and pagination.
 - [Rust client](client/README.md): stateless typed methods and caller-owned credentials.
 - [Optional SDK runtime](client/runtime.md): durable local relay hosting, daemon launch, and hourly update policy.

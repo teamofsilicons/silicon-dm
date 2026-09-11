@@ -164,6 +164,7 @@ pub fn build_router(state: AppState) -> Router {
         }))
         .layer(DefaultBodyLimit::max(maximum_body))
         .layer(middleware)
+        .layer(axum::middleware::from_fn(silicon_dm_protocol::responses))
         .layer(axum::middleware::map_response(prevent_response_caching))
 }
 

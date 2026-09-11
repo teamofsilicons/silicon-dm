@@ -30,6 +30,18 @@ The server sends an application-level JSON `ping` every 30 seconds. The adapte
 
 For the said message sent and recieved when a message is being sent by a silicon or recieved by a silicon or sent to a silicon, it should be possible to include `isi` at the start, so say for when someone is sending a message to `cos:tos` they can say to send it to `deliberate@cos:tos` the deliberate here is the ISI, isi is an optional thing that can be configured via the sendee and requestee, dm just supports isi so isi can be used to send and recieve accordingly.
 
+For every single request sent it should be sent in the format:
+```
+"type": "new_message",
+"data": {
+	"message": "the message here",
+	"metadata": {
+		metadata here
+	}
+}
+```
+
+Just these 2 feilds must be present in all sent. And metadata included inside data itself. 
 
 # Message Types
 

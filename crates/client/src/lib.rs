@@ -5,6 +5,7 @@ pub mod relay;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 pub use models::*;
+pub use silicon_dm_protocol::Envelope;
 
 use reqwest::{Client as HttpClient, Method, RequestBuilder};
 use serde::{Serialize, de::DeserializeOwned};
@@ -164,12 +165,25 @@ impl Client {
         }
         Ok(request)
     }
+    async fn send(&self, builder: RequestBuilder) -> Result<reqwest::Response> {
+        let mut request = builder.build()?;
+        if let Some(body) = request.body().and_then(reqwest::Body::as_bytes) {
+            let kind =
+                silicon_dm_protocol::http_type(request.method().as_str(), request.url().path());
+            // Preserve already-serialized JSON bytes, avoiding a second parsed message allocation.
+            let mut encoded = format!("{{\"type\":\"{kind}\",\"data\":").into_bytes();
+            encoded.extend_from_slice(body);
+            encoded.push(b'}');
+            *request.body_mut() = Some(encoded.into());
+        }
+        Ok(self.http.execute(request).await?)
+    }
     async fn json<T: DeserializeOwned>(&self, request: RequestBuilder) -> Result<T> {
-        let response = checked(request.send().await?).await?;
-        Ok(serde_json::from_slice(&response.bytes().await?)?)
+        let response = checked(self.send(request).await?).await?;
+        Ok(serde_json::from_slice::<Envelope<T>>(&response.bytes().await?)?.data)
     }
     async fn empty(&self, request: RequestBuilder) -> Result<()> {
-        checked(request.send().await?).await?;
+        checked(self.send(request).await?).await?;
         Ok(())
     }
     pub async fn login(&self, slt: &str, key: &str) -> Result<Tokens> {
@@ -546,7 +560,11 @@ async fn checked(response: reqwest::Response) -> Result<reqwest::Response> {
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
-    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    let body = response
+        .json::<Envelope<Value>>()
+        .await
+        .map(|e| e.data)
+        .unwrap_or(Value::Null);
     let code = body
         .pointer("/error/code")
         .and_then(Value::as_str)

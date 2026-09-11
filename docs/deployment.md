@@ -209,7 +209,7 @@ expecting further test callbacks. Production uses the registered public URL.
 ## Rust package and CLI release
 
 The client and CLI are published on crates.io. For each new release, publish
-`silicon-dm-client` before `silicon-dm-cli`, whose manifest depends on that
+`silicon-dm-protocol`, then `silicon-dm-client`, then `silicon-dm-cli`, whose manifest depends on that
 client version. Use the appropriate crates.io owner account and review the
 package contents and release version before publication.
 

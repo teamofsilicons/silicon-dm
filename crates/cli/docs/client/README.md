@@ -9,7 +9,7 @@ state directory. The stateful `dm` CLI uses that same SDK runtime.
 
 ## Installation and configuration
 
-Add `silicon-dm-client = "0.3"` to your application's Cargo manifest to use the
+Add `silicon-dm-client = "0.4"` to your application's Cargo manifest to use the
 published package. For development against this checkout, depend on
 `crates/client` by path.
 

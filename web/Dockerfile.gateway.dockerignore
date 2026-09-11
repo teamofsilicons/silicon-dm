@@ -5,3 +5,5 @@
 !scripts/build.mjs
 !server/
 !server/**
+!src/
+!src/wire.ts

@@ -34,21 +34,29 @@ POST /api/v1/auth/login
 Content-Type: application/json
 Idempotency-Key: 98ac875d-e610-40a8-b431-f17919dba362
 
-{"slt":"oac_REPLACE_WITH_IAM_TOKEN"}
+{"type":"login","data":{"slt":"oac_REPLACE_WITH_IAM_TOKEN"}}
 ```
 
 DM calls the SDK's `oauth().login(app_id, slt, mutation)` using its server-side application credential. DM then introspects the returned access token and validates its complete live organization authorization snapshot before returning any session:
 
 ```json
 {
-  "access_token": "oat_REDACTED",
-  "refresh_token": "ort_REDACTED",
-  "token_type": "Bearer",
-  "expires_in": 1800,
-  "scope": "memberships.read offline_access organizations.read profile roles.read",
-  "actor": {"type": "carbon", "id": "alice"},
-  "organization_id": "tos",
-  "organization_ids": ["tos"]
+  "type": "login",
+  "data": {
+    "access_token": "oat_REDACTED",
+    "refresh_token": "ort_REDACTED",
+    "token_type": "Bearer",
+    "expires_in": 1800,
+    "scope": "memberships.read offline_access organizations.read profile roles.read",
+    "actor": {
+      "type": "carbon",
+      "id": "alice"
+    },
+    "organization_id": "tos",
+    "organization_ids": [
+      "tos"
+    ]
+  }
 }
 ```
 

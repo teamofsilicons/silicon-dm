@@ -88,6 +88,7 @@ pub struct MessageCreate {
     pub recipient_id: Option<super::ActorId>,
     /// Optional text content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "message", alias = "text")]
     pub text: Option<String>,
     /// Zero or more stable HTTPS attachments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -164,6 +165,7 @@ pub struct Message {
     pub status: MessageStatus,
     /// Text content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "message", alias = "text")]
     pub text: Option<String>,
     /// Stable attachment references.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -270,6 +272,41 @@ impl MessageCreate {
         }
         validate_attachments(&self.attachments, self.voice.as_ref())?;
         validate_gif(self.gif.as_ref())
+    }
+
+    /// Stable pre-envelope representation used by the durable edit retry journal.
+    pub(crate) fn idempotency_content(&self) -> impl Serialize + '_ {
+        #[derive(Serialize)]
+        struct Content<'a> {
+            metadata: &'a serde_json::Map<String, serde_json::Value>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reply_to_message_id: Option<Uuid>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            sender_id: Option<&'a super::ActorId>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            recipient_id: Option<&'a super::ActorId>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            text: Option<&'a str>,
+            #[serde(skip_serializing_if = "<[Attachment]>::is_empty")]
+            attachments: &'a [Attachment],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            voice: Option<&'a VoiceAttachment>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            voice_transcript: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            gif: Option<&'a Gif>,
+        }
+        Content {
+            metadata: &self.metadata,
+            reply_to_message_id: self.reply_to_message_id,
+            sender_id: self.sender_id.as_ref(),
+            recipient_id: self.recipient_id.as_ref(),
+            text: self.text.as_deref(),
+            attachments: &self.attachments,
+            voice: self.voice.as_ref(),
+            voice_transcript: self.voice_transcript.as_deref(),
+            gif: self.gif.as_ref(),
+        }
     }
 
     /// Returns a canonical content digest used for safe draft clearing.

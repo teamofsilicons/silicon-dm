@@ -2821,7 +2821,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-dm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2837,6 +2837,8 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "silicon-dm-client",
+ "silicon-dm-protocol",
  "silicon-iam-client",
  "sqlx",
  "subtle",
@@ -2857,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-dm-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2874,7 +2876,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-dm-client"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2887,11 +2889,22 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "silicon-dm-protocol",
  "thiserror",
  "tokio",
  "tokio-tungstenite 0.28.0",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "silicon-dm-protocol"
+version = "0.4.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

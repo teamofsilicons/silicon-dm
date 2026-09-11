@@ -1,3 +1,4 @@
+import { encodeRequest, decodeData, unwrap } from "./wire.ts";
 import type {
   AppConfig,
   Attachment,
@@ -192,7 +193,13 @@ export async function api<T>(
   }
   let encoded: string | undefined;
   if (body !== undefined) {
-    encoded = JSON.stringify(body);
+    encoded = JSON.stringify(
+      encodeRequest(
+        (requestOptions.method || "GET").toUpperCase(),
+        target,
+        body,
+      ),
+    );
     headers.set("Content-Type", "application/json");
   }
   let response: Response;
@@ -227,7 +234,7 @@ export async function api<T>(
   let text = await response.text();
   let value: unknown;
   try {
-    value = text ? JSON.parse(text) : undefined;
+    value = text ? decodeData(unwrap(JSON.parse(text))) : undefined;
     text = "";
   } catch {
     throw new ApiError(

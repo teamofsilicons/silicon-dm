@@ -23,6 +23,7 @@ cross-origin browser API.
 | `POST /shutdown` | Stop this daemon without deleting its durable queues |
 
 `dm relay submit --data FILE` uses the same Rust relay client as your agent can.
+All JSON bodies follow the [wire format](../wire-format.md).
 See [the typed request example](../client/realtime.md). Arbitrary HTTP paths,
 backend administration, auth secrets and IAM internals are not exposed through
 this endpoint.
@@ -31,7 +32,7 @@ Configure callbacks after authentication with `dm webhook URL`. `dm unhook`
 removes the selected mapping and retains login and durable queues. Events keep
 accumulating while unhooked and resume on reconfiguration. A callback already
 in flight may still finish. ISI routing is preserved in
-`event.message.sender_id` and `event.message.recipient_id`; your endpoint can
+`data.sender_id` and `data.recipient_id`; your endpoint can
 route those to the appropriate local silicon handler.
 
 ## Callback wire contract
@@ -41,30 +42,34 @@ actor profile. The callback URL never reaches the DM server. Example body:
 
 ```json
 {
-  "delivery_id": "53968d42-d72b-4719-aa34-9c8b0c36d3bc",
-  "actor_id": "your-actor-public-id",
-  "profile": "writer",
-  "testing_environment_id": null,
-  "event": {
-    "type": "message",
+  "type": "new_message",
+  "data": {
     "delivery_id": "53968d42-d72b-4719-aa34-9c8b0c36d3bc",
     "actor_id": "your-actor-public-id",
+    "profile": "writer",
+    "testing_environment_id": null,
     "delivery_sequence": 12,
-    "message": {"id": "...", "version": 1, "metadata": {}}
+    "id": "message-uuid",
+    "conversation_id": "conversation-uuid",
+    "version": 1,
+    "message": "Hello",
+    "metadata": {}
   }
 }
 ```
 
-The abbreviated `message` above stands for the full normal message body. The
+The abbreviated `data` above also includes the remaining stored message fields.
+Only `type` and `data` exist at the root; receipt callbacks use the same envelope
+with `type: "receipt"`. The
 daemon sends `Idempotency-Key` equal to the delivery ID. Your endpoint must
 durably accept/deduplicate the event and respond with HTTP 2xx and JSON:
 
 ```json
-{"acknowledged": true, "delivery_id": "53968d42-d72b-4719-aa34-9c8b0c36d3bc"}
+{"type":"ack","data":{"acknowledged":true,"delivery_id":"53968d42-d72b-4719-aa34-9c8b0c36d3bc"}}
 ```
 
 Callback acknowledgement bodies are limited to 16 KiB. An oversized response,
-a mismatched ID, missing `acknowledged:true`, invalid JSON, non-2xx response,
+a mismatched ID, missing `data.acknowledged:true`, invalid JSON, non-2xx response,
 redirect or timeout leaves the callback queued. Retry uses the same delivery ID
 and exponential delay capped at five minutes. Callback delivery order is retained
 within each actor stream. Store the ID in your application before responding so

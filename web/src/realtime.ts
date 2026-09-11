@@ -1,3 +1,4 @@
+import { encodeFrame, decodeFrame } from "./wire.ts";
 import type {
   Activity,
   Message,
@@ -152,7 +153,7 @@ export function connectRealtime(
   }
   function send(frame: unknown, target = socket): boolean {
     if (!target || target.readyState !== WebSocket.OPEN) return false;
-    target.send(JSON.stringify(frame));
+    target.send(JSON.stringify(encodeFrame(frame as Record<string, unknown>)));
     return true;
   }
   function stopWithError(error: Error, unauthorized = false): void {
@@ -202,7 +203,7 @@ export function connectRealtime(
     if (epoch !== connectionEpoch || stopped) return;
     if (frame.type === "ready") {
       if (
-        frame.protocol_version !== 2 ||
+        frame.protocol_version !== 3 ||
         frame.actors.length !== 1 ||
         frame.actors[0] !== actorId
       )
@@ -385,7 +386,7 @@ export function connectRealtime(
         let frame: ServerFrame | undefined;
         if (event.data.length < 4096) {
           try {
-            frame = JSON.parse(event.data) as ServerFrame;
+            frame = decodeFrame(JSON.parse(event.data)) as ServerFrame;
           } catch {
             stopWithError(new Error("Invalid realtime JSON."));
             return;
@@ -403,7 +404,7 @@ export function connectRealtime(
           return;
         }
         try {
-          frame ??= JSON.parse(event.data) as ServerFrame;
+          frame ??= decodeFrame(JSON.parse(event.data)) as ServerFrame;
         } catch {
           stopWithError(new Error("Invalid realtime JSON."));
           return;
