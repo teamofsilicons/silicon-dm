@@ -216,6 +216,11 @@ impl IamClient {
             .ok_or_else(dependency_unavailable)?
             .project_iam_authorization(&snapshot, &actor)
             .await?;
+        self.directory
+            .as_ref()
+            .ok_or_else(dependency_unavailable)?
+            .initialize_member_conversations(organization_id, &actor)
+            .await?;
         Ok(AuthContext {
             actor,
             principal_id: snapshot.principal_id,

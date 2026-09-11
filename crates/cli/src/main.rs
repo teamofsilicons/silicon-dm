@@ -1,5 +1,6 @@
 mod daemon;
 mod docs;
+mod message_length;
 mod store;
 mod updater;
 use anyhow::{Context, Result, bail};
@@ -315,6 +316,9 @@ enum Messages {
         conversation: Uuid,
         #[command(flatten)]
         content: Content,
+        /// Allow text over 400 characters when a Silicon messages a Carbon.
+        #[arg(long)]
+        dangerously_send_long_message: bool,
     },
     /// Full replacement using --version from the current message; omitted fields are removed.
     #[command(
@@ -812,6 +816,7 @@ async fn run(cli: Cli) -> Result<Value> {
         }
         other => {
             let profile = store::profile(&config, &name, cli.test)?;
+            let mut long_message_override = false;
             let operation = match other {
                 Command::Whoami => Operation::Me,
                 Command::Conversations { command } => match command {
@@ -843,11 +848,26 @@ async fn run(cli: Cli) -> Result<Value> {
                     Messages::Send {
                         conversation,
                         content,
-                    } => Operation::SendMessage {
-                        conversation_id: conversation,
-                        message: content.read()?,
-                        idempotency_key: key,
-                    },
+                        dangerously_send_long_message,
+                    } => {
+                        let message = content.read()?;
+                        if message_length::needs_check(&profile.tokens.actor, &message) {
+                            let (config, profile) = store::fresh_profile(&session).await?;
+                            long_message_override = message_length::check(
+                                &store::client(&config, &profile)?,
+                                &profile.tokens.actor,
+                                conversation,
+                                &message,
+                                dangerously_send_long_message,
+                            )
+                            .await?;
+                        }
+                        Operation::SendMessage {
+                            conversation_id: conversation,
+                            message,
+                            idempotency_key: key,
+                        }
+                    }
                     Messages::Edit {
                         conversation,
                         message,
@@ -935,7 +955,11 @@ async fn run(cli: Cli) -> Result<Value> {
                 },
                 _ => bail!("unsupported command"),
             };
-            execute(&name, cli.test, operation, cli.wait_seconds).await
+            let result = execute(&name, cli.test, operation, cli.wait_seconds).await?;
+            if message_length::sent_warning(long_message_override, &result) {
+                eprintln!("{}", message_length::SENT_WARNING);
+            }
+            Ok(result)
         }
     }
 }

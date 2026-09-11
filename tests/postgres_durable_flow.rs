@@ -1198,3 +1198,107 @@ async fn exercise_isi_routing(store: &PostgresStore) -> TestResult<()> {
     assert_eq!(bundle.display_message.sender_id, content.sender_id);
     Ok(())
 }
+
+fn member(actor_type: ActorType, id: &str) -> TestResult<ActorRef> {
+    Ok(ActorRef {
+        actor_type,
+        id: id.parse()?,
+    })
+}
+
+#[tokio::test]
+async fn automatic_member_chats_are_scoped_idempotent_and_message_free() -> TestResult<()> {
+    let database = TestDatabase::start().await?;
+    let store = &database.store;
+    let org: OrganizationId = format!("auto-{}", Uuid::new_v4()).parse()?;
+    let other_org: OrganizationId = format!("other-{}", Uuid::new_v4()).parse()?;
+    let actor = member(ActorType::Carbon, "owner")?;
+    let tech = member(ActorType::Silicon, "tech:tos")?;
+    let colleague = member(ActorType::Carbon, "colleague")?;
+    let removed = member(ActorType::Silicon, "removed:tos")?;
+    let outsider = member(ActorType::Carbon, "outsider")?;
+    let unknown = member(ActorType::Carbon, "undisclosed")?;
+    store
+        .refresh_directory(
+            &org,
+            &[
+                actor.clone(),
+                tech.clone(),
+                colleague.clone(),
+                removed.clone(),
+                unknown.clone(),
+            ],
+        )
+        .await?;
+    store
+        .refresh_directory(&other_org, std::slice::from_ref(&outsider))
+        .await?;
+    for (scope, member, status) in [
+        (&org, &actor, "active"),
+        (&org, &tech, "active"),
+        (&org, &colleague, "active"),
+        (&org, &removed, "removed"),
+        (&other_org, &outsider, "active"),
+    ] {
+        sqlx::query("INSERT INTO iam_membership_projections(membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status) VALUES($1,$2,$3,$4,$5::text::actor_kind,$6,1,1,$7)")
+            .bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(scope.as_str()).bind(member.actor_type.as_str()).bind(member.id.as_str()).bind(status).execute(store.pool()).await?;
+    }
+    let existing = store
+        .create_conversation(CreateConversationCommand {
+            organization_id: org.clone(),
+            creator: actor.clone(),
+            participants: vec![actor.clone(), tech.clone()],
+            idempotency_key: Uuid::new_v4().to_string().parse()?,
+        })
+        .await?;
+    let (first, second) = tokio::join!(
+        store.initialize_member_conversations(&org, &actor),
+        store.initialize_member_conversations(&org, &actor)
+    );
+    first?;
+    second?;
+    store.initialize_member_conversations(&org, &actor).await?;
+    let chats = store
+        .list_conversations(&org, &actor, &PageRequest::default())
+        .await?;
+    assert_eq!(chats.items.len(), 2);
+    assert!(
+        chats
+            .items
+            .iter()
+            .all(|c| c.participants.len() == 2 && c.last_message.is_none())
+    );
+    assert!(
+        chats
+            .items
+            .iter()
+            .any(|c| c.participants.contains(&colleague))
+    );
+    let retained = chats
+        .items
+        .iter()
+        .find(|c| c.id == existing.id)
+        .ok_or("existing direct chat missing")?;
+    assert_eq!(retained.updated_at, existing.updated_at);
+    assert!(
+        !chats.items.iter().any(|c| c.participants.contains(&removed)
+            || c.participants.contains(&outsider)
+            || c.participants.contains(&unknown))
+    );
+    store
+        .initialize_member_conversations(&org, &unknown)
+        .await?;
+    assert!(
+        store
+            .list_conversations(&org, &unknown, &PageRequest::default())
+            .await?
+            .items
+            .is_empty()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE organization_id=$1")
+        .bind(org.as_str())
+        .fetch_one(store.pool())
+        .await?;
+    assert_eq!(count, 0);
+    Ok(())
+}
