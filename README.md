@@ -20,6 +20,12 @@ drafts. PostgreSQL commits messages and delivery outboxes together. Client relay
 storage commits inbound deliveries before transport ACK, and persists outgoing
 requests and idempotency keys before sending. Reconnects replay durable state.
 
+On authenticated access, DM initializes empty direct conversations with the
+other active organization members disclosed by IAM. They appear in the usual
+conversation list and sidebar without sending a message. Existing conversations
+keep their IDs and activity; removed, undisclosed, and other-organization members
+are excluded. Concurrent sign-ins do not create duplicate conversations.
+
 ## Development
 
 Requirements: the pinned Rust toolchain, PostgreSQL 16, a registered IAM

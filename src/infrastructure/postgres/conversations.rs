@@ -11,7 +11,7 @@ use crate::{
     AppError, AppResult,
     application::commands::CreateConversationCommand,
     domain::{
-        ActorRef, Conversation, ConversationPage, Cursor, MAX_CONVERSATION_PARTICIPANTS,
+        ActorRef, ActorType, Conversation, ConversationPage, Cursor, MAX_CONVERSATION_PARTICIPANTS,
         OrganizationId, PageRequest,
     },
 };
@@ -48,6 +48,71 @@ struct ConversationIdempotencyContent<'a> {
 }
 
 impl PostgresStore {
+    /// Initializes empty direct chats with IAM-disclosed active organization members.
+    /// Existing chats retain their IDs and activity; no message or delivery is created.
+    ///
+    /// # Errors
+    /// Fails closed on ambiguous IAM identities or database errors.
+    pub async fn initialize_member_conversations(
+        &self,
+        organization: &OrganizationId,
+        actor: &ActorRef,
+    ) -> AppResult<()> {
+        let mut tx = self.pool().begin().await?;
+        // The same active projections authorize explicit conversation creation.
+        // Lock them through insertion so a concurrent removal cannot create a new chat.
+        let members: Vec<(ActorType, String)> = sqlx::query_as(
+            "SELECT member.actor_kind, member.actor_id
+             FROM iam_membership_projections member
+             JOIN organization_snapshots org USING (organization_id)
+             JOIN iam_membership_projections caller ON caller.organization_id=org.organization_id
+             WHERE org.organization_id=$1 AND org.status='active'
+               AND caller.actor_kind=$2::text::actor_kind AND caller.actor_id=$3 AND caller.status='active'
+               AND member.status='active'
+               AND (member.actor_kind<>caller.actor_kind OR member.actor_id<>caller.actor_id)
+             ORDER BY member.membership_id
+             FOR SHARE OF member, caller, org",
+        )
+        .bind(organization.as_str()).bind(actor.actor_type.as_str()).bind(actor.id.as_str())
+        .fetch_all(&mut *tx).await?;
+        let mut unique = std::collections::HashSet::new();
+        let mut candidates = Vec::with_capacity(members.len());
+        for (kind, id) in members {
+            if !unique.insert(id.clone()) {
+                return Err(AppError::Forbidden);
+            }
+            let member = ActorRef {
+                actor_type: kind,
+                id: parse_actor_id(&id)?,
+            };
+            let mut participants = vec![actor.clone(), member.clone()];
+            canonicalize_participants(&mut participants);
+            let hash = participant_set_hash(&participants);
+            candidates.push(serde_json::json!({
+                "id": Uuid::now_v7(), "hash": blake3::Hash::from(hash).to_hex().to_string(),
+                "actor_kind": member.actor_type.as_str(), "actor_id": member.id.as_str(),
+            }));
+        }
+        if !candidates.is_empty() {
+            sqlx::query(
+                "WITH candidates AS (
+                   SELECT * FROM jsonb_to_recordset($4) AS c(id uuid, hash text, actor_kind text, actor_id text)
+                 ), created AS (
+                   INSERT INTO conversations (id,organization_id,participant_set_hash,created_by_kind,created_by_id)
+                   SELECT id,$1,decode(hash,'hex'),$2::text::actor_kind,$3 FROM candidates ORDER BY hash
+                   ON CONFLICT (organization_id,participant_set_hash) DO NOTHING RETURNING id
+                 )
+                 INSERT INTO conversation_participants (conversation_id,organization_id,actor_kind,actor_id)
+                 SELECT id,$1,$2::text::actor_kind,$3 FROM created
+                 UNION ALL
+                 SELECT c.id,$1,c.actor_kind::actor_kind,c.actor_id FROM candidates c JOIN created USING(id)",
+            )
+            .bind(organization.as_str()).bind(actor.actor_type.as_str()).bind(actor.id.as_str())
+            .bind(serde_json::Value::Array(candidates)).execute(&mut *tx).await?;
+        }
+        tx.commit().await.map_err(map_constraint_error)
+    }
+
     /// Creates or resolves the exact participant set idempotently.
     ///
     /// # Errors
