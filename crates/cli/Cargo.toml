@@ -1,6 +1,6 @@
 [package]
 name = "silicon-dm-cli"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.98"
 license = "LicenseRef-Proprietary"
@@ -24,3 +24,7 @@ serde_json = "1.0.145"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "process", "net"] }
 url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.26.0", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6.5"
