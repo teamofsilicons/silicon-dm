@@ -244,7 +244,12 @@ async fn app_secret_discovery_is_isolated_revalidated_and_resets_generation() ->
             .is_err()
     );
     iam.reset().await;
-    mock_context(&iam, id, &secret, 2, Some("2026-09-13T00:00:00Z")).await;
+    mock_context(&iam, id, &secret, 2, None).await;
+    let renamed = registry.state_for_key(&app, &secret).await?;
+    assert_eq!(renamed.testing_generation, selected.testing_generation);
+    assert_eq!(registry.selected_metadata(id).await?.name, "Sandbox 2");
+    iam.reset().await;
+    mock_context(&iam, id, &secret, 3, Some("2026-09-13T00:00:00Z")).await;
     let reset = registry.state_for_key(&app, &secret).await?;
     assert!(reset.testing_generation > selected.testing_generation);
     let actors: i64 = sqlx::query_scalar("SELECT count(*) FROM actor_snapshots")
