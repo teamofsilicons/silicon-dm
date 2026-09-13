@@ -2,12 +2,22 @@
 
 ## Rollout status
 
-The 0.5 implementation is ready for review on the
-[source branch](https://github.com/teamofsilicons/silicon-dm/tree/codex/dm-understanding-0.5).
-Production backend rollout and crates.io publication are pending. The installer
-uses the latest published CLI, which may not yet include these features. Deploy
-this backend before publishing the 0.5 CLI so automatic updates cannot break
-existing installations.
+The 0.5 backend, worker, browser gateway, and frontend are deployed in production.
+The protocol, Rust client, and CLI packages are published as **0.5.0** on crates.io.
+The [source branch](https://github.com/teamofsilicons/silicon-dm/tree/codex/dm-understanding-0.5)
+contains the implementation and deployment configuration.
+
+Production diagnostics are arriving in the dedicated Space Station table. Report
+email delivery still needs a DM Postmark server token; until configured, production
+report submission returns a clear unavailable error. Sandbox reports are simulated.
+
+The docs are live at [the Vercel mirror](https://silicon-dm-docs.vercel.app/).
+The custom domain needs the Namecheap `A docs.dm → 76.76.21.21` record. Until DNS is
+configured, the installation command is:
+
+```sh
+curl -fsSL https://silicon-dm-docs.vercel.app/install.sh | sh
+```
 
 To build the implementation locally:
 
@@ -61,8 +71,15 @@ using the standalone socket on the new server.
 - The live `tos / silicondm` Space Station table received and acknowledged diagnostic
   verification records. Its ingest key is kept in private deployment configuration.
 
-Production rollout still requires a renewed AWS session, migration execution,
-configuration of a DM Postmark server token and the Space Station ingest key, and
-API/worker/frontend rollout. Publish the package family only after that rollout.
-The docs project is deployed on Vercel; activating its requested custom domain
-requires the Namecheap `A docs.dm → 76.76.21.21` DNS record.
+- Production migrations completed with authenticated TLS and credential-continuity
+  checks, followed by a successful API/worker CloudFormation rollout.
+- The new browser gateway passed its live health check; the frontend is deployed
+  at [dm.teamofsilicons.com](https://dm.teamofsilicons.com).
+- Live contract discovery returns service 0.5.0 and shared protocol 1; the shared
+  WebSocket returns its prewarmed frame before any profile subscribes.
+- The published crate family passed Cargo's package verification, including a
+  combined workspace publication dry run before uploading. A fresh isolated
+  crates.io installation reports `dm 0.5.0`; its public `iam --json` call succeeds.
+
+Outstanding external setup: the Namecheap DNS record and a DM Postmark server
+token. No production bug-report email was sent during verification.
