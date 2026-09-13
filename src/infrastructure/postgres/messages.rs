@@ -926,7 +926,7 @@ async fn participant_records_in(
     sqlx::query_as::<_, ParticipantRecord>(
         r#"
         SELECT actor_kind::text AS actor_kind, actor_id
-        FROM conversation_participants
+        FROM effective_conversation_participants
         WHERE conversation_id = $1 AND organization_id = $2
         ORDER BY actor_kind, actor_id
         "#,
@@ -948,7 +948,7 @@ pub(crate) async fn require_participant_in(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM conversation_participants
+            FROM effective_conversation_participants
             WHERE conversation_id = $1
               AND organization_id = $2
               AND actor_kind = $3::text::actor_kind

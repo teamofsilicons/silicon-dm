@@ -15,6 +15,9 @@ pub struct Conversation {
     pub org_id: super::OrganizationId,
     /// Canonically ordered participants.
     pub participants: Vec<ActorRef>,
+    /// Named group policy; omitted for existing direct conversations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<super::GroupDetails>,
     /// Latest visible message, if any.
     pub last_message: Option<Message>,
     /// Creation time.

@@ -107,14 +107,16 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
     store
         .refresh_directory(&organization_id, &[sender.clone(), target.clone()])
         .await?;
-    let conversation = store
-        .create_conversation(CreateConversationCommand {
-            organization_id: organization_id.clone(),
-            creator: sender.clone(),
-            participants: vec![sender.clone(), target.clone()],
-            idempotency_key: idempotency_key("conversation-create-legacy-upgrade")?,
-        })
-        .await?;
+    // Seed the historical schema directly: current store readers require current migrations.
+    let conversation_id = Uuid::now_v7();
+    let mut tx = store.pool().begin().await?;
+    sqlx::query("INSERT INTO conversations(id,organization_id,participant_set_hash,created_by_kind,created_by_id) VALUES($1,$2,$3,'carbon',$4)")
+        .bind(conversation_id).bind(ORGANIZATION_ID).bind([1_u8;32].as_slice()).bind(SENDER_ID).execute(&mut *tx).await?;
+    for member in [&sender, &target] {
+        sqlx::query("INSERT INTO conversation_participants(conversation_id,organization_id,actor_kind,actor_id) VALUES($1,$2,$3::text::actor_kind,$4)")
+            .bind(conversation_id).bind(ORGANIZATION_ID).bind(member.actor_type.as_str()).bind(member.id.as_str()).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
 
     let legacy_message_id = Uuid::now_v7();
     let legacy_voice_url = "https://media.example/legacy.ogg";
@@ -138,7 +140,7 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
         "#,
     )
     .bind(legacy_message_id)
-    .bind(conversation.id)
+    .bind(conversation_id)
     .bind(ORGANIZATION_ID)
     .bind(SENDER_ID)
     .bind("historical provider transcript")
@@ -160,7 +162,7 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
         "#,
     )
     .bind(legacy_message_id)
-    .bind(conversation.id)
+    .bind(conversation_id)
     .bind(ORGANIZATION_ID)
     .bind(legacy_voice_url)
     .execute(&mut *transaction)
@@ -183,7 +185,7 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
     .bind(Uuid::now_v7())
     .bind(ORGANIZATION_ID)
     .bind(TARGET_ID)
-    .bind(conversation.id)
+    .bind(conversation_id)
     .bind(legacy_message_id)
     .execute(&mut *transaction)
     .await?;
@@ -200,7 +202,7 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
         VALUES ($1, $2, 'carbon', $3, NULL, $4)
         "#,
     )
-    .bind(conversation.id)
+    .bind(conversation_id)
     .bind(ORGANIZATION_ID)
     .bind(SENDER_ID)
     .bind(&legacy_voice_hash)
@@ -221,7 +223,7 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
         VALUES ($1, $2, 'carbon', $3, 100, 'voice', $4, NULL)
         "#,
     )
-    .bind(conversation.id)
+    .bind(conversation_id)
     .bind(ORGANIZATION_ID)
     .bind(SENDER_ID)
     .bind(legacy_voice_url)
@@ -319,7 +321,7 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
         .list_messages(
             &organization_id,
             &sender,
-            conversation.id,
+            conversation_id,
             &PageRequest::default(),
             true,
         )
@@ -337,7 +339,7 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
         None
     );
     let legacy_draft = store
-        .get_draft(&organization_id, &sender, conversation.id)
+        .get_draft(&organization_id, &sender, conversation_id)
         .await?;
     assert_eq!(
         legacy_draft
@@ -493,7 +495,7 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
         "#,
     )
     .bind(Uuid::now_v7())
-    .bind(conversation.id)
+    .bind(conversation_id)
     .bind(ORGANIZATION_ID)
     .bind(SENDER_ID)
     .bind(vec![1_u8; 32])
@@ -563,7 +565,7 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
     let upgraded_voice_message = store
         .send_message(SendMessageCommand {
             organization_id: organization_id.clone(),
-            conversation_id: conversation.id,
+            conversation_id,
             sender: sender.clone(),
             content: MessageCreate {
                 voice: Some(VoiceAttachment {
@@ -588,7 +590,7 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
     );
     assert!(matches!(
         store
-            .get_draft(&organization_id, &sender, conversation.id)
+            .get_draft(&organization_id, &sender, conversation_id)
             .await,
         Err(AppError::NotFound)
     ));
@@ -1300,5 +1302,374 @@ async fn automatic_member_chats_are_scoped_idempotent_and_message_free() -> Test
         .fetch_one(store.pool())
         .await?;
     assert_eq!(count, 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "group policy transitions share one history and durable delivery stream"
+)]
+async fn groups_apply_current_iam_access_without_rewriting_history() -> TestResult<()> {
+    use silicon_dm::application::auth::{AuthContext, PresentedCredential};
+    use silicon_dm::domain::GroupSettings;
+    use std::collections::BTreeSet;
+    let database = TestDatabase::start().await?;
+    let store = &database.store;
+    sqlx::query("CREATE ROLE group_runtime")
+        .execute(store.pool())
+        .await?;
+    let grants = include_str!("../deploy/runtime-grants.sql")
+        .split_once("-- Run as the role")
+        .ok_or("grants")?
+        .1;
+    let grants =
+        format!("-- Run as the role{grants}").replace(":\"runtime_role\"", "group_runtime");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(grants))
+        .execute(store.pool())
+        .await?;
+    let mut runtime = store.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE group_runtime")
+        .execute(&mut *runtime)
+        .await?;
+    sqlx::query("SELECT dm.sync_group_participants('groups-org'), dm_private.assert_conversation_participant_count($1)").bind(Uuid::nil()).execute(&mut *runtime).await?;
+    runtime.commit().await?;
+    let org: OrganizationId = "groups-org".parse()?;
+    let actors = [
+        ActorRef {
+            actor_type: ActorType::Carbon,
+            id: "owner".parse()?,
+        },
+        ActorRef {
+            actor_type: ActorType::Carbon,
+            id: "reader".parse()?,
+        },
+        ActorRef {
+            actor_type: ActorType::Silicon,
+            id: "bot:groups-org".parse()?,
+        },
+        ActorRef {
+            actor_type: ActorType::Carbon,
+            id: "late".parse()?,
+        },
+    ];
+    let tag = Uuid::new_v4();
+    let iam_org = Uuid::new_v4();
+    store.refresh_directory(&org, &actors).await?;
+    for actor in &actors {
+        sqlx::query("INSERT INTO iam_membership_projections(membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status,tag_ids) VALUES($1,$2,$3,$4,$5::text::actor_kind,$6,1,1,'active',$7)")
+            .bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(iam_org).bind(org.as_str()).bind(actor.actor_type.as_str()).bind(actor.id.as_str()).bind(vec![tag]).execute(store.pool()).await?;
+    }
+    let authority = |actor: ActorRef, admin: bool, tags: Option<BTreeSet<Uuid>>| AuthContext {
+        actor,
+        principal_id: Uuid::new_v4(),
+        session_id: None,
+        organization_id: org.clone(),
+        org_role: admin.then(|| "org_admin".into()),
+        tag_ids: tags,
+        represented_actor_ids: BTreeSet::new(),
+        capabilities: BTreeSet::new(),
+        credential: PresentedCredential::Bearer(SecretString::from("test-token")),
+    };
+    let owner = authority(actors[0].clone(), true, None);
+    let reader = authority(actors[1].clone(), false, Some(BTreeSet::from([tag])));
+    let bot = authority(actors[2].clone(), false, Some(BTreeSet::from([tag])));
+    let settings = GroupSettings {
+        name: "Research".into(),
+        description: "Shared history".into(),
+        is_public: false,
+        tag_ids: vec![],
+    };
+    assert!(matches!(
+        store
+            .create_group(
+                &reader,
+                settings.clone(),
+                vec![],
+                &idempotency_key("denied-create")?
+            )
+            .await,
+        Err(AppError::Forbidden)
+    ));
+    let group = store
+        .create_group(
+            &owner,
+            settings.clone(),
+            vec![actors[1].clone()],
+            &idempotency_key("group-create")?,
+        )
+        .await?;
+    assert_eq!(
+        group.group.as_ref().ok_or("group")?.settings.name,
+        "Research"
+    );
+    let retry = store
+        .create_group(
+            &owner,
+            settings.clone(),
+            vec![actors[1].clone()],
+            &idempotency_key("group-create")?,
+        )
+        .await?;
+    assert_eq!(retry.id, group.id);
+    let second = store
+        .create_group(
+            &owner,
+            settings.clone(),
+            vec![actors[1].clone()],
+            &idempotency_key("another-group")?,
+        )
+        .await?;
+    assert_ne!(
+        second.id, group.id,
+        "groups with identical rosters remain distinct"
+    );
+    assert!(store.check_group_access(&bot, group.id).await.is_err());
+    let message = store
+        .send_message(SendMessageCommand {
+            organization_id: org.clone(),
+            conversation_id: group.id,
+            sender: owner.actor.clone(),
+            content: MessageCreate {
+                text: Some("Before you joined".into()),
+                ..MessageCreate::default()
+            },
+            idempotency_key: idempotency_key("group-message")?,
+        })
+        .await?;
+    store
+        .change_group_members(
+            &owner,
+            group.id,
+            vec![actors[3].clone()],
+            false,
+            &idempotency_key("invite-late")?,
+        )
+        .await?;
+    let history = store
+        .list_messages(&org, &actors[3], group.id, &PageRequest::default(), false)
+        .await?;
+    assert_eq!(history.items[0].id, message.id);
+    assert!(
+        store
+            .replay_deliveries(&org, &actors[3], 0, 10)
+            .await?
+            .is_empty(),
+        "joining grants history without backfilling old transport deliveries"
+    );
+    store
+        .record_receipt_without_payload(RecordReceiptCommand {
+            organization_id: org.clone(),
+            conversation_id: group.id,
+            message_id: message.id,
+            recipient: reader.actor.clone(),
+            device_id: "reader-device".into(),
+            status: ReceiptStatus::Read,
+        })
+        .await?;
+    assert_eq!(
+        store
+            .get_message(&org, &owner.actor, group.id, message.id)
+            .await?
+            .status,
+        MessageStatus::Read,
+        "late members do not hold old receipts open"
+    );
+    store
+        .change_group_members(
+            &owner,
+            group.id,
+            vec![reader.actor.clone()],
+            true,
+            &idempotency_key("uninvite-reader")?,
+        )
+        .await?;
+    assert!(
+        store
+            .require_participant(&org, &reader.actor, group.id)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .replay_deliveries(&org, &reader.actor, 0, 10)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_messages(
+                &org,
+                &reader.actor,
+                group.id,
+                &PageRequest::default(),
+                false
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .get_draft(&org, &reader.actor, group.id)
+            .await
+            .is_err()
+    );
+    let current = store.group_details(&org, group.id).await?.ok_or("group")?;
+    let tagged = GroupSettings {
+        tag_ids: vec![tag],
+        ..settings.clone()
+    };
+    store
+        .update_group(
+            &owner,
+            group.id,
+            tagged.clone(),
+            current.version,
+            &idempotency_key("enable-tags")?,
+        )
+        .await?;
+    store.check_group_access(&reader, group.id).await?;
+    store.check_group_access(&bot, group.id).await?;
+    store
+        .require_participant(&org, &bot.actor, group.id)
+        .await?;
+    let narrow = authority(reader.actor.clone(), false, None);
+    assert!(
+        store.check_group_access(&narrow, group.id).await.is_err(),
+        "undisclosed tags cannot inherit broader cached token permissions"
+    );
+    assert!(
+        store
+            .list_conversations_scoped(&org, &reader.actor, &PageRequest::default(), &[], true)
+            .await?
+            .items
+            .iter()
+            .all(|c| c.id != group.id)
+    );
+    let (membership, principal):(Uuid,Uuid)=sqlx::query_as("SELECT membership_id,principal_id FROM iam_membership_projections WHERE organization_id=$1 AND actor_id=$2").bind(org.as_str()).bind(reader.actor.id.as_str()).fetch_one(store.pool()).await?;
+    let event = |version: i64, tags: serde_json::Value| silicon_iam_client::models::WebhookEvent {
+        spec_version: serde_json::json!(1),
+        event_id: Uuid::new_v4(),
+        event_type: "organization.membership.updated.v1".into(),
+        occurred_at: OffsetDateTime::now_utc(),
+        organization_id: Some(iam_org),
+        aggregate: serde_json::json!({}),
+        data: serde_json::json!({"current":{"members":[{"resource":{"type":"organization_membership","id":membership,"principal_id":principal,"principal_type":"carbon","status":"active","version":version},"principal":{"public_id":reader.actor.id},"organization":{"id":iam_org,"org_id":org},"membership":{"authorization_epoch":version,"tags":tags},"authorization":"active"}]}}),
+    };
+    let mut tx = store.pool().begin().await?;
+    PostgresStore::project_iam_webhook(&mut tx, &event(1, serde_json::Value::Null)).await?;
+    tx.commit().await?;
+    store
+        .require_participant(&org, &reader.actor, group.id)
+        .await?;
+    // A newer undisclosed projection invalidates the old tags; explicit fresh
+    // disclosure restores them and an empty list revokes them immediately.
+    for (version, tags, allowed) in [
+        (2, serde_json::Value::Null, false),
+        (
+            3,
+            serde_json::json!([{"id":tag,"name":"Engineering"}]),
+            true,
+        ),
+        (4, serde_json::json!([]), false),
+    ] {
+        let mut tx = store.pool().begin().await?;
+        PostgresStore::project_iam_webhook(&mut tx, &event(version, tags)).await?;
+        tx.commit().await?;
+        assert_eq!(
+            store
+                .require_participant(&org, &reader.actor, group.id)
+                .await
+                .is_ok(),
+            allowed
+        );
+    }
+
+    assert!(
+        store
+            .require_participant(&org, &reader.actor, group.id)
+            .await
+            .is_err(),
+        "tag removal revokes historical roster access"
+    );
+    let current = store.group_details(&org, group.id).await?.ok_or("group")?;
+    store
+        .update_group(
+            &owner,
+            group.id,
+            GroupSettings {
+                is_public: true,
+                ..tagged.clone()
+            },
+            current.version,
+            &idempotency_key("enable-public")?,
+        )
+        .await?;
+    store
+        .require_participant(&org, &reader.actor, group.id)
+        .await?;
+    assert!(
+        store.check_group_access(&bot, group.id).await.is_err(),
+        "public Silicons require explicit invitation, even with matching tags"
+    );
+    assert!(
+        store
+            .require_participant(&org, &bot.actor, group.id)
+            .await
+            .is_err()
+    );
+    store
+        .change_group_members(
+            &owner,
+            group.id,
+            vec![bot.actor.clone()],
+            false,
+            &idempotency_key("invite-bot")?,
+        )
+        .await?;
+    store.check_group_access(&bot, group.id).await?;
+    store
+        .require_participant(&org, &bot.actor, group.id)
+        .await?;
+    assert!(
+        store
+            .update_group(
+                &owner,
+                group.id,
+                tagged,
+                1,
+                &idempotency_key("stale-policy")?
+            )
+            .await
+            .is_err()
+    );
+    let mut cross_org = owner.clone();
+    cross_org.organization_id = "other-org".parse()?;
+    assert!(
+        store
+            .check_group_access(&cross_org, group.id)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .change_group_members(
+                &cross_org,
+                group.id,
+                vec![reader.actor.clone()],
+                false,
+                &idempotency_key("cross-org-invite")?
+            )
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE iam_membership_projections SET status='removed' WHERE organization_id=$1 AND actor_id=$2").bind(org.as_str()).bind(bot.actor.id.as_str()).execute(store.pool()).await?;
+    assert!(
+        store
+            .require_participant(&org, &bot.actor, group.id)
+            .await
+            .is_err(),
+        "org departure overrides explicit invitation"
+    );
     Ok(())
 }

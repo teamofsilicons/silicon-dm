@@ -1,5 +1,7 @@
 # Realtime and local relay integration
 
+Current 0.5 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
+
 The public WebSocket version is 3. `Client::connect` opens the authenticated
 `/api/v1/ws` endpoint with `org_id`, repeated `actors` parameters and `device_id`.
 The socket is returned to the caller; the library does not start a hidden task,

@@ -112,7 +112,8 @@ export class Sockets {
       for (const key of url.searchParams.keys())
         if (
           ![
-            "profile_id",
+            "telemetry",
+        "profile_id",
             "device_id",
             "testing_generation",
             "actors",
@@ -125,6 +126,7 @@ export class Sockets {
             "Unknown WebSocket parameter.",
           );
       for (const key of [
+        "telemetry",
         "profile_id",
         "device_id",
         "testing_generation",
@@ -189,7 +191,7 @@ export class Sockets {
       }
       let connected;
       try {
-        connected = await this.connect(target, headersFor(current.profile));
+        connected = await this.connect(target, telemetryHeaders(current.profile, url.searchParams.get("telemetry")));
       } catch (error) {
         if (!(error instanceof GatewayError) || error.status !== 401)
           throw error;
@@ -198,7 +200,7 @@ export class Sockets {
           current.browser.id,
           current.profile.profile_id,
         );
-        connected = await this.connect(target, headersFor(current.profile));
+        connected = await this.connect(target, telemetryHeaders(current.profile, url.searchParams.get("telemetry")));
       }
       const upstream = connected.socket;
       if (socket.destroyed) {
@@ -265,4 +267,11 @@ export class Sockets {
         );
     }
   }
+}
+
+function telemetryHeaders(profile: Parameters<typeof headersFor>[0], preference: string | null): Headers {
+  const headers = headersFor(profile);
+  headers.set("X-DM-Source", "web");
+  headers.set("X-DM-Telemetry", preference === "off" ? "off" : "on");
+  return headers;
 }

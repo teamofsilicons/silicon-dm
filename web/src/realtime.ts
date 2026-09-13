@@ -1,3 +1,4 @@
+import { telemetryEnabled } from "./telemetry";
 import { encodeFrame, decodeFrame } from "./wire.ts";
 import type {
   Activity,
@@ -359,6 +360,7 @@ export function connectRealtime(
       if (stopped || terminal || epoch !== connectionEpoch) return;
       const url = new URL("/api/ws", gatewayOrigin());
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("telemetry", telemetryEnabled() ? "on" : "off");
       url.searchParams.set("profile_id", profileId);
       url.searchParams.set("device_id", deviceId);
       if (previousGeneration != null)
@@ -575,6 +577,15 @@ export function connectRealtime(
   window.addEventListener("dm:unauthorized", unauthorized);
   document.addEventListener("visibilitychange", visibility);
   state(navigator.onLine ? "connecting" : "offline");
+  const telemetryChanged = () => {
+    if (stopped) return;
+    connectionEpoch++;
+    socket?.close(1000, "settings-changed");
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+    void open();
+  };
+  window.addEventListener("dm-telemetry-change", telemetryChanged);
   if (navigator.onLine) void open();
   return {
     close() {
@@ -585,6 +596,7 @@ export function connectRealtime(
       clearInterval(watchdog);
       channel?.close();
       socket?.close(1000, "client-closed");
+      window.removeEventListener("dm-telemetry-change", telemetryChanged);
       window.removeEventListener("online", online);
       window.removeEventListener("offline", offline);
       window.removeEventListener("dm:unauthorized", unauthorized);

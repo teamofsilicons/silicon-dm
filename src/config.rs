@@ -35,8 +35,32 @@ pub struct Settings {
     pub realtime: RealtimeSettings,
     /// Delivery-worker policy.
     pub worker: WorkerSettings,
+    /// Context-rich, opt-out observability.
+    pub telemetry: TelemetrySettings,
+    /// Optional Postmark notification transport for durable bug reports.
+    pub reporting: Option<ReportingSettings>,
     /// Tracing filter directive.
     pub log_filter: String,
+}
+
+/// Space Station exporter configuration. No ingest key is shipped to consumers.
+#[derive(Clone, Debug)]
+pub struct TelemetrySettings {
+    /// Enable diagnostic recording (default true).
+    pub enabled: bool,
+    /// Write-only key for this deployment's dedicated table.
+    pub table_key: Option<SecretString>,
+    /// Private spool location for the official SDK's daemon.
+    pub home: std::path::PathBuf,
+}
+
+/// Server-only Postmark credentials. Sandboxes never use this transport.
+#[derive(Clone, Debug)]
+pub struct ReportingSettings {
+    /// Postmark email endpoint; production requires HTTPS.
+    pub endpoint: Url,
+    /// Postmark server token, never returned to a client.
+    pub token: SecretString,
 }
 
 /// Minimal settings required by the migration binary.
@@ -238,6 +262,22 @@ impl Settings {
             providers,
             realtime,
             worker,
+            telemetry: TelemetrySettings {
+                enabled: parse_or("DM_TELEMETRY_ENABLED", "true")?,
+                table_key: optional("DM_SPACE_STATION_TABLE_KEY").map(SecretString::from),
+                home: parse_or("DM_TELEMETRY_HOME", "/tmp/silicon-dm-telemetry")?,
+            },
+            reporting: optional("DM_POSTMARK_SERVER_TOKEN")
+                .map(|token| {
+                    Ok::<_, SettingsError>(ReportingSettings {
+                        token: SecretString::from(token),
+                        endpoint: parse_or(
+                            "DM_POSTMARK_EMAIL_URL",
+                            "https://api.postmarkapp.com/email",
+                        )?,
+                    })
+                })
+                .transpose()?,
             log_filter: parse_or("DM_LOG_FILTER", "info,silicon_dm=debug")?,
         };
         settings.validate()?;
@@ -245,6 +285,13 @@ impl Settings {
     }
 
     fn validate(&self) -> Result<(), SettingsError> {
+        if let Some(reporting) = &self.reporting {
+            validate_url(
+                "DM_POSTMARK_EMAIL_URL",
+                &reporting.endpoint,
+                self.environment,
+            )?;
+        }
         validate_url(
             "DM_PUBLIC_BASE_URL",
             &self.server.public_base_url,

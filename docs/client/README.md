@@ -1,5 +1,9 @@
 # Rust client guide
 
+DM 0.6 adds [groups, IAM tag access and invitations](../groups.md) across the API, Rust client, CLI and web.
+
+Current 0.6 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
+
 `silicon-dm-client` is a stateless, typed client for public Silicon DM operations.
 Its default HTTP/WebSocket client does not call IAM directly, hold IAM
 application secrets, persist credentials, or start a daemon. Its protocol types
@@ -9,7 +13,7 @@ state directory. The stateful `dm` CLI uses that same SDK runtime.
 
 ## Installation and configuration
 
-Add `silicon-dm-client = "0.4"` to your application's Cargo manifest to use the
+Add `silicon-dm-client = "0.6"` to your application's Cargo manifest to use the
 published package. For development against this checkout, depend on
 `crates/client` by path.
 

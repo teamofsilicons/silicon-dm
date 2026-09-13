@@ -92,7 +92,8 @@ impl PostgresStore {
             r#"
             SELECT 1
             FROM conversation_participants
-            WHERE conversation_id = $1
+            WHERE EXISTS (SELECT 1 FROM effective_conversation_participants e WHERE e.conversation_id=$1 AND e.organization_id=$2 AND e.actor_kind=$3::text::actor_kind AND e.actor_id=$4)
+              AND conversation_id = $1
               AND organization_id = $2
               AND actor_kind = $3::text::actor_kind
               AND actor_id = $4

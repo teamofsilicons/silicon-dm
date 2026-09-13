@@ -60,7 +60,18 @@ export interface Message extends Omit<MessageCreate, "sender_id"> {
   failure_reason?: string | null;
   bundle?: { id: string; role: "member" | "display" };
 }
+export interface GroupSettings {
+  name: string;
+  description: string;
+  is_public: boolean;
+  tag_ids: string[];
+}
+export interface GroupDetails extends GroupSettings {
+  version: number;
+  invited_members: Actor[];
+}
 export interface Conversation {
+  group?: GroupDetails | null;
   id: string;
   org_id: string;
   participants: Actor[];
@@ -134,6 +145,7 @@ export interface Profile {
   actor: Actor;
   organization_id: string;
   testing_environment_id?: string | null;
+  testing_environment_name?: string;
   testing_generation?: number | null;
 }
 export interface Session {
@@ -142,6 +154,7 @@ export interface Session {
   organization_id?: string;
   profile_id?: string;
   testing_environment_id?: string | null;
+  testing_environment_name?: string;
   testing_generation?: number | null;
   profiles?: Profile[];
 }
@@ -155,9 +168,11 @@ export interface AppConfig {
   max_body_bytes?: number;
 }
 export interface LoginInput {
+  app_secret?: string;
   slt: string;
   testing_key?: string;
   testing_environment_id?: string;
+  testing_environment_name?: string;
 }
 export interface MessageDelivery {
   type: "message";

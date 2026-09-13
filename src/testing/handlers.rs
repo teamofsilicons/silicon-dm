@@ -265,6 +265,12 @@ pub async fn clean(
             "provide exactly one testing environment key",
         ));
     }
+    if key
+        .as_deref()
+        .is_some_and(|value| value.starts_with("ask_"))
+    {
+        return Err(AppError::Forbidden);
+    }
     let auth = if key.is_none() {
         Some(
             Authenticated::from_request_parts(&mut parts, &state)

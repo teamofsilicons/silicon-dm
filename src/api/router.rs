@@ -21,9 +21,34 @@ use crate::testing::handlers as testing;
 use crate::{AppError, application::state::AppState};
 
 /// Builds the versioned DM router.
+#[allow(
+    clippy::too_many_lines,
+    reason = "all public routes remain visible together"
+)]
 fn build_plane_router(state: AppState) -> Router {
     let public_api = Router::new()
+        .route(
+            "/groups",
+            get(super::groups::list).post(super::groups::create),
+        )
+        .route(
+            "/groups/{group_id}",
+            get(super::groups::get).patch(super::groups::update),
+        )
+        .route(
+            "/groups/{group_id}/members",
+            post(super::groups::invite).delete(super::groups::remove),
+        )
         .route("/iam", get(auth_handlers::iam))
+        .route(
+            "/reports",
+            post(crate::reporting::submit).layer(DefaultBodyLimit::max(65536)),
+        )
+        .route(
+            "/telemetry",
+            post(crate::telemetry::receive).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route("/contracts", get(super::contracts::describe))
         .route(
             "/conversations",
             get(handlers::list_conversations).post(handlers::create_conversation),
@@ -112,12 +137,22 @@ fn build_plane_router(state: AppState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             state.settings.server.request_timeout,
         ));
-    let realtime_route = Router::new().route("/api/v1/ws", get(handlers::open_realtime_connection));
+    let realtime_route = Router::new()
+        .route("/api/v1/ws", get(handlers::open_realtime_connection))
+        .route("/api/v1/ws/shared", get(crate::realtime::shared::open));
 
     Router::new()
         .merge(timed_routes)
         .merge(realtime_route)
         .fallback(|| async { AppError::NotFound })
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            super::contracts::negotiate,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::telemetry::observe,
+        ))
         .with_state(state)
 }
 
@@ -149,7 +184,7 @@ pub fn build_router(state: AppState) -> Router {
                 tracing::info_span!(
                     "http.request",
                     method = %request.method(),
-                    path = %request.uri().path(),
+                    operation = silicon_dm_protocol::http_type(request.method().as_str(), request.uri().path()),
                 )
             }),
         )

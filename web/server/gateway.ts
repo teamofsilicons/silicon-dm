@@ -37,6 +37,8 @@ function requestedProfile(
   return value as string | undefined;
 }
 const corsHeaders = new Set([
+  "x-dm-telemetry",
+  "x-dm-source",
   "content-type",
   "x-dm-profile",
   "idempotency-key",
@@ -265,6 +267,69 @@ export class Gateway {
         });
         res.setHeader("Set-Cookie", this.sessions.cookie(browser.id));
         json(res, await this.auth.describe(browser.id));
+        return true;
+      }
+      if (path === "/api/testing-environments/exit" && method === "POST") {
+        const id=this.sessions.cookieId(req);
+        if (!id) throw new GatewayError(401,"login_required","Sign in to continue.");
+        await this.sessions.locked(id, async()=>{
+          const browser=await this.sessions.read(id);
+          if (!browser) throw new GatewayError(401,"login_required","Sign in to continue.");
+          const production=browser.value.profiles.find(p=>p.profile_id===browser.value.production_profile_id&&!p.testing_environment_id)
+            || browser.value.profiles.find(p=>!p.testing_environment_id);
+          browser.value.selected=production?.profile_id;
+          await this.sessions.save(browser);
+        });
+        json(res,await this.auth.describe(id));
+        return true;
+      }
+      if (path === "/api/testing-environments/enter" && method === "POST") {
+        this.authRate(req);
+        const body = await requestJson(req),
+          id = this.sessions.cookieId(req);
+        const previous = await this.sessions.read(id);
+        const profile = await this.auth.enterTestingEnvironment(
+          id,
+          profileHeader(req),
+          body,
+        );
+        try {
+          const session = await this.auth.describe(id, profile);
+          if (!session.authenticated)
+            throw new GatewayError(
+              409,
+              "testing_login_required",
+              "This test account needs a new IAM test sign-in token.",
+            );
+          await this.sessions.locked(id!, async () => {
+            const browser = await this.sessions.read(id);
+            if (!browser)
+              throw new GatewayError(
+                401,
+                "login_required",
+                "Sign in to continue.",
+              );
+            selectProfile(browser, profile);
+            browser.value.selected = profile;
+            await this.sessions.save(browser);
+          });
+          json(res, session);
+        } catch (error) {
+          await this.sessions.locked(id!, async () => {
+            const browser = await this.sessions.read(id);
+            if (browser?.value.selected === profile) {
+              browser.value.selected = previous?.value.selected;
+              await this.sessions.save(browser);
+            }
+          });
+          if (error instanceof GatewayError && error.status === 401)
+            throw new GatewayError(
+              409,
+              "testing_login_required",
+              "This test account needs a new IAM test sign-in token.",
+            );
+          throw error;
+        }
         return true;
       }
       if (path === "/api/session" && method === "GET") {

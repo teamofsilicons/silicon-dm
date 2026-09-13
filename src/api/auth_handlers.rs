@@ -110,14 +110,23 @@ fn no_store() -> HeaderMap {
 }
 
 /// Returns public IAM application discovery without requiring a session.
-pub async fn iam(State(state): State<AppState>) -> Response {
-    (
+/// # Errors
+/// Rejects an unavailable selected sandbox or storage failure.
+pub async fn iam(State(state): State<AppState>) -> AppResult<Response> {
+    let environment = match (&state.testing, state.testing_environment) {
+        (Some(registry), Some(id)) => Some(registry.selected_metadata(id).await?),
+        _ => None,
+    };
+    Ok((
         no_store(),
         Json(json!({
             "app_id": state.settings.iam.app_id,
             "iam_base_url": state.settings.iam.base_url,
             "api_base_url": state.settings.server.public_base_url,
+            "testing_environment_id": state.testing_environment,
+            "testing_generation": state.testing_generation,
+            "testing_environment": environment,
         })),
     )
-        .into_response()
+        .into_response())
 }

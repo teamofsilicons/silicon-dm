@@ -1,3 +1,7 @@
+
+# This file is only meant to be changed by carbons (humans), if you are an agent DONT EDIT THIS FILE.  
+
+
 # UNDERSTANIDNG.md - DM
 
 This is understanding.md for our chatting layer, responsible for managing silicon<>carbon, silicon<>silicon, carbon<>carbin communication. DM is the messaging layer we have. 
@@ -42,6 +46,8 @@ For every single request sent it should be sent in the format:
 ```
 
 Just these 2 feilds must be present in all sent. And metadata included inside data itself. 
+
+For all websocket connections ensure prewarming of the websocket. 
 
 # Message Types
 
@@ -113,51 +119,85 @@ When a user is typing, they would have the state typing, when recording a voice 
 There are also gonna be states in which the user is Online, last seen {x}.
 
 
-# Testing
+# Groups
 
-We will have an test enviorment for dm itself, this would be an exact replica of the main application, so when the test enviorment is created it would be initiated empty, for the said test enviorment actions can be performed, as this is an exact same replica of the main prod.
+DM should also support groups, carbons and silicons both can be part of these groups. I can also create groups for tags so anyone who gets that tag would automatically get access to the group, then manually adding members (carbons/silicons) should also be possible. 
 
-Refer to this to know how to create testing enviorment compatible with iam. 
-https://github.com/teamofsilicons/silicon-iam/blob/main/docs/client/testing-environments.html
+So when creating a group the group would also have a group description, then i can add people specifically, tags, etc. 
 
-For creating a test enviorment on dm, it would require the name of the test enviorment and also the test enviroment key of iam, this test iam key would be used in the each request it sends to the IAm as this is in test enviorment, it would in no way be possible to send request to it without attaching the test enviorment. 
+It should also be possible to make public groups, these groups everyone in the org would have access to, silicon's wont be added to these groups automatically and i would need to manually invite them to give them access to groups. 
 
-So dm testing wouldn't support dm testing on the prod IAm, it would only support it in the testing enviorment of IAm. 
+Groups can be created by the org_admins and org_owners. 
 
-Once the name and the test-key to silicon iam is given, the dm would also generate a test key, this test key can be used by any one to perform any action in silicon-dm. 
+### New member
 
-For each testing enviorment they would be sharing a shared test database (that's not the prod database, this is just responsible for storing all the test data). For this testing enviorment each entry would be associated with the testing env id. 
-
-A test enviorment is basically the exact same dm with all the functions and everything else, so this is the dm where i can test sending messsages, deleting it, reciepts, requests, acknowledgments, etc. 
+Even when a new member is added in the group they would also get full access to the prior chat history. Inviting carbons/silicons is also limited to org_admins and org_owners.  
 
 
-### Creating Test Env
 
-For creating a test enviorment, it can be created by any carbon or silicon in the organisation and it would be owned by the organisation with the user marked as the creator of the test enviorment. The test enviorment is created at the silicon-dm level itself. For creating a test enviorment it would need the name, an optional description, and the iam test enviorment. 
+# Backend Versioning
 
-In return it would return the key for the test enviorment, this key is what's gonna be used to be able to access that test enviorment, anyone with this key would be able to access the test enviorment as the god of the test enviorment, this key would be stored along side with the test enviorment, and can anytime be retrieved by the said carbon/silicon/org_admin/org_owner. The key would be 32 digit alpha numeric. 
+For versioning we have Contract Governance/API/service contract lifecycle management. We will have:
 
-### Rotate Key
+1) Contract versioning / API versioning
+2) Protocol Negotiation
+3) Backward compatibility
+4) Consumer-driven contract testing
+5) Deprecation and sunset management - if 0 requests for 7 days, sunset that version
+6) Compatibility matrix
+7) Version policy
 
-The creator of the test enviorment and org_admin/org_head should be able to rotate the key of the test enviroment, which would give them a new key to the test enviorment.  
 
-### Clean Test Enviorment
+# Email
 
-There should be an option to clean the test enviorment, which would allow the test enviorment to be there, but would clear every signle data stored for the said test enviorment. Anyone with the key should be able to execute this action. 
+We use postmark as our mail provider. You have an email at [dm@teamofsilicons.com] use this email if needed, currently there's no usecase of this email except mailing for report bugs. 
 
-### Delete Test Env
+# Testing Environment
 
-The org admins, owners or the creator should be able to delete the test enviorment, deleting a test enviorment would delete the key, and the instance that the test enviorment even existed. For all the logs it should also be limited to the test enviorment itself. Each deleted Test Env would have a ttl of 30 days before getting deleted permanently. From this point the test env should be recoverable.
+We will have a test environment for dm itself. This would work exactly like the main application, with the same functions, APIs, permission checks, and workflows, but with completely isolated data.
 
-### Auto Delete Test Env
+When a test environment is created, it would start empty.
 
-If there's no new activity in the test enviorment for 15 days, auto delete the test enviorment. 
+Refer to [how IAM manages testing environments](https://docs.iam.teamofsilicons.com/api/testing-environments/) for environment creation, test identities, application imports, authentication, webhooks, and lifecycle.
 
-### Using a Test Enviorment
+A test environment is basically the same dm where sending all kind of messages, recieving them, etc. It uses test IAM and test dm together, so the entire flow can be tested inside one sandbox.
 
-For using a test enviorment anyone with the key would have the god view for that test enviorment, they should be able to access dm as the signed in user from IAm, and now as the signed in user it should be able to perform the set of allowed actions, so this is an exact replica of how dm would have worked with the actual iam, instead it has the test iam and the test iam, so an sandboxed enviorment to test it all out. 
+### Using a Test Environment
 
-Read [(https://github.com/teamofsilicons/silicon-iam/blob/main/docs/client/testing-environments.html)] to understand how exactly are webhooks gonna work for this, etc. 
+In the client app, website, CLI, or API, passing the test environment’s `app_secret` would select that application’s test environment. No manual pairing or separately entering the IAM environment root key should be needed. DM should validate the secret with IAM and identify the correct environment automatically.
+
+For logging in, it would ask for an SLT. In a test environment, this can either be an IAM-issued test SLT or the public ID of an existing Carbon/Silicon in the test sandbox. Entering the ID would sign me in as that test user. Unknown or inactive identities should be rejected. This shortcut must never work in production.
+
+The IAM environment root key gives administrative control over the test world. The application’s `app_secret` selects its sandbox. Once signed in as a particular user, actions must follow that user’s actual permissions. Possessing the secret must not make every signed-in user bypass permission checks.
+
+If an administrative or god view is provided, it should be separate and clearly labelled so it cannot be confused with testing what a normal user is allowed to do.
+
+### Website and CLI
+
+On the website, I should be able to enter the `app_secret` from settings or the sign-in screen. Without a selected test environment, the application would use production.
+
+When in a test environment, always show a banner at the top saying that I am currently in a test environment, along with its name, the signed-in test identity, and a button to exit testing mode.
+
+Production and testing sessions should remain separate. Exiting testing mode should return me to the production session or ask me to sign in.
+
+In the CLI, always display the selected test environment at the end, including when a command fails. This message should go to stderr so it does not interfere with JSON output, downloaded files, or commands used in scripts.
+
+### Isolation
+
+Everything belonging to a test environment must stay inside that environment, including files, permissions, versions, deleted items, search results, caches, notifications, background jobs, and audit logs.
+
+Production credentials must not work in testing, and credentials from one test environment must not work in another.
+
+If a supplied test secret is invalid, revoked, or belongs to an unavailable environment, return an error. Never silently continue in production.
+
+
+### Webhooks and External Actions
+
+Test webhooks should follow IAM’s documented format. Verify the signature over the complete raw body, identify the correct test environment, and apply the event only there. Duplicate or out-of-order events must not corrupt the current state.
+
+Test actions should not send real emails, SMS messages, payments, or other production effects. These should use test destinations or simulated delivery.
+
+Secrets must not appear in URLs, logs, audit records, or stored webhook payloads.
 
 
 
@@ -217,25 +257,110 @@ It should also expose these specific endpoints:
 4) `webhook <webhook-url>` the user should be able to run `dm webhook <webhook-url>` to configure the webhook endpoint in case of silicon hook, this is the webhook you send all the requests to for that silicon. 
 5) `unhook` the user should be able to run `dm unhook` to unhook the configured webhook connection which would simply unhook the said user.
 
-### Cli experience
 
-Cli is an interface on it's own, it's an interface used by our fellow dear agents, and sometimes humans. What we would want this interface to serve as is it should give the correct information at correct time, and can write texts to explain what exactly is happening. 
+In CLI we would have a 400 characters limit for when a silicon tries to message a carbon, and when trying to send a message if the message is more than 400 characters, dont send the message, instead say  
+"message too long, not delivered. Your carbon would likely not read this long message, you can break this message down into multiple smaller messages, or just write a single short message, if you wanna still send the longer version you can send it by adding the flag --dangerously-send-long-message"
 
-A few things that would be needed to ensure good cli experience: the cli alone should have enough information to use DM correctly! Surfacing the right set of things when needed, giving suggestions at the correct times. Like for eg: when someone runs a command then show them the exact help for it if the information is not enough, and when the app has been created, show them the other related commands that they might need to run after it. For each command a good description, the entire docs, etc. 
+And if --dangerously-send-long-message is attached in the message let the message go, still display the warning, "Message sent but it was above the 400 characters safe carbon read limits".
 
-So the overall cli experience needs to be super good. It needs to give the relevant informations, help should be detailed, and suggested commands, etc should also happen. 
+
+# Cli experience
+
+CLI is the primary way to interact with IAM Apps. It should be built for both Carbons & Silicons. Any other interface (like website) will be a subset of the CLI.
+
+The cli should never ask for credentials from either silicon or carbon. it should just ask for short lived tokens that the user can generate from the official iam cli, or from the web where the the user is sent to auth concent screen.
+
+CLIs get SILICON_HOME env variable where it should store all the details. Its home, so you should use that as base, and make their own hidden folders to keep their information.
+
+Specific apps that could benefit from using ISI env variable should do that. eg: dm.
+
+ISI are internal silicons. If silicon is a brain, then isi are parts of the brain. store this inside metadata, or main data if its super useful. ISI may or may not be present. make sure to not rely on it in such a way that things break. consider ISI as useful additional information.
+
+every app cli must support the following commands:
+
+`app iam --json` gives {app_id: "...", ...}
+
+`app login "..."` takes in a short lived auth token generated by silicon interpretter.
+
+`app login status --json` tells if its {authenticated: true, ...}
+
+If your app is not just reactive, but also proactive (sends msg upfront to a silicon), it must also support the following commands:
+`app webhook "..."` takes in the URL to send updates to. optionally a secret.
+`app unhook` to remove receiving updates.
+
+App Internals:
+All apps are suggested to make a rust library which is stateless. then 2 things that uses the rust library: always running daemon, and a cli interface that talks to the daemon.
+
+At the end, on the docs page, there should be one curl + sh command to run to install and get everything setup to start using it. not auth, just technical setup on the system like installing the right set of things.
+
+CLI design should be focused on giving details and helping finding the right command to use. CLI will often have lots of commands and it should be like a tree that can be traversed using --help.
+
+CLI documentation should be bundled inside the cli itself. On each print of the cli documentation using --help or otherwise, it should show what this command is for, how its often used (perhaps in conjunction with other commands if applicable) and then a list of flags etc it takes in.
+
+Follow the CLI grammar. These CLIs can be used by humans, but more often than not, it'll be used by an agent who prefers to know why something broke and so it can figure out ways to fix it. Don't just say something went wrong... tell it exactly what & why.
+
+A good rule of thumb is: these CLIs are being made for someone who understands ins-and-outs of technology. Make like a programming language that gives very specific and helpful errors and outputs compared to a web interface where all errors are hidden until absolutely critical.
+
+All CLIs must have a report bug feature that also optionally takes in a PR ref if the agent did not just find a bug but also patched it. 
+
+dm report `<report-message>` --pr `<pr-link>` and if someone just reports the bug, without the pr, show them a message, you can also put a pr in the repo (`repo-link`). 
+
+Everytime a bug is reported use postmark to mail [saketdev12@gmail.com, shubhastro2@gmails.com, bugs@teamofsilicons.com]
+
+Since all TOS applications are open sourced, any bug can be discovered, replicated, patched and a pr can be raised. Allow all such edge cases be figured out by the agent instead of fixing it ourselves based on a bug report.
+
+Only a bug report submitting is possible, but its encouraged to give a lot more details and also attach a PR if possible.
+
+Give the information of the github repo, online docs, rust package, etc inside the cli itself.
+
+The CLI as i told before is a tree of documentation. Show possible paths, and then let someone go deeper along with documentation.
+
+for webhooks, the daemon prewarms ONE websocket with server and subscribes to updates for all the silicons that have registered with the daemon. DO NOT CONNECT MULTIPLE WEBSOCKETS FOR SILICONS ON THE SAME SYSTEM.
+
+send the request to the silicon over at the webhook link in the following shape:
+{
+	"type": "...",
+	"data": {...},
+	"metadata": {...}
+}
+
 
 # Docs
 
-The API, Rust-client, CLI, IAM integration, and testing-environment guides are
-maintained in [docs/].
+There are two kinds of documentations: informative & instructive.
 
-For the docs keep it as detailed and mention all the details, this is the only thing the other apps can use as their source of knowledge and how they can use dm exactly. 
+Always keep instructive documentation up front, easy to use, direct with clear instructions & link to informative documents to know why its done this way. Instructive documents should be the landing point of the product for both carbons & silicons.
 
-Write detailed guides.
+It can give carbon the instructions on how to install & use it, or how to ask their silicon to use it.
 
-Write very good detailed instructions on how test enviorment for silicon-dm works. Write docs on all 3 cli, api, client. Keep it segregated and clear. Write all the documentations in docs/ folder in the main directory of silicon-dm.  
+For silicons, it can be that, but also how to do a lot more with it. Esp. things like building on top of it. Make it very clear what is expected, what is mandatory and how does the system work.
 
-# Later to do
+Then the silicon can dig deeper into the informative documentation to know all the possible ways to do it, & why its done the way its done.
 
-dm report `<report-message>`, this should send an report message to the user. 
+While both carbons and silicons can read the documentation, it'll likely be more silicon. So design it for silicons. The more reasons you give, the better a silicon would be at making a judgement call of how to do something.
+
+Since all IAM apps can both be used as is, and also built on top of... its imp to write documentation for both. Usage docs & Development docs.
+
+# Telemetry
+
+All IAM apps use Space Station [https://spacestation.teamofsilicons.com/docs] for telemetry. Telemetry is opted-in by default but can be opted out from settings if the user wants.
+
+Space Station is also a rust package which can be used from within the backend, or daemon, or cli to send telemetry.
+
+Record as many things as you think might be useful to diagnose or follow traces later.
+
+Since space station is just an event store, make sure to include all the source, step, progress, etc information inside each event. some of the system information is automatically added to the metadata so you need not add that.
+
+push context-rich, self-contained events.
+
+Space Station also support web, for web it has 2 possible pathways: analytics & events. Most of the Analytics is self captured and you can define a seperate event store from the web. Its possible that both web analytics and web events go to separate tables.
+
+
+# Configurability
+
+We ship highly configurable apps with sensible defaults. Very much like VS Code. flags to toggle / customize behaviors.
+
+
+# Updates
+
+All CLIs when installed, within their daemon run a update checker hourly. Update the CLI to the newest one if a update is found. Don't rely on user usage to check for updates.

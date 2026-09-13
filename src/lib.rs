@@ -10,6 +10,8 @@ pub mod domain;
 pub mod error;
 pub mod infrastructure;
 pub mod realtime;
+/// Durable bug reporting and Postmark delivery.
+pub mod reporting;
 pub mod shutdown;
 pub mod telemetry;
 pub mod worker;

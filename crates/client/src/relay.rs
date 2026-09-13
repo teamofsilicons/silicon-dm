@@ -10,6 +10,33 @@ use uuid::Uuid;
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Operation {
     Me,
+    ListGroups {
+        #[serde(default)]
+        page: PageRequest,
+    },
+    GetGroup {
+        group_id: Uuid,
+    },
+    CreateGroup {
+        group: GroupCreate,
+        idempotency_key: String,
+    },
+    UpdateGroup {
+        group_id: Uuid,
+        settings: GroupSettings,
+        version: i64,
+        idempotency_key: String,
+    },
+    InviteGroupMembers {
+        group_id: Uuid,
+        member_ids: Vec<String>,
+        idempotency_key: String,
+    },
+    RemoveGroupMembers {
+        group_id: Uuid,
+        member_ids: Vec<String>,
+        idempotency_key: String,
+    },
     ListConversations {
         #[serde(default)]
         page: PageRequest,
@@ -91,7 +118,11 @@ impl Operation {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::CreateConversation { .. }
+            Self::CreateGroup { .. }
+                | Self::UpdateGroup { .. }
+                | Self::InviteGroupMembers { .. }
+                | Self::RemoveGroupMembers { .. }
+                | Self::CreateConversation { .. }
                 | Self::SendMessage { .. }
                 | Self::EditMessage { .. }
                 | Self::DeleteMessage { .. }
@@ -105,6 +136,40 @@ impl Operation {
     /// Calls only the public DM client. Presence writes require a live socket.
     pub async fn execute(&self, client: &Client) -> Result<Value> {
         Ok(match self {
+            Self::ListGroups { page } => serde_json::to_value(client.groups(page).await?)?,
+            Self::GetGroup { group_id } => serde_json::to_value(client.group(*group_id).await?)?,
+            Self::CreateGroup {
+                group,
+                idempotency_key,
+            } => serde_json::to_value(client.create_group(group, idempotency_key).await?)?,
+            Self::UpdateGroup {
+                group_id,
+                settings,
+                version,
+                idempotency_key,
+            } => serde_json::to_value(
+                client
+                    .update_group(*group_id, settings, *version, idempotency_key)
+                    .await?,
+            )?,
+            Self::InviteGroupMembers {
+                group_id,
+                member_ids,
+                idempotency_key,
+            } => serde_json::to_value(
+                client
+                    .invite_group_members(*group_id, member_ids, idempotency_key)
+                    .await?,
+            )?,
+            Self::RemoveGroupMembers {
+                group_id,
+                member_ids,
+                idempotency_key,
+            } => serde_json::to_value(
+                client
+                    .remove_group_members(*group_id, member_ids, idempotency_key)
+                    .await?,
+            )?,
             Self::Me => serde_json::to_value(client.me().await?)?,
             Self::ListConversations { page } => {
                 serde_json::to_value(client.conversations(page).await?)?

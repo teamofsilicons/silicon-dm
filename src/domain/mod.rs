@@ -4,6 +4,7 @@ mod actor;
 mod bundle;
 mod conversation;
 mod draft;
+mod group;
 mod idempotency;
 mod message;
 mod pagination;
@@ -13,6 +14,7 @@ pub use actor::{ActorId, ActorRef, ActorType, OrganizationId};
 pub use bundle::{Bundle, BundleCreate, BundleDetail, BundleRef, BundleRole};
 pub use conversation::{Conversation, ConversationPage};
 pub use draft::{Draft, DraftInput};
+pub use group::{GroupCreate, GroupDetails, GroupSettings};
 pub use idempotency::IdempotencyKey;
 pub use message::{
     Attachment, Gif, GifPage, Message, MessageCreate, MessagePage, MessageStatus, ReceiptStatus,

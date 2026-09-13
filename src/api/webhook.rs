@@ -94,6 +94,12 @@ async fn accept(state: &AppState, event: &WebhookEvent) -> AppResult<StatusCode>
     tx.commit().await?;
     // Duplicate delivery also signals: a prior process might have died after commit.
     state.realtime.invalidate_authorization();
+    crate::telemetry::record(
+        state,
+        "backend",
+        "iam.webhook_applied",
+        serde_json::json!({"count":inserted,"success":true}),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

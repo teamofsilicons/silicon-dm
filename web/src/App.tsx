@@ -15,6 +15,8 @@ import {
   api,
   getConfig,
   getSession,
+  login,
+  exitTesting,
   logout,
   queueMessage,
   retryOutbox,
@@ -49,6 +51,7 @@ import {
   removeOutbox,
 } from "./storage";
 import { connectRealtime } from "./realtime";
+import { GroupForm, GroupInfo } from "./Groups";
 import Composer from "./Composer";
 import { MessageView } from "./MessageView";
 import { AccountPanel, EnvironmentsPanel, OutboxPanel } from "./Panels";
@@ -194,6 +197,26 @@ export default function App() {
   );
 }
 function SignIn(props: { compact?: boolean; config?: AppConfig }) {
+  const [testSecret, setTestSecret] = createSignal("");
+  const [testIdentity, setTestIdentity] = createSignal("");
+  const [testError, setTestError] = createSignal<unknown>();
+  const [testBusy, setTestBusy] = createSignal(false);
+  async function enterTest(event: SubmitEvent) {
+    event.preventDefault();
+    if (testBusy()) return;
+    setTestBusy(true);
+    setTestError();
+    try {
+      await login({ app_secret: testSecret(), slt: testIdentity() });
+      setTestSecret("");
+      setTestIdentity("");
+      location.reload();
+    } catch (error) {
+      setTestError(error);
+    } finally {
+      setTestBusy(false);
+    }
+  }
   const iamLoginHref = () => {
     const url = new URL(
       props.config?.iam_login_url || "/auth/login",
@@ -217,6 +240,38 @@ function SignIn(props: { compact?: boolean; config?: AppConfig }) {
         <p class="footnote">
           Sign in or create your identity securely with IAM.
         </p>
+        <details class="test-signin">
+          <summary>Use a testing environment</summary>
+          <form class="stack" onSubmit={(event) => void enterTest(event)}>
+            <p class="muted">
+              Use the test app secret from IAM, then sign in as a sandbox
+              identity.
+            </p>
+            <label>
+              Test app secret
+              <input
+                type="password"
+                autocomplete="off"
+                value={testSecret()}
+                onInput={(e) => setTestSecret(e.currentTarget.value)}
+                required
+              />
+            </label>
+            <label>
+              Test SLT or Carbon / Silicon ID
+              <input
+                autocomplete="off"
+                value={testIdentity()}
+                onInput={(e) => setTestIdentity(e.currentTarget.value)}
+                required
+              />
+            </label>
+            <Notice error={testError()} />
+            <button class="button full" disabled={testBusy()} type="submit">
+              {testBusy() ? "Entering…" : "Enter testing environment"}
+            </button>
+          </form>
+        </details>
       </div>
     </div>
   );
@@ -302,6 +357,9 @@ function Workspace(props: {
     [editing, setEditing] = createSignal<Message>(),
     [replyLabel, setReplyLabel] = createSignal(""),
     [sending, setSending] = createSignal(false),
+    [groupEditor, setGroupEditor] = createSignal<"create" | Conversation>(),
+    [groupAdmin, setGroupAdmin] = createSignal(false),
+    [conversationKind, setConversationKind] = createSignal("all"),
     [newConversation, setNewConversation] = createSignal(false),
     [detail, setDetail] = createSignal(false),
     [reference, setReference] = createSignal<Message>(),
@@ -404,14 +462,18 @@ function Workspace(props: {
   const otherActors = (c: Conversation) =>
     c.participants.filter((p) => p.id !== actor());
   const title = (c: Conversation) =>
+    c.group?.name ||
     otherActors(c)
       .map((p) => p.id)
       .join(", ");
   const filtered = createMemo(() =>
-    conversations().filter((c) =>
-      `${title(c)} ${c.last_message?.text?.slice(0, 100) || ""}`
-        .toLowerCase()
-        .includes(filter().toLowerCase()),
+    conversations().filter(
+      (c) =>
+        (conversationKind() === "all" ||
+          (conversationKind() === "groups" ? !!c.group : !c.group)) &&
+        `${title(c)} ${c.last_message?.text?.slice(0, 100) || ""}`
+          .toLowerCase()
+          .includes(filter().toLowerCase()),
     ),
   );
   let alive = true,
@@ -682,6 +744,41 @@ function Workspace(props: {
         setLoading(false);
     }
   }
+  async function refreshGroup() {
+    const conversation = active();
+    if (!conversation?.group) return;
+    const revision = environmentRevision;
+    try {
+      const updated = await request<Conversation>(`/groups/${conversation.id}`);
+      if (validEnvironment(revision))
+        setConversations((cs) =>
+          cs.map((c) => (c.id === updated.id ? updated : c)),
+        );
+    } catch (error) {
+      if (!validEnvironment(revision)) return;
+      if (error instanceof ApiError && [403, 404].includes(error.status)) {
+        setConversations((cs) => cs.filter((c) => c.id !== conversation.id));
+        if (current() === conversation.id) {
+          viewRevision++;
+          messageRequest++;
+          replaceComposition(emptyContent(), false);
+          setEditing();
+          setDraftConflict();
+          setReference();
+          setBundle();
+          setSelection();
+          setMessageCursor(null);
+          setMessageLoading(false);
+          setCurrent();
+          setMessages([]);
+          setDetail(false);
+          setCompose(emptyContent());
+          setDraft();
+          setDirty(false);
+        }
+      } else setError(error);
+    }
+  }
   async function loadMessages(append = false) {
     const id = current();
     if (!id) return;
@@ -885,6 +982,16 @@ function Workspace(props: {
     );
   }
   onMount(() => {
+    void request<{ org_role?: string }>("/auth/me")
+      .then((me) => {
+        if (alive)
+          setGroupAdmin(
+            ["owner", "admin", "org_owner", "org_admin"].includes(
+              me.org_role || "",
+            ),
+          );
+      })
+      .catch(() => {});
     if (!workspaceSession.testing_environment_id) void loadConversations();
     void refreshOutbox();
     connectionApi = connectRealtime(workspaceSession, {
@@ -972,6 +1079,12 @@ function Workspace(props: {
       )
         autoFlush();
     }, 2500);
+    const groupTimer = setInterval(() => {
+      if (document.visibilityState === "visible" && !loading()) {
+        void loadConversations();
+        void refreshGroup();
+      }
+    }, 30000);
     const presenceTimer = setInterval(() => {
       if (document.visibilityState === "visible") void loadPresence();
     }, 20000);
@@ -995,6 +1108,7 @@ function Workspace(props: {
       viewRevision++;
       clearInterval(timer);
       clearInterval(presenceTimer);
+      clearInterval(groupTimer);
       clearTimeout(typingTimer);
       connectionApi?.close();
       window.removeEventListener("online", online);
@@ -1241,6 +1355,15 @@ function Workspace(props: {
   const selectedMessages = () =>
     messages().filter((m) => selection()?.includes(m.id));
   const profiles = () => props.session.profiles || [];
+  async function returnToProduction() {
+    if (!(await confirmLeaving("Exit testing mode"))) return;
+    try {
+      const selected = await exitTesting();
+      if (alive) props.changed(selected);
+    } catch (e) {
+      if (alive) setError(e);
+    }
+  }
   const own = (m: Message) => m.sender.id === actor();
   return (
     <div
@@ -1386,6 +1509,29 @@ function Workspace(props: {
             </Show>
           </div>
         </header>
+        <Show when={props.session.testing_environment_id}>
+          <div class="testing-banner" role="status">
+            <Icon name="flask" />
+            <div>
+              <strong>
+                Testing environment ·{" "}
+                {props.session.testing_environment_name ||
+                  props.session.testing_environment_id}
+              </strong>
+              <span>
+                Full DM experience. Messages and changes stay in this
+                environment.
+              </span>
+              <code>{props.session.actor?.id}</code>
+            </div>
+            <button
+              class="button small"
+              onClick={() => void returnToProduction()}
+            >
+              Exit testing mode
+            </button>
+          </div>
+        </Show>
         <Show when={recovered().length}>
           <div class="global-notice">
             <div class="notice error">
@@ -1454,6 +1600,13 @@ function Workspace(props: {
               <section class="conversation-pane" aria-label="Conversations">
                 <div class="conversation-title">
                   <h1>Conversations</h1>
+                  <Show when={groupAdmin()}>
+                    <IconButton
+                      icon="users"
+                      label="Create group"
+                      onClick={() => setGroupEditor("create")}
+                    />
+                  </Show>
                   <IconButton
                     icon="plus"
                     label="New conversation"
@@ -1468,6 +1621,18 @@ function Workspace(props: {
                     value={filter()}
                     onInput={(e) => setFilter(e.currentTarget.value)}
                   />
+                </label>
+                <label class="conversation-search">
+                  Show
+                  <select
+                    aria-label="Conversation type"
+                    value={conversationKind()}
+                    onChange={(e) => setConversationKind(e.currentTarget.value)}
+                  >
+                    <option value="all">All conversations</option>
+                    <option value="groups">Groups</option>
+                    <option value="direct">Direct conversations</option>
+                  </select>
                 </label>
                 <div class="conversation-list">
                   <Show
@@ -1496,11 +1661,13 @@ function Workspace(props: {
                               {previewOf(c.last_message)}
                             </span>
                             <span class="conversation-kind">
-                              {otherActors(c).length > 1
-                                ? `${c.participants.length} participants`
-                                : otherActors(c)[0]?.type === "silicon"
-                                  ? "Silicon"
-                                  : "Carbon"}
+                              {c.group
+                                ? `Group · ${c.participants.length} members`
+                                : otherActors(c).length > 1
+                                  ? `${c.participants.length} participants`
+                                  : otherActors(c)[0]?.type === "silicon"
+                                    ? "Silicon"
+                                    : "Carbon"}
                             </span>
                           </span>
                         </button>
@@ -1875,10 +2042,33 @@ function Workspace(props: {
             />
           </Match>
           <Match when={page() === "environments"}>
-            <EnvironmentsPanel session={props.session} signIn={addAccount} />
+            <EnvironmentsPanel
+              session={props.session}
+              beforeEnter={() => confirmLeaving("Enter testing environment")}
+              entered={props.changed}
+            />
           </Match>
         </Switch>
       </div>
+      <Show when={groupEditor()} keyed>
+        {(editing) => (
+          <GroupForm
+            session={workspaceSession}
+            conversation={editing === "create" ? undefined : editing}
+            close={() => setGroupEditor()}
+            done={(conversation) => {
+              setGroupEditor();
+              setDetail(false);
+              setConversations((cs) => [
+                conversation,
+                ...cs.filter((c) => c.id !== conversation.id),
+              ]);
+              void openConversation(conversation.id);
+              void loadConversations();
+            }}
+          />
+        )}
+      </Show>
       <Show when={newConversation()}>
         <NewConversation
           session={workspaceSession}
@@ -1896,6 +2086,18 @@ function Workspace(props: {
       <Show when={detail() && active()}>
         <Modal title="Conversation details" close={() => setDetail(false)}>
           <div class="stack">
+            <Show when={active()!.group}>
+              <GroupInfo
+                session={workspaceSession}
+                conversation={active()!}
+                admin={groupAdmin()}
+                changed={() => void refreshGroup()}
+                edit={() => {
+                  setDetail(false);
+                  setGroupEditor(active()!);
+                }}
+              />
+            </Show>
             <p class="muted">{active()!.participants.length} participants</p>
             <For each={active()!.participants}>
               {(p) => (

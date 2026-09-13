@@ -98,6 +98,11 @@ def main():
 
     runtime = {key: str(app[key]) for key in ['DM_IAM_APP_ID', 'DM_IAM_APP_SECRET', 'DM_IAM_WEBHOOK_SECRET',
                'DM_IAM_WEBHOOK_KEY_VERSION', 'DM_GIPHY_API_KEY', 'DM_TEST_KEY_ENCRYPTION_KEY']}
+    for name in ['DM_SPACE_STATION_TABLE_KEY', 'DM_POSTMARK_SERVER_TOKEN']:
+        value = app.get(name, '')
+        if not isinstance(value, str) or any(c in value for c in '\r\n\x00'):
+            raise ValueError('Invalid optional secret field: ' + name)
+        runtime[name] = value.strip()
     runtime['DM_DATABASE_URL'] = database_url('dm_runtime', app['DM_RUNTIME_DATABASE_PASSWORD'],
                                              os.environ['DB_HOST'], 'silicon_dm')
     runtime['DM_TEST_DATABASE_URL'] = database_url('dm_testing', app['DM_TEST_DATABASE_PASSWORD'],

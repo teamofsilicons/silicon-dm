@@ -1,3 +1,4 @@
+import { telemetryEnabled, recordTelemetry } from "./telemetry";
 import { encodeRequest, decodeData, unwrap } from "./wire.ts";
 import type {
   AppConfig,
@@ -64,11 +65,17 @@ export interface ApiOptions extends Omit<RequestInit, "body"> {
   version?: number;
 }
 let selectedSession: Session = { authenticated: false, profiles: [] };
+if (typeof window !== "undefined") {
+  const diagnosticError = () => recordTelemetry(selectedSession, gatewayOrigin(), "web_error", false);
+  window.addEventListener("error", diagnosticError);
+  window.addEventListener("unhandledrejection", diagnosticError);
+}
 export function currentSession(): Session {
   return selectedSession;
 }
 export function setSession(session: Session): Session {
   selectedSession = session;
+  if (typeof window !== "undefined") recordTelemetry(session, gatewayOrigin(), "page_view");
   return session;
 }
 export function pathSegment(value: string): string {
@@ -155,6 +162,8 @@ export async function api<T>(
   const url = new URL(target, gatewayOrigin());
   const headers = new Headers(requestOptions.headers);
   headers.set("Accept", "application/json");
+  headers.set("X-DM-Telemetry",telemetryEnabled() ? "on" : "off");
+  headers.set("X-DM-Source","web");
   const profile = profileId ?? session.profile_id;
   if (profile) headers.set("X-DM-Profile", profile);
   if (idempotencyKey) {
@@ -202,6 +211,7 @@ export async function api<T>(
     );
     headers.set("Content-Type", "application/json");
   }
+  const diagnosticStart = performance.now();
   let response: Response;
   try {
     response = await fetch(url, {
@@ -213,6 +223,7 @@ export async function api<T>(
       redirect: "error",
     });
   } catch (error) {
+    recordTelemetry(session, gatewayOrigin(), "request", false, performance.now()-diagnosticStart);
     if (error instanceof DOMException && error.name === "AbortError")
       throw error;
     throw new ApiError(
@@ -230,6 +241,7 @@ export async function api<T>(
     window.dispatchEvent(
       new CustomEvent("dm:unauthorized", { detail: { profile_id: profile } }),
     );
+  recordTelemetry(session, gatewayOrigin(), "request", response.ok, performance.now()-diagnosticStart);
   if (response.status === 204) return undefined as T;
   let text = await response.text();
   let value: unknown;
@@ -304,6 +316,22 @@ export async function selectProfile(profileId: string): Promise<Session> {
     await api<Session>("/api/profiles/select", {
       method: "POST",
       body: { profile_id: profileId },
+    }),
+  );
+}
+export async function enterTestingEnvironment(
+  environmentId: string,
+  session: Session,
+  slt?: string,
+): Promise<Session> {
+  return setSession(
+    await api<Session>("/api/testing-environments/enter", {
+      method: "POST",
+      session,
+      body: {
+        environment_id: environmentId,
+        ...(slt === undefined ? {} : { slt }),
+      },
     }),
   );
 }
@@ -712,3 +740,7 @@ export function retryOutbox(
   return operation;
 }
 export { listOutbox, removeOutbox };
+
+export async function exitTesting(): Promise<Session> {
+  return setSession(await api<Session>("/api/testing-environments/exit", {method:"POST",body:{}}));
+}

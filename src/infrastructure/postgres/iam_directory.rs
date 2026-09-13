@@ -26,6 +26,7 @@ struct Projection {
     version: i64,
     epoch: Option<i64>,
     removed: bool,
+    tag_ids: Option<Vec<Uuid>>,
 }
 
 impl PostgresStore {
@@ -48,6 +49,10 @@ impl PostgresStore {
             version: snapshot.membership_version,
             epoch: Some(snapshot.authorization_epoch),
             removed: false,
+            tag_ids: snapshot
+                .tags
+                .as_ref()
+                .map(|tags| tags.iter().map(|tag| tag.id).collect()),
         };
         let mut tx = self.pool().begin().await?;
         project_member(&mut tx, &projection).await?;
@@ -62,6 +67,10 @@ impl PostgresStore {
             // authority without disclosing a new organization resource version.
             sqlx::query("UPDATE organization_snapshots SET status='active',refreshed_at=clock_timestamp() WHERE organization_id=$1")
                 .bind(&snapshot.org_id).execute(&mut *tx).await?;
+            sqlx::query("SELECT sync_group_participants($1)")
+                .bind(&snapshot.org_id)
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         if active {
@@ -197,6 +206,18 @@ fn parse_member(event: &WebhookEvent, member: &Value) -> AppResult<Option<Projec
             .ok_or_else(invalid_projection)?,
         epoch,
         removed,
+        tag_ids: member
+            .pointer("/membership/tags")
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                value
+                    .as_array()
+                    .ok_or_else(invalid_projection)?
+                    .iter()
+                    .map(|tag| required_uuid(tag, "id"))
+                    .collect::<AppResult<Vec<_>>>()
+            })
+            .transpose()?,
     }))
 }
 
@@ -206,14 +227,23 @@ async fn project_member(
 ) -> AppResult<()> {
     // Lock serializes independently delivered events and online introspection.
     // UUID bindings are immutable. Equal-version removals win over active state.
+    // A narrower credential does not erase known tags at the exact same IAM
+    // version/epoch. Fresh token checks independently enforce its disclosure;
+    // undisclosed tags at a newer authority version invalidate the cached grant.
     let row: Option<AppliedProjection> = sqlx::query_as(
-        "INSERT INTO iam_membership_projections (membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status)
-         VALUES ($1,$2,$3,$4,$5::text::actor_kind,$6,$7,$8,$9)
+        "INSERT INTO iam_membership_projections (membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status,tag_ids)
+         VALUES ($1,$2,$3,$4,$5::text::actor_kind,$6,$7,$8,$9,$10)
          ON CONFLICT (membership_id) DO UPDATE SET
            organization_id = COALESCE(EXCLUDED.organization_id, iam_membership_projections.organization_id),
            actor_id = COALESCE(EXCLUDED.actor_id, iam_membership_projections.actor_id),
            iam_version = EXCLUDED.iam_version,
            authorization_epoch = COALESCE(EXCLUDED.authorization_epoch, iam_membership_projections.authorization_epoch),
+           tag_ids = CASE
+             WHEN EXCLUDED.tag_ids IS NOT NULL THEN EXCLUDED.tag_ids
+             WHEN iam_membership_projections.iam_version = EXCLUDED.iam_version
+               AND iam_membership_projections.authorization_epoch = EXCLUDED.authorization_epoch
+             THEN iam_membership_projections.tag_ids
+             ELSE NULL END,
            status = EXCLUDED.status, refreshed_at = clock_timestamp()
          WHERE iam_membership_projections.principal_id = EXCLUDED.principal_id
            AND iam_membership_projections.iam_organization_id = EXCLUDED.iam_organization_id
@@ -228,7 +258,7 @@ async fn project_member(
          RETURNING organization_id, actor_id, actor_kind, iam_version, status")
         .bind(projection.membership_id).bind(projection.principal_id).bind(projection.iam_organization_id)
         .bind(&projection.organization_id).bind(projection.actor_type.as_str()).bind(&projection.actor_id)
-        .bind(projection.version).bind(projection.epoch).bind(if projection.removed { "removed" } else { "active" })
+        .bind(projection.version).bind(projection.epoch).bind(if projection.removed { "removed" } else { "active" }).bind(&projection.tag_ids)
         .fetch_optional(&mut **tx).await?;
     let Some((Some(org), Some(actor_id), actor_type, version, status)) = row else {
         return Ok(());
@@ -242,6 +272,10 @@ async fn project_member(
     sqlx::query("UPDATE actor_snapshots SET status = $4::text::snapshot_status, iam_version = $5, refreshed_at = clock_timestamp() WHERE organization_id = $1 AND actor_kind = $2::text::actor_kind AND actor_id = $3 AND iam_version <= $5")
         .bind(org.as_str()).bind(actor_type.as_str()).bind(actor.id.as_str())
         .bind(if status == "active" { "active" } else { "deleted" }).bind(version).execute(&mut **tx).await?;
+    sqlx::query("SELECT sync_group_participants($1)")
+        .bind(org.as_str())
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
@@ -270,6 +304,10 @@ async fn project_organization(
         let org: OrganizationId = org_id.parse().map_err(|_| invalid_projection())?;
         sqlx::query("INSERT INTO organization_snapshots (organization_id,status,iam_version) VALUES ($1,$2::text::snapshot_status,$3) ON CONFLICT (organization_id) DO UPDATE SET status=EXCLUDED.status,iam_version=EXCLUDED.iam_version,refreshed_at=clock_timestamp() WHERE organization_snapshots.iam_version < EXCLUDED.iam_version")
             .bind(org.as_str()).bind(status).bind(version).execute(&mut **tx).await?;
+        sqlx::query("SELECT sync_group_participants($1)")
+            .bind(org.as_str())
+            .execute(&mut **tx)
+            .await?;
     }
     Ok(())
 }

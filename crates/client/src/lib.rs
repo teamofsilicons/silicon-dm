@@ -1,5 +1,8 @@
 //! Stateless Silicon DM client. Callers own credentials, retry policy and durable cursors.
 //! No IAM application secrets, local files or backend-internal operations are required.
+/// Optional Silicon-to-Carbon CLI message safety policy.
+#[cfg(feature = "runtime")]
+pub mod message_length;
 pub mod models;
 pub mod relay;
 #[cfg(feature = "runtime")]
@@ -67,6 +70,8 @@ pub struct Client {
     test_key: Option<String>,
     websocket_limit: usize,
     testing_generation: Option<i64>,
+    telemetry_enabled: bool,
+    telemetry_source: &'static str,
 }
 impl Client {
     /// Accepts an origin or an `/api/v1` base. HTTP is limited to loopback hosts.
@@ -99,6 +104,8 @@ impl Client {
             test_key: None,
             websocket_limit: 128 * 1024 * 1024,
             testing_generation: None,
+            telemetry_enabled: true,
+            telemetry_source: "sdk",
         })
     }
     pub fn with_auth(mut self, token: impl Into<String>, organization: impl Into<String>) -> Self {
@@ -109,9 +116,16 @@ impl Client {
     /// Mandatory IAM sandbox selection remains the backend's responsibility.
     pub fn with_test_key(mut self, key: impl Into<String>) -> Result<Self> {
         let key = key.into();
-        if key.len() != 32 || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        if !((key.len() == 32 && key.bytes().all(|b| b.is_ascii_alphanumeric()))
+            || (key.len() == 47
+                && key.starts_with("ask_")
+                && key[4..]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))))
+        {
             return Err(Error::Configuration(
-                "testing environment key must be 32 alphanumeric characters".into(),
+                "provide an IAM test app_secret (ask_...) or a legacy 32-character DM test key"
+                    .into(),
             ));
         }
         self.test_key = Some(key);
@@ -144,13 +158,44 @@ impl Client {
         self.websocket_limit = max_bytes;
         Ok(self)
     }
+    /// Disable diagnostic collection for requests and connections from this client.
+    pub fn with_telemetry(mut self, enabled: bool) -> Self {
+        self.telemetry_enabled = enabled;
+        self
+    }
+    /// Select a known diagnostic source without accepting arbitrary identifying text.
+    pub fn with_source(mut self, source: &'static str) -> Self {
+        self.telemetry_source = match source {
+            "cli" | "daemon" | "web" => source,
+            _ => "sdk",
+        };
+        self
+    }
+    /// Submit a bounded diagnostic event; callers choose whether to wait or drop on failure.
+    /// No table key, message content, token or callback URL is included.
+    pub async fn telemetry(&self, event: &str, success: bool, duration_ms: u64) -> Result<()> {
+        if !self.telemetry_enabled {
+            return Ok(());
+        }
+        self.empty(self.request(Method::POST, "telemetry")?
+            .timeout(Duration::from_millis(500))
+            .json(&json!({"source":self.telemetry_source,"event":event,"success":success,"duration_ms":duration_ms}))).await
+    }
     fn endpoint(&self, path: &str) -> Result<Url> {
         self.base
             .join(path)
             .map_err(|e| Error::Configuration(e.to_string()))
     }
     fn request(&self, method: Method, path: &str) -> Result<RequestBuilder> {
-        let mut request = self.http.request(method, self.endpoint(path)?);
+        let mut request = self
+            .http
+            .request(method, self.endpoint(path)?)
+            .header("X-DM-Contract-Version", "1")
+            .header(
+                "X-DM-Telemetry",
+                if self.telemetry_enabled { "on" } else { "off" },
+            )
+            .header("X-DM-Source", self.telemetry_source);
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
@@ -185,6 +230,22 @@ impl Client {
     async fn empty(&self, request: RequestBuilder) -> Result<()> {
         checked(self.send(request).await?).await?;
         Ok(())
+    }
+    /// Discover supported contracts and the local deprecation lifecycle.
+    pub async fn contracts(&self) -> Result<Value> {
+        self.json(self.request(Method::GET, "contracts")?).await
+    }
+    /// Durably submit a bug report. Reuse the idempotency key when retrying.
+    /// Production sends Postmark notifications; test environments simulate them.
+    pub async fn report(&self, message: &str, pr: Option<&str>, key: &str) -> Result<Value> {
+        self.json(
+            self.request(Method::POST, "reports")?
+                .header("Idempotency-Key", key)
+                .json(
+                    &json!({"message":message,"pr":pr,"client_version":env!("CARGO_PKG_VERSION")}),
+                ),
+        )
+        .await
     }
     pub async fn login(&self, slt: &str, key: &str) -> Result<Tokens> {
         self.json(
@@ -230,6 +291,65 @@ impl Client {
             self.request(Method::POST, "conversations")?
                 .header("Idempotency-Key", key)
                 .json(&json!({"participant_ids":participants})),
+        )
+        .await
+    }
+    /// Lists groups accessible to this token; group IDs are conversation IDs.
+    pub async fn groups(&self, page: &PageRequest) -> Result<Page<Conversation>> {
+        self.json(self.request(Method::GET, "groups")?.query(page))
+            .await
+    }
+    pub async fn group(&self, id: Uuid) -> Result<Conversation> {
+        self.json(self.request(Method::GET, &format!("groups/{id}"))?)
+            .await
+    }
+    pub async fn create_group(&self, input: &GroupCreate, key: &str) -> Result<Conversation> {
+        self.json(
+            self.request(Method::POST, "groups")?
+                .header("Idempotency-Key", key)
+                .json(input),
+        )
+        .await
+    }
+    pub async fn update_group(
+        &self,
+        id: Uuid,
+        settings: &GroupSettings,
+        version: i64,
+        key: &str,
+    ) -> Result<GroupDetails> {
+        self.json(
+            self.request(Method::PATCH, &format!("groups/{id}"))?
+                .header("If-Match", version)
+                .header("Idempotency-Key", key)
+                .json(settings),
+        )
+        .await
+    }
+    pub async fn invite_group_members(
+        &self,
+        id: Uuid,
+        members: &[String],
+        key: &str,
+    ) -> Result<GroupDetails> {
+        self.json(
+            self.request(Method::POST, &format!("groups/{id}/members"))?
+                .header("Idempotency-Key", key)
+                .json(&json!({"member_ids":members})),
+        )
+        .await
+    }
+    /// Removes explicit invitations; independent public/tag access remains effective.
+    pub async fn remove_group_members(
+        &self,
+        id: Uuid,
+        members: &[String],
+        key: &str,
+    ) -> Result<GroupDetails> {
+        self.json(
+            self.request(Method::DELETE, &format!("groups/{id}/members"))?
+                .header("Idempotency-Key", key)
+                .json(&json!({"member_ids":members})),
         )
         .await
     }
@@ -459,6 +579,32 @@ impl Client {
         )
         .await
     }
+    /// Prewarms one multiplexed connection. Each subscription authenticates independently inside TLS.
+    pub async fn prewarm_shared(&self) -> Result<Socket> {
+        let mut url = self.endpoint("ws/shared")?;
+        url.set_scheme(if self.base.scheme() == "https" {
+            "wss"
+        } else {
+            "ws"
+        })
+        .map_err(|_| Error::Configuration("invalid socket URL".into()))?;
+        let configuration = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(self.websocket_limit))
+            .max_frame_size(Some(self.websocket_limit))
+            .max_write_buffer_size(self.websocket_limit.saturating_add(128 * 1024 + 1));
+        let mut request = url.as_str().into_client_request()?;
+        request.headers_mut().insert(
+            "X-DM-Telemetry",
+            if self.telemetry_enabled { "on" } else { "off" }
+                .parse()
+                .map_err(|_| Error::Configuration("invalid telemetry header".into()))?,
+        );
+        let (socket, _) =
+            tokio_tungstenite::connect_async_with_config(request, Some(configuration), true)
+                .await?;
+        Ok(socket)
+    }
+
     /// Connects without reading/writing a cursor or automatically acknowledging messages.
     pub async fn connect(&self, actors: &[String], device_id: &str) -> Result<Socket> {
         self.connect_with_generation(actors, device_id, None).await
@@ -496,6 +642,12 @@ impl Client {
                 .append_pair("testing_generation", &generation.to_string());
         }
         let mut req = url.as_str().into_client_request()?;
+        req.headers_mut().insert(
+            "X-DM-Telemetry",
+            if self.telemetry_enabled { "on" } else { "off" }
+                .parse()
+                .map_err(|_| Error::Configuration("invalid telemetry header".into()))?,
+        );
         let token = self
             .token
             .as_ref()

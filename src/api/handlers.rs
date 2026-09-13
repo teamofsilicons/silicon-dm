@@ -40,11 +40,16 @@ use crate::{
 
 /// Authenticates and upgrades a durable realtime client connection.
 pub(super) async fn open_realtime_connection(
-    State(state): State<AppState>,
+    State(mut state): State<AppState>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     upgrade: WebSocketUpgrade,
 ) -> AppResult<Response> {
+    if headers.get("x-dm-telemetry").is_some_and(|v| v == "off") {
+        std::sync::Arc::make_mut(&mut state.settings)
+            .telemetry
+            .enabled = false;
+    }
     let query = parse_realtime_query(raw_query.as_deref())?;
     let token = realtime_bearer(&headers)?;
     let authority = state
@@ -94,7 +99,18 @@ pub(super) async fn list_conversations(
     page.validated_limit()?;
     state
         .store
-        .list_conversations(&context.organization_id, &context.actor, &page)
+        .list_conversations_scoped(
+            &context.organization_id,
+            &context.actor,
+            &page,
+            &context
+                .tag_ids
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>(),
+            false,
+        )
         .await
         .map(Json)
 }
@@ -669,7 +685,7 @@ async fn resolve_sender(
     Ok(actor)
 }
 
-fn verify_resolved_actors(
+pub(super) fn verify_resolved_actors(
     requested: &[ActorId],
     resolved: Vec<ActorRef>,
 ) -> AppResult<Vec<ActorRef>> {

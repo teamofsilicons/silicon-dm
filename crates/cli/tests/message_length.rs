@@ -127,7 +127,9 @@ async fn send_guard_precedes_queue_and_override_warns_only_after_delivery() -> R
             );
         }
         assert_eq!(
-            stderr.contains("Message sent but it was above the 400 characters safe read limits."),
+            stderr.contains(
+                "Message sent but it was above the 400 characters safe carbon read limits"
+            ),
             override_flag && state == "completed",
             "{stderr}"
         );

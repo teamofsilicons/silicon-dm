@@ -262,6 +262,21 @@ impl PostgresStore {
         actor: &ActorRef,
         page: &PageRequest,
     ) -> AppResult<ConversationPage> {
+        self.list_conversations_scoped(organization_id, actor, page, &[], false)
+            .await
+    }
+
+    /// Lists conversations using the exact token's IAM tags and an optional group filter.
+    /// # Errors
+    /// Rejects invalid pagination and propagates storage errors.
+    pub async fn list_conversations_scoped(
+        &self,
+        organization_id: &OrganizationId,
+        actor: &ActorRef,
+        page: &PageRequest,
+        tag_ids: &[Uuid],
+        groups_only: bool,
+    ) -> AppResult<ConversationPage> {
         let limit = page.validated_limit()?;
         let cursor = page
             .cursor
@@ -298,12 +313,17 @@ impl PostgresStore {
                 conversation.created_at,
                 conversation.updated_at
             FROM conversations AS conversation
-            JOIN conversation_participants AS participant
+            JOIN effective_conversation_participants AS participant
               ON participant.conversation_id = conversation.id
              AND participant.organization_id = conversation.organization_id
             WHERE conversation.organization_id = $1
               AND participant.actor_kind = $2::text::actor_kind
               AND participant.actor_id = $3
+              AND (NOT $8 OR conversation.is_group)
+              AND (NOT conversation.is_group OR EXISTS (
+                  SELECT 1 FROM groups g WHERE g.conversation_id=conversation.id AND (
+                    EXISTS(SELECT 1 FROM group_invitations i WHERE i.conversation_id=g.conversation_id AND i.actor_kind=participant.actor_kind AND i.actor_id=participant.actor_id)
+                    OR (g.is_public AND $2='carbon') OR (NOT g.is_public AND g.tag_ids && $7))))
               AND (
                     $4::timestamptz IS NULL
                     OR (conversation.updated_at, conversation.id) < ($4, $5)
@@ -318,6 +338,8 @@ impl PostgresStore {
         .bind(cursor_time)
         .bind(cursor_id)
         .bind(i64::from(limit) + 1)
+        .bind(tag_ids)
+        .bind(groups_only)
         .fetch_all(self.pool())
         .await?;
         self.conversation_page(records, limit).await
@@ -352,7 +374,7 @@ impl PostgresStore {
                 conversation.created_at,
                 conversation.updated_at
             FROM conversations AS conversation
-            JOIN conversation_participants AS participant
+            JOIN effective_conversation_participants AS participant
               ON participant.conversation_id = conversation.id
              AND participant.organization_id = conversation.organization_id
             WHERE conversation.id = $1
@@ -389,7 +411,7 @@ impl PostgresStore {
             r#"
             SELECT EXISTS (
                 SELECT 1
-                FROM conversation_participants
+                FROM effective_conversation_participants
                 WHERE conversation_id = $1
                   AND organization_id = $2
                   AND actor_kind = $3::text::actor_kind
@@ -427,7 +449,7 @@ impl PostgresStore {
             sqlx::query_as::<_, ParticipantRecord>(
                 r#"
                 SELECT conversation_id, actor_kind::text AS actor_kind, actor_id
-                FROM conversation_participants
+                FROM effective_conversation_participants
                 WHERE conversation_id = ANY($1)
                 ORDER BY conversation_id, actor_kind, actor_id
                 "#,
@@ -470,6 +492,15 @@ impl PostgresStore {
                     .parse()
                     .map_err(|error| super::rows::data_error("organization ID", error))?,
                 participants: participants.remove(&record.id).unwrap_or_default(),
+                group: self
+                    .group_details(
+                        &record
+                            .organization_id
+                            .parse()
+                            .map_err(|error| super::rows::data_error("organization ID", error))?,
+                        record.id,
+                    )
+                    .await?,
                 last_message,
                 created_at: record.created_at,
                 updated_at: record.updated_at,

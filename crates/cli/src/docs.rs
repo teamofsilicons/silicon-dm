@@ -19,6 +19,18 @@ pub struct DocsArgs {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Topic {
+    /// Group creation, IAM tags, invitations and history.
+    Groups,
+    /// Install, authenticate and send the first message.
+    GettingStarted,
+    /// Build a reliable typed integration.
+    Building,
+    /// Version negotiation, compatibility and sunset policy.
+    Contracts,
+    /// Runtime and backend settings.
+    Configuration,
+    /// Diagnostic collection, opt-out and sandbox isolation.
+    Telemetry,
     /// Topic catalog and essential acknowledgement conventions.
     Index,
     /// Command grammar, profiles, messaging, drafts and updates.
@@ -75,6 +87,12 @@ macro_rules! guide {
 }
 
 const GUIDES: &[Guide] = &[
+    guide!("groups", "Groups and membership", "groups.md"),
+    guide!("getting-started", "Start using DM", "getting-started.md"),
+    guide!("building", "Build on DM", "building.md"),
+    guide!("contracts", "Contracts and compatibility", "contracts.md"),
+    guide!("configuration", "Configure DM", "configuration.md"),
+    guide!("telemetry", "Diagnostics and analytics", "telemetry.md"),
     guide!("wire-format", "DM JSON wire format", "wire-format.md"),
     guide!("cli", "DM CLI guide", "cli/README.md"),
     guide!("relay", "Local relay and actor callbacks", "cli/relay.md"),

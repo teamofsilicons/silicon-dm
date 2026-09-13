@@ -28,6 +28,8 @@ pub struct AuthContext {
     pub organization_id: OrganizationId,
     /// Current organization role, only when IAM discloses it.
     pub org_role: Option<String>,
+    /// Tags disclosed for this exact credential; absent disclosure grants no tag access.
+    pub tag_ids: Option<BTreeSet<Uuid>>,
     /// Actors this credential may represent on a realtime connection.
     pub represented_actor_ids: BTreeSet<ActorId>,
     /// Effective IAM scopes; undisclosed authority is never inferred.

@@ -13,9 +13,20 @@ npm run dev
 ```
 
 Open http://127.0.0.1:4315. The default upstream is the live AWS API at
-https://backend.dm.teamofsilicons.com. Sign in through IAM, or use the advanced
-form with an IAM DM short-lived token and optional DM testing environment/key.
-Test credentials select the isolated test plane; they do not use production data.
+https://backend.dm.teamofsilicons.com. Sign in through IAM. To test DM, open
+**Testing environments → View as testing environment** on an active environment.
+The first visit asks for a DM short-lived token issued in its paired IAM test
+environment; subsequent visits reuse a saved test account. The gateway retrieves
+the DM root key with your production creator/admin authority and keeps it private.
+Use **Add test account** to add another test Carbon/Silicon, then switch between
+them using the workspace selector to exercise both sides of a conversation.
+
+Testing uses the exact same workspace, messaging features, and API as production,
+with isolated data and normal account/conversation permissions. It does not copy
+production messages or grant access to other users' conversations. A persistent
+banner identifies the test environment and provides **Return to production**.
+Rotated keys or expired test logins require a new IAM test token; failed entry
+never falls back to a production login.
 
 ```sh
 npm run check
@@ -38,6 +49,7 @@ for the exact session, security, persistence, and ingress requirements.
 - Versioned saved drafts with explicit conflict resolution. Edit cancellation
   restores the prior composition; reset recovery preserves local unsent content.
 - Silicon message bundles, original-message expansion, and individual message details.
+- Direct entry into the full testing workspace, additional test accounts, and return to production.
 - Production-side testing environment creation, details, editing, access key,
   rotation, clean, soft deletion, restoration, and test-profile login.
 - Long messages render a bounded preview with complete text downloads. HTTP/WS
