@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon DM API
-  version: 0.5.0
+  version: 0.6.0
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
@@ -21,6 +21,8 @@ tags:
   description: Authenticated WebSocket sessions and durable actor streams
 - name: Conversations
   description: Exact-participant-set conversations
+- name: Groups
+  description: Named organization groups with invitations and dynamic IAM tag access
 - name: Messages
   description: Durable content, receipts, and attachment access
 - name: Bundles
@@ -40,6 +42,367 @@ tags:
 - name: Operations
   description: Deployment health probes
 paths:
+  "/groups":
+    get:
+      tags:
+        - "Groups"
+      operationId: "listGroups"
+      summary: "List groups accessible to the current IAM token"
+      parameters:
+        -
+          $ref: "#/components/parameters/OrgId"
+        -
+          $ref: "#/components/parameters/TestingKey"
+        -
+          $ref: "#/components/parameters/Cursor"
+        -
+          $ref: "#/components/parameters/Limit"
+      responses:
+        200:
+          description: "Successful group operation"
+          content:
+            application/json:
+              schema:
+                type: "object"
+                additionalProperties: false
+                required:
+                  - "type"
+                  - "data"
+                properties:
+                  type:
+                    type: "string"
+                    const: "groups"
+                  data:
+                    type: "object"
+                    required:
+                      - "items"
+                      - "next_cursor"
+                    properties:
+                      items:
+                        type: "array"
+                        items:
+                          $ref: "#/components/schemas/Conversation"
+                      next_cursor:
+                        type:
+                          - "string"
+                          - "null"
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        403:
+          $ref: "#/components/responses/Error"
+        404:
+          $ref: "#/components/responses/Error"
+        409:
+          $ref: "#/components/responses/Error"
+        422:
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags:
+        - "Groups"
+      operationId: "createGroup"
+      summary: "Create a group as an organization administrator or owner"
+      parameters:
+        -
+          $ref: "#/components/parameters/OrgId"
+        -
+          $ref: "#/components/parameters/TestingKey"
+        -
+          $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        201:
+          description: "Successful group operation"
+          content:
+            application/json:
+              schema:
+                type: "object"
+                additionalProperties: false
+                required:
+                  - "type"
+                  - "data"
+                properties:
+                  type:
+                    type: "string"
+                    const: "create_group"
+                  data:
+                    $ref: "#/components/schemas/Conversation"
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        403:
+          $ref: "#/components/responses/Error"
+        404:
+          $ref: "#/components/responses/Error"
+        409:
+          $ref: "#/components/responses/Error"
+        422:
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              additionalProperties: false
+              required:
+                - "type"
+                - "data"
+              properties:
+                type:
+                  type: "string"
+                  const: "create_group"
+                data:
+                  $ref: "#/components/schemas/GroupCreate"
+      description: "Creator is invited automatically. Groups have stable conversation UUIDs and full prior message history for new members. Private groups admit invited members or actors with any matching current IAM tag. Public groups automatically admit organization Carbons; Silicons always require an explicit invitation. Only org_admin/org_owner (and canonical IAM admin/owner aliases) may create, update, invite or remove invitations. Group administration does not itself grant history access."
+  "/groups/{group_id}":
+    get:
+      tags:
+        - "Groups"
+      operationId: "getGroup"
+      summary: "Read group settings, active participants and latest message"
+      parameters:
+        -
+          $ref: "#/components/parameters/OrgId"
+        -
+          $ref: "#/components/parameters/TestingKey"
+        -
+          name: "group_id"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+            format: "uuid"
+      responses:
+        200:
+          description: "Successful group operation"
+          content:
+            application/json:
+              schema:
+                type: "object"
+                additionalProperties: false
+                required:
+                  - "type"
+                  - "data"
+                properties:
+                  type:
+                    type: "string"
+                    const: "group"
+                  data:
+                    $ref: "#/components/schemas/Conversation"
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        403:
+          $ref: "#/components/responses/Error"
+        404:
+          $ref: "#/components/responses/Error"
+        409:
+          $ref: "#/components/responses/Error"
+        422:
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags:
+        - "Groups"
+      operationId: "updateGroup"
+      summary: "Replace group settings with an exact current version"
+      parameters:
+        -
+          $ref: "#/components/parameters/OrgId"
+        -
+          $ref: "#/components/parameters/TestingKey"
+        -
+          name: "group_id"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+            format: "uuid"
+        -
+          $ref: "#/components/parameters/IdempotencyKey"
+        -
+          name: "If-Match"
+          in: "header"
+          required: true
+          schema:
+            type: "integer"
+            minimum: 1
+      responses:
+        200:
+          description: "Successful group operation"
+          content:
+            application/json:
+              schema:
+                type: "object"
+                additionalProperties: false
+                required:
+                  - "type"
+                  - "data"
+                properties:
+                  type:
+                    type: "string"
+                    const: "update_group"
+                  data:
+                    $ref: "#/components/schemas/GroupDetails"
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        403:
+          $ref: "#/components/responses/Error"
+        404:
+          $ref: "#/components/responses/Error"
+        409:
+          $ref: "#/components/responses/Error"
+        422:
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              additionalProperties: false
+              required:
+                - "type"
+                - "data"
+              properties:
+                type:
+                  type: "string"
+                  const: "update_group"
+                data:
+                  $ref: "#/components/schemas/GroupSettings"
+  "/groups/{group_id}/members":
+    post:
+      tags:
+        - "Groups"
+      operationId: "inviteGroupMembers"
+      summary: "Add explicit invitations as an organization administrator or owner"
+      parameters:
+        -
+          $ref: "#/components/parameters/OrgId"
+        -
+          $ref: "#/components/parameters/TestingKey"
+        -
+          name: "group_id"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+            format: "uuid"
+        -
+          $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        200:
+          description: "Successful group operation"
+          content:
+            application/json:
+              schema:
+                type: "object"
+                additionalProperties: false
+                required:
+                  - "type"
+                  - "data"
+                properties:
+                  type:
+                    type: "string"
+                    const: "invite_group_members"
+                  data:
+                    $ref: "#/components/schemas/GroupDetails"
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        403:
+          $ref: "#/components/responses/Error"
+        404:
+          $ref: "#/components/responses/Error"
+        409:
+          $ref: "#/components/responses/Error"
+        422:
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              additionalProperties: false
+              required:
+                - "type"
+                - "data"
+              properties:
+                type:
+                  type: "string"
+                  const: "invite_group_members"
+                data:
+                  $ref: "#/components/schemas/GroupMembers"
+    delete:
+      tags:
+        - "Groups"
+      operationId: "removeGroupMembers"
+      summary: "Remove explicit invitations; tag and public grants remain independent"
+      parameters:
+        -
+          $ref: "#/components/parameters/OrgId"
+        -
+          $ref: "#/components/parameters/TestingKey"
+        -
+          name: "group_id"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+            format: "uuid"
+        -
+          $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        200:
+          description: "Successful group operation"
+          content:
+            application/json:
+              schema:
+                type: "object"
+                additionalProperties: false
+                required:
+                  - "type"
+                  - "data"
+                properties:
+                  type:
+                    type: "string"
+                    const: "remove_group_members"
+                  data:
+                    $ref: "#/components/schemas/GroupDetails"
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        403:
+          $ref: "#/components/responses/Error"
+        404:
+          $ref: "#/components/responses/Error"
+        409:
+          $ref: "#/components/responses/Error"
+        422:
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              additionalProperties: false
+              required:
+                - "type"
+                - "data"
+              properties:
+                type:
+                  type: "string"
+                  const: "remove_group_members"
+                data:
+                  $ref: "#/components/schemas/GroupMembers"
   "/contracts":
     get:
       tags: [Operations]
@@ -1787,6 +2150,105 @@ components:
               data:
                 "$ref": "#/components/schemas/Error"
   schemas:
+    "GroupSettings":
+      type: "object"
+      required:
+        - "name"
+      properties:
+        name:
+          type: "string"
+          minLength: 1
+          maxLength: 120
+        description:
+          type: "string"
+          maxLength: 4000
+          default: ""
+        is_public:
+          type: "boolean"
+          default: false
+        tag_ids:
+          type: "array"
+          maxItems: 100
+          items:
+            type: "string"
+            format: "uuid"
+          default: []
+    "GroupCreate":
+      type: "object"
+      required:
+        - "name"
+      properties:
+        name:
+          type: "string"
+          minLength: 1
+          maxLength: 120
+        description:
+          type: "string"
+          maxLength: 4000
+          default: ""
+        is_public:
+          type: "boolean"
+          default: false
+        tag_ids:
+          type: "array"
+          maxItems: 100
+          items:
+            type: "string"
+            format: "uuid"
+          default: []
+        member_ids:
+          type: "array"
+          maxItems: 100
+          items:
+            type: "string"
+          default: []
+    "GroupDetails":
+      type: "object"
+      required:
+        - "name"
+        - "description"
+        - "is_public"
+        - "tag_ids"
+        - "version"
+        - "invited_members"
+      properties:
+        name:
+          type: "string"
+          minLength: 1
+          maxLength: 120
+        description:
+          type: "string"
+          maxLength: 4000
+          default: ""
+        is_public:
+          type: "boolean"
+          default: false
+        tag_ids:
+          type: "array"
+          maxItems: 100
+          items:
+            type: "string"
+            format: "uuid"
+          default: []
+        version:
+          type: "integer"
+          minimum: 1
+        invited_members:
+          type: "array"
+          items:
+            $ref: "#/components/schemas/ActorRef"
+    "GroupMembers":
+      type: "object"
+      additionalProperties: false
+      required:
+        - "member_ids"
+      properties:
+        member_ids:
+          type: "array"
+          maxItems: 100
+          items:
+            type: "string"
+          default: []
     ActorRef:
       type: object
       required:
@@ -1809,6 +2271,8 @@ components:
       - created_at
       - updated_at
       properties:
+        group:
+          "$ref": "#/components/schemas/GroupDetails"
         id:
           type: string
           format: uuid
@@ -1816,7 +2280,7 @@ components:
           type: string
         participants:
           type: array
-          minItems: 2
+          minItems: 1
           items:
             "$ref": "#/components/schemas/ActorRef"
         last_message:

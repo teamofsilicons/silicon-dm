@@ -294,6 +294,65 @@ impl Client {
         )
         .await
     }
+    /// Lists groups accessible to this token; group IDs are conversation IDs.
+    pub async fn groups(&self, page: &PageRequest) -> Result<Page<Conversation>> {
+        self.json(self.request(Method::GET, "groups")?.query(page))
+            .await
+    }
+    pub async fn group(&self, id: Uuid) -> Result<Conversation> {
+        self.json(self.request(Method::GET, &format!("groups/{id}"))?)
+            .await
+    }
+    pub async fn create_group(&self, input: &GroupCreate, key: &str) -> Result<Conversation> {
+        self.json(
+            self.request(Method::POST, "groups")?
+                .header("Idempotency-Key", key)
+                .json(input),
+        )
+        .await
+    }
+    pub async fn update_group(
+        &self,
+        id: Uuid,
+        settings: &GroupSettings,
+        version: i64,
+        key: &str,
+    ) -> Result<GroupDetails> {
+        self.json(
+            self.request(Method::PATCH, &format!("groups/{id}"))?
+                .header("If-Match", version)
+                .header("Idempotency-Key", key)
+                .json(settings),
+        )
+        .await
+    }
+    pub async fn invite_group_members(
+        &self,
+        id: Uuid,
+        members: &[String],
+        key: &str,
+    ) -> Result<GroupDetails> {
+        self.json(
+            self.request(Method::POST, &format!("groups/{id}/members"))?
+                .header("Idempotency-Key", key)
+                .json(&json!({"member_ids":members})),
+        )
+        .await
+    }
+    /// Removes explicit invitations; independent public/tag access remains effective.
+    pub async fn remove_group_members(
+        &self,
+        id: Uuid,
+        members: &[String],
+        key: &str,
+    ) -> Result<GroupDetails> {
+        self.json(
+            self.request(Method::DELETE, &format!("groups/{id}/members"))?
+                .header("Idempotency-Key", key)
+                .json(&json!({"member_ids":members})),
+        )
+        .await
+    }
     pub async fn messages(
         &self,
         conversation: Uuid,

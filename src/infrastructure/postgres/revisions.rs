@@ -153,7 +153,7 @@ impl PostgresStore {
             .execute(&mut *tx).await.map_err(map_constraint_error)?;
         // Include sender devices so every authenticated view converges.
         let targets: Vec<(String, String)> = sqlx::query_as(
-            "SELECT actor_kind::text, actor_id FROM conversation_participants WHERE conversation_id=$1 AND organization_id=$2 ORDER BY actor_kind, actor_id"
+            "SELECT actor_kind::text, actor_id FROM effective_conversation_participants WHERE conversation_id=$1 AND organization_id=$2 ORDER BY actor_kind, actor_id"
         ).bind(conversation).bind(org.as_str()).fetch_all(&mut *tx).await?;
         for (kind, target) in targets {
             sqlx::query("INSERT INTO actor_deliveries(id,organization_id,target_kind,target_id,sequence,delivery_kind,conversation_id,message_id,delivery_revision) VALUES($1,$2,$3::text::actor_kind,$4,1,'message',$5,$6,$7)")

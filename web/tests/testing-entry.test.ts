@@ -351,3 +351,15 @@ test("exit restores production or sign-in without revoking saved testing session
   assert.equal(signedOut.value.authenticated,false);
   assert.equal(signedOut.value.profiles.length,1);
 });
+
+test("groups use the authenticated gateway allowlist and selected sandbox credentials", async t => {
+  const f = await fixture(t);
+  const entered = await f.enter("test-slt-token");
+  const response = await f.request("/api/dm/groups", { name: "Research", member_ids: [] }, entered.value.profile_id);
+  assert.equal(response.status, 200);
+  const sent = f.calls.find(call => call.path === "/api/v1/groups");
+  assert(sent);
+  assert.equal(sent.headers.authorization, "Bearer test-access");
+  assert.equal(sent.headers["x-testing-environment-key"], rootKey);
+  assert.deepEqual(sent.body, { type: "create_group", data: { name: "Research", member_ids: [] } });
+});

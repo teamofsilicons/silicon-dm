@@ -19,6 +19,8 @@ pub struct DocsArgs {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Topic {
+    /// Group creation, IAM tags, invitations and history.
+    Groups,
     /// Install, authenticate and send the first message.
     GettingStarted,
     /// Build a reliable typed integration.
@@ -85,6 +87,7 @@ macro_rules! guide {
 }
 
 const GUIDES: &[Guide] = &[
+    guide!("groups", "Groups and membership", "groups.md"),
     guide!("getting-started", "Start using DM", "getting-started.md"),
     guide!("building", "Build on DM", "building.md"),
     guide!("contracts", "Contracts and compatibility", "contracts.md"),

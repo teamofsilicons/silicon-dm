@@ -63,3 +63,23 @@ GROUP BY record.source, record.event
 ```
 
 [Configuration](configuration.md) · [Version policy](contracts.md)
+
+## Group diagnostics
+
+Group routes participate in the same HTTP completion and client diagnostics as
+messages. Successful group mutations emit `group.created`, `group.updated`,
+`group.members_invited` and `group.invitations_removed`. Context is restricted
+to `group_id` (UUID), `count`, `is_public` when relevant, and `success`. These
+record successful requests, including idempotent retries; do not count them as
+unique group creations. Names, descriptions, IAM tag UUIDs, invitee identities
+and message content never enter diagnostics. Opt-out and sandbox isolation apply
+to these events too. The existing DM Overview window includes all group events.
+
+```sql
+SELECT record.event, count() AS observations
+FROM silicondm
+WHERE record.event LIKE 'group.%'
+GROUP BY record.event
+```
+
+See [groups and membership](groups.md) for the full access model.

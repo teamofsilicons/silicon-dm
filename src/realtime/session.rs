@@ -551,6 +551,10 @@ impl SessionRuntime {
                 if device_id != self.consumer_id {
                     return Err(AppError::Forbidden);
                 }
+                self.state
+                    .store
+                    .check_group_access(&self.authority, conversation_id)
+                    .await?;
                 let recipient = self.actor(&actor_id)?.clone();
                 self.state
                     .store
@@ -578,6 +582,10 @@ impl SessionRuntime {
                 if org_id != self.authority.organization_id {
                     return Err(AppError::Forbidden);
                 }
+                self.state
+                    .store
+                    .check_group_access(&self.authority, conversation_id)
+                    .await?;
                 let sender = self.actor(&actor_id)?.clone();
                 if message
                     .sender_id
@@ -673,6 +681,26 @@ impl SessionRuntime {
                 )));
             }
             let sequence = delivery.sequence;
+            let conversation_id: Uuid = sqlx::query_scalar(
+                "SELECT conversation_id FROM actor_deliveries WHERE id=$1 AND organization_id=$2",
+            )
+            .bind(delivery.id)
+            .bind(self.authority.organization_id.as_str())
+            .fetch_one(self.state.store.pool())
+            .await?;
+            match self
+                .state
+                .store
+                .check_group_access(&self.authority, conversation_id)
+                .await
+            {
+                Ok(()) => {}
+                Err(AppError::NotFound) => {
+                    self.sent_through.insert(actor_id.clone(), sequence);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
             let frame =
                 ServerFrame::delivery(delivery.id, actor_id.clone(), sequence, delivery.payload);
             send_server_frame(socket, &frame).await?;

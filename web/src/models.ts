@@ -60,7 +60,18 @@ export interface Message extends Omit<MessageCreate, "sender_id"> {
   failure_reason?: string | null;
   bundle?: { id: string; role: "member" | "display" };
 }
+export interface GroupSettings {
+  name: string;
+  description: string;
+  is_public: boolean;
+  tag_ids: string[];
+}
+export interface GroupDetails extends GroupSettings {
+  version: number;
+  invited_members: Actor[];
+}
 export interface Conversation {
+  group?: GroupDetails | null;
   id: string;
   org_id: string;
   participants: Actor[];

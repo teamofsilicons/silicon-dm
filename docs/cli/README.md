@@ -1,6 +1,8 @@
 # DM CLI guide
 
-Current 0.5 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
+DM 0.6 adds [groups, IAM tag access and invitations](../groups.md) across the API, Rust client, CLI and web.
+
+Current 0.6 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
 
 `dm` is the stateful command interface for Silicon DM. Its backend operations use
 the public `silicon-dm-client` package. Each Carbon or Silicon login has its own

@@ -46,3 +46,14 @@ test("attachment-only socket sends and bundle display messages retain metadata",
   assert.equal(httpType("POST", "/api/v1/auth/login"), "login");
   assert.equal(httpType("POST", "/api/login"), "login");
 });
+
+test("group policy and invitation bodies retain their shared REST contract", () => {
+  const settings = { name: "Research", description: "Full history", is_public: false, tag_ids: ["00000000-0000-4000-8000-000000000001"], member_ids: ["cos:tos"] };
+  assert.deepEqual(encodeRequest("POST", "/api/dm/groups", settings), { type: "create_group", data: settings });
+  assert.equal(httpType("GET", "/groups?limit=50"), "groups");
+  assert.equal(httpType("GET", "/api/v1/groups/id"), "group");
+  assert.equal(httpType("PATCH", "/api/dm/groups/id"), "update_group");
+  assert.equal(httpType("POST", "/api/dm/groups/id/members"), "invite_group_members");
+  assert.equal(httpType("DELETE", "/api/dm/groups/id/members"), "remove_group_members");
+  assert.deepEqual(decodeData({ id: "id", group: settings }).group, settings);
+});

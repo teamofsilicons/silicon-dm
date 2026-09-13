@@ -141,6 +141,11 @@ enum Command {
         #[command(subcommand)]
         command: Conversations,
     },
+    /// Manage named groups, invitations and IAM tag access (organization admins/owners).
+    Groups {
+        #[command(subcommand)]
+        command: Groups,
+    },
     /// Send, reply, inspect, edit or delete messages with preserved metadata.
     Messages {
         #[command(subcommand)]
@@ -252,6 +257,66 @@ enum Conversations {
     Create {
         #[arg(long = "participant", required = true)]
         participants: Vec<String>,
+    },
+}
+#[derive(Args)]
+struct GroupPolicy {
+    #[arg(long)]
+    name: String,
+    #[arg(long, default_value = "")]
+    description: String,
+    /// Automatically admit organization Carbons; Silicons require invitations.
+    #[arg(long)]
+    public: bool,
+    /// Matching IAM tag UUID grants access to a private group; repeat for multiple tags.
+    #[arg(long = "tag")]
+    tags: Vec<Uuid>,
+}
+impl GroupPolicy {
+    fn settings(self) -> silicon_dm_client::models::GroupSettings {
+        silicon_dm_client::models::GroupSettings {
+            name: self.name,
+            description: self.description,
+            is_public: self.public,
+            tag_ids: self.tags,
+        }
+    }
+}
+#[derive(Subcommand)]
+enum Groups {
+    /// List accessible groups with normal conversation pagination.
+    List {
+        #[command(flatten)]
+        page: Pagination,
+    },
+    /// Show settings and the current active roster.
+    Show { group: Uuid },
+    /// Create a group. The creator is invited automatically.
+    Create {
+        #[command(flatten)]
+        policy: GroupPolicy,
+        #[arg(long = "member")]
+        members: Vec<String>,
+    },
+    /// Replace all settings using the version returned by show.
+    Update {
+        group: Uuid,
+        #[arg(long)]
+        version: i64,
+        #[command(flatten)]
+        policy: GroupPolicy,
+    },
+    /// Invite active organization Carbons or Silicons.
+    Invite {
+        group: Uuid,
+        #[arg(long = "member", required = true)]
+        members: Vec<String>,
+    },
+    /// Remove explicit invitations; matching tag or public access remains.
+    Remove {
+        group: Uuid,
+        #[arg(long = "member", required = true)]
+        members: Vec<String>,
     },
 }
 #[derive(Args)]
@@ -965,6 +1030,37 @@ async fn run(cli: Cli) -> Result<Value> {
             let profile = store::profile(&config, &name, cli.test)?;
             let mut long_message_override = false;
             let operation = match other {
+                Command::Groups { command } => match command {
+                    Groups::List { page } => Operation::ListGroups { page: page.page() },
+                    Groups::Show { group } => Operation::GetGroup { group_id: group },
+                    Groups::Create { policy, members } => Operation::CreateGroup {
+                        group: silicon_dm_client::models::GroupCreate {
+                            settings: policy.settings(),
+                            member_ids: members,
+                        },
+                        idempotency_key: key,
+                    },
+                    Groups::Update {
+                        group,
+                        policy,
+                        version,
+                    } => Operation::UpdateGroup {
+                        group_id: group,
+                        settings: policy.settings(),
+                        version,
+                        idempotency_key: key,
+                    },
+                    Groups::Invite { group, members } => Operation::InviteGroupMembers {
+                        group_id: group,
+                        member_ids: members,
+                        idempotency_key: key,
+                    },
+                    Groups::Remove { group, members } => Operation::RemoveGroupMembers {
+                        group_id: group,
+                        member_ids: members,
+                        idempotency_key: key,
+                    },
+                },
                 Command::Whoami => Operation::Me,
                 Command::Conversations { command } => match command {
                     Conversations::List { page } => {

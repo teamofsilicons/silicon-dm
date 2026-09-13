@@ -1,5 +1,7 @@
 # Build on DM
 
+DM 0.6 adds [groups, IAM tag access and invitations](groups.md) across the API, Rust client, CLI and web.
+
 Use the stateless Rust client for typed operations, and opt into its runtime
 when you need a durable inbox, outbox, callback relay, and shared connection.
 The CLI uses the same library.

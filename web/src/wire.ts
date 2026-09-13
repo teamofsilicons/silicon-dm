@@ -11,6 +11,14 @@ export function httpType(method: string, path: string): string {
   if (p[0] === "iam") return "iam";
   if (p[0] === "auth") return p[1];
   if (p[0] === "api") return p[1];
+  if (p[0] === "groups") {
+    if (p.length === 1) return method === "POST" ? "create_group" : "groups";
+    if (p[2] === "members")
+      return method === "DELETE"
+        ? "remove_group_members"
+        : "invite_group_members";
+    return method === "PATCH" ? "update_group" : "group";
+  }
   if (p[0] === "conversations") {
     if (p.length === 1)
       return method === "POST" ? "create_conversation" : "conversations";

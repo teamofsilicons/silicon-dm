@@ -94,7 +94,7 @@ pub(super) async fn describe(State(state): State<AppState>) -> AppResult<Json<se
             .fetch_all(state.store.pool())
             .await?;
     Ok(Json(
-        json!({"service":"silicon-dm","service_version":env!("CARGO_PKG_VERSION"),"contracts":rows,"compatibility":[{"http":1,"websocket":3,"shared":1,"minimum_client":"0.5.0","legacy_client":"0.4.x (standalone socket)"}],"policy":{"breaking_changes":"new contract version; existing consumers retain their negotiated shape","additive_changes":"optional fields only","sunset_after_idle_days":7,"deprecation_required":true},"docs":"https://docs.dm.teamofsilicons.com/contracts/"}),
+        json!({"service":"silicon-dm","service_version":env!("CARGO_PKG_VERSION"),"contracts":rows,"compatibility":[{"http":1,"websocket":3,"shared":1,"minimum_client":"0.5.0","legacy_client":"0.4.x (standalone socket)"}],"features":{"groups":{"minimum_client":"0.6.0","guide":"https://docs.dm.teamofsilicons.com/groups/"}},"policy":{"breaking_changes":"new contract version; existing consumers retain their negotiated shape","additive_changes":"optional fields only","sunset_after_idle_days":7,"deprecation_required":true},"docs":"https://docs.dm.teamofsilicons.com/contracts/"}),
     ))
 }
 

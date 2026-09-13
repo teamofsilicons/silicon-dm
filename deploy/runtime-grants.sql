@@ -8,8 +8,10 @@
 -- keeps the operator-supplied role name an identifier rather than SQL text.
 GRANT USAGE ON SCHEMA dm TO :"runtime_role";
 GRANT USAGE ON SCHEMA dm_private TO :"runtime_role";
+GRANT EXECUTE ON FUNCTION dm.sync_group_participants(text) TO :"runtime_role";
 -- Trigger bodies call these invariant validators under the runtime role.
 -- Trigger-only functions do not need to be callable directly by that role.
+GRANT EXECUTE ON FUNCTION dm_private.assert_direct_conversation_participant_count(uuid) TO :"runtime_role";
 GRANT EXECUTE ON FUNCTION dm_private.assert_conversation_participant_count(uuid) TO :"runtime_role";
 GRANT EXECUTE ON FUNCTION dm_private.assert_message_content(uuid) TO :"runtime_role";
 GRANT EXECUTE ON FUNCTION dm_private.assert_message_outbox_complete(uuid) TO :"runtime_role";

@@ -12,3 +12,5 @@ pub mod auth_handlers;
 pub mod webhook;
 
 mod contracts;
+
+mod groups;

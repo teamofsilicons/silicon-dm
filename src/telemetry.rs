@@ -113,8 +113,8 @@ fn safe_fields(fields: Value) -> serde_json::Map<String, Value> {
         for (key, value) in fields {
             let allowed = match key.as_str() {
                 "duration_ms" | "status" | "count" | "sequence" | "attempt" => value.is_u64(),
-                "success" => value.is_boolean(),
-                "request_id" | "session_id" => value
+                "success" | "is_public" => value.is_boolean(),
+                "request_id" | "session_id" | "group_id" => value
                     .as_str()
                     .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok()),
                 "route" | "method" | "code" | "stage" => value.as_str().is_some_and(|s| {
@@ -139,6 +139,10 @@ fn diagnostic(state: &AppState, source: &str, event: &str, fields: Value) -> Val
         "backend"
     };
     let event = if [
+        "group.created",
+        "group.updated",
+        "group.members_invited",
+        "group.invitations_removed",
         "http.completed",
         "websocket.opened",
         "websocket.closed",
@@ -168,7 +172,7 @@ fn diagnostic(state: &AppState, source: &str, event: &str, fields: Value) -> Val
         "testing_environment_id":state.testing_environment,"testing_generation":state.testing_generation,
         "instance_id":state.instance_id.as_ref(),"context":safe})
 }
-fn requested(headers: &HeaderMap) -> bool {
+pub(crate) fn requested(headers: &HeaderMap) -> bool {
     headers.get("x-dm-telemetry").is_none_or(|v| v != "off")
 }
 /// Capture completion, latency and failure for every admitted API operation.

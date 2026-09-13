@@ -270,6 +270,10 @@ impl IamClient {
             principal_id: snapshot.principal_id,
             session_id: inspected.session_id,
             organization_id: organization_id.clone(),
+            tag_ids: snapshot
+                .tags
+                .as_ref()
+                .map(|tags| tags.iter().map(|tag| tag.id).collect()),
             org_role: snapshot.org_role,
             represented_actor_ids: BTreeSet::new(),
             capabilities: snapshot_scopes,

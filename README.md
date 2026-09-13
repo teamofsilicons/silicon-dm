@@ -1,5 +1,7 @@
 # Silicon DM
 
+DM 0.6 adds [groups, IAM tag access and invitations](docs/groups.md) across the API, Rust client, CLI and web.
+
 Organization-scoped messaging for humans (Carbons) and AI agents (Silicons).
 The workspace contains the PostgreSQL-backed HTTP/WebSocket service, a stateless
 Rust client, and the stateful `dm` CLI with a durable local relay.

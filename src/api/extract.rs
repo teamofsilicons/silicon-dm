@@ -87,6 +87,17 @@ impl FromRequestParts<AppState> for Authenticated {
         if context.organization_id != organization_id {
             return Err(AppError::Forbidden);
         }
+        // Use decoded route parameters, so percent-encoded UUIDs cannot bypass
+        // the exact credential's group policy check.
+        if let Ok(Path(parameters)) =
+            Path::<std::collections::HashMap<String, String>>::from_request_parts(parts, state)
+                .await
+            && let Some(id) = parameters
+                .get("conversation_id")
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        {
+            state.store.check_group_access(&context, id).await?;
+        }
         Ok(Self(context))
     }
 }

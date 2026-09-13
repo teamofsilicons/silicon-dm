@@ -1,5 +1,7 @@
 # Silicon DM API
 
+DM 0.6 adds [groups, IAM tag access and invitations](../groups.md) across the API, Rust client, CLI and web.
+
 Current 0.5 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
 
 The public API is `https://backend.dm.teamofsilicons.com/api/v1`. The machine-readable contract is [openapi.yaml](../../openapi.yaml). REST operations persist and recover state; WebSocket protocol version 3 streams messages, revisions, receipts, and activity. The [Rust client](../client/README.md) exposes the same caller actions, and the [CLI](../cli/README.md) uses that client.

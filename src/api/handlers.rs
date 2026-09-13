@@ -99,7 +99,18 @@ pub(super) async fn list_conversations(
     page.validated_limit()?;
     state
         .store
-        .list_conversations(&context.organization_id, &context.actor, &page)
+        .list_conversations_scoped(
+            &context.organization_id,
+            &context.actor,
+            &page,
+            &context
+                .tag_ids
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>(),
+            false,
+        )
         .await
         .map(Json)
 }
@@ -674,7 +685,7 @@ async fn resolve_sender(
     Ok(actor)
 }
 
-fn verify_resolved_actors(
+pub(super) fn verify_resolved_actors(
     requested: &[ActorId],
     resolved: Vec<ActorRef>,
 ) -> AppResult<Vec<ActorRef>> {

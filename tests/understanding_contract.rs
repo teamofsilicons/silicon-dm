@@ -48,7 +48,8 @@ impl IdentityProvider for Identity {
             principal_id: Uuid::from_u128(if id == "alice" { 1 } else { 2 }),
             session_id: None,
             organization_id: organization_id.clone(),
-            org_role: None,
+            org_role: (id == "alice").then(|| "org_admin".into()),
+            tag_ids: None,
             represented_actor_ids: BTreeSet::new(),
             capabilities: BTreeSet::new(),
             credential: PresentedCredential::Bearer(token.clone()),
@@ -536,10 +537,16 @@ async fn daemon_uses_one_connection(base: &str, pool: &sqlx::PgPool) -> Result {
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "sandbox effects and opt-out share a single generation fence"
+)]
 async fn sandbox_effects_are_isolated(production: &AppState, mut sandbox: AppState) -> Result {
     sandbox.identity = Arc::new(Identity);
     Arc::make_mut(&mut sandbox.settings).telemetry.enabled = true;
     let pool = sandbox.store.pool().clone();
+    sqlx::query("INSERT INTO iam_membership_projections(membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status) VALUES($1,$2,$3,'tos','carbon','alice',1,1,'active')")
+        .bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(Uuid::nil()).execute(&pool).await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
     let server =
@@ -553,6 +560,41 @@ async fn sandbox_effects_are_isolated(production: &AppState, mut sandbox: AppSta
             .await?["notification"],
         "simulated"
     );
+    let input = silicon_dm_client::models::GroupCreate {
+        settings: silicon_dm_client::models::GroupSettings {
+            name: "Secret sandbox group".into(),
+            description: "Private description".into(),
+            is_public: false,
+            tag_ids: vec![],
+        },
+        member_ids: vec![],
+    };
+    let group = client.create_group(&input, "sandbox-group-fixture").await?;
+    assert!(group.group.is_some());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM groups")
+            .fetch_one(production.store.pool())
+            .await?,
+        0
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let event: Option<Value> = sqlx::query_scalar(
+                "SELECT event FROM telemetry_events WHERE event->>'event'='group.created'",
+            )
+            .fetch_optional(&pool)
+            .await?;
+            if let Some(event) = event {
+                assert_eq!(event["context"]["group_id"], group.id.to_string());
+                assert!(!event.to_string().contains("Secret sandbox"));
+                assert!(!event.to_string().contains("Private description"));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await??;
     client
         .with_source("cli")
         .telemetry("command", true, 12)
@@ -560,7 +602,7 @@ async fn sandbox_effects_are_isolated(production: &AppState, mut sandbox: AppSta
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM telemetry_events WHERE event->>'source'='cli'",
+                "SELECT count(*) FROM telemetry_events WHERE event->>'source'='cli' AND EXISTS(SELECT 1 FROM telemetry_events WHERE event->>'event'='http.completed' AND event->'context'->>'route' LIKE '%/groups')",
             )
             .fetch_one(&pool)
             .await?;
@@ -588,6 +630,7 @@ async fn sandbox_effects_are_isolated(production: &AppState, mut sandbox: AppSta
         .await?;
     client.telemetry("command", false, 12).await?;
     client.iam().await?;
+    client.create_group(&input, "sandbox-group-opt-out").await?;
     let after: i64 = sqlx::query_scalar("SELECT count(*) FROM telemetry_events")
         .fetch_one(&pool)
         .await?;
@@ -595,6 +638,198 @@ async fn sandbox_effects_are_isolated(production: &AppState, mut sandbox: AppSta
         after, before,
         "opt-out excludes client and server request events"
     );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "exercise the public SDK and HTTP group lifecycle end to end"
+)]
+async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Result {
+    use silicon_dm_client::{
+        Client,
+        models::{GroupCreate, GroupSettings, MessageCreate, PageRequest},
+    };
+    let container = Postgres::default().with_tag("16-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@{}:{}/postgres",
+        container.get_host().await?,
+        container.get_host_port_ipv4(5432).await?
+    );
+    let app = state(settings(url, "http://localhost:9999")?).await?;
+    let org: OrganizationId = "tos".parse()?;
+    for id in ["alice", "bob"] {
+        let actor = ActorRef {
+            id: id.parse()?,
+            actor_type: ActorType::Carbon,
+        };
+        app.store.refresh_directory(&org, &[actor]).await?;
+        sqlx::query("INSERT INTO iam_membership_projections(membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status) VALUES($1,$2,$3,'tos','carbon',$4,1,1,'active')")
+            .bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(Uuid::nil()).bind(id).execute(app.store.pool()).await?;
+    }
+    let group_pool = app.store.pool().clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let server =
+        tokio::spawn(
+            async move { axum::serve(listener, silicon_dm::api::build_router(app)).await },
+        );
+    let owner = Client::new(&base)?.with_auth("token-alice", "tos");
+    let reader = Client::new(&base)?.with_auth("token-bob", "tos");
+    let input = GroupCreate {
+        settings: GroupSettings {
+            name: "Delivery team".into(),
+            description: "Full history".into(),
+            is_public: false,
+            tag_ids: vec![],
+        },
+        member_ids: vec![],
+    };
+    assert!(
+        reader
+            .create_group(&input, "reader-cannot-create")
+            .await
+            .is_err()
+    );
+    let group = owner.create_group(&input, "owner-creates-group").await?;
+    assert_eq!(
+        owner.create_group(&input, "owner-creates-group").await?.id,
+        group.id
+    );
+    assert_eq!(
+        group.group.as_ref().ok_or("group")?.settings.description,
+        "Full history"
+    );
+    assert!(reader.group(group.id).await.is_err());
+    let message = owner
+        .send_message(
+            group.id,
+            &MessageCreate {
+                text: Some("Existing history".into()),
+                ..MessageCreate::default()
+            },
+            "prior-group-message",
+        )
+        .await?;
+    owner
+        .invite_group_members(group.id, &["bob".into()], "invite-bob-to-group")
+        .await?;
+    assert_eq!(
+        reader
+            .messages(group.id, &PageRequest::default(), false)
+            .await?
+            .items[0]
+            .id,
+        message.id
+    );
+    assert_eq!(reader.groups(&PageRequest::default()).await?.items.len(), 1);
+    assert!(
+        reader
+            .invite_group_members(group.id, &["alice".into()], "reader-cannot-invite")
+            .await
+            .is_err()
+    );
+    assert!(
+        reader
+            .remove_group_members(group.id, &["alice".into()], "reader-cannot-remove")
+            .await
+            .is_err()
+    );
+    let current = owner.group(group.id).await?.group.ok_or("group")?;
+    let renamed = GroupSettings {
+        name: "Renamed".into(),
+        ..input.settings.clone()
+    };
+    let updated = owner
+        .update_group(group.id, &renamed, current.version, "rename-group-once")
+        .await?;
+    assert_eq!(updated.settings.name, "Renamed");
+    assert!(
+        owner
+            .update_group(
+                group.id,
+                &input.settings,
+                current.version,
+                "reject-stale-version"
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        owner
+            .update_group(group.id, &renamed, current.version, "rename-group-once")
+            .await?
+            .version,
+        updated.version
+    );
+    let removed = owner
+        .remove_group_members(group.id, &["bob".into()], "remove-bob-once")
+        .await?;
+    assert_eq!(
+        owner
+            .remove_group_members(group.id, &["bob".into()], "remove-bob-once")
+            .await?
+            .version,
+        removed.version
+    );
+    assert!(
+        reader
+            .messages(group.id, &PageRequest::default(), false)
+            .await
+            .is_err()
+    );
+    assert!(reader.draft(group.id).await.is_err());
+    assert!(
+        reader
+            .groups(&PageRequest::default())
+            .await?
+            .items
+            .is_empty()
+    );
+    let tag = Uuid::new_v4();
+    sqlx::query("UPDATE iam_membership_projections SET tag_ids=$1 WHERE actor_id='bob'")
+        .bind(vec![tag])
+        .execute(&group_pool)
+        .await?;
+    owner
+        .update_group(
+            group.id,
+            &GroupSettings {
+                tag_ids: vec![tag],
+                ..renamed
+            },
+            removed.version,
+            "tag-policy-for-narrow-token",
+        )
+        .await?;
+    // The cached IAM projection can grant membership while this specific token
+    // discloses no tags. Both literal and encoded paths must still deny it.
+    assert!(
+        reader
+            .messages(group.id, &PageRequest::default(), false)
+            .await
+            .is_err()
+    );
+    let raw_id = group.id.to_string();
+    let encoded_id = format!("%{:02X}{}", raw_id.as_bytes()[0], &raw_id[1..]);
+    let encoded = reqwest::Client::new()
+        .get(format!("{base}/api/v1/conversations/{encoded_id}/messages"))
+        .bearer_auth("token-bob")
+        .header("X-Org-ID", "tos")
+        .send()
+        .await?;
+    assert_eq!(encoded.status(), 404);
+    let bad = reqwest::Client::new()
+        .post(format!("{base}/api/v1/groups"))
+        .bearer_auth("token-alice")
+        .header("X-Org-ID", "tos")
+        .header("Idempotency-Key", "wrong-wire-discriminator")
+        .json(&json!({"type":"create_conversation","data":input}))
+        .send()
+        .await?;
+    assert_eq!(bad.status(), 422);
     server.abort();
     Ok(())
 }

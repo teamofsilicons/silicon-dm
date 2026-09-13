@@ -116,7 +116,33 @@ pub struct BundleRef {
     pub role: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupSettings {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub is_public: bool,
+    #[serde(default)]
+    pub tag_ids: Vec<Uuid>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupCreate {
+    #[serde(flatten)]
+    pub settings: GroupSettings,
+    #[serde(default)]
+    pub member_ids: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupDetails {
+    #[serde(flatten)]
+    pub settings: GroupSettings,
+    pub version: i64,
+    pub invited_members: Vec<Actor>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Conversation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupDetails>,
     pub id: Uuid,
     pub org_id: String,
     pub participants: Vec<Actor>,

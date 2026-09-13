@@ -13,6 +13,9 @@ const allowed: [RegExp, string[]][] = [
   [/^reports$/, ["POST"]],
   [/^contracts$/, ["GET"]],
   [/^auth\/me$/, ["GET"]],
+  [/^groups$/, ["GET", "POST"]],
+  [new RegExp(`^groups/${id}$`), ["GET", "PATCH"]],
+  [new RegExp(`^groups/${id}/members$`), ["POST", "DELETE"]],
   [/^conversations$/, ["GET", "POST"]],
   [new RegExp(`^conversations/${id}/messages$`), ["GET", "POST"]],
   [

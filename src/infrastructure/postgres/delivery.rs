@@ -257,6 +257,7 @@ impl PostgresStore {
               AND sequence <= $4
               AND dead_lettered_at IS NULL
               AND delivery_kind IN ('message', 'message_status')
+              AND EXISTS (SELECT 1 FROM effective_conversation_participants e WHERE e.conversation_id=actor_deliveries.conversation_id AND e.organization_id=actor_deliveries.organization_id AND e.actor_kind=actor_deliveries.target_kind AND e.actor_id=actor_deliveries.target_id)
             "#,
         )
         .bind(organization_id.as_str())
@@ -308,6 +309,7 @@ impl PostgresStore {
               AND sequence > $4
               AND dead_lettered_at IS NULL
               AND delivery_kind IN ('message', 'message_status')
+              AND EXISTS (SELECT 1 FROM effective_conversation_participants e WHERE e.conversation_id=actor_deliveries.conversation_id AND e.organization_id=actor_deliveries.organization_id AND e.actor_kind=actor_deliveries.target_kind AND e.actor_id=actor_deliveries.target_id)
             ORDER BY sequence
             LIMIT $5
             "#,
@@ -356,6 +358,7 @@ impl PostgresStore {
                   AND acked_at IS NULL
                   AND dead_lettered_at IS NULL
                   AND delivery_kind IN ('message', 'message_status')
+              AND EXISTS (SELECT 1 FROM effective_conversation_participants e WHERE e.conversation_id=actor_deliveries.conversation_id AND e.organization_id=actor_deliveries.organization_id AND e.actor_kind=actor_deliveries.target_kind AND e.actor_id=actor_deliveries.target_id)
                   AND next_attempt_at <= transaction_timestamp()
                   AND (
                       lease_owner IS NULL
