@@ -44,6 +44,10 @@ Set `DM_SPACE_STATION_TABLE_KEY` in the API service's secret environment and set
 but not replacement of an ephemeral container. Mount persistent storage when
 retaining unsent diagnostics across container replacement is required.
 
+Production Fargate tasks use a private UID 10001, mode 0700 volume at
+`/var/lib/silicon-dm/telemetry`. This volume lasts for the task; replacement
+can discard unsent diagnostics.
+
 Diagnostics are best effort and never gate message delivery. The official SDK
 bounds its pending queue; sandbox writes have a separate bounded concurrency
 limit. A missing ingest key leaves production export inactive, while explicit

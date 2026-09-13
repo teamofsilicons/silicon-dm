@@ -172,3 +172,22 @@ References: [Fargate IP target groups](https://docs.aws.amazon.com/AmazonECS/lat
 [preserving resources on failure](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stack-failure-options.html),
 [DeleteStack retention](https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_DeleteStack.html),
 [CreationPolicy timing](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-creationpolicy.html).
+
+
+## DM 0.5 diagnostics and report configuration
+
+The application secret may include `DM_SPACE_STATION_TABLE_KEY` and
+`DM_POSTMARK_SERVER_TOKEN`. Bootstrap validates and copies these optional fields
+into the restricted runtime secret without rotating database credentials. Missing
+values become empty strings: telemetry export stays inactive without its key,
+and production report submission returns unavailable without a Postmark token.
+After changing either value, rerun bootstrap and replace the API/worker tasks so
+ECS injects the updated secret version.
+
+The runtime image creates `/var/lib/silicon-dm/telemetry` as UID 10001, mode 0700,
+and declares it as a Docker volume. Each Fargate task mounts its own writable
+`telemetry` volume at that exact path, preserving image ownership while keeping
+the root filesystem read-only. The spool survives a process restart within the
+task; unsent diagnostics can be lost when the task is replaced. It contains no
+message payloads or authentication credentials. Message durability is independent
+of this best-effort telemetry spool.

@@ -210,7 +210,7 @@ pub(crate) async fn observe(
             &state,
             source,
             "http.completed",
-            json!({"route":route,"method":method,"request_id":request_id,"status":response.status().as_u16(),"success":response.status().is_success(),"duration_ms":u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)}),
+            json!({"route":route,"method":method,"request_id":request_id,"status":response.status().as_u16(),"success":response.status().is_success() || response.status() == axum::http::StatusCode::SWITCHING_PROTOCOLS,"duration_ms":u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)}),
         );
     }
     response

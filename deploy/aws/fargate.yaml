@@ -632,6 +632,8 @@ Resources:
         Fn::GetAtt:
         - RuntimeExecutionRole
         - Arn
+      Volumes:
+      - Name: telemetry
       ContainerDefinitions:
       - Name: api
         Image:
@@ -639,6 +641,10 @@ Resources:
         Essential: true
         User: 10001:10001
         ReadonlyRootFilesystem: true
+        MountPoints:
+        - SourceVolume: telemetry
+          ContainerPath: /var/lib/silicon-dm/telemetry
+          ReadOnly: false
         LinuxParameters:
           Capabilities:
             Drop:
@@ -655,6 +661,10 @@ Resources:
         Command:
         - dm-api
         Environment:
+        - Name: DM_TELEMETRY_HOME
+          Value: /var/lib/silicon-dm/telemetry
+        - Name: DM_TELEMETRY_ENABLED
+          Value: 'true'
         - Name: DM_ENVIRONMENT
           Value: production
         - Name: DM_BIND_ADDR
@@ -684,6 +694,12 @@ Resources:
         - Name: DM_LOG_FILTER
           Value: info,silicon_dm=info
         Secrets:
+        - Name: DM_SPACE_STATION_TABLE_KEY
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_SPACE_STATION_TABLE_KEY::'
+        - Name: DM_POSTMARK_SERVER_TOKEN
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_POSTMARK_SERVER_TOKEN::'
         - Name: DM_IAM_APP_ID
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_IAM_APP_ID::'
@@ -772,6 +788,8 @@ Resources:
         Fn::GetAtt:
         - RuntimeExecutionRole
         - Arn
+      Volumes:
+      - Name: telemetry
       ContainerDefinitions:
       - Name: worker
         Image:
@@ -779,6 +797,10 @@ Resources:
         Essential: true
         User: 10001:10001
         ReadonlyRootFilesystem: true
+        MountPoints:
+        - SourceVolume: telemetry
+          ContainerPath: /var/lib/silicon-dm/telemetry
+          ReadOnly: false
         LinuxParameters:
           Capabilities:
             Drop:
@@ -795,6 +817,10 @@ Resources:
         Command:
         - dm-worker
         Environment:
+        - Name: DM_TELEMETRY_HOME
+          Value: /var/lib/silicon-dm/telemetry
+        - Name: DM_TELEMETRY_ENABLED
+          Value: 'true'
         - Name: DM_ENVIRONMENT
           Value: production
         - Name: DM_BIND_ADDR
@@ -824,6 +850,12 @@ Resources:
         - Name: DM_LOG_FILTER
           Value: info,silicon_dm=info
         Secrets:
+        - Name: DM_SPACE_STATION_TABLE_KEY
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_SPACE_STATION_TABLE_KEY::'
+        - Name: DM_POSTMARK_SERVER_TOKEN
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_POSTMARK_SERVER_TOKEN::'
         - Name: DM_IAM_APP_ID
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_IAM_APP_ID::'

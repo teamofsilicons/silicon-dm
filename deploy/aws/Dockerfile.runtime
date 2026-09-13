@@ -9,4 +9,8 @@ RUN apt-get update \
     && chmod 0644 /aws-rds-global-bundle.pem
 FROM ${BACKEND_IMAGE}
 COPY --from=certificates /aws-rds-global-bundle.pem /opt/silicon-dm/aws-rds-global-bundle.pem
+USER root
+RUN install -d -m 0700 -o 10001 -g 10001 /var/lib/silicon-dm/telemetry
+# Fargate copies this ownership into the task's private writable bind mount.
+VOLUME ["/var/lib/silicon-dm/telemetry"]
 USER 10001:10001
