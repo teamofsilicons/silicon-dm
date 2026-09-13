@@ -8,15 +8,15 @@ The [source branch](https://github.com/teamofsilicons/silicon-dm/tree/codex/dm-u
 contains the implementation and deployment configuration.
 
 Production diagnostics are arriving in the dedicated Space Station table. Report
-email delivery still needs a DM Postmark server token; until configured, production
-report submission returns a clear unavailable error. Sandbox reports are simulated.
+email delivery is configured through the existing Team of Silicons Postmark
+server, using private backend credentials and its transactional stream. The sender
+domain has verified DKIM and Return-Path records. Sandbox reports are simulated.
 
-The docs are live at [the Vercel mirror](https://silicon-dm-docs.vercel.app/).
-The custom domain needs the Namecheap `A docs.dm → 76.76.21.21` record. Until DNS is
-configured, the installation command is:
+The docs are live at [docs.dm.teamofsilicons.com](https://docs.dm.teamofsilicons.com/).
+The [Vercel mirror](https://silicon-dm-docs.vercel.app/) remains available.
 
 ```sh
-curl -fsSL https://silicon-dm-docs.vercel.app/install.sh | sh
+curl -fsSL https://docs.dm.teamofsilicons.com/install.sh | sh
 ```
 
 To build the implementation locally:
@@ -81,5 +81,8 @@ using the standalone socket on the new server.
   combined workspace publication dry run before uploading. A fresh isolated
   crates.io installation reports `dm 0.5.0`; its public `iam --json` call succeeds.
 
-Outstanding external setup: the Namecheap DNS record and a DM Postmark server
-token. No production bug-report email was sent during verification.
+The requested docs domain resolves to Vercel through authoritative DNS and both
+Google and Cloudflare public resolvers. HTTPS serves the docs with a valid
+certificate. All GitHub CI checks passed, including the release image smoke test.
+Postmark credentials were authenticated against the live provider and the sender
+domain was verified. No production bug-report email was sent during verification.
