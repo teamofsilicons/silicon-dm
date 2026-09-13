@@ -185,6 +185,24 @@ pub async fn run(state: store::Store) -> Result<()> {
     )));
     let mut outgoing = AbortOnDrop(tokio::spawn(outbox(context.clone(), channels)));
     let mut callbacks = AbortOnDrop(tokio::spawn(webhooks(context.clone())));
+    let update_store = context.store.clone();
+    let mut updater = AbortOnDrop(tokio::spawn(async move {
+        let mut timer = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            timer.tick().await;
+            super::updates::automatic(&update_store, env!("CARGO_PKG_VERSION")).await;
+            if let Ok(config) = update_store.load() {
+                for profile in config.profiles.values().filter(|p| p.enabled) {
+                    if let Ok(client) = store::client(&config, profile) {
+                        let _ = client
+                            .with_source("daemon")
+                            .telemetry("queue", true, 0)
+                            .await;
+                    }
+                }
+            }
+        }
+    }));
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = shutdown_rx.changed().await;
     });
@@ -197,7 +215,13 @@ pub async fn run(state: store::Store) -> Result<()> {
     supervisor.0.abort();
     outgoing.0.abort();
     callbacks.0.abort();
-    let _ = tokio::join!(&mut supervisor.0, &mut outgoing.0, &mut callbacks.0);
+    updater.0.abort();
+    let _ = tokio::join!(
+        &mut supervisor.0,
+        &mut outgoing.0,
+        &mut callbacks.0,
+        &mut updater.0
+    );
     FileExt::unlock(&lock)?;
     Ok(())
 }
@@ -354,174 +378,225 @@ async fn stop(State(app): State<App>, headers: HeaderMap) -> Response {
     StatusCode::NO_CONTENT.into_response()
 }
 async fn supervise(context: RuntimeContext, channels: Channels, statuses: Statuses) {
-    let mut jobs: BTreeMap<String, (String, AbortOnDrop)> = BTreeMap::new();
+    let mut jobs: BTreeMap<String, (String, Vec<String>, AbortOnDrop)> = BTreeMap::new();
     loop {
         if let Ok(config) = context.store.load() {
-            let active: BTreeMap<_, _> = config
-                .profiles
+            let mut active: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for (key, profile) in config.profiles.iter().filter(|(_, p)| p.enabled) {
+                active
+                    .entry(
+                        crate::Client::new(&profile.base_url)
+                            .map(|client| client.base.to_string())
+                            .unwrap_or_else(|_| profile.base_url.clone()),
+                    )
+                    .or_default()
+                    .push(key.clone());
+            }
+            let fingerprints: BTreeMap<_, _> = active
                 .iter()
-                .filter(|(_, p)| p.enabled)
-                .map(|(key, p)| {
+                .map(|(base, keys)| {
+                    let value: Vec<_> = keys
+                        .iter()
+                        .map(|key| {
+                            let p = &config.profiles[key];
+                            (
+                                key,
+                                &p.device_id,
+                                &p.webhook_url,
+                                p.testing_environment_id,
+                                config.telemetry_enabled,
+                            )
+                        })
+                        .collect();
                     (
-                        key.clone(),
-                        format!(
-                            "{}:{}:{:?}:{:?}",
-                            p.base_url, p.tokens.actor.id, p.webhook_url, p.testing_environment_id
-                        ),
+                        base.clone(),
+                        serde_json::to_string(&value).unwrap_or_default(),
                     )
                 })
                 .collect();
             let remove: Vec<_> = jobs
                 .iter()
-                .filter(|(key, (fingerprint, handle))| {
-                    handle.0.is_finished() || active.get(*key) != Some(fingerprint)
+                .filter(|(base, (fingerprint, _, task))| {
+                    task.0.is_finished() || fingerprints.get(*base) != Some(fingerprint)
                 })
-                .map(|(key, _)| key.clone())
+                .map(|(base, _)| base.clone())
                 .collect();
-            for key in remove {
-                if let Some((_, job)) = jobs.remove(&key) {
-                    job.0.abort()
+            for base in remove {
+                if let Some((_, keys, task)) = jobs.remove(&base) {
+                    task.0.abort();
+                    for key in keys {
+                        channels.lock().await.remove(&key);
+                        statuses.lock().await.remove(&key);
+                    }
                 }
-                channels.lock().await.remove(&key);
-                statuses.lock().await.remove(&key);
             }
-            for (key, fingerprint) in active {
-                if let std::collections::btree_map::Entry::Vacant(entry) = jobs.entry(key.clone()) {
-                    let task = AbortOnDrop(tokio::spawn(connection_loop(
+            for (base, keys) in active {
+                if !jobs.contains_key(&base) {
+                    let task = AbortOnDrop(tokio::spawn(shared_loop(
                         context.clone(),
-                        key.clone(),
+                        base.clone(),
+                        keys.clone(),
                         channels.clone(),
                         statuses.clone(),
                     )));
-                    entry.insert((fingerprint, task));
+                    jobs.insert(base.clone(), (fingerprints[&base].clone(), keys, task));
                 }
             }
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
-async fn connection_loop(
+async fn shared_loop(
     context: RuntimeContext,
-    key: String,
+    base: String,
+    keys: Vec<String>,
     channels: Channels,
     statuses: Statuses,
 ) {
     let mut delay = 1;
     loop {
-        statuses
-            .lock()
-            .await
-            .insert(key.clone(), json!({"state":"connecting"}));
-        match connected(&context, &key, &channels, &statuses).await {
+        match shared_connected(&context, &base, &keys, &channels, &statuses).await {
             Ok(()) => delay = 1,
             Err(error) => {
                 let detail = connection_error(&error);
-                let requires_login = detail["stage"].as_str() == Some("load_profile")
-                    && matches!(detail["status"].as_u64(), Some(401 | 403));
-                let mut status = json!({
-                    "state": if requires_login { "authentication_required" } else { "reconnecting" },
-                    "retry_in_seconds": delay,
-                    "last_error": detail,
-                });
-                if requires_login {
-                    status["recovery"] = json!(
-                        "Log in again with a fresh IAM short-lived token for this profile; queued work is retained."
-                    );
+                for key in &keys {
+                    statuses.lock().await.insert(key.clone(),json!({"state":"reconnecting","retry_in_seconds":delay,"last_error":detail}));
                 }
-                statuses.lock().await.insert(key.clone(), status);
             }
         }
-        channels.lock().await.remove(&key);
+        for key in &keys {
+            channels.lock().await.remove(key);
+        }
         tokio::time::sleep(Duration::from_secs(delay)).await;
         delay = (delay * 2).min(30);
     }
 }
-async fn connected(
+async fn shared_send(socket: &mut crate::Socket, key: &str, frame: &ClientFrame) -> Result<()> {
+    socket
+        .send(Message::Text(
+            json!({"type":"channel","data":{"subscription_id":key,"frame":frame}})
+                .to_string()
+                .into(),
+        ))
+        .await?;
+    Ok(())
+}
+async fn shared_connected(
     context: &RuntimeContext,
-    key: &str,
+    base: &str,
+    keys: &[String],
     channels: &Channels,
     statuses: &Statuses,
 ) -> Result<()> {
-    let (config, profile) = context
-        .store
-        .fresh_profile(key)
+    let telemetry = context.store.load()?.telemetry_enabled
+        && std::env::var("DM_TELEMETRY_ENABLED").as_deref() != Ok("false");
+    let mut socket = crate::Client::new(base)?
+        .with_telemetry(telemetry)
+        .with_source("daemon")
+        .prewarm_shared()
         .await
-        .context("load_profile")?;
-    let client = store::client(&config, &profile).context("configure_client")?;
-    let known_generation = context.queue.generation(key)?;
-    let mut stream_session = queue::stream_session(key, known_generation);
-    let socket = client
-        .connect_with_generation(
-            std::slice::from_ref(&profile.tokens.actor.id),
-            &profile.device_id,
-            known_generation,
-        )
-        .await;
-    if matches!(
-        &socket,
-        Err(crate::Error::WebSocket(tokio_tungstenite::tungstenite::Error::Http(response)))
-            if response.status() == StatusCode::UNAUTHORIZED
-    ) {
-        // IAM may revoke access while this independent refresh family remains
-        // active. Let the next connection attempt refresh under its profile
-        // lock, without expiring a newer login that completed during the dial.
-        context
-            .store
-            .update(|config| {
-                if let Some(current) = config.profiles.get_mut(key)
-                    && current.tokens.access_token == profile.tokens.access_token
-                {
-                    current.expires_at = 0;
+        .context("open_socket")?;
+    let (tx, mut rx) = mpsc::channel::<(String, ClientFrame)>(64);
+    let mut forwarding = Vec::new();
+    let mut profiles = BTreeMap::new();
+    let mut streams = BTreeMap::new();
+    let mut expiry = store::now() + 3600;
+    for key in keys {
+        let (config, profile) = match context.store.fresh_profile(key).await {
+            Ok(value) => value,
+            Err(_) => {
+                statuses.lock().await.insert(key.clone(),json!({"state":"authentication_required","recovery":"Log in again with a fresh IAM SLT for this profile."}));
+                expiry = expiry.min(store::now() + 30);
+                continue;
+            }
+        };
+        let generation = context.queue.generation(key)?;
+        let test_key = profile
+            .testing_environment_id
+            .and_then(|id| config.testing_keys.get(&id))
+            .map(|key| &key.key);
+        if profile.testing_environment_id.is_some() && test_key.is_none() {
+            bail!("testing key missing; production fallback forbidden");
+        }
+        let subscribe = json!({"type":"subscribe","data":{"subscription_id":key,"token":profile.tokens.access_token,"organization_id":profile.tokens.organization_id,"actor_id":profile.tokens.actor.id,"device_id":profile.device_id,"testing_key":test_key,"testing_generation":generation,"telemetry_enabled":telemetry}});
+        socket
+            .send(Message::Text(subscribe.to_string().into()))
+            .await?;
+        expiry = expiry.min(profile.expires_at.saturating_sub(45).max(store::now() + 1));
+        streams.insert(key.clone(), queue::stream_session(key, generation));
+        profiles.insert(key.clone(), profile);
+        let (sender, mut receiver) = mpsc::channel::<ClientFrame>(64);
+        let sender_all = tx.clone();
+        let id = key.clone();
+        forwarding.push(AbortOnDrop(tokio::spawn(async move {
+            while let Some(frame) = receiver.recv().await {
+                if sender_all.send((id.clone(), frame)).await.is_err() {
+                    break;
                 }
-                Ok(())
-            })
-            .context("load_profile")?;
+            }
+        })));
+        channels.lock().await.insert(key.clone(), sender);
+        statuses.lock().await.insert(
+            key.clone(),
+            json!({"state":"subscribing","shared_connection":true}),
+        );
     }
-    let mut socket = socket.context("open_socket")?;
-    let (tx, mut rx) = mpsc::channel::<ClientFrame>(64);
-    let refresh_in = profile.expires_at.saturating_sub(store::now() + 45).max(1);
-    let expiry = tokio::time::sleep(Duration::from_secs(refresh_in));
-    tokio::pin!(expiry);
-    let mut timeout = tokio::time::interval(Duration::from_secs(30));
-    let mut last_received = tokio::time::Instant::now();
+    let mut timer = tokio::time::interval(Duration::from_secs(1));
+    let mut received = tokio::time::Instant::now();
     loop {
         tokio::select! {
-            _=&mut expiry=>{socket.close(None).await?;return Ok(())},
-            _=timeout.tick()=>{if last_received.elapsed()>Duration::from_secs(120){bail!("server heartbeat expired")}},
-            command=rx.recv()=>{if let Some(command)=command{socket.send(Message::Text(serde_json::to_string(&command)?.into())).await?;}},
-            incoming=socket.next()=>{
-                match incoming.context("WebSocket ended")?? {
-                    Message::Text(text)=>{
-                        last_received=tokio::time::Instant::now();
-                        let frame:ServerFrame=serde_json::from_str(&text).context("decode_frame")?;
+            _=timer.tick()=> { if store::now()>=expiry { socket.close(None).await?; return Ok(()); }
+                if received.elapsed()>Duration::from_secs(120) { bail!("shared server heartbeat expired"); } },
+            Some((key,frame))=rx.recv()=>shared_send(&mut socket,&key,&frame).await?,
+            incoming=socket.next()=> {
+                let message=incoming.context("shared WebSocket ended")??;
+                match message {
+                    Message::Close(_)=>return Ok(()),
+                    Message::Ping(bytes)=>socket.send(Message::Pong(bytes)).await?,
+                    Message::Text(text)=> {
+                        received=tokio::time::Instant::now();
+                        let outer:Value=serde_json::from_str(&text).context("decode_frame")?;
+                        if outer["type"]=="ping" { socket.send(Message::Text(json!({"type":"pong","data":{"ping_id":outer["data"]["ping_id"]}}).to_string().into())).await?; continue; }
+                        if outer["type"]=="prewarmed" { if outer["data"]["protocol_version"]!=1 { bail!("unsupported shared protocol"); } continue; }
+                        let key=outer["data"]["subscription_id"].as_str().context("subscription ID missing")?;
+                        let profile=profiles.get(key).context("unknown subscription")?;
+                        let raw=serde_json::to_string(&outer["data"]["frame"])?;
+                        let frame:ServerFrame=serde_json::from_str(&raw).context("decode_frame")?;
                         match &frame {
-                            ServerFrame::Ping{ping_id}=>socket.send(Message::Text(serde_json::to_string(&ClientFrame::Pong{ping_id:ping_id.clone()})?.into())).await?,
-                            ServerFrame::Ready{protocol_version,actors,testing_generation,..}=>{
-                                if *protocol_version!=silicon_dm_protocol::WEBSOCKET_VERSION{bail!("unsupported protocol version")}
+                            ServerFrame::Ping {ping_id} => shared_send(&mut socket,key,&ClientFrame::Pong {ping_id:ping_id.clone()}).await?,
+                            ServerFrame::Ready {protocol_version,actors,testing_generation,..} => {
+                                if *protocol_version!=silicon_dm_protocol::WEBSOCKET_VERSION || actors.as_slice()!=[profile.tokens.actor.id.clone()] { bail!("subscription identity or protocol mismatch"); }
                                 context.queue.adopt_generation(key,*testing_generation)?;
-                                stream_session=queue::stream_session(key,*testing_generation);
-                                channels.lock().await.insert(key.to_owned(), tx.clone());
+                                let stream=queue::stream_session(key,*testing_generation);
                                 for actor in actors {
-                                    let after=context.queue.cursor(&stream_session,actor)?;
-                                    socket.send(Message::Text(serde_json::to_string(&ClientFrame::Resume{actor_id:actor.clone(),after_sequence:after})?.into())).await?;
-                                    if after>0{socket.send(Message::Text(serde_json::to_string(&ClientFrame::Ack{actor_id:actor.clone(),through_sequence:after})?.into())).await?;}
+                                    let after=context.queue.cursor(&stream,actor)?;
+                                    shared_send(&mut socket,key,&ClientFrame::Resume {actor_id:actor.clone(),after_sequence:after}).await?;
+                                    if after>0 { shared_send(&mut socket,key,&ClientFrame::Ack {actor_id:actor.clone(),through_sequence:after}).await?; }
                                 }
-                                statuses.lock().await.insert(key.to_owned(),json!({"state":"connected","actor_id":profile.tokens.actor.id,"testing_environment_id":profile.testing_environment_id}));
+                                streams.insert(key.into(),stream);
+                                statuses.lock().await.insert(key.into(),json!({"state":"connected","shared_connection":true,"actor_id":profile.tokens.actor.id,"testing_environment_id":profile.testing_environment_id}));
                             },
-                            ServerFrame::Error{recoverable:false,..}=>bail!("server closed authorization"),
-                            _=>{
-                                if let Some((_,actor,sequence))=frame.delivery_position(){
-                                    // ACK occurs only after durable inbox + cursor transaction commits.
-                                    let through=context.queue.receive(&stream_session,&frame,&text).context("persist_delivery")?;
-                                    if through>0{socket.send(Message::Text(serde_json::to_string(&ClientFrame::Ack{actor_id:actor.into(),through_sequence:through})?.into())).await?;}
-                                    if through<sequence{socket.send(Message::Text(serde_json::to_string(&ClientFrame::Resume{actor_id:actor.into(),after_sequence:through})?.into())).await?;}
-                                }
+                            ServerFrame::Error {recoverable:false,..} => {
+                                channels.lock().await.remove(key);
+                                context.store.update(|config| {
+                                    if let Some(current) = config.profiles.get_mut(key)
+                                        && current.tokens.access_token == profile.tokens.access_token {
+                                        current.expires_at = 0;
+                                    }
+                                    Ok(())
+                                })?;
+                                statuses.lock().await.insert(key.into(),json!({"state":"authentication_required","shared_connection":true}));
+                                expiry=expiry.min(store::now()+30);
+                            },
+                            _ => if let Some((_,actor,sequence))=frame.delivery_position() {
+                                if actor!=profile.tokens.actor.id { bail!("delivery actor mismatch"); }
+                                let through=context.queue.receive(&streams[key],&frame,&raw).context("persist_delivery")?;
+                                if through>0 { shared_send(&mut socket,key,&ClientFrame::Ack {actor_id:actor.into(),through_sequence:through}).await?; }
+                                if through<sequence { shared_send(&mut socket,key,&ClientFrame::Resume {actor_id:actor.into(),after_sequence:through}).await?; }
                             }
                         }
                     },
-                    Message::Ping(data)=>socket.send(Message::Pong(data)).await?,
-                    Message::Close(_)=>return Ok(()),
-                    _=>{}
+                    _=>{},
                 }
             }
         }
@@ -849,8 +924,16 @@ async fn deliver_webhook(
             delivery_id: &item.delivery_id,
         },
     };
-    let success = match http
-        .post(webhook_url)
+    let mut request = http.post(webhook_url);
+    if let Ok(config) = context.store.load()
+        && let Some(secret) = config.webhook_secrets.get(&store::session_key(
+            &profile.name,
+            profile.testing_environment_id,
+        ))
+    {
+        request = request.bearer_auth(secret);
+    }
+    let success = match request
         .header("Idempotency-Key", &item.delivery_id)
         .json(&payload)
         .send()
@@ -869,6 +952,12 @@ async fn deliver_webhook(
     } else {
         None
     };
+    if let Ok(client) = store::client(&config, profile) {
+        let _ = client
+            .with_source("daemon")
+            .telemetry("callback", success, 0)
+            .await;
+    }
     let _ = context
         .queue
         .webhook_done(&item.session, &item.delivery_id, success, receipt.as_ref());

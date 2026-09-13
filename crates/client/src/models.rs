@@ -368,6 +368,12 @@ impl ServerFrame {
 /// Public application discovery. Application secrets are never returned.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IamInfo {
+    #[serde(default)]
+    pub testing_environment_id: Option<Uuid>,
+    #[serde(default)]
+    pub testing_generation: Option<i64>,
+    #[serde(default)]
+    pub testing_environment: Option<Value>,
     pub app_id: String,
     pub iam_base_url: String,
     pub api_base_url: String,

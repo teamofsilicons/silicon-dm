@@ -2,8 +2,8 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use super::transport::Transport;
 use axum::extract::ws::{CloseFrame, Message as SocketMessage, WebSocket};
-use futures::StreamExt as _;
 use time::OffsetDateTime;
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use uuid::Uuid;
@@ -48,7 +48,26 @@ fn log_database_failure(error: &AppError, session_id: Uuid) {
 /// Authentication happens before the HTTP upgrade. Credentials remain only in
 /// this request-scoped task and are never stored in the realtime lease.
 pub async fn serve_socket(
-    mut socket: WebSocket,
+    socket: WebSocket,
+    state: AppState,
+    authority: AuthContext,
+    actors: Vec<ActorRef>,
+    consumer_id: String,
+    requested_testing_generation: Option<i64>,
+) {
+    serve_transport(
+        Transport::Direct(Box::new(socket)),
+        state,
+        authority,
+        actors,
+        consumer_id,
+        requested_testing_generation,
+    )
+    .await;
+}
+
+pub(super) async fn serve_transport(
+    mut socket: Transport,
     state: AppState,
     authority: AuthContext,
     actors: Vec<ActorRef>,
@@ -94,6 +113,13 @@ pub async fn serve_socket(
         return;
     }
 
+    crate::telemetry::record(
+        &state,
+        "backend",
+        "websocket.opened",
+        serde_json::json!({"session_id":session_id,"success":true}),
+    );
+    let started = Instant::now();
     let mut runtime = SessionRuntime {
         reset_cursors: state.testing_generation.is_some()
             && state.testing_generation != requested_testing_generation,
@@ -121,6 +147,12 @@ pub async fn serve_socket(
             SocketExit::server(1011, "internal-error")
         }
     };
+    crate::telemetry::record(
+        &runtime.state,
+        "backend",
+        "websocket.closed",
+        serde_json::json!({"session_id":session_id,"status":exit.code,"duration_ms":u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)}),
+    );
     if exit.send_close {
         let _ = close_socket(&mut socket, exit.code, &exit.reason).await;
     }
@@ -154,7 +186,7 @@ struct SessionRuntime {
 impl SessionRuntime {
     // Keep the socket event selection and its lifecycle fence in one visible loop.
     #[allow(clippy::too_many_lines)]
-    async fn run(&mut self, socket: &mut WebSocket) -> AppResult<SocketExit> {
+    async fn run(&mut self, socket: &mut Transport) -> AppResult<SocketExit> {
         let startup_fence = environment_fence(&self.state).await?;
         let mut authorization_changes = self.state.realtime.authorization_changes();
         let mut disconnects = self.state.realtime.disconnects();
@@ -245,6 +277,7 @@ impl SessionRuntime {
                     )));
                 }
                 SessionEvent::Heartbeat => {
+                    sqlx::query("UPDATE contract_versions SET last_request_at=clock_timestamp() WHERE family IN ('websocket','shared') AND status!='sunset'").execute(self.state.store.pool()).await?;
                     if let Err(error) = self.revalidate_authority().await {
                         return Ok(authority_exit(&error));
                     }
@@ -342,7 +375,7 @@ impl SessionRuntime {
 
     async fn handle_socket_message(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut Transport,
         message: SocketMessage,
     ) -> AppResult<Option<SocketExit>> {
         match message {
@@ -406,6 +439,19 @@ impl SessionRuntime {
         reason = "one exhaustive protocol dispatcher keeps every client frame variant visibly fail-closed"
     )]
     async fn handle_client_frame(&mut self, frame: ClientFrame) -> AppResult<ClientOutcome> {
+        let stage = match &frame {
+            ClientFrame::Pong { .. } => "heartbeat",
+            ClientFrame::Ack { .. } => "ack",
+            ClientFrame::Resume { .. } => "resume",
+            ClientFrame::SendMessage { .. } => "send",
+            _ => "activity",
+        };
+        crate::telemetry::record(
+            &self.state,
+            "backend",
+            "websocket.received",
+            serde_json::json!({"session_id":self.session_id,"stage":stage}),
+        );
         match frame {
             ClientFrame::Pong { ping_id } => {
                 if self.pending_ping_id.as_deref() != Some(ping_id.as_str()) {
@@ -445,6 +491,12 @@ impl SessionRuntime {
                         through_sequence,
                     )
                     .await?;
+                crate::telemetry::record(
+                    &self.state,
+                    "backend",
+                    "delivery.acknowledged",
+                    serde_json::json!({"session_id":self.session_id,"sequence":through_sequence,"success":true}),
+                );
                 Ok(ClientOutcome::None)
             }
             ClientFrame::Resume {
@@ -565,7 +617,7 @@ impl SessionRuntime {
 
     async fn handle_local_delivery(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut Transport,
         wakeup: &DeliveryWakeup,
     ) -> AppResult<()> {
         let sent = self
@@ -579,7 +631,7 @@ impl SessionRuntime {
         self.replay_actor(socket, &wakeup.actor_id).await
     }
 
-    async fn replay_all(&mut self, socket: &mut WebSocket) -> AppResult<()> {
+    async fn replay_all(&mut self, socket: &mut Transport) -> AppResult<()> {
         let actor_ids = self.actors.keys().cloned().collect::<Vec<_>>();
         if actor_ids.is_empty() {
             return Ok(());
@@ -597,7 +649,7 @@ impl SessionRuntime {
         Ok(())
     }
 
-    async fn replay_actor(&mut self, socket: &mut WebSocket, actor_id: &ActorId) -> AppResult<()> {
+    async fn replay_actor(&mut self, socket: &mut Transport, actor_id: &ActorId) -> AppResult<()> {
         let actor = self.actor(actor_id)?.clone();
         let started = Instant::now();
         // Read one payload at a time. A count-bounded batch of 100 allowed
@@ -624,6 +676,12 @@ impl SessionRuntime {
             let frame =
                 ServerFrame::delivery(delivery.id, actor_id.clone(), sequence, delivery.payload);
             send_server_frame(socket, &frame).await?;
+            crate::telemetry::record(
+                &self.state,
+                "backend",
+                "delivery.sent",
+                serde_json::json!({"session_id":self.session_id,"sequence":sequence}),
+            );
             self.sent_through.insert(actor_id.clone(), sequence);
             // Return to the socket loop for ACKs, heartbeats and revocation.
             // A single large write may exceed this budget; never start a second.
@@ -704,7 +762,7 @@ impl SocketExit {
     }
 }
 
-async fn send_error(socket: &mut WebSocket, error: &AppError) -> AppResult<()> {
+async fn send_error(socket: &mut Transport, error: &AppError) -> AppResult<()> {
     send_server_frame(
         socket,
         &ServerFrame::recoverable_error(error.code(), error.to_string()),
@@ -712,7 +770,7 @@ async fn send_error(socket: &mut WebSocket, error: &AppError) -> AppResult<()> {
     .await
 }
 
-async fn send_server_frame(socket: &mut WebSocket, frame: &ServerFrame) -> AppResult<()> {
+async fn send_server_frame(socket: &mut Transport, frame: &ServerFrame) -> AppResult<()> {
     let encoded = serde_json::to_string(frame).map_err(AppError::internal)?;
     socket
         .send(SocketMessage::Text(encoded.into()))
@@ -720,7 +778,7 @@ async fn send_server_frame(socket: &mut WebSocket, frame: &ServerFrame) -> AppRe
         .map_err(|error| AppError::internal(anyhow::Error::new(error)))
 }
 
-async fn close_socket(socket: &mut WebSocket, code: u16, reason: &str) -> AppResult<()> {
+async fn close_socket(socket: &mut Transport, code: u16, reason: &str) -> AppResult<()> {
     socket
         .send(SocketMessage::Close(Some(CloseFrame {
             code,

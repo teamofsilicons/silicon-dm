@@ -25,6 +25,7 @@ export type Profile = {
   actor: Actor;
   organization_id: string;
   testing_environment_id?: string;
+  testing_environment_name?: string;
   testing_key?: string;
   access_token: string;
   refresh_token: string;
@@ -36,6 +37,7 @@ export type BrowserSession = {
   binding: string;
   deadline: number;
   selected?: string;
+  production_profile_id?: string;
   profiles: Profile[];
   flow?: { state: string; deadline: number };
 };
@@ -61,6 +63,7 @@ export function publicProfile(profile: Profile) {
     actor: profile.actor,
     organization_id: profile.organization_id,
     testing_environment_id: profile.testing_environment_id,
+    testing_environment_name: profile.testing_environment_name,
     authenticated: !profile.auth_required,
   };
 }

@@ -6,6 +6,8 @@ export function httpType(method: string, path: string): string {
     .replace(/^\/api\/(?:v1|dm)\//, "")
     .replace(/^\/+|\/+$/g, "")
     .split("/");
+  if (p[0] === "telemetry" || p[0] === "contracts") return p[0];
+  if (p[0] === "reports") return "report";
   if (p[0] === "iam") return "iam";
   if (p[0] === "auth") return p[1];
   if (p[0] === "api") return p[1];

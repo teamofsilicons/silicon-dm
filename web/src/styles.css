@@ -1376,6 +1376,28 @@ fieldset {
 .global-notice:empty {
   display: none;
 }
+.testing-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  flex: none;
+  padding: 12px 24px;
+  border-bottom: 1px solid #dfc997;
+  background: #fff8e9;
+  color: #695022;
+  font-size: 12px;
+}
+.testing-banner > div {
+  display: grid;
+  flex: 1;
+  min-width: 180px;
+  gap: 3px;
+}
+.testing-banner code {
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
 dl {
   display: grid;
   grid-template-columns: max-content 1fr;
@@ -1840,3 +1862,8 @@ dialog::backdrop {
     scroll-behavior: auto !important;
   }
 }
+
+.test-signin { margin-top: 1rem; }
+.test-signin summary { cursor: pointer; margin-bottom: 1rem; }
+.test-signin label { display: grid; gap: .5rem; }
+.test-signin input { width: 100%; }

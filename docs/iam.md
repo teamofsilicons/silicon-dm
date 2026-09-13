@@ -1,5 +1,7 @@
 # IAM integration
 
+Current 0.5 guidance: [start using DM](getting-started.md), [sandbox entry](testing-environments.md), and [shared transport / contracts](contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
+
 Silicon IAM owns all Carbon and Silicon authentication, organization membership, organization roles, consent, application sessions, refresh rotation, and revocation. DM uses the official [`silicon-iam-client`](https://crates.io/crates/silicon-iam-client) Rust SDK (1.4.0 or a compatible newer release) for every IAM request. Application integrations do not enable the SDK's `cli-session` feature. DM has no OBO login, OBO proof exchange, delegated endpoint catalog, or inbound OBO routes.
 
 ## Backend application registration
@@ -141,8 +143,16 @@ This handles Carbon/Silicon logout, organization removal, membership suspension,
 
 A DM testing environment requires a real IAM testing environment and an imported copy of `tos>dm`. Import the existing canonical app using the installed IAM CLI, which issues a fresh **test-only application secret** while preserving approved application configuration. Do not submit the production app secret as the test credential. The imported webhook configuration initially retains the registered callback and signing secret. To register a dedicated callback for an IAM test application, supply both optional `iam_webhook_secret` and `iam_webhook_key_version` in the DM environment creation body. The secret must contain 32–512 visible ASCII characters and the version must be positive. DM encrypts the override separately from the test application credential. Omit both to inherit the backend signer. This permits a local tunnel callback and independently rotated test signer without changing the production callback. Use IAM's returned webhook key version: changing a callback can advance it even when the secret is reused.
 
-DM retains the IAM test environment ID, root key, canonical application ID, and fresh test secret encrypted in its testing registry. `IamClient::for_environment` permanently attaches the IAM root key using the SDK's `with_environment` equivalent. Its application credential is exclusively the imported test credential. At creation, DM calls the SDK's current-environment and application-directory operations to prove the key names the expected environment and the test credential works. It cannot retry a failed test request against production.
+Passing an IAM test application's `app_secret` asks IAM 1.8's testing-context API
+to discover its environment, canonical application ID, current credential version,
+webhook key digest, and cleaned timestamp. DM encrypts the selector and lazily
+creates an empty isolated schema. It rechecks IAM on selection, invalidates older
+generations after a clean, and never accepts an unavailable or revoked secret as
+production. The application selector grants no environment-administration authority.
 
-IAM test webhooks use a signed outer testing envelope containing the IAM environment key and a nested normal event. DM verifies the **outer bytes**, then uses the SDK's constant-time environment-key verification to identify the authenticated IAM testing environment. The SDK does not expose the received root key. Production rejects a testing envelope; test adapters reject production events and other environments' envelopes. After a configured test signer authenticates the envelope and its key, every active DM environment paired with that authenticated IAM environment receives the normalized invalidation, including pairings whose own configured signer is an older inherited version. Unrelated IAM environments and production receive no invalidation. Each target persists its event receipt and advances its own realtime revision; a partial database failure returns an error so IAM can retry the same event safely. Deleted/inactive environments cannot receive mutations. Do not log, copy into bug reports, or persist a raw IAM test webhook body.
-
-See [testing environments](testing-environments.md) for DM environment creation, key rotation, cleaning, deletion, and recovery. IAM's complete external contract is in its [client documentation](https://github.com/teamofsilicons/silicon-iam/tree/main/docs/client).
+Test webhooks authenticate the complete raw signed envelope first. DM matches the
+SDK-verified envelope's testing key against IAM's freshly discovered digest, then
+applies only normalized invalidation records in that sandbox. Neither raw payloads
+nor root keys are stored in event receipts. Duplicate IDs are idempotent and all
+unique invalidations trigger re-introspection, so out-of-order events cannot restore
+revoked authority. [Legacy root-key pairings](testing-legacy.md) remain supported.

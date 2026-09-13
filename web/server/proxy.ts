@@ -9,6 +9,9 @@ import { GatewayError } from "./session.ts";
 
 const id = "[0-9a-fA-F-]{36}";
 const allowed: [RegExp, string[]][] = [
+  [/^telemetry$/, ["POST"]],
+  [/^reports$/, ["POST"]],
+  [/^contracts$/, ["GET"]],
   [/^auth\/me$/, ["GET"]],
   [/^conversations$/, ["GET", "POST"]],
   [new RegExp(`^conversations/${id}/messages$`), ["GET", "POST"]],
@@ -140,6 +143,8 @@ export async function proxy(
     );
   const headers = headersFor(profile);
   for (const name of [
+    "x-dm-telemetry",
+    "x-dm-source",
     "content-type",
     "idempotency-key",
     "if-match",

@@ -134,6 +134,7 @@ export interface Profile {
   actor: Actor;
   organization_id: string;
   testing_environment_id?: string | null;
+  testing_environment_name?: string;
   testing_generation?: number | null;
 }
 export interface Session {
@@ -142,6 +143,7 @@ export interface Session {
   organization_id?: string;
   profile_id?: string;
   testing_environment_id?: string | null;
+  testing_environment_name?: string;
   testing_generation?: number | null;
   profiles?: Profile[];
 }
@@ -155,9 +157,11 @@ export interface AppConfig {
   max_body_bytes?: number;
 }
 export interface LoginInput {
+  app_secret?: string;
   slt: string;
   testing_key?: string;
   testing_environment_id?: string;
+  testing_environment_name?: string;
 }
 export interface MessageDelivery {
   type: "message";

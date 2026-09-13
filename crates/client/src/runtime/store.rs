@@ -41,10 +41,16 @@ pub struct Config {
     pub default_profile: String,
     pub profiles: BTreeMap<String, Profile>,
     pub testing_keys: BTreeMap<Uuid, TestKey>,
+    #[serde(default)]
+    pub testing_names: BTreeMap<Uuid, String>,
+    #[serde(default)]
+    pub webhook_secrets: BTreeMap<String, String>,
     pub relay_port: u16,
     pub relay_token: String,
     #[serde(default = "enabled")]
     pub auto_update: bool,
+    #[serde(default = "enabled")]
+    pub telemetry_enabled: bool,
     #[serde(default)]
     pub last_update_check: u64,
 }
@@ -54,9 +60,12 @@ impl Default for Config {
             default_profile: "default".into(),
             profiles: BTreeMap::new(),
             testing_keys: BTreeMap::new(),
+            testing_names: BTreeMap::new(),
+            webhook_secrets: BTreeMap::new(),
             relay_port: 19780,
             relay_token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
             auto_update: true,
+            telemetry_enabled: true,
             last_update_check: 0,
         }
     }
@@ -216,10 +225,16 @@ pub fn profile<'a>(config: &'a Config, name: &str, test: Option<Uuid>) -> Result
     config.profiles.get(&session_key(name,test)).filter(|p|p.enabled).with_context(||format!("profile {name} is not logged in for {}; run dm {}--profile {name} login --token-file -",test.map_or("production".into(),|id|id.to_string()),test.map_or(String::new(),|id|format!("--test {id} "))))
 }
 pub fn client(config: &Config, profile: &Profile) -> Result<Client> {
-    let mut client = Client::new(&profile.base_url)?.with_auth(
-        &profile.tokens.access_token,
-        &profile.tokens.organization_id,
-    );
+    let mut client = Client::new(&profile.base_url)?
+        .with_telemetry(
+            config.telemetry_enabled
+                && std::env::var("DM_TELEMETRY_ENABLED").as_deref() != Ok("false"),
+        )
+        .with_source("cli")
+        .with_auth(
+            &profile.tokens.access_token,
+            &profile.tokens.organization_id,
+        );
     if let Ok(limit) = std::env::var("DM_CLIENT_MAX_FRAME_BYTES") {
         client = client.with_websocket_limit(
             limit

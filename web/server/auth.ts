@@ -167,7 +167,7 @@ export class Auth {
   ): Promise<Profile> {
     if (
       typeof body.slt !== "string" ||
-      body.slt.length < 8 ||
+      body.slt.length < 1 ||
       body.slt.length > 8192 ||
       /\s/.test(body.slt)
     )
@@ -176,13 +176,30 @@ export class Auth {
         "invalid_login",
         "Provide the IAM short-lived token.",
       );
-    const testingKey = body.testing_key,
+    let testingKey = body.testing_key,
       environment = body.testing_environment_id;
+    let environmentName: string | undefined;
+    if (body.app_secret !== undefined) {
+      if (testingKey !== undefined || environment !== undefined || typeof body.app_secret !== "string" || !/^ask_[A-Za-z0-9_-]{43}$/.test(body.app_secret))
+        throw new GatewayError(400, "invalid_testing_environment", "Provide a valid IAM test app secret.");
+      const response = await fetch(new URL("/api/v1/iam", this.config.api), {
+        headers: { "X-Testing-Environment-Key": body.app_secret, Accept: "application/json" },
+        redirect: "error", signal: AbortSignal.timeout(20000),
+      });
+      if (!response.ok) { await response.body?.cancel(); throw new GatewayError(response.status === 401 ? 401 : 503, "testing_environment_unavailable", "The test app secret was rejected or its environment is unavailable. Production was not used."); }
+      const info = await responseJson(response);
+      if (typeof info.testing_environment_id !== "string" || !uuidPattern.test(info.testing_environment_id) || info.app_id !== this.config.appId)
+        throw new GatewayError(502, "invalid_testing_environment", "DM did not validate the test environment.");
+      testingKey = body.app_secret;
+      environment = info.testing_environment_id;
+      const meta = info.testing_environment as Record<string, unknown> | undefined;
+      environmentName = typeof meta?.name === "string" ? meta.name : "Testing environment";
+    }
     if (
       (testingKey === undefined) !== (environment === undefined) ||
       (testingKey !== undefined &&
         (typeof testingKey !== "string" ||
-          !/^[A-Za-z0-9]{32}$/.test(testingKey) ||
+          !/^(?:[A-Za-z0-9]{32}|ask_[A-Za-z0-9_-]{43})$/.test(testingKey) ||
           typeof environment !== "string" ||
           !uuidPattern.test(environment)))
     ) {
@@ -221,6 +238,7 @@ export class Auth {
           expires_at: Date.now() + tokens.expires_in * 1000,
           testing_environment_id: environment as string | undefined,
           testing_key: testingKey as string | undefined,
+          testing_environment_name: environmentName,
         };
       },
     );
@@ -229,6 +247,9 @@ export class Auth {
       (p) => !replaced.has(p.profile_id),
     );
     browser.value.profiles.push(...profiles);
+    const previousSelection = browser.value.profiles.find(p=>p.profile_id===browser.value.selected);
+    if (environment && previousSelection && !previousSelection.testing_environment_id)
+      browser.value.production_profile_id=previousSelection.profile_id;
     browser.value.selected = profiles[0]!.profile_id;
     delete browser.value.flow;
     await this.sessions.save(browser);
@@ -302,6 +323,90 @@ export class Auth {
         }
       }
       return { browser, profile };
+    });
+  }
+  /** Enter the real test plane without exposing its root key to the browser. */
+  async enterTestingEnvironment(
+    id: string | undefined,
+    requested: string | undefined,
+    body: Record<string, unknown>,
+  ): Promise<string> {
+    const environment = body.environment_id;
+    if (typeof environment !== "string" || !uuidPattern.test(environment))
+      throw new GatewayError(
+        400,
+        "invalid_testing_environment",
+        "Select a valid testing environment.",
+      );
+    const { browser, profile } = await this.fresh(id, requested);
+    if (profile.testing_environment_id)
+      throw new GatewayError(
+        403,
+        "production_required",
+        "Use a production account to enter a testing environment.",
+      );
+
+    // The backend checks current creator/admin authority and environment status.
+    const response = await fetch(
+      new URL(
+        `/api/v1/testing-environments/${environment}/key`,
+        this.config.api,
+      ),
+      {
+        headers: headersFor(profile),
+        redirect: "error",
+        signal: AbortSignal.timeout(20000),
+      },
+    );
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new GatewayError(
+        response.status,
+        "testing_environment_unavailable",
+        response.status === 403
+          ? "Only the environment creator or an organization administrator can open this environment with this button."
+          : "This testing environment could not be opened. Check that it is active and that you still have access.",
+      );
+    }
+    const value = await responseJson(response);
+    if (
+      value.environment_id !== environment ||
+      typeof value.root_key !== "string" ||
+      !/^[A-Za-z0-9]{32}$/.test(value.root_key)
+    )
+      throw new GatewayError(
+        502,
+        "upstream_response",
+        "The backend returned an invalid testing environment key.",
+      );
+    const testingKey = value.root_key;
+    return this.sessions.locked(browser.id, async () => {
+      const current = await this.sessions.read(browser.id);
+      if (!current)
+        throw new GatewayError(401, "login_required", "Sign in to continue.");
+      // A concurrent logout must not be undone by an in-flight entry request.
+      selectProfile(current, profile.profile_id);
+      if (body.slt !== undefined) {
+        const test = await this.login(current, {
+          slt: body.slt,
+          testing_environment_id: environment,
+          testing_key: testingKey,
+        });
+        return test.profile_id;
+      }
+      const test = current.value.profiles.find(
+        (p) =>
+          p.testing_environment_id === environment &&
+          p.testing_key === testingKey &&
+          !p.auth_required,
+      );
+      if (!test)
+        throw new GatewayError(
+          409,
+          "testing_login_required",
+          "Sign in with an IAM token issued inside this environment’s paired IAM test environment.",
+        );
+      return test.profile_id;
     });
   }
   async expire(id: string, profile: Profile): Promise<void> {

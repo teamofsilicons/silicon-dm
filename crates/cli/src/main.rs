@@ -24,7 +24,7 @@ use uuid::Uuid;
     version,
     about = "Silicon DM: reliable messaging for Carbons and Silicons",
     arg_required_else_help = true,
-    after_help = "FIRST STEPS\n  dm iam --json\n  dm login OAC_TOKEN\n  dm webhook http://localhost:9000/events\n  dm conversations create --participant ACTOR_ID\n  dm messages send CONVERSATION_ID --text 'Hello'\n  dm daemon status\n\nTESTING\n  dm environments create --data environment.json\n  dm --test ENV_UUID login --token-file -\n  dm --test ENV_UUID conversations list\n\nEvery command has --help. State: ~/.silicon-dm (private credentials, durable inbox/outbox)."
+    after_help = "FIRST STEPS\n  dm iam --json\n  dm login OAC_TOKEN\n  dm webhook http://localhost:9000/events\n  dm conversations create --participant ACTOR_ID\n  dm messages send CONVERSATION_ID --text 'Hello'\n  dm daemon status\n\nTESTING\n  dm --app-secret-file - login TEST_SLT_OR_PUBLIC_ID\n  dm --test ENV_UUID login status --json\n  dm --test ENV_UUID conversations list\n\nDocs: https://docs.dm.teamofsilicons.com\nRepository: https://github.com/teamofsilicons/silicon-dm\nRust package: https://crates.io/crates/silicon-dm-client\nEvery command has --help. State: ~/.silicon-dm (private credentials, durable inbox/outbox)."
 )]
 struct Cli {
     /// Local profile; defaults to the name selected with profiles use.
@@ -38,6 +38,18 @@ struct Cli {
         value_name = "ENV_UUID"
     )]
     test: Option<Uuid>,
+    /// IAM test app secret: discover the sandbox automatically. Prefer DM_TEST_APP_SECRET or --app-secret-file.
+    #[arg(
+        long,
+        global = true,
+        env = "DM_TEST_APP_SECRET",
+        hide_env_values = true,
+        conflicts_with = "app_secret_file"
+    )]
+    app_secret: Option<String>,
+    /// File containing the IAM test app secret; '-' reads hidden stdin.
+    #[arg(long, global = true)]
+    app_secret_file: Option<PathBuf>,
     /// Compact JSON. Standard output is JSON in either mode.
     #[arg(long, global = true)]
     json: bool,
@@ -89,7 +101,21 @@ enum Command {
         base_url: String,
     },
     /// Configure the selected logged-in profile's local callback.
-    Webhook { url: url::Url },
+    Webhook {
+        url: url::Url,
+        /// Optional bearer secret for the local callback. Prefer a private file.
+        #[arg(long)]
+        secret_file: Option<PathBuf>,
+    },
+    /// Submit a bug report and notify maintainers; sandbox notifications are simulated.
+    #[command(
+        after_help = "EXAMPLES\n  dm report 'Messages fail after reconnect'\n  dm report 'Fixed replay' --pr https://github.com/teamofsilicons/silicon-dm/pull/123\nInclude reproduction steps and expected behavior. Never include credentials. Repository: https://github.com/teamofsilicons/silicon-dm\nDocs: https://docs.dm.teamofsilicons.com · Rust: https://crates.io/crates/silicon-dm-client"
+    )]
+    Report {
+        message: String,
+        #[arg(long)]
+        pr: Option<String>,
+    },
     /// Detach the local callback, retaining authentication and queued events.
     Unhook,
     /// Configure the parent directory for private DM state.
@@ -97,6 +123,8 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Inspect supported contracts, deprecation and compatibility.
+    Contracts,
     /// Revoke the refresh-token family and stop this local profile's connection.
     Logout,
     /// Show IAM actor, organization, capabilities and session.
@@ -182,6 +210,11 @@ enum LoginCommand {
 enum ConfigCommand {
     /// Store state under LOCATION/.silicon-dm. LOCATION must already be a directory.
     Home { location: PathBuf },
+    /// Enable or disable diagnostic events for this CLI and its daemon.
+    Telemetry {
+        #[arg(action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
 }
 #[derive(Subcommand)]
 enum Profiles {
@@ -554,7 +587,53 @@ async fn main() {
     unsafe {
         libc::umask(0o077);
     }
-    let cli = Cli::parse();
+    let mut cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let code = error.exit_code();
+            let _ = error.print();
+            let args: Vec<String> = std::env::args().collect();
+            if args.iter().any(|a| {
+                a == "--test"
+                    || a.starts_with("--test=")
+                    || a == "--app-secret"
+                    || a == "--app-secret-file"
+                    || a.starts_with("--app-secret=")
+            }) || std::env::var_os("SILICON_DM_TEST").is_some()
+                || std::env::var_os("DM_TEST_APP_SECRET").is_some()
+            {
+                eprintln!("Testing environment selected (command was not executed).");
+            }
+            std::process::exit(code);
+        }
+    };
+    let mut testing = cli.test;
+    let requested_testing =
+        testing.is_some() || cli.app_secret.is_some() || cli.app_secret_file.is_some();
+    let selection = async {
+        let secret = match (cli.app_secret.take(), cli.app_secret_file.take()) {
+            (Some(secret), _) => Some(secret),
+            (_, Some(path)) => Some(read_secret(&path)?),
+            _ => None,
+        };
+        if let Some(secret) = secret {
+            let base = match &cli.command {
+                Command::Login { base_url, .. } | Command::Iam { base_url } => base_url.clone(),
+                _ => std::env::var("DM_API_URL")
+                    .unwrap_or_else(|_| "https://backend.dm.teamofsilicons.com".into()),
+            };
+            let info = runtime::LocalRuntime::from_environment()?
+                .select_testing_application(&base, &secret)
+                .await?;
+            if testing.is_some() && testing != info.testing_environment_id {
+                bail!("app secret belongs to a different testing environment");
+            }
+            testing = info.testing_environment_id;
+            cli.test = testing;
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
     let compact = cli.json;
     let foreground = matches!(
         &cli.command,
@@ -564,7 +643,31 @@ async fn main() {
     );
     let skip_update =
         foreground || matches!(&cli.command, Command::Updates { .. } | Command::Docs { .. });
-    let result = run(cli).await;
+    let diagnostic_profile = cli.profile.clone();
+    let diagnostic_start = std::time::Instant::now();
+    let result = match selection {
+        Ok(()) => run(cli).await,
+        Err(error) => Err(error),
+    };
+    if !foreground && let Ok(runtime) = runtime::LocalRuntime::from_environment() {
+        let profile = diagnostic_profile.unwrap_or_else(|| {
+            runtime
+                .store()
+                .load()
+                .map(|c| c.default_profile)
+                .unwrap_or_default()
+        });
+        runtime
+            .record_diagnostic(
+                &profile,
+                testing,
+                "cli",
+                "command",
+                result.is_ok(),
+                u64::try_from(diagnostic_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            )
+            .await;
+    }
     match &result {
         Ok(value) => {
             if !foreground {
@@ -599,6 +702,22 @@ async fn main() {
     }
     if !skip_update {
         updater::automatic().await;
+    }
+    if requested_testing {
+        let label = testing
+            .and_then(|id| {
+                store::load()
+                    .ok()
+                    .and_then(|c| c.testing_names.get(&id).cloned())
+                    .map(|name| format!("{name} ({id})"))
+            })
+            .unwrap_or_else(|| {
+                testing.map_or_else(
+                    || "unresolved; production was not used".into(),
+                    |id| id.to_string(),
+                )
+            });
+        eprintln!("Testing environment: {label}");
     }
     if result.is_err() {
         std::process::exit(1)
@@ -663,6 +782,10 @@ async fn run(cli: Cli) -> Result<Value> {
     let session = store::session_key(&name, cli.test);
     match cli.command {
         Command::Config { command } => match command {
+            ConfigCommand::Telemetry { enabled } => {
+                runtime::LocalRuntime::from_environment()?.set_telemetry(enabled)?;
+                Ok(json!({"telemetry_enabled":enabled}))
+            }
             ConfigCommand::Home { location } => {
                 let directory = silicon_dm_client::runtime::store::set_home_directory(&location)?;
                 Ok(json!({"home_directory": directory}))
@@ -726,7 +849,13 @@ async fn run(cli: Cli) -> Result<Value> {
             }
             Ok(serde_json::to_value(client.iam().await?)?)
         }
-        Command::Webhook { url } => {
+        Command::Webhook { url, secret_file } => {
+            let secret = secret_file.as_deref().map(read_secret).transpose()?;
+            runtime::LocalRuntime::from_environment()?.webhook_secret(
+                &name,
+                cli.test,
+                secret.as_deref(),
+            )?;
             let result =
                 runtime::LocalRuntime::from_environment()?.webhook(&name, cli.test, Some(&url))?;
             daemon::start(None).await?;
@@ -809,6 +938,24 @@ async fn run(cli: Cli) -> Result<Value> {
                 json!({"url":format!("http://dm.localhost:{}/",config.relay_port),"loopback_url":format!("http://127.0.0.1:{}/",config.relay_port),"bearer_token":config.relay_token}),
             ),
         },
+        Command::Contracts => {
+            let profile = store::profile(&config, &name, cli.test)?;
+            Ok(store::client(&config, profile)?.contracts().await?)
+        }
+        Command::Report { message, pr } => {
+            if pr.is_none() {
+                eprintln!(
+                    "You can also submit a patch at https://github.com/teamofsilicons/silicon-dm and attach it with --pr."
+                );
+            }
+            let profile = store::profile(&config, &name, cli.test)?;
+            let client = store::client(&config, profile)?;
+            client
+                .report(&message, pr.as_deref(), &key)
+                .await
+                .map_err(Into::into)
+        }
+
         Command::Updates { command } => updater::command(command).await,
         Command::Docs { options } => docs::render(&options),
         Command::Environments { command } => {
@@ -1179,6 +1326,9 @@ mod command_tests {
             vec!["dm", "iam", "--json"],
             vec!["dm", "webhook", "http://localhost:9000/events"],
             vec!["dm", "unhook"],
+            vec!["dm", "config", "telemetry", "false"],
+            vec!["dm", "config", "telemetry", "true"],
+            vec!["dm", "report", "replay failed"],
         ] {
             Cli::try_parse_from(args)?;
         }

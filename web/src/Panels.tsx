@@ -1,5 +1,5 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { ApiError, api, type ApiOptions } from "./api";
+import { ApiError, api, enterTestingEnvironment, type ApiOptions } from "./api";
 import type {
   Activity,
   OutboxEntry,
@@ -117,6 +117,8 @@ export function OutboxPanel(props: {
     </section>
   );
 }
+import { telemetryEnabled, setTelemetryEnabled } from "./telemetry";
+
 export function AccountPanel(props: {
   session: Session;
   add: () => void;
@@ -128,6 +130,7 @@ export function AccountPanel(props: {
     [error, setError] = createSignal<unknown>(),
     [busy, setBusy] = createSignal(false),
     [activity, setActivity] = createSignal("");
+  const [diagnostics, setDiagnostics] = createSignal(telemetryEnabled());
   const session = props.session;
   let alive = true;
   onCleanup(() => {
@@ -177,6 +180,10 @@ export function AccountPanel(props: {
           <span class="badge">
             {props.session.testing_environment_id ? "Testing" : "Production"}
           </span>
+        </div>
+        <div class="settings-row">
+          <div><strong>Diagnostics and analytics</strong><p class="muted">Help diagnose failures and improve DM. Message content and credentials are excluded.</p></div>
+          <input type="checkbox" aria-label="Diagnostics and analytics" checked={diagnostics()} onChange={e => {setTelemetryEnabled(e.currentTarget.checked);setDiagnostics(e.currentTarget.checked);}} />
         </div>
         <div class="settings-row">
           <div>
@@ -259,7 +266,8 @@ export function AccountPanel(props: {
 }
 export function EnvironmentsPanel(props: {
   session: Session;
-  signIn: (id?: string, key?: string) => void;
+  beforeEnter: () => Promise<boolean>;
+  entered: (session: Session) => void;
 }) {
   const [items, setItems] = createSignal<TestingEnvironment[]>([]),
     [deleted, setDeleted] = createSignal(false),
@@ -268,6 +276,9 @@ export function EnvironmentsPanel(props: {
     [busy, setBusy] = createSignal(false),
     [create, setCreate] = createSignal(false),
     [editing, setEditing] = createSignal<TestingEnvironment>(),
+    [entering, setEntering] = createSignal<TestingEnvironment>(),
+    [testToken, setTestToken] = createSignal(""),
+    [entryError, setEntryError] = createSignal<unknown>(),
     [secret, setSecret] = createSignal<Record<string, unknown>>(),
     [confirm, setConfirm] = createSignal<{
       item: TestingEnvironment;
@@ -312,6 +323,33 @@ export function EnvironmentsPanel(props: {
     if (!session.testing_environment_id) void load();
     else setLoading(false);
   });
+  async function enter(item: TestingEnvironment, slt?: string) {
+    if (busy()) return;
+    setBusy(true);
+    setError();
+    setEntryError();
+    try {
+      if (!(await props.beforeEnter()) || !alive) return;
+      const selected = await enterTestingEnvironment(
+        item.environment_id,
+        session,
+        slt,
+      );
+      if (alive) {
+        setTestToken("");
+        props.entered(selected);
+      }
+    } catch (e) {
+      if (!alive) return;
+      if (e instanceof ApiError && e.code === "testing_login_required") {
+        setEntering(item);
+        setTestToken("");
+      } else if (entering()) setEntryError(e);
+      else setError(e);
+    } finally {
+      if (alive) setBusy(false);
+    }
+  }
   async function action(
     item: TestingEnvironment,
     action: string,
@@ -440,11 +478,23 @@ export function EnvironmentsPanel(props: {
                         }
                       >
                         <button
+                          class="button primary small"
+                          disabled={busy()}
+                          onClick={() => void enter(item)}
+                        >
+                          <Icon name="flask" />
+                          View as testing environment
+                        </button>
+                        <button
                           class="button small"
                           disabled={busy()}
-                          onClick={() => props.signIn(item.environment_id)}
+                          onClick={() => {
+                            setTestToken("");
+                            setEntryError();
+                            setEntering(item);
+                          }}
                         >
-                          Sign in
+                          Add test account
                         </button>
                         <button
                           class="button small"
@@ -483,6 +533,77 @@ export function EnvironmentsPanel(props: {
             </div>
           </Show>
         </Show>
+      </Show>
+      <Show when={entering()}>
+        {(item) => (
+          <Modal
+            title="View as testing environment"
+            subtitle={item().name}
+            close={() => {
+              if (!busy()) {
+                setEntering();
+                setTestToken("");
+                setEntryError();
+              }
+            }}
+          >
+            <form
+              class="stack"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void enter(item(), testToken().trim());
+              }}
+            >
+              <p>
+                Open the full DM experience with this environment’s
+                conversations, messages, drafts, and realtime updates.
+              </p>
+              <p class="muted">
+                For your first visit, sign in as a test Carbon or Silicon.
+                Future visits can reuse this account.
+              </p>
+              <Notice error={entryError()} />
+              <label>
+                IAM test sign-in token
+                <input
+                  type="password"
+                  required
+                  minLength={8}
+                  maxLength={8192}
+                  autocomplete="off"
+                  spellcheck={false}
+                  value={testToken()}
+                  onInput={(e) => setTestToken(e.currentTarget.value)}
+                />
+              </label>
+              <p class="footnote">
+                Use a short-lived token for <code>{item().iam_app_id}</code>{" "}
+                from IAM test environment{" "}
+                <code>{item().iam_environment_id}</code>. Production sign-in
+                tokens cannot be used here.
+              </p>
+              <div class="form-actions">
+                <button
+                  class="button"
+                  type="button"
+                  disabled={busy()}
+                  onClick={() => {
+                    setEntering();
+                    setTestToken("");
+                    setEntryError();
+                  }}
+                >
+                  Cancel
+                </button>
+                <button class="button primary" type="submit" disabled={busy()}>
+                  {busy()
+                    ? "Opening environment…"
+                    : "Enter testing environment"}
+                </button>
+              </div>
+            </form>
+          </Modal>
+        )}
       </Show>
       <Show when={create()}>
         <EnvironmentForm

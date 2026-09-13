@@ -1,5 +1,7 @@
 # Rust client guide
 
+Current 0.5 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
+
 `silicon-dm-client` is a stateless, typed client for public Silicon DM operations.
 Its default HTTP/WebSocket client does not call IAM directly, hold IAM
 application secrets, persist credentials, or start a daemon. Its protocol types

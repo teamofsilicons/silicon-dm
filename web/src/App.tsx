@@ -15,6 +15,8 @@ import {
   api,
   getConfig,
   getSession,
+  login,
+  exitTesting,
   logout,
   queueMessage,
   retryOutbox,
@@ -194,6 +196,21 @@ export default function App() {
   );
 }
 function SignIn(props: { compact?: boolean; config?: AppConfig }) {
+  const [testSecret, setTestSecret] = createSignal("");
+  const [testIdentity, setTestIdentity] = createSignal("");
+  const [testError, setTestError] = createSignal<unknown>();
+  const [testBusy, setTestBusy] = createSignal(false);
+  async function enterTest(event: SubmitEvent) {
+    event.preventDefault();
+    if (testBusy()) return;
+    setTestBusy(true); setTestError();
+    try {
+      await login({ app_secret: testSecret(), slt: testIdentity() });
+      setTestSecret(""); setTestIdentity("");
+      location.reload();
+    } catch (error) { setTestError(error); }
+    finally { setTestBusy(false); }
+  }
   const iamLoginHref = () => {
     const url = new URL(
       props.config?.iam_login_url || "/auth/login",
@@ -217,6 +234,16 @@ function SignIn(props: { compact?: boolean; config?: AppConfig }) {
         <p class="footnote">
           Sign in or create your identity securely with IAM.
         </p>
+        <details class="test-signin">
+          <summary>Use a testing environment</summary>
+          <form class="stack" onSubmit={(event) => void enterTest(event)}>
+            <p class="muted">Use the test app secret from IAM, then sign in as a sandbox identity.</p>
+            <label>Test app secret<input type="password" autocomplete="off" value={testSecret()} onInput={(e) => setTestSecret(e.currentTarget.value)} required /></label>
+            <label>Test SLT or Carbon / Silicon ID<input autocomplete="off" value={testIdentity()} onInput={(e) => setTestIdentity(e.currentTarget.value)} required /></label>
+            <Notice error={testError()} />
+            <button class="button full" disabled={testBusy()} type="submit">{testBusy() ? "Entering…" : "Enter testing environment"}</button>
+          </form>
+        </details>
       </div>
     </div>
   );
@@ -1241,6 +1268,13 @@ function Workspace(props: {
   const selectedMessages = () =>
     messages().filter((m) => selection()?.includes(m.id));
   const profiles = () => props.session.profiles || [];
+  async function returnToProduction() {
+    if (!(await confirmLeaving("Exit testing mode"))) return;
+    try {
+      const selected = await exitTesting();
+      if (alive) props.changed(selected);
+    } catch (e) { if (alive) setError(e); }
+  }
   const own = (m: Message) => m.sender.id === actor();
   return (
     <div
@@ -1386,6 +1420,25 @@ function Workspace(props: {
             </Show>
           </div>
         </header>
+        <Show when={props.session.testing_environment_id}>
+          <div class="testing-banner" role="status">
+            <Icon name="flask" />
+            <div>
+              <strong>Testing environment · {props.session.testing_environment_name || props.session.testing_environment_id}</strong>
+              <span>
+                Full DM experience. Messages and changes stay in this
+                environment.
+              </span>
+              <code>{props.session.actor?.id}</code>
+            </div>
+              <button
+                class="button small"
+                onClick={() => void returnToProduction()}
+              >
+                Exit testing mode
+              </button>
+          </div>
+        </Show>
         <Show when={recovered().length}>
           <div class="global-notice">
             <div class="notice error">
@@ -1875,7 +1928,11 @@ function Workspace(props: {
             />
           </Match>
           <Match when={page() === "environments"}>
-            <EnvironmentsPanel session={props.session} signIn={addAccount} />
+            <EnvironmentsPanel
+              session={props.session}
+              beforeEnter={() => confirmLeaving("Enter testing environment")}
+              entered={props.changed}
+            />
           </Match>
         </Switch>
       </div>

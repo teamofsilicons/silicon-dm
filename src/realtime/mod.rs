@@ -7,3 +7,6 @@ mod session;
 pub use hub::{DeliveryWakeup, HubRegistration, PublishReport, RealtimeHub, RealtimeTarget};
 pub use protocol::{ClientFrame, DeliveryPayload, PROTOCOL_VERSION, ServerFrame};
 pub use session::serve_socket;
+
+pub(crate) mod shared;
+mod transport;

@@ -40,11 +40,16 @@ use crate::{
 
 /// Authenticates and upgrades a durable realtime client connection.
 pub(super) async fn open_realtime_connection(
-    State(state): State<AppState>,
+    State(mut state): State<AppState>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     upgrade: WebSocketUpgrade,
 ) -> AppResult<Response> {
+    if headers.get("x-dm-telemetry").is_some_and(|v| v == "off") {
+        std::sync::Arc::make_mut(&mut state.settings)
+            .telemetry
+            .enabled = false;
+    }
     let query = parse_realtime_query(raw_query.as_deref())?;
     let token = realtime_bearer(&headers)?;
     let authority = state

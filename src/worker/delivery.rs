@@ -263,6 +263,8 @@ impl DeliveryWorker {
     }
 
     async fn maintain(&self, cancellation: &CancellationToken) -> AppResult<CycleOutcome> {
+        sqlx::query("UPDATE contract_versions SET status='sunset',sunset_at=clock_timestamp() WHERE status='deprecated' AND GREATEST(COALESCE(last_request_at,introduced_at),deprecated_at)<=clock_timestamp()-INTERVAL '7 days'")
+            .execute(self.store.pool()).await?;
         let Some(expired) = cancellation
             .run_until_cancelled(self.store.expire_realtime_sessions())
             .await

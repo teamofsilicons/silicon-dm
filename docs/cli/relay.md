@@ -1,5 +1,7 @@
 # Local relay and actor callbacks
 
+Current 0.5 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
+
 Login starts a durable daemon. `dm daemon start`, `stop`, `status`, and `run`
 control it. `run` stays in the foreground for a service supervisor. Normal start
 detaches from the launching Unix shell/session and redirects output to the

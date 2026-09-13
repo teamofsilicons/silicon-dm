@@ -1,5 +1,33 @@
 # Hosted frontend verification — 6 September 2026
 
+## Testing-environment entry deployment — 11 September 2026
+
+- Published the testing-entry frontend to `https://dm.teamofsilicons.com`.
+  Vercel deployment `dpl_ua7tDPPvNzBHigSbmsE76t3VZ6Ac` is Ready:
+  `https://silicon-dm-frontend-eicdl8yrt-saketdev12-5675s-projects.vercel.app`.
+- Updated only the existing gateway service on `i-06b6670e5b2c53a3d` to
+  `234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-dm-production@sha256:3588a26b3ea1ac79a6c5456a866d4a1161488943c0fe5debf417f4dbedb58b36`.
+  The state volume stayed mounted; no database or infrastructure changes were made.
+- Gateway SSM rollout `bd535cd5-79ca-4f30-8cd4-170ec6ce03be` succeeded.
+  The previous unit is preserved on the host at
+  `/etc/systemd/system/silicon-dm-gateway.service.before-testing-entry-20260911-0205`.
+  Its prior image digest is
+  `sha256:0dc48ba0079d61a5c92af1e95acec4808e6bde8c2a4b94478faa51ab65a94c89`.
+- The production build and local container smoke check passed. The previous
+  implementation verification passed all 11 tests and browser checks using
+  local fixture data for entry, message sending, return, and repeat entry.
+- Live frontend HTTPS returned 200. Both served JavaScript and CSS match the
+  validated static build byte-for-byte. The CSP allows the production gateway.
+- Live gateway health returned 200, its ALB target is healthy, and backend
+  readiness remains 204. The new entry route returned the expected 401
+  `login_required` for an unauthenticated POST; trusted-frontend CORS preflight
+  returned 204 with the correct credentialed origin.
+- Authenticated entry and messaging were not exercised against production
+  during this rollout. No live testing environments, accounts, or messages
+  were created or changed for verification.
+
+## Original deployment record
+
 This record covers deployment checks performed individually against the hosted
 frontend and gateway. It supplements `MANUAL_VERIFICATION.md`, which records the
 larger local frontend exercise against live DM/IAM. No automated browser scenario

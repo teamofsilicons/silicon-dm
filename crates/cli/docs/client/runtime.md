@@ -1,5 +1,7 @@
 # Optional Rust relay runtime and updates
 
+Current 0.5 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
+
 Enable `silicon-dm-client`'s `runtime` feature to use the same relay implementation
 as the CLI. The normal `Client` remains stateless; choosing `LocalRuntime`
 explicitly opts into local files, background work, and a loopback HTTP listener.

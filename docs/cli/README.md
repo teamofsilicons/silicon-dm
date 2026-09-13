@@ -1,5 +1,7 @@
 # DM CLI guide
 
+Current 0.5 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
+
 `dm` is the stateful command interface for Silicon DM. Its backend operations use
 the public `silicon-dm-client` package. Each Carbon or Silicon login has its own
 named profile, organization, tokens, device identifier and local callback URL.
@@ -174,35 +176,22 @@ not change delivered/read state.
 
 ## Test environments
 
-`environments` has the shorter alias `env`. Management uses the selected
-profile's production login to establish org ownership. Create JSON includes
-`name`, optional `description`, `iam_environment_id`, `iam_environment_key`,
-`iam_app_id`, and `iam_app_secret`. Optional `iam_webhook_secret` and
-`iam_webhook_key_version` must be supplied together when pairing a distinct IAM
-testing callback. Keep this JSON in a private file; never put secrets directly
-in shell history.
+Create/import DM in IAM, then select its test app secret. No pairing or IAM root key is required.
 
 ```sh
-dm --profile owner environments create --data private-test-environment.json
-dm --profile owner environments list --include-deleted
-dm environments import-key ENV_UUID --key-file - --base-url https://backend.dm.teamofsilicons.com
-dm --profile writer --test ENV_UUID login --webhook http://localhost:9000/events --token-file -
-dm --profile writer --test ENV_UUID conversations list
-dm --profile writer --test ENV_UUID environments clean
+dm --app-secret-file - login TEST_SLT_OR_PUBLIC_ID
+dm --test ENV_UUID login status --json
+dm --test ENV_UUID conversations list
 ```
 
-Creation and explicit key operations save the returned key locally. `key UUID`
-retrieves it; `rotate-key UUID` replaces it. Keys are only printed with explicit
-`--show`. Use `update UUID --data FILE` for name/description, `delete UUID` for
-soft deletion, and `restore UUID` during the recovery window. Every control
-mutation takes the global idempotency key. For retries after an uncertain
-control call, supply your own known key from the first attempt.
+The first command discovers and saves the environment privately. `DM_TEST_APP_SECRET`
+and `--app-secret` are alternative selectors. Normal user permissions still
+apply. Invalid credentials never fall back to production. The selected name and
+UUID print last on stderr even when commands fail. See [the testing guide](../testing-environments.md).
 
-`clean` requires `--test`; omitting it is rejected before any network action.
-The root key grants sandbox access, while actor operations still use that
-sandbox's IAM identity. The CLI cannot fall back to a production key or login.
-See [the full testing guide](../testing-environments.md) for permissions,
-auto-deletion, 30-day recovery and IAM pairing.
+The `environments` command tree continues to administer manually paired worlds.
+Use IAM lifecycle controls for automatically discovered environments. See
+[legacy controls](../testing-legacy.md) when supporting an older installation.
 
 ## Errors and durable results
 

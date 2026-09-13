@@ -27,6 +27,11 @@ impl TestingRegistry {
     }
 
     pub(super) fn authorize(environment: &TestingEnvironment, auth: &AuthContext) -> AppResult<()> {
+        if environment.environment_id == environment.iam_environment_id {
+            return Err(AppError::validation(
+                "manage IAM-discovered environments in IAM",
+            ));
+        }
         if environment.organization_id == auth.organization_id.as_str()
             && ((environment.creator_actor_id == auth.actor.id.as_str()
                 && environment.creator_actor_kind == auth.actor.actor_type.as_str())
@@ -290,7 +295,7 @@ impl TestingRegistry {
         sqlx::raw_sql(AssertSqlSafe(format!("CREATE TABLE IF NOT EXISTS {schema}.__dm_clean_receipts (mutation_id uuid PRIMARY KEY, completed_at timestamptz NOT NULL DEFAULT clock_timestamp(), testing_environment_id uuid NOT NULL DEFAULT '{id}' CHECK(testing_environment_id='{id}'))"))).execute(&mut *transaction).await?;
         for migration in MIGRATOR
             .iter()
-            .filter(|migration| !matches!(migration.version, 6 | 8 | 11))
+            .filter(|migration| !matches!(migration.version, 6 | 8 | 11 | 16))
         {
             let existing: Option<Vec<u8>> = sqlx::query_scalar(AssertSqlSafe(format!(
                 "SELECT checksum FROM {schema}.__dm_migrations WHERE version=$1"
@@ -339,7 +344,7 @@ impl TestingRegistry {
     }
 
     pub(super) async fn maintain(&self) -> AppResult<()> {
-        let idle:Vec<Uuid>=sqlx::query_scalar("SELECT environment_id FROM dm.testing_environments WHERE status='active' AND last_activity_at <= clock_timestamp()-INTERVAL '15 days'")
+        let idle:Vec<Uuid>=sqlx::query_scalar("SELECT environment_id FROM dm.testing_environments WHERE iam_control_version IS NULL AND status='active' AND last_activity_at <= clock_timestamp()-INTERVAL '15 days'")
             .fetch_all(self.production.pool()).await?;
         for id in idle {
             let mut fence = self.admin.pool().begin().await?;

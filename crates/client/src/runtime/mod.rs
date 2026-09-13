@@ -74,6 +74,69 @@ impl LocalRuntime {
     pub fn store(&self) -> &store::Store {
         &self.store
     }
+    /// Selects and remembers a sandbox from its IAM test app secret, without an IAM root key.
+    pub async fn select_testing_application(
+        &self,
+        base_url: &str,
+        secret: &str,
+    ) -> Result<crate::IamInfo> {
+        let info = crate::Client::new(base_url)?
+            .with_test_key(secret)?
+            .iam()
+            .await?;
+        let id = info.testing_environment_id.context(
+            "DM did not validate a testing environment; no production fallback is allowed",
+        )?;
+        let name = info
+            .testing_environment
+            .as_ref()
+            .and_then(|v| v["name"].as_str())
+            .unwrap_or("Testing environment")
+            .to_owned();
+        self.store.update(|config| {
+            config.testing_keys.insert(
+                id,
+                store::TestKey {
+                    key: secret.into(),
+                    base_url: base_url.into(),
+                },
+            );
+            config.testing_names.insert(id, name);
+            Ok(())
+        })?;
+        Ok(info)
+    }
+
+    /// Persist the diagnostic opt-in for CLI and daemon requests.
+    pub fn set_telemetry(&self, enabled: bool) -> Result<()> {
+        self.store.update(|config| {
+            config.telemetry_enabled = enabled;
+            Ok(())
+        })
+    }
+    /// Best-effort, bounded diagnostics using the selected profile's own credentials.
+    pub async fn record_diagnostic(
+        &self,
+        profile: &str,
+        testing: Option<Uuid>,
+        source: &'static str,
+        event: &str,
+        success: bool,
+        duration_ms: u64,
+    ) {
+        let Ok(config) = self.store.load() else {
+            return;
+        };
+        let Ok(profile) = store::profile(&config, profile, testing) else {
+            return;
+        };
+        if let Ok(client) = store::client(&config, profile) {
+            let _ = client
+                .with_source(source)
+                .telemetry(event, success, duration_ms)
+                .await;
+        }
+    }
     /// An authenticated transport to this runtime's local HTTP relay.
     pub fn client(&self) -> Result<crate::relay::RelayClient> {
         store::relay(&self.store.load()?)
@@ -176,6 +239,28 @@ impl LocalRuntime {
         }
     }
     /// Sets or removes a local callback without changing the IAM login or deleting queued events.
+    pub fn webhook_secret(
+        &self,
+        name: &str,
+        test: Option<Uuid>,
+        secret: Option<&str>,
+    ) -> Result<()> {
+        if secret.is_some_and(|s| {
+            s.is_empty() || s.len() > 8192 || s.bytes().any(|b| b.is_ascii_control())
+        }) {
+            bail!("invalid callback secret");
+        }
+        self.store.update(|config| {
+            let key = store::session_key(name, test);
+            store::profile(config, name, test)?;
+            if let Some(secret) = secret {
+                config.webhook_secrets.insert(key, secret.into());
+            } else {
+                config.webhook_secrets.remove(&key);
+            }
+            Ok(())
+        })
+    }
     pub fn webhook(&self, name: &str, test: Option<Uuid>, url: Option<&Url>) -> Result<Value> {
         if let Some(url) = url {
             validate_callback_endpoint(url)?;

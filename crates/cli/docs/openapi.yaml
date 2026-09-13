@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon DM API
-  version: 0.4.0
+  version: 0.5.0
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
@@ -40,6 +40,154 @@ tags:
 - name: Operations
   description: Deployment health probes
 paths:
+  "/contracts":
+    get:
+      tags: [Operations]
+      operationId: discoverContracts
+      summary: Discover contract lifecycle and compatibility
+      security: []
+      parameters:
+      - "$ref": "#/components/parameters/TestingKey"
+      responses:
+        '200':
+          description: Contract versions and compatibility matrix for the selected plane
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: contracts}
+                  data: {type: object, additionalProperties: true}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+        default:
+          "$ref": "#/components/responses/Error"
+  "/ws/shared":
+    get:
+      tags: [Realtime]
+      operationId: prewarmSharedConnection
+      summary: Prewarm one socket for independently authenticated subscriptions
+      security: []
+      description: >-
+        Negotiates shared transport v1. Each subscribe frame must carry its own bearer,
+        organization, actor, device, and optional test app secret. Up to 64 subscriptions
+        share one connection. Channel frames wrap unchanged WebSocket v3 frames under
+        data.subscription_id and data.frame. Credentials are never URL parameters.
+        See https://docs.dm.teamofsilicons.com/contracts/ for the complete protocol.
+      parameters:
+      - in: header
+        name: X-DM-Protocol-Version
+        schema: {type: integer, enum: [1]}
+      responses:
+        '101':
+          description: Transport prewarmed; authenticate each subscription before accessing data
+        '406':
+          "$ref": "#/components/responses/Error"
+        '410':
+          "$ref": "#/components/responses/Error"
+        default:
+          "$ref": "#/components/responses/Error"
+  "/reports":
+    post:
+      tags: [Operations]
+      operationId: submitBugReport
+      summary: Durably submit a report and queue a Postmark notification
+      description: >-
+        Production retries notification delivery. Sandbox email is simulated.
+        Reuse Idempotency-Key after an uncertain response. Ten new reports per actor per hour.
+      parameters:
+      - "$ref": "#/components/parameters/OrgId"
+      - "$ref": "#/components/parameters/TestingKey"
+      - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [type, data]
+              properties:
+                type: {type: string, const: report}
+                data:
+                  type: object
+                  additionalProperties: false
+                  required: [message, client_version]
+                  properties:
+                    message: {type: string, minLength: 1, maxLength: 60000}
+                    pr: {type: [string, 'null'], format: uri}
+                    client_version: {type: string, maxLength: 100}
+      responses:
+        '202':
+          description: Durable acknowledgement; notification is queued, sent or simulated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: report}
+                  data:
+                    type: object
+                    required: [id, submitted, notification, repository]
+                    properties:
+                      id: {type: string, format: uuid}
+                      submitted: {type: boolean}
+                      notification: {type: string, enum: [queued, sent, simulated]}
+                      repository: {type: string, format: uri}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+        '409':
+          "$ref": "#/components/responses/Error"
+        '429':
+          "$ref": "#/components/responses/Error"
+        '503':
+          "$ref": "#/components/responses/Error"
+        default:
+          "$ref": "#/components/responses/Error"
+  "/telemetry":
+    post:
+      tags: [Operations]
+      operationId: recordDiagnostic
+      summary: Record a bounded diagnostic event without distributing the ingest key
+      description: >-
+        X-DM-Telemetry off disables collection. Sandbox diagnostics remain in their own schema.
+        Message content, URLs and secrets are excluded from the accepted schema.
+      parameters:
+      - "$ref": "#/components/parameters/OrgId"
+      - "$ref": "#/components/parameters/TestingKey"
+      - in: header
+        name: X-DM-Telemetry
+        schema: {type: string, enum: ['on', 'off']}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [type, data]
+              properties:
+                type: {type: string, const: telemetry}
+                data:
+                  type: object
+                  additionalProperties: false
+                  required: [source, event, success, duration_ms]
+                  properties:
+                    source: {type: string, enum: [cli, sdk, daemon, web]}
+                    event: {type: string, enum: [command, connection, callback, queue, update, page_view, request, web_error]}
+                    success: {type: boolean}
+                    duration_ms: {type: integer, minimum: 0, maximum: 604800000}
+      responses:
+        '204':
+          description: Diagnostic accepted or opted out
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+        '422':
+          "$ref": "#/components/responses/Error"
+        default:
+          "$ref": "#/components/responses/Error"
   "/iam":
     get:
       tags:
@@ -78,6 +226,14 @@ paths:
                       api_base_url:
                         type: string
                         format: uri
+                      testing_environment_id:
+                        type: [string, 'null']
+                        format: uuid
+                      testing_generation:
+                        type: [integer, 'null']
+                      testing_environment:
+                        type: [object, 'null']
+                        additionalProperties: true
         '401':
           "$ref": "#/components/responses/Unauthorized"
         default:
@@ -1572,9 +1728,8 @@ components:
       required: false
       schema:
         type: string
-        pattern: "^[A-Za-z0-9]{32}$"
-      description: DM testing environment key. Omit for production. Never send the IAM test key in
-        this header.
+        pattern: "^(ask_[A-Za-z0-9_-]{43}|[A-Za-z0-9]{32})$"
+      description: IAM test app secret for automatic discovery, or a legacy DM root key. Omit for production. Never send the IAM environment root key.
     EnvironmentId:
       name: environment_id
       in: path

@@ -27,6 +27,7 @@ use crate::{
 /// Returns a redacted application error when an adapter cannot be constructed,
 /// PostgreSQL cannot be reached, or its readiness query fails.
 pub async fn build_app_state(settings: Settings) -> AppResult<AppState> {
+    let telemetry = crate::telemetry::Recorder::new(&settings.telemetry)?;
     let identity = IamClient::new(&settings.iam)?;
     let gifs = Arc::new(GiphyClient::new(&settings.providers)?);
     let store = PostgresStore::connect(&settings.database).await?;
@@ -41,6 +42,7 @@ pub async fn build_app_state(settings: Settings) -> AppResult<AppState> {
 
     Ok(AppState {
         instance_id: new_instance_id(),
+        telemetry,
         settings: Arc::new(settings),
         store,
         identity,
@@ -89,6 +91,7 @@ pub async fn run_api(settings: Settings) -> anyhow::Result<()> {
         .testing
         .clone()
         .map(|registry| tokio::spawn(registry.run_maintenance(cancellation.clone())));
+    let reporting = tokio::spawn(crate::reporting::run(state.clone(), cancellation.clone()));
     let router = build_router(state);
     let server = axum::serve(listener, router)
         .with_graceful_shutdown(cancellation.clone().cancelled_owned())
@@ -136,6 +139,7 @@ pub async fn run_api(settings: Settings) -> anyhow::Result<()> {
         }
     };
     cancellation.cancel();
+    let _ = timeout(shutdown_timeout, reporting).await;
     if let Some(maintenance) = testing_maintenance {
         let _ = timeout(shutdown_timeout, maintenance).await;
     }

@@ -31,6 +31,9 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
     let p: Vec<_> = path.split('/').collect();
     match (method, p.as_slice()) {
         (_, ["iam"]) => "iam",
+        (_, ["contracts"]) => "contracts",
+        (_, ["reports"]) => "report",
+        (_, ["telemetry"]) => "telemetry",
         (_, ["auth", "login"]) => "login",
         (_, ["auth", "refresh"]) => "refresh",
         (_, ["auth", "logout"]) => "logout",

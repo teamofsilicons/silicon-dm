@@ -30,6 +30,7 @@ pub struct IamClient {
     environment_id: Option<Uuid>,
     verifier: Arc<WebhookVerifier>,
     directory: Option<PostgresStore>,
+    testing_key_digest: Option<String>,
 }
 
 impl IamClient {
@@ -105,7 +106,44 @@ impl IamClient {
             environment_id,
             verifier: Arc::new(WebhookVerifier::new(keyring)),
             directory: None,
+            testing_key_digest: None,
         })
+    }
+
+    /// Resolves a sandbox using only the imported application's secret.
+    /// # Errors
+    /// Rejects inactive credentials, mismatched applications and unavailable IAM.
+    pub async fn discover(
+        settings: &IamSettings,
+        secret: SecretString,
+    ) -> AppResult<(Self, models::ApplicationTestingContext)> {
+        if !secret.expose_secret().starts_with("ask_") || secret.expose_secret().len() != 47 {
+            return Err(AppError::Unauthorized);
+        }
+        let mut identity = Self::build(settings, &settings.app_id, secret.clone(), None)?;
+        identity.client = identity
+            .client
+            .with_testing_application(&settings.app_id, secret.expose_secret())
+            .map_err(map_error)?;
+        let context = identity
+            .client
+            .applications()
+            .testing_context()
+            .await
+            .map_err(map_error)?;
+        if context.application.app_id != settings.app_id
+            || context.environment_id.is_nil()
+            || context.environment.as_ref().is_none_or(|meta| {
+                meta.environment_id != context.environment_id || meta.version < 1
+            })
+        {
+            return Err(AppError::Unauthorized);
+        }
+        identity.environment_id = Some(context.environment_id);
+        identity
+            .testing_key_digest
+            .clone_from(&context.webhook_key_digest);
+        Ok((identity, context))
     }
 
     /// Attaches the database permanently scoped to this DM environment.
@@ -169,7 +207,7 @@ impl IamClient {
             return Err(AppError::Unauthorized);
         }
         let snapshot = inspected.authorization.ok_or_else(dependency_unavailable)?;
-        let actor_type = match snapshot.actor_type {
+        let actor_type = match snapshot.actor_type.as_ref().ok_or(AppError::Unauthorized)? {
             models::ApplicationAuthorizationActorType::Carbon => ActorType::Carbon,
             models::ApplicationAuthorizationActorType::Silicon => ActorType::Silicon,
             models::ApplicationAuthorizationActorType::Other(_) => {
@@ -210,7 +248,13 @@ impl IamClient {
         {
             return Err(AppError::Unauthorized);
         }
-        let actor = actor_ref(actor_type, &snapshot.public_id)?;
+        let actor = actor_ref(
+            actor_type,
+            snapshot
+                .public_id
+                .as_deref()
+                .ok_or(AppError::Unauthorized)?,
+        )?;
         self.directory
             .as_ref()
             .ok_or_else(dependency_unavailable)?
@@ -251,14 +295,15 @@ impl IamClient {
             .await
             .map_err(map_error)?
             .ok_or(AppError::Unauthorized)?;
+        let response_identity = response.actor.as_ref().ok_or(AppError::Unauthorized)?;
         let mut organization_ids = Vec::new();
         for grant in grants {
             if grant.audience != self.app_id
-                || grant.principal_id != response.actor.principal_id
+                || grant.principal_id != response_identity.principal_id
                 || grant.testing_environment_id != self.environment_id
-                || iam_actor(&response.actor)?
+                || iam_actor(response_identity)?
                     != actor_ref(
-                        match grant.actor_type {
+                        match grant.actor_type.as_ref().ok_or(AppError::Unauthorized)? {
                             models::ApplicationAuthorizationActorType::Carbon => ActorType::Carbon,
                             models::ApplicationAuthorizationActorType::Silicon => {
                                 ActorType::Silicon
@@ -267,7 +312,7 @@ impl IamClient {
                                 return Err(AppError::Unauthorized);
                             }
                         },
-                        &grant.public_id,
+                        grant.public_id.as_deref().ok_or(AppError::Unauthorized)?,
                     )?
             {
                 return Err(AppError::Unauthorized);
@@ -287,8 +332,9 @@ impl IamClient {
                 &organization_id,
             )
             .await?;
-        let response_actor = iam_actor(&response.actor)?;
-        if response_actor != context.actor || response.actor.principal_id != context.principal_id {
+        let response_actor = iam_actor(response_identity)?;
+        if response_actor != context.actor || response_identity.principal_id != context.principal_id
+        {
             return Err(AppError::Unauthorized);
         }
         Ok(ApplicationSession {
@@ -403,6 +449,24 @@ impl IdentityProvider for IamClient {
                 .map_err(|_| AppError::Unauthorized)?,
             // This distinct internal result means the signature was authentic,
             // but routing must select the matching testing plane.
+            None if self.environment_id.is_some() => {
+                use sha2::{Digest as _, Sha256};
+                use subtle::ConstantTimeEq as _;
+                let hint: serde_json::Value =
+                    serde_json::from_slice(body).map_err(|_| AppError::Unauthorized)?;
+                let key = hint
+                    .pointer("/test/testing_key")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(AppError::Unauthorized)?;
+                let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
+                if !delivery.is_testing()
+                    || !self.testing_key_digest.as_ref().is_some_and(|expected| {
+                        bool::from(expected.as_bytes().ct_eq(digest.as_bytes()))
+                    })
+                {
+                    return Err(AppError::Unauthorized);
+                }
+            }
             None if delivery.is_testing() => return Err(AppError::Forbidden),
             None => {}
         }

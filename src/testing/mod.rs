@@ -1,6 +1,7 @@
 //! Test environments share one separate database, with an immutable schema scope
 //! and an environment UUID on every data row. Control records live in production.
 
+mod discovery;
 pub mod handlers;
 mod journal;
 mod storage;
@@ -128,6 +129,11 @@ impl TestingRegistry {
     /// # Errors
     /// Returns unauthorized for malformed or inactive keys, or errors opening the selected database/IAM adapters.
     pub async fn state_for_key(&self, parent: &AppState, key: &str) -> AppResult<AppState> {
+        if key.starts_with("ask_") {
+            return self
+                .state_for_app_secret(parent, &SecretString::from(key.to_owned()))
+                .await;
+        }
         validate_key(key)?;
         let row = sqlx::query_as::<_, TestingEnvironment>(
             "UPDATE dm.testing_environments SET last_activity_at = clock_timestamp() WHERE root_key_digest = $1 AND status = 'active' RETURNING *")
@@ -158,6 +164,10 @@ impl TestingRegistry {
     ///
     /// # Errors
     /// Returns unauthorized unless an exact matching signer verifies the bytes, or errors loading authenticated targets.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "legacy and discovered webhook authorization remain visible together"
+    )]
     pub async fn verified_webhook_states(
         &self,
         parent: &AppState,
@@ -171,6 +181,32 @@ impl TestingRegistry {
             sqlx::query_as("SELECT * FROM dm.testing_environments WHERE status='active'")
                 .fetch_all(self.production.pool())
                 .await?;
+        let mut discovered = Vec::new();
+        for environment in &rows {
+            let credentials: (String, String) = sqlx::query_as("SELECT iam_environment_key_ciphertext,iam_app_secret_ciphertext FROM dm.testing_environments WHERE environment_id=$1")
+                .bind(environment.environment_id).fetch_one(self.production.pool()).await?;
+            if !credentials.0.is_empty() {
+                continue;
+            }
+            let secret = self.decrypt(environment.environment_id, "iam-app", &credentials.1)?;
+            let (identity, _) =
+                match IamClient::discover(&parent.settings.iam, secret.clone()).await {
+                    Ok(context) => context,
+                    Err(AppError::Unauthorized | AppError::Forbidden) => continue,
+                    Err(error) => return Err(error),
+                };
+            if let Ok(event) = identity.verify_webhook(headers, body) {
+                let state = self.state_for_app_secret(parent, &secret).await?;
+                discovered.push((state, event));
+            }
+        }
+        if !discovered.is_empty() {
+            return Ok(discovered);
+        }
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|env| env.environment_id != env.iam_environment_id)
+            .collect();
         let mut verified = None;
         for environment in &rows {
             let credentials:Option<(String,String,Option<String>,Option<i64>)>=sqlx::query_as("SELECT iam_environment_key_ciphertext,iam_app_secret_ciphertext,iam_webhook_secret_ciphertext,iam_webhook_key_version FROM dm.testing_environments WHERE environment_id=$1 AND status='active'")
@@ -273,13 +309,22 @@ impl TestingRegistry {
                     self.decrypt(environment.environment_id, "iam-webhook", &secret)?;
                 iam_settings.webhook_key_version = version;
             }
-            let identity = IamClient::for_environment(
-                &iam_settings,
-                &environment.iam_app_id,
-                self.decrypt(environment.environment_id, "iam-app", &iam_secret)?,
-                self.decrypt(environment.environment_id, "iam-key", &iam_key)?,
-                environment.iam_environment_id,
-            )?;
+            let identity = if iam_key.is_empty() {
+                IamClient::discover(
+                    &iam_settings,
+                    self.decrypt(environment.environment_id, "iam-app", &iam_secret)?,
+                )
+                .await?
+                .0
+            } else {
+                IamClient::for_environment(
+                    &iam_settings,
+                    &environment.iam_app_id,
+                    self.decrypt(environment.environment_id, "iam-app", &iam_secret)?,
+                    self.decrypt(environment.environment_id, "iam-key", &iam_key)?,
+                    environment.iam_environment_id,
+                )?
+            };
             self.upgrade_schema(environment.environment_id).await?;
             let store = PostgresStore::connect_schema(
                 &self.database,
@@ -337,7 +382,7 @@ impl TestingRegistry {
     /// # Errors
     /// Returns unauthorized for a retired generation, or a database error.
     pub async fn ensure_active(&self, environment_id: Uuid, generation: i64) -> AppResult<()> {
-        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dm.testing_environments WHERE environment_id = $1 AND status = 'active' AND version = $2)")
+        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dm.testing_environments WHERE environment_id = $1 AND status = 'active' AND NOT iam_sync_pending AND version = $2)")
             .bind(environment_id).bind(generation).fetch_one(self.production.pool()).await?;
         if active {
             Ok(())
