@@ -1415,7 +1415,10 @@ async fn groups_apply_current_iam_access_without_rewriting_history() -> TestResu
     let second = store
         .create_group(
             &owner,
-            settings.clone(),
+            GroupSettings {
+                name: "Another research group".into(),
+                ..settings.clone()
+            },
             vec![actors[1].clone()],
             &idempotency_key("another-group")?,
         )

@@ -30,6 +30,10 @@ close code. CLI completion, daemon queue checks and callback outcomes, and brows
 page views, request timings and error classifications provide client-side context.
 Space Station adds system and ingestion metadata itself.
 
+Group mutation events carry the canonical `group_id`, such as
+`g:tos:product-design`, plus counts and public/private status. The address includes
+the creation-name slug; renamed display names and descriptions are not recorded.
+
 The browser analytics path is explicit and goes through the same authenticated DM
 gateway as product requests. DM does not use a third-party browser script or expose
 the table key. Diagnostic input accepts a small fixed set of event types and

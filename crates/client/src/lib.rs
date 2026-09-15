@@ -299,7 +299,9 @@ impl Client {
         self.json(self.request(Method::GET, "groups")?.query(page))
             .await
     }
-    pub async fn group(&self, id: Uuid) -> Result<Conversation> {
+    pub async fn group(&self, id: impl std::fmt::Display) -> Result<Conversation> {
+        let id = id.to_string();
+        validate_conversation_id(&id)?;
         self.json(self.request(Method::GET, &format!("groups/{id}"))?)
             .await
     }
@@ -313,11 +315,13 @@ impl Client {
     }
     pub async fn update_group(
         &self,
-        id: Uuid,
+        id: impl std::fmt::Display,
         settings: &GroupSettings,
         version: i64,
         key: &str,
     ) -> Result<GroupDetails> {
+        let id = id.to_string();
+        validate_conversation_id(&id)?;
         self.json(
             self.request(Method::PATCH, &format!("groups/{id}"))?
                 .header("If-Match", version)
@@ -328,10 +332,12 @@ impl Client {
     }
     pub async fn invite_group_members(
         &self,
-        id: Uuid,
+        id: impl std::fmt::Display,
         members: &[String],
         key: &str,
     ) -> Result<GroupDetails> {
+        let id = id.to_string();
+        validate_conversation_id(&id)?;
         self.json(
             self.request(Method::POST, &format!("groups/{id}/members"))?
                 .header("Idempotency-Key", key)
@@ -342,10 +348,12 @@ impl Client {
     /// Removes explicit invitations; independent public/tag access remains effective.
     pub async fn remove_group_members(
         &self,
-        id: Uuid,
+        id: impl std::fmt::Display,
         members: &[String],
         key: &str,
     ) -> Result<GroupDetails> {
+        let id = id.to_string();
+        validate_conversation_id(&id)?;
         self.json(
             self.request(Method::DELETE, &format!("groups/{id}/members"))?
                 .header("Idempotency-Key", key)
@@ -355,10 +363,12 @@ impl Client {
     }
     pub async fn messages(
         &self,
-        conversation: Uuid,
+        conversation: impl std::fmt::Display,
         page: &PageRequest,
         include_bundled: bool,
     ) -> Result<Page<Message>> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
         self.json(
             self.request(
                 Method::GET,
@@ -371,10 +381,12 @@ impl Client {
     }
     pub async fn send_message(
         &self,
-        conversation: Uuid,
+        conversation: impl std::fmt::Display,
         message: &MessageCreate,
         key: &str,
     ) -> Result<Message> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
         self.json(
             self.request(
                 Method::POST,
@@ -385,7 +397,13 @@ impl Client {
         )
         .await
     }
-    pub async fn message(&self, conversation: Uuid, message: Uuid) -> Result<Message> {
+    pub async fn message(
+        &self,
+        conversation: impl std::fmt::Display,
+        message: Uuid,
+    ) -> Result<Message> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
         self.json(self.request(
             Method::GET,
             &format!("conversations/{conversation}/messages/{message}"),
@@ -394,12 +412,14 @@ impl Client {
     }
     pub async fn edit_message(
         &self,
-        conversation: Uuid,
+        conversation: impl std::fmt::Display,
         message: Uuid,
         content: &MessageCreate,
         version: i64,
         key: &str,
     ) -> Result<Message> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
         self.json(
             self.request(
                 Method::PATCH,
@@ -413,11 +433,13 @@ impl Client {
     }
     pub async fn delete_message(
         &self,
-        conversation: Uuid,
+        conversation: impl std::fmt::Display,
         message: Uuid,
         version: i64,
         key: &str,
     ) -> Result<Message> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
         self.json(
             self.request(
                 Method::DELETE,
@@ -430,11 +452,13 @@ impl Client {
     }
     pub async fn record_receipt(
         &self,
-        conversation: Uuid,
+        conversation: impl std::fmt::Display,
         message: Uuid,
         status: ReceiptStatus,
         device: &str,
     ) -> Result<Message> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
         self.json(
             self.request(
                 Method::POST,
@@ -444,16 +468,20 @@ impl Client {
         )
         .await
     }
-    pub async fn draft(&self, conversation: Uuid) -> Result<Draft> {
+    pub async fn draft(&self, conversation: impl std::fmt::Display) -> Result<Draft> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
         self.json(self.request(Method::GET, &format!("conversations/{conversation}/draft"))?)
             .await
     }
     pub async fn put_draft(
         &self,
-        conversation: Uuid,
+        conversation: impl std::fmt::Display,
         draft: &DraftInput,
         version: i64,
     ) -> Result<Draft> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
         self.json(
             self.request(Method::PUT, &format!("conversations/{conversation}/draft"))?
                 .header("If-Match", version)
@@ -461,7 +489,9 @@ impl Client {
         )
         .await
     }
-    pub async fn delete_draft(&self, conversation: Uuid) -> Result<()> {
+    pub async fn delete_draft(&self, conversation: impl std::fmt::Display) -> Result<()> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
         self.empty(self.request(
             Method::DELETE,
             &format!("conversations/{conversation}/draft"),
@@ -470,10 +500,12 @@ impl Client {
     }
     pub async fn create_bundle(
         &self,
-        conversation: Uuid,
+        conversation: impl std::fmt::Display,
         bundle: &BundleCreate,
         key: &str,
     ) -> Result<Bundle> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
         self.json(
             self.request(
                 Method::POST,
@@ -484,7 +516,13 @@ impl Client {
         )
         .await
     }
-    pub async fn bundle(&self, conversation: Uuid, bundle: Uuid) -> Result<Bundle> {
+    pub async fn bundle(
+        &self,
+        conversation: impl std::fmt::Display,
+        bundle: Uuid,
+    ) -> Result<Bundle> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
         self.json(self.request(
             Method::GET,
             &format!("conversations/{conversation}/bundles/{bundle}"),
@@ -768,4 +806,14 @@ pub async fn check_update() -> Result<UpdateInfo> {
         latest_version: latest.into(),
         rebuild_command: "cargo update -p silicon-dm-client && cargo build --release".into(),
     })
+}
+
+fn validate_conversation_id(value: &str) -> Result<()> {
+    if Uuid::parse_str(value).is_ok() || silicon_dm_protocol::valid_group_id(value) {
+        Ok(())
+    } else {
+        Err(Error::Configuration(
+            "expected a conversation UUID or g:org:group-slug".into(),
+        ))
+    }
 }

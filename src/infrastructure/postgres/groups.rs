@@ -51,7 +51,7 @@ impl PostgresStore {
             .bind(id).bind(org.as_str()).fetch_optional(self.pool()).await?;
         Ok(row.map(|row| row.0))
     }
-    /// Creates a named group with a stable conversation UUID and idempotent invitations.
+    /// Creates a named group with a stable public address and internal conversation UUID and idempotent invitations.
     /// # Errors
     /// Rejects unauthorized creators, invalid policies/actors, and conflicting retries.
     pub async fn create_group(
@@ -87,7 +87,7 @@ impl PostgresStore {
                 let id = Uuid::now_v7();
                 let digest = blake3::hash(id.as_bytes());
                 sqlx::query("INSERT INTO conversations(id,organization_id,participant_set_hash,created_by_kind,created_by_id,is_group) VALUES($1,$2,$3,$4::text::actor_kind,$5,true)").bind(id).bind(auth.organization_id.as_str()).bind(digest.as_bytes().as_slice()).bind(auth.actor.actor_type.as_str()).bind(auth.actor.id.as_str()).execute(&mut *tx).await?;
-                sqlx::query("INSERT INTO groups(conversation_id,organization_id,name,description,is_public,tag_ids) VALUES($1,$2,$3,$4,$5,$6)").bind(id).bind(auth.organization_id.as_str()).bind(&settings.name).bind(&settings.description).bind(settings.is_public).bind(&settings.tag_ids).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO groups(conversation_id,organization_id,name,description,is_public,tag_ids) VALUES($1,$2,$3,$4,$5,$6)").bind(id).bind(auth.organization_id.as_str()).bind(&settings.name).bind(&settings.description).bind(settings.is_public).bind(&settings.tag_ids).execute(&mut *tx).await.map_err(map_constraint_error)?;
                 invite_in(&mut tx, &auth.organization_id, id, &members).await?;
                 complete_group(&mut tx, auth, "groups.create", key, id).await?;
                 id

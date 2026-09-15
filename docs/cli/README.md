@@ -90,11 +90,11 @@ disables that login and clears its tokens; pending requests remain stored.
 ```sh
 dm conversations create --participant OTHER_ACTOR_ID
 dm conversations list --limit 20
-dm messages send CONVERSATION_UUID --text 'Hello' --metadata '{"task_id":"42"}'
-dm messages send CONVERSATION_UUID --attachment https://example.com/report.pdf
-dm messages send CONVERSATION_UUID --text 'Reply' --reply-to MESSAGE_UUID
-dm messages list CONVERSATION_UUID --limit 20
-dm messages show CONVERSATION_UUID MESSAGE_UUID
+dm messages send CONVERSATION_ID --text 'Hello' --metadata '{"task_id":"42"}'
+dm messages send CONVERSATION_ID --attachment https://example.com/report.pdf
+dm messages send CONVERSATION_ID --text 'Reply' --reply-to MESSAGE_UUID
+dm messages list CONVERSATION_ID --limit 20
+dm messages show CONVERSATION_ID MESSAGE_UUID
 ```
 
 Participant IDs are IAM public actor IDs, not local profile names. The current
@@ -128,9 +128,9 @@ attachment-count/declared-size and voice-duration limits.
 Edit and delete use the version from `messages show`:
 
 ```sh
-dm messages edit CONVERSATION_UUID MESSAGE_UUID --version 1 \
+dm messages edit CONVERSATION_ID MESSAGE_UUID --version 1 \
   --text 'Corrected text' --metadata '{"task_id":"42"}'
-dm messages delete CONVERSATION_UUID MESSAGE_UUID --version 2
+dm messages delete CONVERSATION_ID MESSAGE_UUID --version 2
 ```
 
 Edit is full replacement: preserve all existing fields you intend to retain.
@@ -218,9 +218,9 @@ conversation using the canonical account IDs, then supply addresses per message:
 
 ```sh
 dm conversations create --participant cos:tos
-dm messages send CONVERSATION_UUID --to deliberate@cos:tos --text 'Please review'
+dm messages send CONVERSATION_ID --to deliberate@cos:tos --text 'Please review'
 # When authenticated as writer:tos:
-dm messages send CONVERSATION_UUID --from compose@writer:tos --to deliberate@cos:tos --text 'Draft'
+dm messages send CONVERSATION_ID --from compose@writer:tos --to deliberate@cos:tos --text 'Draft'
 ```
 
 `--from` / `--sender-id` and `--to` / `--recipient-id` set the message's

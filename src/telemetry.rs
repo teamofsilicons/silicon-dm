@@ -114,7 +114,10 @@ fn safe_fields(fields: Value) -> serde_json::Map<String, Value> {
             let allowed = match key.as_str() {
                 "duration_ms" | "status" | "count" | "sequence" | "attempt" => value.is_u64(),
                 "success" | "is_public" => value.is_boolean(),
-                "request_id" | "session_id" | "group_id" => value
+                "group_id" => value
+                    .as_str()
+                    .is_some_and(silicon_dm_protocol::valid_group_id),
+                "request_id" | "session_id" => value
                     .as_str()
                     .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok()),
                 "route" | "method" | "code" | "stage" => value.as_str().is_some_and(|s| {
@@ -266,6 +269,13 @@ pub(crate) async fn receive(
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+    #[test]
+    fn group_diagnostics_use_the_canonical_address() {
+        let safe = safe_fields(json!({"group_id":"g:tos:product-design", "name":"Private name"}));
+        assert_eq!(safe.len(), 1);
+        assert_eq!(safe["group_id"], "g:tos:product-design");
+        assert!(safe_fields(json!({"group_id":"g:tos:../../secret"})).is_empty());
+    }
     #[test]
     fn secrets_and_arbitrary_content_cannot_enter_diagnostic_context() {
         let value = json!({"message":"private message","token":"oat_secret","app_secret":"ask_secret","url":"https://callback.invalid/private","request_id":"ask_secret","status":503,"success":false,"duration_ms":29,"route":"/api/v1/conversations/{conversation_id}","stage":"ack","session_id":uuid::Uuid::nil()});

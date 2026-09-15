@@ -8,24 +8,25 @@ import { Auth, headersFor } from "./auth.ts";
 import { GatewayError } from "./session.ts";
 
 const id = "[0-9a-fA-F-]{36}";
+const conversationId = `(?:${id}|g:[A-Za-z0-9][A-Za-z0-9_-]{0,254}:[a-z0-9]+(?:-[a-z0-9]+)*)`;
 const allowed: [RegExp, string[]][] = [
   [/^telemetry$/, ["POST"]],
   [/^reports$/, ["POST"]],
   [/^contracts$/, ["GET"]],
   [/^auth\/me$/, ["GET"]],
   [/^groups$/, ["GET", "POST"]],
-  [new RegExp(`^groups/${id}$`), ["GET", "PATCH"]],
-  [new RegExp(`^groups/${id}/members$`), ["POST", "DELETE"]],
+  [new RegExp(`^groups/${conversationId}$`), ["GET", "PATCH"]],
+  [new RegExp(`^groups/${conversationId}/members$`), ["POST", "DELETE"]],
   [/^conversations$/, ["GET", "POST"]],
-  [new RegExp(`^conversations/${id}/messages$`), ["GET", "POST"]],
+  [new RegExp(`^conversations/${conversationId}/messages$`), ["GET", "POST"]],
   [
-    new RegExp(`^conversations/${id}/messages/${id}$`),
+    new RegExp(`^conversations/${conversationId}/messages/${id}$`),
     ["GET", "PATCH", "DELETE"],
   ],
-  [new RegExp(`^conversations/${id}/messages/${id}/receipts$`), ["POST"]],
-  [new RegExp(`^conversations/${id}/draft$`), ["GET", "PUT", "DELETE"]],
-  [new RegExp(`^conversations/${id}/bundles$`), ["POST"]],
-  [new RegExp(`^conversations/${id}/bundles/${id}$`), ["GET"]],
+  [new RegExp(`^conversations/${conversationId}/messages/${id}/receipts$`), ["POST"]],
+  [new RegExp(`^conversations/${conversationId}/draft$`), ["GET", "PUT", "DELETE"]],
+  [new RegExp(`^conversations/${conversationId}/bundles$`), ["POST"]],
+  [new RegExp(`^conversations/${conversationId}/bundles/${id}$`), ["GET"]],
   [/^presence\/[A-Za-z0-9_.:%>+-]+$/, ["GET"]],
   [/^gifs\/(?:trending|search|recent)$/, ["GET"]],
   [/^testing-environments$/, ["GET", "POST"]],
@@ -125,7 +126,7 @@ export async function proxy(
   config: Config,
   auth: Auth,
 ): Promise<void> {
-  const path = url.pathname.slice("/api/dm/".length),
+  const path = url.pathname.slice("/api/dm/".length).replace(/%3a/gi, ":"),
     method = req.method || "GET";
   const route = allowed.find(([pattern]) => pattern.test(path));
   if (!route || !route[1].includes(method))

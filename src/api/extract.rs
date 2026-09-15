@@ -34,6 +34,9 @@ pub struct IfMatch(pub Option<i64>);
 /// Path parameters whose deserialization failures use the public error shape.
 pub struct ApiPath<T>(pub T);
 
+#[derive(Clone)]
+struct ResolvedPath(std::collections::HashMap<String, String>);
+
 /// Query parameters whose deserialization failures use the public error shape.
 pub struct ApiQuery<T>(pub T);
 
@@ -87,16 +90,25 @@ impl FromRequestParts<AppState> for Authenticated {
         if context.organization_id != organization_id {
             return Err(AppError::Forbidden);
         }
-        // Use decoded route parameters, so percent-encoded UUIDs cannot bypass
-        // the exact credential's group policy check.
-        if let Ok(Path(parameters)) =
+        // Resolve decoded addresses before exact-token authorization. The internal key
+        // is passed to handlers only after tenant-scoped lookup succeeds.
+        if let Ok(Path(mut parameters)) =
             Path::<std::collections::HashMap<String, String>>::from_request_parts(parts, state)
                 .await
-            && let Some(id) = parameters
-                .get("conversation_id")
-                .and_then(|id| uuid::Uuid::parse_str(id).ok())
         {
-            state.store.check_group_access(&context, id).await?;
+            for field in ["conversation_id", "group_id"] {
+                if let Some(value) = parameters.get(field) {
+                    let id = state
+                        .store
+                        .resolve_conversation_id(&context.organization_id, value)
+                        .await?;
+                    if field == "conversation_id" {
+                        state.store.check_group_access(&context, id).await?;
+                    }
+                    parameters.insert(field.into(), id.to_string());
+                }
+            }
+            parts.extensions.insert(ResolvedPath(parameters));
         }
         Ok(Self(context))
     }
@@ -158,6 +170,11 @@ where
     type Rejection = ApiInputRejection;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        if let Some(parameters) = parts.extensions.get::<ResolvedPath>() {
+            return serde_json::from_value(serde_json::json!(parameters.0))
+                .map(Self)
+                .map_err(|_| ApiInputRejection::validation("path parameters are invalid"));
+        }
         Path::<T>::from_request_parts(parts, state)
             .await
             .map(|Path(value)| Self(value))

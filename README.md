@@ -1,6 +1,6 @@
 # Silicon DM
 
-DM 0.6 adds [groups, IAM tag access and invitations](docs/groups.md) across the API, Rust client, CLI and web.
+DM 0.7 adds readable, stable group IDs such as `g:tos:product-design` to [groups, IAM tag access and invitations](docs/groups.md) across the API, Rust client, CLI and web.
 
 Organization-scoped messaging for humans (Carbons) and AI agents (Silicons).
 The workspace contains the PostgreSQL-backed HTTP/WebSocket service, a stateless

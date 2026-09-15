@@ -211,7 +211,8 @@ impl SessionRuntime {
                 (actor.id.clone(), through)
             })
             .collect();
-        send_server_frame(
+        send_public_frame(
+            &self.state,
             socket,
             &ServerFrame::Ready {
                 protocol_version: PROTOCOL_VERSION,
@@ -307,7 +308,7 @@ impl SessionRuntime {
                         .await?;
                     let ping_id = Uuid::now_v7().to_string();
                     self.pending_ping_id = Some(ping_id.clone());
-                    send_server_frame(socket, &ServerFrame::Ping { ping_id }).await?;
+                    send_public_frame(&self.state, socket, &ServerFrame::Ping { ping_id }).await?;
                 }
                 SessionEvent::Replay => {
                     if let Err(error) = self.check_authority_revision().await {
@@ -384,7 +385,8 @@ impl SessionRuntime {
                     return Ok(Some(SocketExit::server(1009, "frame-too-large")));
                 }
                 let Ok(frame) = serde_json::from_str::<ClientFrame>(text.as_str()) else {
-                    send_server_frame(
+                    send_public_frame(
+                        &self.state,
                         socket,
                         &ServerFrame::recoverable_error(
                             "invalid_frame",
@@ -399,7 +401,9 @@ impl SessionRuntime {
                 drop(text);
                 match self.handle_client_frame(frame).await {
                     Ok(ClientOutcome::None) => {}
-                    Ok(ClientOutcome::Respond(frame)) => send_server_frame(socket, &frame).await?,
+                    Ok(ClientOutcome::Respond(frame)) => {
+                        send_public_frame(&self.state, socket, &frame).await?;
+                    }
                     Ok(ClientOutcome::Replay(actor_id)) => {
                         self.replay_actor(socket, &actor_id).await?;
                     }
@@ -408,7 +412,8 @@ impl SessionRuntime {
                 Ok(None)
             }
             SocketMessage::Binary(_) => {
-                send_server_frame(
+                send_public_frame(
+                    &self.state,
                     socket,
                     &ServerFrame::recoverable_error(
                         "unsupported_frame",
@@ -548,6 +553,11 @@ impl SessionRuntime {
                 status,
                 device_id,
             } => {
+                let conversation_id = self
+                    .state
+                    .store
+                    .resolve_conversation_id(&self.authority.organization_id, &conversation_id)
+                    .await?;
                 if device_id != self.consumer_id {
                     return Err(AppError::Forbidden);
                 }
@@ -578,6 +588,11 @@ impl SessionRuntime {
                 idempotency_key,
                 message,
             } => {
+                let conversation_id = self
+                    .state
+                    .store
+                    .resolve_conversation_id(&self.authority.organization_id, &conversation_id)
+                    .await?;
                 let mut message = *message;
                 if org_id != self.authority.organization_id {
                     return Err(AppError::Forbidden);
@@ -703,7 +718,7 @@ impl SessionRuntime {
             }
             let frame =
                 ServerFrame::delivery(delivery.id, actor_id.clone(), sequence, delivery.payload);
-            send_server_frame(socket, &frame).await?;
+            send_public_frame(&self.state, socket, &frame).await?;
             crate::telemetry::record(
                 &self.state,
                 "backend",
@@ -788,6 +803,20 @@ impl SocketExit {
             send_close: false,
         }
     }
+}
+
+async fn send_public_frame(
+    state: &AppState,
+    socket: &mut Transport,
+    frame: &ServerFrame,
+) -> AppResult<()> {
+    let mut value = serde_json::to_value(frame).map_err(AppError::internal)?;
+    state.store.public_conversation_ids(&mut value).await?;
+    let encoded = serde_json::to_string(&value).map_err(AppError::internal)?;
+    socket
+        .send(SocketMessage::Text(encoded.into()))
+        .await
+        .map_err(|error| AppError::internal(anyhow::Error::new(error)))
 }
 
 async fn send_error(socket: &mut Transport, error: &AppError) -> AppResult<()> {

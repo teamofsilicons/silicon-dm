@@ -363,3 +363,21 @@ test("groups use the authenticated gateway allowlist and selected sandbox creden
   assert.equal(sent.headers["x-testing-environment-key"], rootKey);
   assert.deepEqual(sent.body, { type: "create_group", data: { name: "Research", member_ids: [] } });
 });
+
+
+test("group addresses pass gateway routing and preserve sandbox credentials", async t => {
+  const f = await fixture(t);
+  const entered = await f.enter("test-slt-token");
+  for (const path of ["groups/g:tos:product-design/members", "conversations/g:tos:product-design/messages", "conversations/g%3Atos%3Aproduct-design/messages"]) {
+    const response = await f.request(`/api/dm/${path}`, { member_ids: [], message: "Hello", metadata: {} }, entered.value.profile_id);
+    assert.equal(response.status, 200);
+    const sent = f.calls.find(call => call.path === `/api/v1/${path.replaceAll("%3A", ":")}`);
+    assert(sent);
+    assert.equal(sent.headers.authorization, "Bearer test-access");
+    assert.equal(sent.headers["x-testing-environment-key"], rootKey);
+  }
+  for (const id of ["g:tos:bad--slug", "g:tos:-bad", "g:tos:UPPER", "g:tos:bad%2Fmembers"]) {
+    const response = await f.request(`/api/dm/groups/${id}/members`, { member_ids: [] }, entered.value.profile_id);
+    assert.equal(response.status, id.includes("%2F") ? 400 : 404);
+  }
+});

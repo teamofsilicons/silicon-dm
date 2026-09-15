@@ -82,7 +82,8 @@ pub(super) async fn create(
         conversation.id,
         conversation.group.as_ref().map(|g| &g.settings),
         input.member_ids.len(),
-    );
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(conversation)))
 }
 pub(super) async fn update(
@@ -107,7 +108,8 @@ pub(super) async fn update(
         path.group_id,
         Some(&group.settings),
         group.invited_members.len(),
-    );
+    )
+    .await;
     Ok(Json(group))
 }
 pub(super) async fn invite(
@@ -131,7 +133,8 @@ pub(super) async fn invite(
         path.group_id,
         None,
         input.member_ids.len(),
-    );
+    )
+    .await;
     Ok(Json(group))
 }
 pub(super) async fn remove(
@@ -177,7 +180,8 @@ pub(super) async fn remove(
         path.group_id,
         None,
         input.member_ids.len(),
-    );
+    )
+    .await;
     Ok(Json(group))
 }
 fn validate_members(ids: &[ActorId]) -> AppResult<()> {
@@ -199,7 +203,7 @@ async fn resolve(
     }
     verify_resolved_actors(ids, state.identity.authorize_participants(auth, ids).await?)
 }
-fn event(
+async fn event(
     state: &AppState,
     headers: &HeaderMap,
     name: &str,
@@ -207,7 +211,10 @@ fn event(
     settings: Option<&GroupSettings>,
     count: usize,
 ) {
-    if crate::telemetry::requested(headers) {
+    if crate::telemetry::requested(headers) && state.settings.telemetry.enabled {
+        let Ok(id) = state.store.public_group_id(id).await else {
+            return;
+        };
         crate::telemetry::record(
             state,
             "backend",

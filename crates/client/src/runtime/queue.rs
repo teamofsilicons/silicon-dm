@@ -200,7 +200,7 @@ struct StoredDeliveryIdentity {
 #[derive(serde::Deserialize)]
 struct StoredDeliveryData {
     id: Option<Uuid>,
-    conversation_id: Option<Uuid>,
+    conversation_id: Option<String>,
     sender: Option<crate::Actor>,
     sequence: Option<i64>,
     created_at: Option<String>,
@@ -209,10 +209,15 @@ struct StoredDeliveryData {
 #[derive(serde::Deserialize)]
 struct StoredMessageIdentity {
     id: Uuid,
-    conversation_id: Uuid,
+    conversation_id: String,
     sender: crate::Actor,
     sequence: i64,
     created_at: String,
+}
+// Existing queues may replay the same immutable message with its new public address.
+// The caller also verifies message UUID, sender, sequence, and creation timestamp.
+fn same_conversation_identity(old: &str, new: &str) -> bool {
+    old == new || (Uuid::parse_str(old).is_ok() && silicon_dm_protocol::valid_group_id(new))
 }
 fn same_delivery_identity(old: &StoredDeliveryIdentity, new: &ServerFrame) -> bool {
     match new {
@@ -221,7 +226,10 @@ fn same_delivery_identity(old: &StoredDeliveryIdentity, new: &ServerFrame) -> bo
         {
             if let Some(data) = &old.data {
                 return data.id == Some(new.id)
-                    && data.conversation_id == Some(new.conversation_id)
+                    && data
+                        .conversation_id
+                        .as_ref()
+                        .is_some_and(|old| same_conversation_identity(old, &new.conversation_id))
                     && data.sender.as_ref() == Some(&new.sender)
                     && data.sequence == Some(new.sequence)
                     && data.created_at.as_ref() == Some(&new.created_at);
@@ -230,7 +238,7 @@ fn same_delivery_identity(old: &StoredDeliveryIdentity, new: &ServerFrame) -> bo
                 return false;
             };
             old.id == new.id
-                && old.conversation_id == new.conversation_id
+                && same_conversation_identity(&old.conversation_id, &new.conversation_id)
                 && old.sender == new.sender
                 && old.sequence == new.sequence
                 && old.created_at == new.created_at
@@ -549,5 +557,29 @@ mod webhook_tests {
         drop(queue);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod group_address_tests {
+    #[test]
+    fn legacy_conversation_identity_can_upgrade_once() {
+        let old = uuid::Uuid::nil().to_string();
+        assert!(super::same_conversation_identity(
+            &old,
+            "g:tos:product-design"
+        ));
+        assert!(super::same_conversation_identity(
+            "g:tos:product-design",
+            "g:tos:product-design"
+        ));
+        assert!(!super::same_conversation_identity(
+            "g:tos:product-design",
+            "g:tos:another"
+        ));
+        assert!(!super::same_conversation_identity(
+            "g:tos:product-design",
+            &old
+        ));
     }
 }

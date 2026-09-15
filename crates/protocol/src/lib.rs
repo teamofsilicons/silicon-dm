@@ -125,3 +125,62 @@ pub async fn responses(
         .chain(stream::once(async { Ok(Bytes::from_static(b"}")) }));
     axum::response::Response::from_parts(parts, Body::from_stream(stream))
 }
+
+/// Canonical public group address: g:<organization>:<lowercase-name-slug>.
+pub fn valid_group_id(value: &str) -> bool {
+    let mut parts = value.split(':');
+    if parts.next() != Some("g") {
+        return false;
+    }
+    let (Some(org), Some(slug)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    parts.next().is_none()
+        && org
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && org.len() <= 255
+        && org
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        && !slug.is_empty()
+        && slug.len() <= 140
+        && !slug.starts_with('-')
+        && !slug.ends_with('-')
+        && !slug.contains("--")
+        && slug
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+#[cfg(test)]
+mod group_id_tests {
+    #[test]
+    fn canonical_group_addresses_are_bounded_and_path_safe() {
+        for id in [
+            "g:tos:product-design",
+            "g:other-org:product-design",
+            "g:tos:research-2",
+            "g:tos:123",
+        ] {
+            assert!(super::valid_group_id(id), "{id}");
+        }
+        for id in [
+            "g:tos-product-design",
+            "g:tos:Product-Design",
+            "g:tos:bad--slug",
+            "g:tos:-bad",
+            "g:tos:bad-",
+            "g:tos:",
+            "g::name",
+            "g:tos:name:extra",
+            "g:tos:a/b",
+            "g:tos:foo?bar",
+            "g:tos:foo%2fbar",
+            "g:_:name",
+        ] {
+            assert!(!super::valid_group_id(id), "{id}");
+        }
+    }
+}

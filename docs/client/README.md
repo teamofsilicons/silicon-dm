@@ -98,7 +98,7 @@ and subscription IDs remain canonical, with the prefixed sender in its message.
 | --- | --- | --- |
 | Identity | `login`, `refresh`, `logout`, `me` | SLT/token and original retry key |
 | Conversations | `conversations`, `create_conversation` | Page request; participant public IDs and retry key |
-| Messages | `messages`, `message`, `send_message`, `edit_message`, `delete_message` | Conversation/message UUIDs, content, observed version, retry key |
+| Messages | `messages`, `message`, `send_message`, `edit_message`, `delete_message` | Conversation address and message UUID, content, observed version, retry key |
 | Receipts | `record_receipt` | Delivered/read state and stable device ID |
 | Drafts | `draft`, `put_draft`, `delete_draft` | Full content; version zero for create or observed version for replacement; versions are retained across deletion |
 | Bundles | `create_bundle`, `bundle` | 1–100 message UUIDs and a display message; Silicon authority |

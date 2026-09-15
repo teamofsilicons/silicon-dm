@@ -99,6 +99,7 @@ export function GroupForm(props: {
             onInput={(e) => setDescription(e.currentTarget.value)}
           />
         </label>
+        <p class="footnote">The group ID uses the organization and the name slug, for example g:tos:product-design. It stays the same after a rename.</p>
         <label class="check-label">
           <input
             type="checkbox"
@@ -195,6 +196,7 @@ export function GroupInfo(props: {
   return (
     <section class="stack">
       <h2>{props.conversation.group!.name}</h2>
+      <p class="footnote">Group ID: <code>{props.conversation.id}</code></p>
       <p>{props.conversation.group!.description || "No description yet."}</p>
       <p class="muted">
         {props.conversation.group!.is_public

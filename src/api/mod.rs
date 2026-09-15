@@ -13,4 +13,5 @@ pub mod webhook;
 
 mod contracts;
 
+mod group_ids;
 mod groups;

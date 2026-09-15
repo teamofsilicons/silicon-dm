@@ -116,7 +116,7 @@ fn websocket_command_and_delivery_round_trip_between_backend_and_sdk() -> Result
     let encoded = serde_json::to_value(ClientFrame::SendMessage {
         actor_id: "cos:tos".into(),
         org_id: "tos".into(),
-        conversation_id: Uuid::nil(),
+        conversation_id: Uuid::nil().to_string(),
         idempotency_key: "retry-message-key".into(),
         message: Box::new(content),
     })?;

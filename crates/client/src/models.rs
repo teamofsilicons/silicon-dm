@@ -88,7 +88,7 @@ pub enum ReceiptStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
     pub id: Uuid,
-    pub conversation_id: Uuid,
+    pub conversation_id: String,
     pub sender: Actor,
     pub sequence: i64,
     pub status: MessageStatus,
@@ -143,7 +143,7 @@ pub struct GroupDetails {
 pub struct Conversation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<GroupDetails>,
-    pub id: Uuid,
+    pub id: String,
     pub org_id: String,
     pub participants: Vec<Actor>,
     pub last_message: Option<Message>,
@@ -182,7 +182,7 @@ pub struct DraftInput {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Draft {
-    pub conversation_id: Uuid,
+    pub conversation_id: String,
     pub actor_id: String,
     pub version: i64,
     #[serde(flatten)]
@@ -197,7 +197,7 @@ pub struct BundleCreate {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bundle {
     pub id: Uuid,
-    pub conversation_id: Uuid,
+    pub conversation_id: String,
     pub original_message_ids: Vec<Uuid>,
     pub display_message: Message,
     pub created_by: Actor,
@@ -312,7 +312,7 @@ pub enum ClientFrame {
     },
     Receipt {
         actor_id: String,
-        conversation_id: Uuid,
+        conversation_id: String,
         message_id: Uuid,
         status: ReceiptStatus,
         device_id: String,
@@ -321,7 +321,7 @@ pub enum ClientFrame {
     SendMessage {
         actor_id: String,
         org_id: String,
-        conversation_id: Uuid,
+        conversation_id: String,
         idempotency_key: String,
         #[serde(flatten)]
         message: Box<MessageCreate>,

@@ -5,6 +5,7 @@ mod conversations;
 mod delivery;
 mod directory;
 mod drafts;
+mod group_ids;
 pub(crate) mod groups;
 mod iam_directory;
 mod idempotency;

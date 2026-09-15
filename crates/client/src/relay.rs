@@ -15,25 +15,25 @@ pub enum Operation {
         page: PageRequest,
     },
     GetGroup {
-        group_id: Uuid,
+        group_id: String,
     },
     CreateGroup {
         group: GroupCreate,
         idempotency_key: String,
     },
     UpdateGroup {
-        group_id: Uuid,
+        group_id: String,
         settings: GroupSettings,
         version: i64,
         idempotency_key: String,
     },
     InviteGroupMembers {
-        group_id: Uuid,
+        group_id: String,
         member_ids: Vec<String>,
         idempotency_key: String,
     },
     RemoveGroupMembers {
-        group_id: Uuid,
+        group_id: String,
         member_ids: Vec<String>,
         idempotency_key: String,
     },
@@ -46,58 +46,58 @@ pub enum Operation {
         idempotency_key: String,
     },
     ListMessages {
-        conversation_id: Uuid,
+        conversation_id: String,
         #[serde(default)]
         page: PageRequest,
         #[serde(default)]
         include_bundled_members: bool,
     },
     GetMessage {
-        conversation_id: Uuid,
+        conversation_id: String,
         message_id: Uuid,
     },
     SendMessage {
-        conversation_id: Uuid,
+        conversation_id: String,
         message: MessageCreate,
         idempotency_key: String,
     },
     EditMessage {
-        conversation_id: Uuid,
+        conversation_id: String,
         message_id: Uuid,
         message: MessageCreate,
         version: i64,
         idempotency_key: String,
     },
     DeleteMessage {
-        conversation_id: Uuid,
+        conversation_id: String,
         message_id: Uuid,
         version: i64,
         idempotency_key: String,
     },
     Receipt {
-        conversation_id: Uuid,
+        conversation_id: String,
         message_id: Uuid,
         status: ReceiptStatus,
         device_id: String,
     },
     GetDraft {
-        conversation_id: Uuid,
+        conversation_id: String,
     },
     PutDraft {
-        conversation_id: Uuid,
+        conversation_id: String,
         draft: DraftInput,
         version: i64,
     },
     DeleteDraft {
-        conversation_id: Uuid,
+        conversation_id: String,
     },
     CreateBundle {
-        conversation_id: Uuid,
+        conversation_id: String,
         bundle: BundleCreate,
         idempotency_key: String,
     },
     GetBundle {
-        conversation_id: Uuid,
+        conversation_id: String,
         bundle_id: Uuid,
     },
     GetPresence {
@@ -137,7 +137,7 @@ impl Operation {
     pub async fn execute(&self, client: &Client) -> Result<Value> {
         Ok(match self {
             Self::ListGroups { page } => serde_json::to_value(client.groups(page).await?)?,
-            Self::GetGroup { group_id } => serde_json::to_value(client.group(*group_id).await?)?,
+            Self::GetGroup { group_id } => serde_json::to_value(client.group(group_id).await?)?,
             Self::CreateGroup {
                 group,
                 idempotency_key,
@@ -149,7 +149,7 @@ impl Operation {
                 idempotency_key,
             } => serde_json::to_value(
                 client
-                    .update_group(*group_id, settings, *version, idempotency_key)
+                    .update_group(group_id, settings, *version, idempotency_key)
                     .await?,
             )?,
             Self::InviteGroupMembers {
@@ -158,7 +158,7 @@ impl Operation {
                 idempotency_key,
             } => serde_json::to_value(
                 client
-                    .invite_group_members(*group_id, member_ids, idempotency_key)
+                    .invite_group_members(group_id, member_ids, idempotency_key)
                     .await?,
             )?,
             Self::RemoveGroupMembers {
@@ -167,7 +167,7 @@ impl Operation {
                 idempotency_key,
             } => serde_json::to_value(
                 client
-                    .remove_group_members(*group_id, member_ids, idempotency_key)
+                    .remove_group_members(group_id, member_ids, idempotency_key)
                     .await?,
             )?,
             Self::Me => serde_json::to_value(client.me().await?)?,
@@ -188,20 +188,20 @@ impl Operation {
                 include_bundled_members,
             } => serde_json::to_value(
                 client
-                    .messages(*conversation_id, page, *include_bundled_members)
+                    .messages(conversation_id, page, *include_bundled_members)
                     .await?,
             )?,
             Self::GetMessage {
                 conversation_id,
                 message_id,
-            } => serde_json::to_value(client.message(*conversation_id, *message_id).await?)?,
+            } => serde_json::to_value(client.message(conversation_id, *message_id).await?)?,
             Self::SendMessage {
                 conversation_id,
                 message,
                 idempotency_key,
             } => serde_json::to_value(
                 client
-                    .send_message(*conversation_id, message, idempotency_key)
+                    .send_message(conversation_id, message, idempotency_key)
                     .await?,
             )?,
             Self::EditMessage {
@@ -213,7 +213,7 @@ impl Operation {
             } => serde_json::to_value(
                 client
                     .edit_message(
-                        *conversation_id,
+                        conversation_id,
                         *message_id,
                         message,
                         *version,
@@ -228,7 +228,7 @@ impl Operation {
                 idempotency_key,
             } => serde_json::to_value(
                 client
-                    .delete_message(*conversation_id, *message_id, *version, idempotency_key)
+                    .delete_message(conversation_id, *message_id, *version, idempotency_key)
                     .await?,
             )?,
             Self::Receipt {
@@ -238,19 +238,19 @@ impl Operation {
                 device_id,
             } => serde_json::to_value(
                 client
-                    .record_receipt(*conversation_id, *message_id, *status, device_id)
+                    .record_receipt(conversation_id, *message_id, *status, device_id)
                     .await?,
             )?,
             Self::GetDraft { conversation_id } => {
-                serde_json::to_value(client.draft(*conversation_id).await?)?
+                serde_json::to_value(client.draft(conversation_id).await?)?
             }
             Self::PutDraft {
                 conversation_id,
                 draft,
                 version,
-            } => serde_json::to_value(client.put_draft(*conversation_id, draft, *version).await?)?,
+            } => serde_json::to_value(client.put_draft(conversation_id, draft, *version).await?)?,
             Self::DeleteDraft { conversation_id } => {
-                client.delete_draft(*conversation_id).await?;
+                client.delete_draft(conversation_id).await?;
                 json!({"deleted":true})
             }
             Self::CreateBundle {
@@ -259,13 +259,13 @@ impl Operation {
                 idempotency_key,
             } => serde_json::to_value(
                 client
-                    .create_bundle(*conversation_id, bundle, idempotency_key)
+                    .create_bundle(conversation_id, bundle, idempotency_key)
                     .await?,
             )?,
             Self::GetBundle {
                 conversation_id,
                 bundle_id,
-            } => serde_json::to_value(client.bundle(*conversation_id, *bundle_id).await?)?,
+            } => serde_json::to_value(client.bundle(conversation_id, *bundle_id).await?)?,
             Self::GetPresence { actor_id } => {
                 serde_json::to_value(client.presence(actor_id).await?)?
             }

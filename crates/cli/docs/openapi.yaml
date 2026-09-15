@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon DM API
-  version: 0.6.0
+  version: 0.7.0
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
@@ -172,8 +172,7 @@ paths:
           in: "path"
           required: true
           schema:
-            type: "string"
-            format: "uuid"
+            $ref: "#/components/schemas/ConversationAddress"
       responses:
         200:
           description: "Successful group operation"
@@ -218,8 +217,7 @@ paths:
           in: "path"
           required: true
           schema:
-            type: "string"
-            format: "uuid"
+            $ref: "#/components/schemas/ConversationAddress"
         -
           $ref: "#/components/parameters/IdempotencyKey"
         -
@@ -290,8 +288,7 @@ paths:
           in: "path"
           required: true
           schema:
-            type: "string"
-            format: "uuid"
+            $ref: "#/components/schemas/ConversationAddress"
         -
           $ref: "#/components/parameters/IdempotencyKey"
       responses:
@@ -354,8 +351,7 @@ paths:
           in: "path"
           required: true
           schema:
-            type: "string"
-            format: "uuid"
+            $ref: "#/components/schemas/ConversationAddress"
         -
           $ref: "#/components/parameters/IdempotencyKey"
       responses:
@@ -2061,8 +2057,7 @@ components:
       in: path
       required: true
       schema:
-        type: string
-        format: uuid
+        $ref: '#/components/schemas/ConversationAddress'
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -2150,6 +2145,14 @@ components:
               data:
                 "$ref": "#/components/schemas/Error"
   schemas:
+    ConversationAddress:
+      description: Direct conversation UUID or immutable group address g:org:group-slug. Legacy group UUIDs remain accepted as aliases. Renaming a group does not change its address.
+      oneOf:
+      - type: string
+        format: uuid
+      - type: string
+        pattern: '^g:[A-Za-z0-9][A-Za-z0-9_-]{0,254}:[a-z0-9]+(-[a-z0-9]+)*$'
+        examples: ['g:tos:product-design']
     "GroupSettings":
       type: "object"
       required:
@@ -2274,8 +2277,7 @@ components:
         group:
           "$ref": "#/components/schemas/GroupDetails"
         id:
-          type: string
-          format: uuid
+          $ref: '#/components/schemas/ConversationAddress'
         org_id:
           type: string
         participants:
@@ -2468,8 +2470,7 @@ components:
           type: string
           format: uuid
         conversation_id:
-          type: string
-          format: uuid
+          $ref: '#/components/schemas/ConversationAddress'
         sender:
           "$ref": "#/components/schemas/ActorRef"
         sender_id:
@@ -2612,8 +2613,7 @@ components:
           type: string
           format: uuid
         conversation_id:
-          type: string
-          format: uuid
+          $ref: '#/components/schemas/ConversationAddress'
         original_message_ids:
           type: array
           minItems: 1
@@ -2698,8 +2698,7 @@ components:
       - metadata
       properties:
         conversation_id:
-          type: string
-          format: uuid
+          $ref: '#/components/schemas/ConversationAddress'
         actor_id:
           type: string
         version:
@@ -2912,8 +2911,7 @@ components:
             actor_id:
               type: string
             conversation_id:
-              type: string
-              format: uuid
+              $ref: '#/components/schemas/ConversationAddress'
             message_id:
               type: string
               format: uuid
@@ -2951,8 +2949,7 @@ components:
               org_id:
                 type: string
               conversation_id:
-                type: string
-                format: uuid
+                $ref: '#/components/schemas/ConversationAddress'
               idempotency_key:
                 type: string
                 minLength: 8

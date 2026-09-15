@@ -144,6 +144,10 @@ fn build_plane_router(state: AppState) -> Router {
     Router::new()
         .merge(timed_routes)
         .merge(realtime_route)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            super::group_ids::responses,
+        ))
         .fallback(|| async { AppError::NotFound })
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

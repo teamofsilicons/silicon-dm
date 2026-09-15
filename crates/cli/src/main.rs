@@ -290,7 +290,7 @@ enum Groups {
         page: Pagination,
     },
     /// Show settings and the current active roster.
-    Show { group: Uuid },
+    Show { group: String },
     /// Create a group. The creator is invited automatically.
     Create {
         #[command(flatten)]
@@ -300,7 +300,7 @@ enum Groups {
     },
     /// Replace all settings using the version returned by show.
     Update {
-        group: Uuid,
+        group: String,
         #[arg(long)]
         version: i64,
         #[command(flatten)]
@@ -308,13 +308,13 @@ enum Groups {
     },
     /// Invite active organization Carbons or Silicons.
     Invite {
-        group: Uuid,
+        group: String,
         #[arg(long = "member", required = true)]
         members: Vec<String>,
     },
     /// Remove explicit invitations; matching tag or public access remains.
     Remove {
-        group: Uuid,
+        group: String,
         #[arg(long = "member", required = true)]
         members: Vec<String>,
     },
@@ -391,8 +391,8 @@ impl Content {
 enum Messages {
     /// List newest-first message history with a resumable cursor.
     List {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
         #[command(flatten)]
         page: Pagination,
         #[arg(long)]
@@ -400,8 +400,8 @@ enum Messages {
     },
     /// Fetch a message including its current version or deletion tombstone.
     Show {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
         #[arg(help = "Message UUID from messages send/list")]
         message: Uuid,
     },
@@ -410,8 +410,8 @@ enum Messages {
         after_help = "EXAMPLES\n  dm messages send CONVERSATION_ID --text 'Hello' --metadata '{\"task_id\":\"t42\"}'\n  dm messages send CONVERSATION_ID --attachment https://example.com/file.pdf\n  dm messages send CONVERSATION_ID --text 'Reply' --reply-to MESSAGE_ID\n  dm messages send CONVERSATION_ID --data message.json\n\nJSON: {\"text\":\"Hello\",\"attachments\":[],\"metadata\":{}}. Voice uses {\"permanent_url\":\"https://...\",\"duration_milliseconds\":1000}; voice_transcript is optional.\nNEXT: dm messages list CONVERSATION_ID"
     )]
     Send {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
         #[command(flatten)]
         content: Content,
         /// Allow text over 400 characters when a Silicon messages a Carbon.
@@ -423,8 +423,8 @@ enum Messages {
         after_help = "Fetch with messages show first. Supply the complete intended content and observed --version. A conflict never overwrites a newer revision. Retry with the original --idempotency-key."
     )]
     Edit {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
         #[arg(help = "Message UUID from messages send/list")]
         message: Uuid,
         #[arg(
@@ -437,8 +437,8 @@ enum Messages {
     },
     /// Store a tombstone using the observed current version.
     Delete {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
         #[arg(help = "Message UUID from messages send/list")]
         message: Uuid,
         #[arg(
@@ -452,15 +452,15 @@ enum Messages {
 enum Receipts {
     /// Report receipt by this recipient device.
     Delivered {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
         #[arg(help = "Message UUID from messages send/list")]
         message: Uuid,
     },
     /// Report that this recipient read the message; delivery is implied.
     Read {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
         #[arg(help = "Message UUID from messages send/list")]
         message: Uuid,
     },
@@ -469,16 +469,16 @@ enum Receipts {
 enum Drafts {
     /// Fetch this actor's current synchronized private draft.
     Get {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
     },
     /// Full DraftInput JSON. Version 0 creates; replacement requires the current version.
     #[command(
         after_help = "Fields: message_content, attachments, voice, voice_transcript, gif, metadata, reply_to_message_id. A 409 preserves the server draft where available; fetch, resolve and save with its new version."
     )]
     Put {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
         #[arg(long)]
         data: PathBuf,
         #[arg(long, default_value_t = 0)]
@@ -486,23 +486,23 @@ enum Drafts {
     },
     /// Delete this actor's current private draft.
     Delete {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
     },
 }
 #[derive(Subcommand)]
 enum Bundles {
     /// JSON: message_ids (1-100 unique UUIDs), display_message (normal message content).
     Create {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
         #[arg(long)]
         data: PathBuf,
     },
     /// Expand a bundle into its display and original messages.
     Show {
-        #[arg(help = "Conversation UUID from conversations create/list")]
-        conversation: Uuid,
+        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        conversation: String,
         bundle: Uuid,
     },
 }
@@ -1099,7 +1099,7 @@ async fn run(cli: Cli) -> Result<Value> {
                             long_message_override = message_length::check(
                                 &store::client(&config, &profile)?,
                                 &profile.tokens.actor,
-                                conversation,
+                                &conversation,
                                 &message,
                                 dangerously_send_long_message,
                             )

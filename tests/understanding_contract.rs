@@ -585,7 +585,7 @@ async fn sandbox_effects_are_isolated(production: &AppState, mut sandbox: AppSta
             .fetch_optional(&pool)
             .await?;
             if let Some(event) = event {
-                assert_eq!(event["context"]["group_id"], group.id.to_string());
+                assert_eq!(event["context"]["group_id"], group.id);
                 assert!(!event.to_string().contains("Secret sandbox"));
                 assert!(!event.to_string().contains("Private description"));
                 break;
@@ -630,6 +630,8 @@ async fn sandbox_effects_are_isolated(production: &AppState, mut sandbox: AppSta
         .await?;
     client.telemetry("command", false, 12).await?;
     client.iam().await?;
+    let mut input = input;
+    input.settings.name = "Opt out group".into();
     client.create_group(&input, "sandbox-group-opt-out").await?;
     let after: i64 = sqlx::query_scalar("SELECT count(*) FROM telemetry_events")
         .fetch_one(&pool)
@@ -694,18 +696,65 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
             .is_err()
     );
     let group = owner.create_group(&input, "owner-creates-group").await?;
+    assert_eq!(group.id, "g:tos:delivery-team");
+    let duplicate = owner
+        .create_group(&input, "duplicate-name-different-key")
+        .await;
+    assert!(matches!(
+        duplicate,
+        Err(silicon_dm_client::Error::Api { status: 409, .. })
+    ));
     assert_eq!(
         owner.create_group(&input, "owner-creates-group").await?.id,
         group.id
     );
+    let collision = |name: &str| GroupCreate {
+        settings: GroupSettings {
+            name: name.into(),
+            ..input.settings.clone()
+        },
+        member_ids: vec![],
+    };
+    let one = collision("  Product   Design!  ");
+    let two = collision("product-design");
+    let (one, two) = tokio::join!(
+        owner.create_group(&one, "slug-collision-one"),
+        owner.create_group(&two, "slug-collision-two")
+    );
+    assert!(one.is_ok() ^ two.is_ok());
+    let winner = one
+        .as_ref()
+        .ok()
+        .or_else(|| two.as_ref().ok())
+        .ok_or("no collision winner")?;
+    assert_eq!(winner.id, "g:tos:product-design");
+    let loser = one
+        .err()
+        .or_else(|| two.err())
+        .ok_or("no collision loser")?;
+    assert!(matches!(
+        loser,
+        silicon_dm_client::Error::Api { status: 409, .. }
+    ));
+    assert!(matches!(
+        owner.group("g:another-org:delivery-team").await,
+        Err(silicon_dm_client::Error::Api { status: 404, .. })
+    ));
+    assert!(owner.group("../../auth/logout").await.is_err());
+    assert!(matches!(
+        owner
+            .create_group(&collision("!!!"), "empty-slug-rejected")
+            .await,
+        Err(silicon_dm_client::Error::Api { status: 422, .. })
+    ));
     assert_eq!(
         group.group.as_ref().ok_or("group")?.settings.description,
         "Full history"
     );
-    assert!(reader.group(group.id).await.is_err());
+    assert!(reader.group(&group.id).await.is_err());
     let message = owner
         .send_message(
-            group.id,
+            &group.id,
             &MessageCreate {
                 text: Some("Existing history".into()),
                 ..MessageCreate::default()
@@ -713,43 +762,75 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
             "prior-group-message",
         )
         .await?;
+    assert_eq!(message.conversation_id, group.id);
+    let draft = owner
+        .put_draft(
+            &group.id,
+            &serde_json::from_value(
+                json!({"message":"Private draft", "metadata":{"conversation_id":"unchanged"}}),
+            )?,
+            0,
+        )
+        .await?;
+    assert_eq!(draft.conversation_id, group.id);
+    assert_eq!(draft.content.metadata["conversation_id"], "unchanged");
+    owner.delete_draft(&group.id).await?;
+    group_address_socket_roundtrip(&owner, &group.id, false).await?;
+    group_address_socket_roundtrip(&owner, &group.id, true).await?;
     owner
-        .invite_group_members(group.id, &["bob".into()], "invite-bob-to-group")
+        .invite_group_members(&group.id, &["bob".into()], "invite-bob-to-group")
         .await?;
     assert_eq!(
         reader
-            .messages(group.id, &PageRequest::default(), false)
+            .messages(&group.id, &PageRequest::default(), false)
             .await?
-            .items[0]
-            .id,
-        message.id
+            .items
+            .iter()
+            .filter(|item| item.id == message.id)
+            .count(),
+        1
     );
     assert_eq!(reader.groups(&PageRequest::default()).await?.items.len(), 1);
     assert!(
         reader
-            .invite_group_members(group.id, &["alice".into()], "reader-cannot-invite")
+            .invite_group_members(&group.id, &["alice".into()], "reader-cannot-invite")
             .await
             .is_err()
     );
     assert!(
         reader
-            .remove_group_members(group.id, &["alice".into()], "reader-cannot-remove")
+            .remove_group_members(&group.id, &["alice".into()], "reader-cannot-remove")
             .await
             .is_err()
     );
-    let current = owner.group(group.id).await?.group.ok_or("group")?;
+    let current = owner.group(&group.id).await?.group.ok_or("group")?;
     let renamed = GroupSettings {
         name: "Renamed".into(),
         ..input.settings.clone()
     };
     let updated = owner
-        .update_group(group.id, &renamed, current.version, "rename-group-once")
+        .update_group(&group.id, &renamed, current.version, "rename-group-once")
         .await?;
     assert_eq!(updated.settings.name, "Renamed");
+    assert_eq!(owner.group(&group.id).await?.id, "g:tos:delivery-team");
+    assert_eq!(message.conversation_id, group.id);
+    let legacy: Uuid = sqlx::query_scalar("SELECT conversation_id FROM groups WHERE public_id=$1")
+        .bind(&group.id)
+        .fetch_one(&group_pool)
+        .await?;
+    assert_eq!(owner.group(legacy).await?.id, group.id);
+    assert_eq!(
+        owner
+            .messages(legacy, &PageRequest::default(), false)
+            .await?
+            .items[0]
+            .conversation_id,
+        group.id
+    );
     assert!(
         owner
             .update_group(
-                group.id,
+                &group.id,
                 &input.settings,
                 current.version,
                 "reject-stale-version"
@@ -759,28 +840,28 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
     );
     assert_eq!(
         owner
-            .update_group(group.id, &renamed, current.version, "rename-group-once")
+            .update_group(&group.id, &renamed, current.version, "rename-group-once")
             .await?
             .version,
         updated.version
     );
     let removed = owner
-        .remove_group_members(group.id, &["bob".into()], "remove-bob-once")
+        .remove_group_members(&group.id, &["bob".into()], "remove-bob-once")
         .await?;
     assert_eq!(
         owner
-            .remove_group_members(group.id, &["bob".into()], "remove-bob-once")
+            .remove_group_members(&group.id, &["bob".into()], "remove-bob-once")
             .await?
             .version,
         removed.version
     );
     assert!(
         reader
-            .messages(group.id, &PageRequest::default(), false)
+            .messages(&group.id, &PageRequest::default(), false)
             .await
             .is_err()
     );
-    assert!(reader.draft(group.id).await.is_err());
+    assert!(reader.draft(&group.id).await.is_err());
     assert!(
         reader
             .groups(&PageRequest::default())
@@ -795,7 +876,7 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
         .await?;
     owner
         .update_group(
-            group.id,
+            &group.id,
             &GroupSettings {
                 tag_ids: vec![tag],
                 ..renamed
@@ -808,11 +889,11 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
     // discloses no tags. Both literal and encoded paths must still deny it.
     assert!(
         reader
-            .messages(group.id, &PageRequest::default(), false)
+            .messages(&group.id, &PageRequest::default(), false)
             .await
             .is_err()
     );
-    let raw_id = group.id.to_string();
+    let raw_id = &group.id;
     let encoded_id = format!("%{:02X}{}", raw_id.as_bytes()[0], &raw_id[1..]);
     let encoded = reqwest::Client::new()
         .get(format!("{base}/api/v1/conversations/{encoded_id}/messages"))
@@ -831,5 +912,76 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
         .await?;
     assert_eq!(bad.status(), 422);
     server.abort();
+    Ok(())
+}
+
+async fn group_address_socket_roundtrip(
+    client: &silicon_dm_client::Client,
+    id: &str,
+    shared: bool,
+) -> Result {
+    use tokio_tungstenite::tungstenite::Message as SocketMessage;
+    let mut socket = if shared {
+        client.prewarm_shared().await?
+    } else {
+        client.connect(&["alice".into()], "group-id-device").await?
+    };
+    let frame = socket.next().await.ok_or("opening frame missing")??;
+    assert!(frame.is_text());
+    if shared {
+        socket.send(SocketMessage::Text(json!({"type":"subscribe","data":{"subscription_id":"group","actor_id":"alice","token":"token-alice","organization_id":"tos","device_id":"group-id-device","testing_key":null,"testing_generation":null}}).to_string().into())).await?;
+    }
+    let command = json!({"type":"new_message","data":{"actor_id":"alice","org_id":"tos","conversation_id":id,"idempotency_key":format!("group-id-socket-{shared}"),"message":"Address roundtrip","metadata":{"conversation_id":"leave-this-alone"}}});
+    if shared {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = socket.next().await.ok_or("shared closed before ready")??;
+                let value: Value = serde_json::from_str(frame.to_text()?)?;
+                if value["data"]["frame"]["type"] == "ready" {
+                    break;
+                }
+            }
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        })
+        .await??;
+    }
+    let command = if shared {
+        json!({"type":"channel","data":{"subscription_id":"group","frame":command}})
+    } else {
+        command
+    };
+    socket
+        .send(SocketMessage::Text(command.to_string().into()))
+        .await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = socket
+                .next()
+                .await
+                .ok_or("socket closed before acceptance")??;
+            let value: Value = serde_json::from_str(frame.to_text()?)?;
+            let value = if shared {
+                &value["data"]["frame"]
+            } else {
+                &value
+            };
+            if value["type"] == "error" {
+                return Err(format!("socket rejected: {value}").into());
+            }
+            if value["type"] == "message_accepted" {
+                assert_eq!(value["data"]["conversation_id"], id);
+                assert_eq!(
+                    value["data"]["metadata"]["conversation_id"],
+                    "leave-this-alone"
+                );
+                let _: silicon_dm_client::models::ServerFrame =
+                    serde_json::from_value(value.clone())?;
+                break;
+            }
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await??;
+    socket.close(None).await?;
     Ok(())
 }

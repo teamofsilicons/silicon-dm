@@ -52,7 +52,7 @@ pub enum ClientFrame {
         /// Represented recipient actor.
         actor_id: ActorId,
         /// Parent conversation.
-        conversation_id: Uuid,
+        conversation_id: String,
         /// Message being acknowledged.
         message_id: Uuid,
         /// Monotonic receipt state.
@@ -68,7 +68,7 @@ pub enum ClientFrame {
         /// Organization scope.
         org_id: OrganizationId,
         /// Parent conversation.
-        conversation_id: Uuid,
+        conversation_id: String,
         /// Retry-safe client key.
         idempotency_key: IdempotencyKey,
         /// Normal message content.

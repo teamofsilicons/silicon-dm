@@ -2,7 +2,6 @@ use crate::{Actor, ActorType, Client, MessageCreate, PageRequest};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::collections::HashSet;
-use uuid::Uuid;
 
 const SAFE_CHARACTERS: usize = 400;
 pub const BLOCKED: &str = "message too long, not delivered. Your carbon would likely not read this long message, you can break this message down into multiple smaller messages, or just write a single short message, if you wanna still send the longer version you can send it by adding the flag --dangerously-send-long-message";
@@ -22,13 +21,23 @@ pub fn needs_check(actor: &Actor, message: &MessageCreate) -> bool {
 pub async fn check(
     client: &Client,
     actor: &Actor,
-    conversation: Uuid,
+    conversation: impl std::fmt::Display,
     message: &MessageCreate,
     allow_long: bool,
 ) -> Result<bool> {
+    let conversation = conversation.to_string();
     if !needs_check(actor, message) {
         return Ok(false);
     }
+    let conversation = if uuid::Uuid::parse_str(&conversation).is_ok() {
+        match client.group(&conversation).await {
+            Ok(group) => group.id,
+            Err(crate::Error::Api { status: 404, .. }) => conversation,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        conversation
+    };
     let mut page = PageRequest {
         limit: Some(100),
         cursor: None,

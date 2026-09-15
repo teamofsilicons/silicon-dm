@@ -129,6 +129,8 @@ It should also be possible to make public groups, these groups everyone in the o
 
 Groups can be created by the org_admins and org_owners. 
 
+For group id it's gonna be `g:{org-name}-{group-id}`
+
 ### New member
 
 Even when a new member is added in the group they would also get full access to the prior chat history. Inviting carbons/silicons is also limited to org_admins and org_owners.  
