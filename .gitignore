@@ -9,3 +9,6 @@ coverage/
 /docs-site/.vercel/
 
 /dist/
+
+# Native Honeycomb payloads are delivered in the release archive.
+/targets/
