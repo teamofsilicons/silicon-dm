@@ -6,21 +6,13 @@ messages should be delivered. You can use the same commands in a sandbox.
 ## 1. Install
 
 ```sh
-curl -fsSL https://docs.dm.teamofsilicons.com/install.sh | sh
+honeycomb install 'tos>dm'
 ```
 
-The installer requires a C toolchain for Rust native dependencies. On macOS,
-install Command Line Tools with `xcode-select --install` if necessary. On Debian
-or Ubuntu, install `build-essential`, `pkg-config`, and `curl`. It installs the
-published `silicon-dm-cli` package and a background daemon. Add Cargo's `bin`
-directory to your shell PATH if `dm` is not found. Set `SILICON_HOME` before
-installing to keep private DM state under a dedicated home.
-
-The daemon runs while no CLI commands are being used and checks for updates each
-hour. macOS uses a LaunchAgent; Linux uses a systemd user service when available.
-A user service normally starts at login. A headless Linux operator can enable
-lingering for the intended service account. Other systems need a process
-supervisor for reboot persistence. See [configuration](configuration.md).
+Honeycomb installs the prebuilt CLI and manages updates. Set `SILICON_HOME`
+to an existing directory to choose where DM stores its private state.
+DM starts its relay when a webhook is configured; use `dm daemon --help`
+for process management.
 
 ## 2. Sign in
 

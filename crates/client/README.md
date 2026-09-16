@@ -23,12 +23,8 @@ private state directory to `LocalRuntime`; the default client remains stateless.
 The optional relay executable can be installed with
 `cargo install silicon-dm-client --features runtime --bin dm-relay --locked`.
 
-The runtime's caller-owned `UpdatePolicy` enables hourly checks by default.
-Call `updates::after_command` with the consuming application's manifest to update
-its compatible dependency and rebuild; a running process keeps its linked
-version until restarted. The policy can be disabled, and the stateless client
-does not invoke Cargo automatically. See the runtime guide for integration and
-shutdown examples.
+Rust clients remain ordinary Cargo dependencies and never update themselves.
+Honeycomb manages CLI installation and updates.
 
 Version 0.2.2 reduces copies of large queued payloads, admits runtime work by
 encoded byte size, and adds `RelayClient::request_status` for progress reads

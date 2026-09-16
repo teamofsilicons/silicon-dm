@@ -20,8 +20,3 @@ pub async fn command(command: Updates) -> Result<Value> {
     )
     .await
 }
-pub async fn automatic() {
-    if let Ok(state) = Store::from_environment() {
-        updates::automatic(&state, env!("CARGO_PKG_VERSION")).await;
-    }
-}

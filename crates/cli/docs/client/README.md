@@ -173,10 +173,5 @@ requirements and [the test guide](../testing-environments.md) for lifecycle rule
 
 `check_update()` reads the latest published stable client version from crates.io
 and returns `UpdateInfo`. It stores no timestamp and changes no application
-files. The optional runtime also provides `UpdatePolicy` (enabled by default,
-one check per hour) and `updates::after_command` to update the SDK dependency and
-rebuild an explicitly selected Cargo application after its command finishes.
-Callers own and may persist the policy; setting `enabled=false` opts out. A
-linked library cannot replace code already running, so successful rebuilds
-report that application restart is required. The CLI uses the shared runtime's
-separate installed-executable update path. See [runtime and updates](runtime.md).
+files. Rust clients remain ordinary project dependencies; update the manifest
+and lockfile in the consuming project. Honeycomb manages CLI updates.

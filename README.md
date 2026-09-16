@@ -46,7 +46,7 @@ local database. A complete configuration reference is in `.env.example`.
 5. Run `cargo run --bin dm-migrate`, then `cargo run --bin dm-api`.
    `cargo run --bin dm-worker` starts standalone maintenance.
 6. Build the public command with `cargo build -p silicon-dm-cli` or install it
-   with `cargo install --path crates/cli --locked`. Start with `dm --help`.
+   with `honeycomb install 'tos>dm'`. Start with `dm --help`.
 
 `GET /live` and `GET /ready` return 204 on success. Readiness verifies the exact
 migration checksums and database access. It does not prove external IAM or Giphy

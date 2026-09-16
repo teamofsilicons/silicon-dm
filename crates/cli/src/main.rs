@@ -706,8 +706,6 @@ async fn main() {
             command: Daemon::Run
         }
     );
-    let skip_update =
-        foreground || matches!(&cli.command, Command::Updates { .. } | Command::Docs { .. });
     let diagnostic_profile = cli.profile.clone();
     let diagnostic_start = std::time::Instant::now();
     let result = match selection {
@@ -764,9 +762,6 @@ async fn main() {
                 )
             }
         }
-    }
-    if !skip_update {
-        updater::automatic().await;
     }
     if requested_testing {
         let label = testing

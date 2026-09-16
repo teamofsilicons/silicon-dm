@@ -11,10 +11,8 @@ Production and testing logins are separate within a profile.
 
 ## Install and discover
 
-From a checkout, run `cargo install --path crates/cli --locked`, or
-`cargo run -p silicon-dm-cli -- --help`. After publication, install a released
-version with `cargo install silicon-dm-cli --locked`. Building this repository
-does not itself publish the packages.
+Install with `honeycomb install 'tos>dm'`, then run `dm login <slt>`.
+For development, use `cargo run -p silicon-dm-cli -- --help`.
 
 `dm -h` lists every command family. `dm messages send --help`, for example, shows
 its inputs, examples and the next useful command. Missing required arguments
@@ -248,17 +246,9 @@ plaintext under those permissions. SQLite WAL mode with FULL synchronous commits
 protects inbox, outbox and cursors. Use an absolute `SILICON_DM_HOME` only when
 you explicitly want an isolated state directory; it takes precedence over the configured home and `SILICON_HOME`. The `config home` pointer is stored under the default home selected by `SILICON_HOME` or `HOME`.
 
-Updates are enabled by default. After a command completes, at most once per
-hour the CLI checks crates.io. Registry failure never fails the completed
-command. An executable installed in Cargo's bin directory can be replaced with
-`cargo install ... --force`. Development/custom builds report the available
-version and install command rather than claiming to replace themselves. Running
-daemons keep their loaded version until restarted; queues survive that restart.
-
-`updates status`, `updates check`, `updates install`, `updates disable` and
-`updates enable` expose the policy. Disabling persists across invocations and
-skips automatic network checks. A statically linked Rust library needs dependency
-update plus rebuild; the library's release checker reports that honestly.
+Honeycomb manages CLI installation and updates. DM never replaces its executable.
+The legacy `dm updates` commands report Honeycomb guidance; `updates disable`
+also clears the old local policy. Rust clients remain ordinary project dependencies.
 
 For a dedicated Silicon runtime, set `SILICON_DM_TEST=ENV_UUID` in its service
 environment once. Plain `dm` commands then use that environment without a wrapper.

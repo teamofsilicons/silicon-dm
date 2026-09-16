@@ -185,13 +185,12 @@ pub async fn run(state: store::Store) -> Result<()> {
     )));
     let mut outgoing = AbortOnDrop(tokio::spawn(outbox(context.clone(), channels)));
     let mut callbacks = AbortOnDrop(tokio::spawn(webhooks(context.clone())));
-    let update_store = context.store.clone();
-    let mut updater = AbortOnDrop(tokio::spawn(async move {
+    let telemetry_store = context.store.clone();
+    let mut telemetry_task = AbortOnDrop(tokio::spawn(async move {
         let mut timer = tokio::time::interval(Duration::from_secs(60));
         loop {
             timer.tick().await;
-            super::updates::automatic(&update_store, env!("CARGO_PKG_VERSION")).await;
-            if let Ok(config) = update_store.load() {
+            if let Ok(config) = telemetry_store.load() {
                 for profile in config.profiles.values().filter(|p| p.enabled) {
                     if let Ok(client) = store::client(&config, profile) {
                         let _ = client
@@ -215,12 +214,12 @@ pub async fn run(state: store::Store) -> Result<()> {
     supervisor.0.abort();
     outgoing.0.abort();
     callbacks.0.abort();
-    updater.0.abort();
+    telemetry_task.0.abort();
     let _ = tokio::join!(
         &mut supervisor.0,
         &mut outgoing.0,
         &mut callbacks.0,
-        &mut updater.0
+        &mut telemetry_task.0
     );
     FileExt::unlock(&lock)?;
     Ok(())

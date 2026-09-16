@@ -122,42 +122,9 @@ An initial WebSocket handshake 401 first triggers token refresh, allowing a
 still-valid family to recover from upstream access-token revocation without
 waiting for its recorded expiry or requiring another login.
 
-## Hourly dependency updates
+## Updates
 
-`UpdatePolicy` is caller-owned and serializable. It defaults to enabled and
-tracks the last check; it contains no global state. After each application
-command finishes, invoke the updater with the Cargo project it may change:
-
-```rust
-use silicon_dm_client::runtime::updates::{self, DependencyTarget, UpdatePolicy};
-
-let mut policy = UpdatePolicy::default(); // Restore from your store on startup.
-let target = DependencyTarget { manifest_path: absolute_cargo_manifest };
-let outcome = updates::after_command(&mut policy, &target).await;
-// Persist policy even if the registry or build failed; the attempted check
-// already advances its timestamp to avoid hammering the registry.
-```
-
-The updater skips disabled policies and checks less than an hour apart. To opt
-out, set `policy.enabled = false` and persist it; set it back to true to opt in.
-If an update exists, it runs `cargo update` for `silicon-dm-client` at the exact
-available stable version, then rebuilds the explicit manifest with
-`cargo build --release --locked`. Cargo still enforces the project's version
-constraints. A build failure is returned; the currently running application
-is unchanged, while the dependency lockfile may already have been updated.
-A successful rebuild reports `restart_required: true`.
-
-Call `claim_due(now)` separately when you need to persist the timestamp before
-starting a network check, and then use the stateless `check_update()` API for
-inspection without executing Cargo. Concurrent callers should serialize their
-policy updates in their own store.
-
-CLI installed-executable updates are also exposed by
-`runtime::updates::{command,automatic}` with an explicit store and CLI version.
-That path only replaces a `dm` executable installed in Cargo's bin directory;
-it leaves custom and checkout builds intact. Neither updater publishes a crate.
-Live installation remains dependent on an actual published release.
-
-`RelayClient::request_status(request_id)` retrieves only the request ID and state.
-Use it for polling large queued requests; `result(request_id)` retains the full
-original request and terminal response/error contract.
+The Rust package is an ordinary project dependency. Update it through your
+Cargo manifest and lockfile, then rebuild your application. DM never runs Cargo
+or changes the consuming project at runtime. Legacy `after_command` and
+`automatic` hooks are no-ops. Honeycomb manages released CLI updates.

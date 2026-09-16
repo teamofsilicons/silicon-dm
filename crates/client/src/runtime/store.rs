@@ -64,7 +64,7 @@ impl Default for Config {
             webhook_secrets: BTreeMap::new(),
             relay_port: 19780,
             relay_token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-            auto_update: true,
+            auto_update: false,
             telemetry_enabled: true,
             last_update_check: 0,
         }
