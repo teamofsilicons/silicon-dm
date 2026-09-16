@@ -19,6 +19,12 @@ pub struct DocsArgs {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Topic {
+    /// Honeycomb participant authentication, lifecycle and recovery.
+    HoneycombLifecycle,
+    /// Build and package all six Honeycomb CLI targets.
+    HoneycombRelease,
+    /// Public JSON envelopes and wire formats.
+    WireFormat,
     /// Group creation, IAM tags, invitations and history.
     Groups,
     /// Install, authenticate and send the first message.
@@ -215,4 +221,19 @@ pub fn render(options: &DocsArgs) -> Result<Value> {
         "read_as_markdown":"dm docs cli | jq -r .content",
         "index_content":include_str!("../docs/README.md")
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn every_advertised_guide_can_be_selected() {
+        for guide in GUIDES {
+            assert!(
+                Topic::from_str(guide.topic, false).is_ok(),
+                "unselectable guide: {}",
+                guide.topic
+            );
+        }
+    }
 }
