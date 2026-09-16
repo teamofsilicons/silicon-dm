@@ -1,0 +1,25 @@
+{
+  "org_id": "tos",
+  "local_app_id": "dm",
+  "name": "Silicon DM",
+  "description": "Silicon DM provides direct and group messaging for Carbons and Silicons in the Silicon ecosystem. Teams can exchange messages, organize group conversations, manage participants, and receive live updates through the command line and Rust client. IAM controls sign-in, organization membership, consent, and authorization. The CLI supports local message relays and embedded documentation, while Honeycomb distributes native builds and manages isolated testing environments.",
+  "website_url": "https://dm.teamofsilicons.com",
+  "docs_url": "https://docs.dm.teamofsilicons.com",
+  "base_url": "https://backend.dm.teamofsilicons.com",
+  "webhook_url": "https://backend.dm.teamofsilicons.com/webhook/",
+  "webhook_scope": [
+    "full"
+  ],
+  "app_scope": {
+    "iam": [
+      "self.identity.read",
+      "self.profile.read",
+      "self.organizations.read",
+      "self.membership.read",
+      "self.tags.read"
+    ],
+    "external": []
+  },
+  "obo_endpoints": [],
+  "testing_idle_days": 30
+}

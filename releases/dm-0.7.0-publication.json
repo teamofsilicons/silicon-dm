@@ -1,0 +1,33 @@
+{
+  "app_id": "tos>dm",
+  "version": "0.7.0",
+  "application_revision": 1,
+  "configuration_operation": "fe13cbec-f84c-4d54-978d-f062014e3bf4",
+  "iam_revision_at_registration": 7,
+  "upload": {
+    "app_id": "tos>dm",
+    "id": "ec6aa0f6-0759-444e-a23a-7d1c4598a770",
+    "sha256": "59cb1f2fc3b961469c213b09dba939f534c14c761453cc66e1cdba190283183e",
+    "size": 28716183,
+    "state": "accepted",
+    "version": "0.7.0"
+  },
+  "publication": {
+    "id": "4a763db8-1b61-48a3-bed2-c9ffb19fb3f5",
+    "plan_id": "cb73ee5f-3d1b-4e69-be9d-a6e9f9feb834",
+    "state": "awaiting_validator",
+    "visibility": "private"
+  },
+  "requested_iam_scopes": {
+    "iam": [
+      "self.identity.read",
+      "self.profile.read",
+      "self.organizations.read",
+      "self.membership.read",
+      "self.tags.read"
+    ],
+    "external": []
+  },
+  "credentials": "Stored outside Git with owner-only permissions; existing webhook signing secret retained. Production IAM app secret and runtime secret updated to the accepted registration credential.",
+  "public_availability": "Pending Honeycomb validator approval; not public yet."
+}
