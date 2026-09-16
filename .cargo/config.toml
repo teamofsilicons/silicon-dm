@@ -1,0 +1,7 @@
+# Honeycomb activates prebuilt commands without running a runtime installer.
+# Link the Microsoft CRT into both Windows executables.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
