@@ -29,7 +29,7 @@ impl TestingRegistry {
     pub(super) fn authorize(environment: &TestingEnvironment, auth: &AuthContext) -> AppResult<()> {
         if environment.environment_id == environment.iam_environment_id {
             return Err(AppError::validation(
-                "manage IAM-discovered environments in IAM",
+                "manage shared environments in Honeycomb",
             ));
         }
         if environment.organization_id == auth.organization_id.as_str()
@@ -50,6 +50,11 @@ impl TestingRegistry {
         input: super::handlers::CreateEnvironment,
         mutation: &super::journal::Mutation,
     ) -> AppResult<serde_json::Value> {
+        if self.honeycomb_service_token.is_some() {
+            return Err(AppError::validation(
+                "create shared test environments in Honeycomb",
+            ));
+        }
         if input.iam_environment_id.is_nil() || input.iam_app_id != state.settings.iam.app_id {
             return Err(AppError::validation(
                 "pairing requires a non-nil IAM test environment and the imported DM application ID",
@@ -213,6 +218,17 @@ impl TestingRegistry {
     ) -> AppResult<()> {
         let mut fence = self.admin.pool().begin().await?;
         exclusive_lock(&mut fence, id).await?;
+        let managed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM dm.honeycomb_environments WHERE environment_id=$1)",
+        )
+        .bind(id)
+        .fetch_one(self.production.pool())
+        .await?;
+        if managed {
+            return Err(AppError::validation(
+                "clean shared environments through Honeycomb",
+            ));
+        }
         if let Some(key) = root_key {
             validate_key(key)?;
             let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dm.testing_environments WHERE environment_id=$1 AND status='active' AND root_key_digest=$2)")
@@ -279,9 +295,19 @@ impl TestingRegistry {
     }
 
     pub(super) async fn upgrade_schema(&self, id: Uuid) -> AppResult<()> {
-        let schema = schema_name(id);
         let mut transaction = self.admin.pool().begin().await?;
         exclusive_lock(&mut transaction, id).await?;
+        self.upgrade_schema_locked(id, &mut transaction).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(super) async fn upgrade_schema_locked(
+        &self,
+        id: Uuid,
+        transaction: &mut sqlx::PgConnection,
+    ) -> AppResult<()> {
+        let schema = schema_name(id);
         let live:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dm.testing_environments WHERE environment_id=$1 AND status IN ('active','creating'))").bind(id).fetch_one(self.production.pool()).await?;
         if !live {
             return Err(AppError::Unauthorized);
@@ -295,7 +321,7 @@ impl TestingRegistry {
         sqlx::raw_sql(AssertSqlSafe(format!("CREATE TABLE IF NOT EXISTS {schema}.__dm_clean_receipts (mutation_id uuid PRIMARY KEY, completed_at timestamptz NOT NULL DEFAULT clock_timestamp(), testing_environment_id uuid NOT NULL DEFAULT '{id}' CHECK(testing_environment_id='{id}'))"))).execute(&mut *transaction).await?;
         for migration in MIGRATOR
             .iter()
-            .filter(|migration| !matches!(migration.version, 6 | 8 | 11 | 16))
+            .filter(|migration| !matches!(migration.version, 6 | 8 | 11 | 16 | 22))
         {
             let existing: Option<Vec<u8>> = sqlx::query_scalar(AssertSqlSafe(format!(
                 "SELECT checksum FROM {schema}.__dm_migrations WHERE version=$1"
@@ -332,7 +358,6 @@ impl TestingRegistry {
             sqlx::raw_sql(AssertSqlSafe(format!("ALTER TABLE {schema}.\"{}\" ADD COLUMN IF NOT EXISTS testing_environment_id uuid NOT NULL DEFAULT '{id}' CHECK (testing_environment_id='{id}')",table.replace('"',"\"\""))))
                 .execute(&mut *transaction).await?;
         }
-        transaction.commit().await?;
         Ok(())
     }
 
@@ -340,46 +365,6 @@ impl TestingRegistry {
         let schema = schema_name(id);
         sqlx::raw_sql(AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_private CASCADE;")))
             .execute(self.admin.pool()).await?;
-        Ok(())
-    }
-
-    pub(super) async fn maintain(&self) -> AppResult<()> {
-        let idle:Vec<Uuid>=sqlx::query_scalar("SELECT environment_id FROM dm.testing_environments WHERE iam_control_version IS NULL AND status='active' AND last_activity_at <= clock_timestamp()-INTERVAL '15 days'")
-            .fetch_all(self.production.pool()).await?;
-        for id in idle {
-            let mut fence = self.admin.pool().begin().await?;
-            exclusive_lock(&mut fence, id).await?;
-            let changed=sqlx::query("UPDATE dm.testing_environments SET status='deleted',root_key_digest=NULL,root_key_ciphertext=NULL,deleted_at=clock_timestamp(),purge_after=clock_timestamp()+INTERVAL '30 days',version=version+1 WHERE environment_id=$1 AND status='active' AND last_activity_at <= clock_timestamp()-INTERVAL '15 days'")
-                .bind(id).execute(self.production.pool()).await?.rows_affected();
-            if changed == 1 {
-                self.invalidate(id).await;
-            }
-            fence.commit().await?;
-        }
-        let expired:Vec<Uuid>=sqlx::query_scalar("SELECT environment_id FROM dm.testing_environments WHERE (status='deleted' AND purge_after<=clock_timestamp()) OR status='purging' OR (status='creating' AND created_at<=clock_timestamp()-INTERVAL '1 hour')")
-            .fetch_all(self.production.pool()).await?;
-        for id in expired {
-            let mut fence = self.admin.pool().begin().await?;
-            exclusive_lock(&mut fence, id).await?;
-            let claimed=sqlx::query("UPDATE dm.testing_environments SET status='purging',deleted_at=COALESCE(deleted_at,clock_timestamp()),purge_after=COALESCE(purge_after,clock_timestamp()),version=version+1 WHERE environment_id=$1 AND ((status='deleted' AND purge_after<=clock_timestamp()) OR status='purging' OR (status='creating' AND created_at<=clock_timestamp()-INTERVAL '1 hour'))")
-                .bind(id).execute(self.production.pool()).await?.rows_affected();
-            if claimed == 1 {
-                self.invalidate(id).await;
-                let schema = schema_name(id);
-                sqlx::raw_sql(AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_private CASCADE")))
-                    .execute(&mut *fence).await?;
-                fence.commit().await?;
-                let mut transaction = self.production.pool().begin().await?;
-                sqlx::query("DELETE FROM dm.testing_mutations WHERE environment_id=$1")
-                    .bind(id)
-                    .execute(&mut *transaction)
-                    .await?;
-                sqlx::query("DELETE FROM dm.testing_environments WHERE environment_id=$1 AND status='purging'").bind(id).execute(&mut *transaction).await?;
-                transaction.commit().await?;
-            } else {
-                fence.commit().await?;
-            }
-        }
         Ok(())
     }
 }

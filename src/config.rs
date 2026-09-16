@@ -118,6 +118,10 @@ pub struct DatabaseSettings {
 /// Shared testing database and secret encryption settings.
 #[derive(Clone, Debug)]
 pub struct TestingSettings {
+    /// Dedicated Honeycomb service credential, independent of test sessions.
+    pub honeycomb_service_token: Option<SecretString>,
+    /// Honeycomb origin for durable activity reports.
+    pub honeycomb_base_url: Option<Url>,
     /// Separate database shared by all isolated test schemas.
     pub database: DatabaseSettings,
     /// Base64-encoded 256-bit encryption key for retrievable secrets.
@@ -248,6 +252,15 @@ impl Settings {
                 test_database.max_connections = parse_or("DM_TEST_DATABASE_MAX_CONNECTIONS", "4")?;
                 test_database.min_connections = 0;
                 Ok::<_, SettingsError>(TestingSettings {
+                    honeycomb_service_token: optional("DM_HONEYCOMB_SERVICE_TOKEN")
+                        .map(SecretString::from),
+                    honeycomb_base_url: optional("DM_HONEYCOMB_BASE_URL")
+                        .map(|value| {
+                            value
+                                .parse()
+                                .map_err(|_| invalid("DM_HONEYCOMB_BASE_URL", "invalid URL"))
+                        })
+                        .transpose()?,
                     database: test_database,
                     encryption_key: SecretString::from(required("DM_TEST_KEY_ENCRYPTION_KEY")?),
                 })

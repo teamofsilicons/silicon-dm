@@ -5,7 +5,7 @@ use axum::{
     extract::{DefaultBodyLimit, Request},
     http::{HeaderName, StatusCode, header},
     response::{IntoResponse as _, Response},
-    routing::{any, get, post},
+    routing::{any, get, post, put},
 };
 use tower::{ServiceBuilder, ServiceExt as _};
 use tower_http::{
@@ -125,6 +125,11 @@ fn build_plane_router(state: AppState) -> Router {
             post(testing::clean),
         );
 
+    let participant_routes = Router::new().route(
+        "/internal/honeycomb/organizations/{org_id}/testing-environments/{environment_id}/operations/{operation_id}",
+        put(crate::testing::honeycomb::apply).get(crate::testing::honeycomb::receipt)
+            .layer(DefaultBodyLimit::max(1024 * 1024)),
+    );
     let timed_routes = Router::new()
         .route(
             "/webhook/",
@@ -142,6 +147,7 @@ fn build_plane_router(state: AppState) -> Router {
         .route("/api/v1/ws/shared", get(crate::realtime::shared::open));
 
     Router::new()
+        .merge(participant_routes)
         .merge(timed_routes)
         .merge(realtime_route)
         .layer(axum::middleware::from_fn_with_state(
@@ -203,7 +209,7 @@ pub fn build_router(state: AppState) -> Router {
         }))
         .layer(DefaultBodyLimit::max(maximum_body))
         .layer(middleware)
-        .layer(axum::middleware::from_fn(silicon_dm_protocol::responses))
+        .layer(axum::middleware::from_fn(public_responses))
         .layer(axum::middleware::map_response(prevent_response_caching))
 }
 
@@ -211,7 +217,8 @@ async fn dispatch(state: AppState, production: Router, request: Request) -> Resp
     let path = request.uri().path();
     // Lifecycle authority always comes from production IAM; only clean explicitly
     // accepts a testing root key. Webhooks authenticate their own environment binding.
-    let control = path.starts_with("/api/v1/testing-environments")
+    let control = path.starts_with("/internal/honeycomb/")
+        || path.starts_with("/api/v1/testing-environments")
         || matches!(path, "/live" | "/ready" | "/webhook/");
     let mut values = request
         .headers()
@@ -262,6 +269,16 @@ async fn dispatch(state: AppState, production: Router, request: Request) -> Resp
     else {
         return AppError::Unauthorized.into_response();
     };
+    if expected_generation.is_none()
+        && !matches!(
+            *request.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+        && !request.uri().path().starts_with("/api/v1/auth/")
+        && registry.is_honeycomb_environment(id).await.unwrap_or(true)
+    {
+        return AppError::conflict("testing generation required; read /api/v1/iam and bind X-Testing-Environment-Generation before writing").into_response();
+    }
     if expected_generation.is_some_and(|expected| expected != generation) {
         return AppError::conflict(
             "testing environment generation changed; reconnect before retrying",
@@ -272,6 +289,9 @@ async fn dispatch(state: AppState, production: Router, request: Request) -> Resp
         Ok(fence) => fence,
         Err(error) => return error.into_response(),
     };
+    if let Err(error) = registry.touch(id, generation).await {
+        return error.into_response();
+    }
     let result = build_plane_router(selected).oneshot(request).await;
     drop(fence);
     match result {
@@ -301,4 +321,12 @@ fn testing_generation(request: &Request) -> crate::AppResult<Option<i64>> {
             AppError::validation("testing environment generation must be a positive integer")
         })?;
     Ok(Some(generation))
+}
+
+async fn public_responses(request: Request, next: axum::middleware::Next) -> Response {
+    if request.uri().path().starts_with("/internal/honeycomb/") {
+        next.run(request).await
+    } else {
+        silicon_dm_protocol::responses(request, next).await
+    }
 }

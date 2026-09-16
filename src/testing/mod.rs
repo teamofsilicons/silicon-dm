@@ -3,6 +3,7 @@
 
 mod discovery;
 pub mod handlers;
+pub mod honeycomb;
 mod journal;
 mod storage;
 
@@ -83,6 +84,9 @@ pub struct TestingRegistry {
     cipher: Aes256Gcm,
     runtimes: Mutex<HashMap<Uuid, EnvironmentRuntime>>,
     initialization: Mutex<()>,
+    honeycomb_service_token: Option<SecretString>,
+    honeycomb_base_url: Option<url::Url>,
+    iam_settings: crate::config::IamSettings,
 }
 
 impl TestingRegistry {
@@ -90,7 +94,39 @@ impl TestingRegistry {
     ///
     /// # Errors
     /// Returns configuration errors for an invalid encryption key or shared production database, and connection errors.
-    pub async fn new(production: PostgresStore, settings: &TestingSettings) -> AppResult<Self> {
+    pub async fn new(
+        production: PostgresStore,
+        settings: &TestingSettings,
+        iam_settings: &crate::config::IamSettings,
+    ) -> AppResult<Self> {
+        if settings
+            .honeycomb_service_token
+            .as_ref()
+            .is_some_and(|token| {
+                token.expose_secret().len() < 32
+                    || !token
+                        .expose_secret()
+                        .bytes()
+                        .all(|byte| byte.is_ascii_graphic())
+            })
+        {
+            return Err(AppError::validation(
+                "DM_HONEYCOMB_SERVICE_TOKEN must contain at least 32 visible ASCII characters",
+            ));
+        }
+        if settings.honeycomb_base_url.as_ref().is_some_and(|url| {
+            !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || (url.scheme() != "https"
+                    && !(url.scheme() == "http"
+                        && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))))
+        }) {
+            return Err(AppError::validation(
+                "DM_HONEYCOMB_BASE_URL must be an HTTPS origin (HTTP loopback is allowed)",
+            ));
+        }
         let key = STANDARD
             .decode(settings.encryption_key.expose_secret())
             .map_err(|_| {
@@ -121,6 +157,9 @@ impl TestingRegistry {
             cipher,
             runtimes: Mutex::new(HashMap::new()),
             initialization: Mutex::new(()),
+            honeycomb_service_token: settings.honeycomb_service_token.clone(),
+            honeycomb_base_url: settings.honeycomb_base_url.clone(),
+            iam_settings: iam_settings.clone(),
         })
     }
 
@@ -136,7 +175,7 @@ impl TestingRegistry {
         }
         validate_key(key)?;
         let row = sqlx::query_as::<_, TestingEnvironment>(
-            "UPDATE dm.testing_environments SET last_activity_at = clock_timestamp() WHERE root_key_digest = $1 AND status = 'active' RETURNING *")
+            "UPDATE dm.testing_environments SET last_activity_at = clock_timestamp() WHERE root_key_digest = $1 AND status = 'active' AND NOT iam_sync_pending AND NOT EXISTS (SELECT 1 FROM dm.honeycomb_environments h WHERE h.environment_id=dm.testing_environments.environment_id) RETURNING *")
             .bind(blake3::hash(key.as_bytes()).as_bytes().as_slice()).fetch_optional(self.production.pool()).await?
             .ok_or(AppError::Unauthorized)?;
         self.state_for_environment(parent, &row).await
@@ -148,7 +187,7 @@ impl TestingRegistry {
     /// Returns database, decryption, migration, or IAM-client configuration errors.
     pub async fn active_states(&self, parent: &AppState) -> AppResult<Vec<AppState>> {
         let rows = sqlx::query_as::<_, TestingEnvironment>(
-            "SELECT * FROM dm.testing_environments WHERE status = 'active'",
+            "SELECT * FROM dm.testing_environments WHERE status = 'active' AND NOT iam_sync_pending AND iam_app_secret_ciphertext <> ''",
         )
         .fetch_all(self.production.pool())
         .await?;
@@ -178,7 +217,7 @@ impl TestingRegistry {
         use crate::application::ports::IdentityProvider as _;
         use subtle::ConstantTimeEq as _;
         let rows: Vec<TestingEnvironment> =
-            sqlx::query_as("SELECT * FROM dm.testing_environments WHERE status='active'")
+            sqlx::query_as("SELECT * FROM dm.testing_environments WHERE status='active' AND NOT iam_sync_pending AND iam_app_secret_ciphertext <> ''")
                 .fetch_all(self.production.pool())
                 .await?;
         let mut discovered = Vec::new();
@@ -385,6 +424,14 @@ impl TestingRegistry {
         let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dm.testing_environments WHERE environment_id = $1 AND status = 'active' AND NOT iam_sync_pending AND version = $2)")
             .bind(environment_id).bind(generation).fetch_one(self.production.pool()).await?;
         if active {
+            // Shared readiness is enforced by IAM's current testing context, even
+            // for an already-open socket. Never cache readiness across lifecycle changes.
+            if let Some(secret) = sqlx::query_scalar::<_, String>("SELECT e.iam_app_secret_ciphertext FROM dm.testing_environments e JOIN dm.honeycomb_environments h USING(environment_id) WHERE e.environment_id=$1 AND h.state='active'")
+                .bind(environment_id).fetch_optional(self.production.pool()).await? {
+                if secret.is_empty() { return Err(AppError::Unauthorized); }
+                let (_, current) = IamClient::discover(&self.iam_settings, self.decrypt(environment_id,"iam-app",&secret)?).await?;
+                if current.environment_id != environment_id { return Err(AppError::Unauthorized); }
+            }
             Ok(())
         } else {
             Err(AppError::Unauthorized)
@@ -399,6 +446,7 @@ impl TestingRegistry {
         let changed = sqlx::query("UPDATE dm.testing_environments SET last_activity_at = clock_timestamp() WHERE environment_id = $1 AND version = $2 AND status = 'active'")
             .bind(environment_id).bind(generation).execute(self.production.pool()).await?.rows_affected();
         if changed == 1 {
+            sqlx::query("UPDATE dm.honeycomb_environments SET last_activity_at=clock_timestamp() WHERE environment_id=$1 AND state='active'").bind(environment_id).execute(self.production.pool()).await?;
             Ok(())
         } else {
             Err(AppError::Unauthorized)
@@ -483,7 +531,7 @@ impl TestingRegistry {
             tokio::select! {
                 () = cancellation.cancelled() => break,
                 _ = interval.tick() => {
-                    if let Err(error) = self.maintain().await { tracing::error!(code=error.code(), "testing lifecycle maintenance failed"); }
+                    if let Err(error) = self.report_honeycomb_activity().await { tracing::error!(code=error.code(), "testing lifecycle maintenance failed"); }
                 }
             }
         }

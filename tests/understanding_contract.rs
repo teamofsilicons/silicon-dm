@@ -152,7 +152,7 @@ async fn state(settings: Settings) -> Result<AppState> {
     store.migrate().await?;
     let testing = if let Some(test) = &settings.testing {
         Some(Arc::new(
-            silicon_dm::testing::TestingRegistry::new(store.clone(), test).await?,
+            silicon_dm::testing::TestingRegistry::new(store.clone(), test, &settings.iam).await?,
         ))
     } else {
         None
@@ -182,6 +182,10 @@ async fn mock_context(
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"environment_id":id,"application":{"app_id":"tos>dm","base_url":"https://backend.dm.example","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":id,"org_id":"tos","name":format!("Sandbox {version}"),"version":version,"key_generation":1,"cleaned_at":cleaned,"created_at":"2026-09-01T00:00:00Z","creator_type":"carbon","creator_id":"alice"},"webhook_key_digest":"00".repeat(32)}))).mount(iam).await;
 }
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture covers discovery and generation reset"
+)]
 async fn app_secret_discovery_is_isolated_revalidated_and_resets_generation() -> Result {
     let container = Postgres::default().with_tag("16-alpine").start().await?;
     let url = format!(
@@ -199,6 +203,8 @@ async fn app_secret_discovery_is_isolated_revalidated_and_resets_generation() ->
     testing_db.url =
         SecretString::from(format!("{}/sandbox", url.rsplit_once('/').ok_or("url")?.0));
     config.testing = Some(TestingSettings {
+        honeycomb_service_token: None,
+        honeycomb_base_url: None,
         database: testing_db,
         encryption_key: SecretString::from(STANDARD.encode([7u8; 32])),
     });
@@ -983,5 +989,333 @@ async fn group_address_socket_roundtrip(
     })
     .await??;
     socket.close(None).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one sandbox exercises durable lifecycle ordering and replay"
+)]
+async fn honeycomb_lifecycle_is_authenticated_fenced_and_retry_safe() -> Result {
+    let container = Postgres::default().with_tag("16-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@{}:{}/postgres",
+        container.get_host().await?,
+        container.get_host_port_ipv4(5432).await?
+    );
+    let iam = MockServer::start().await;
+    let honeycomb = MockServer::start().await;
+    let mut config = settings(url.clone(), &iam.uri())?;
+    let admin = PostgresStore::connect(&config.database).await?;
+    sqlx::query("CREATE DATABASE sandbox")
+        .execute(admin.pool())
+        .await?;
+    let mut testing_db = config.database.clone();
+    testing_db.url =
+        SecretString::from(format!("{}/sandbox", url.rsplit_once('/').ok_or("url")?.0));
+    let token = "honeycomb-only-service-token-32-characters";
+    config.testing = Some(TestingSettings {
+        database: testing_db.clone(),
+        encryption_key: SecretString::from(STANDARD.encode([7u8; 32])),
+        honeycomb_service_token: Some(SecretString::from(token)),
+        honeycomb_base_url: Some(honeycomb.uri().parse()?),
+    });
+    let app = state(config).await?;
+    let registry = app.testing.as_ref().ok_or("registry")?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = silicon_dm::api::build_router(app.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let id = Uuid::new_v4();
+    let secret = format!("ask_{}", "h".repeat(43));
+    mock_context(&iam, id, &secret, 1, None).await;
+    assert!(
+        registry.state_for_key(&app, &secret).await.is_err(),
+        "runtime discovery cannot bypass preparation"
+    );
+    let mut op = json!({"operation_id":Uuid::new_v4(),"environment_id":id,"org_id":"tos","app_id":"tos>dm","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"K".repeat(32),"name":"Shared DM","description":"coordinated sandbox","snapshot":{},"reason":"requested","retired_apps":[]});
+    let http = reqwest::Client::new();
+    let endpoint = |body: &Value| {
+        format!(
+            "{base}/internal/honeycomb/organizations/tos/testing-environments/{id}/operations/{}",
+            body["operation_id"].as_str().unwrap_or_default()
+        )
+    };
+    assert_eq!(
+        http.put(endpoint(&op))
+            .bearer_auth(&secret)
+            .json(&op)
+            .send()
+            .await?
+            .status(),
+        401
+    );
+    let prepared = http
+        .put(endpoint(&op))
+        .bearer_auth(token)
+        .json(&op)
+        .send()
+        .await?;
+    assert!(prepared.status().is_success(), "{}", prepared.text().await?);
+    let receipt: Value = http
+        .get(endpoint(&op))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(receipt["state"], "completed"); // Internal receipts must not have a DM envelope.
+    assert!(!receipt.to_string().contains(&"K".repeat(32)));
+    let mut changed = op.clone();
+    changed["name"] = json!("changed replay");
+    assert_eq!(
+        http.put(endpoint(&op))
+            .bearer_auth(token)
+            .json(&changed)
+            .send()
+            .await?
+            .status(),
+        409
+    );
+    let selected = registry.state_for_key(&app, &secret).await?;
+    let old_generation = selected.testing_generation.ok_or("generation")?;
+    let actor = ActorRef {
+        id: "alice".parse()?,
+        actor_type: ActorType::Carbon,
+    };
+    selected
+        .store
+        .refresh_directory(&"tos".parse()?, std::slice::from_ref(&actor))
+        .await?;
+    // A real in-flight request prevents clean from overtaking its write.
+    let fence = registry.request_fence(id, old_generation).await?;
+    op["operation_id"] = json!(Uuid::new_v4());
+    op["action"] = json!("clean");
+    op["environment_revision"] = json!(2);
+    op["generation"] = json!(2);
+    let pending = http.put(endpoint(&op)).bearer_auth(token).json(&op).send();
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut pending)
+            .await
+            .is_err()
+    );
+    drop(fence);
+    let response = pending.await?;
+    assert!(response.status().is_success(), "{}", response.text().await?);
+    assert!(registry.ensure_active(id, old_generation).await.is_err());
+    // Activity survives a failed report and is scoped to the current generation.
+    let generation = registry
+        .state_for_key(&app, &secret)
+        .await?
+        .testing_generation
+        .ok_or("generation")?;
+    registry.touch(id, generation).await?;
+    registry.report_honeycomb_activity().await?; // 404: retain for retry.
+    Mock::given(path(format!(
+        "/api/v1/environments/{id}/apps/tos%3Edm/activity"
+    )))
+    .and(header("x-testing-environment-key", "K".repeat(32)))
+    .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+    .expect(1)
+    .mount(&honeycomb)
+    .await;
+    registry.report_honeycomb_activity().await?;
+    registry.report_honeycomb_activity().await?; // acknowledged activity is not repeated.
+    let clean = op.clone();
+    let selected = registry.state_for_key(&app, &secret).await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM actor_snapshots")
+        .fetch_one(selected.store.pool())
+        .await?;
+    assert_eq!(count, 0);
+    selected
+        .store
+        .refresh_directory(&"tos".parse()?, std::slice::from_ref(&actor))
+        .await?;
+    assert!(
+        http.put(endpoint(&clean))
+            .bearer_auth(token)
+            .json(&clean)
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM actor_snapshots")
+        .fetch_one(selected.store.pool())
+        .await?;
+    assert_eq!(
+        count, 1,
+        "completed clean retry must not erase subsequent data"
+    );
+    let response = http
+        .post(format!("{base}/api/v1/conversations"))
+        .header("X-Testing-Environment-Key", &secret)
+        .json(&json!({}))
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        409,
+        "unfenced mutations must fail before processing"
+    );
+    let response = http
+        .post(format!("{base}/api/v1/conversations"))
+        .header("X-Testing-Environment-Key", &secret)
+        .header("X-Testing-Environment-Generation", old_generation)
+        .json(&json!({}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), 409);
+    op["operation_id"] = json!(Uuid::new_v4());
+    op["action"] = json!("disable");
+    op["environment_revision"] = json!(3);
+    assert!(
+        http.put(endpoint(&op))
+            .bearer_auth(token)
+            .json(&op)
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
+    assert!(registry.state_for_key(&app, &secret).await.is_err());
+    // No runtime IAM sessions are available while lifecycle control remains usable.
+    iam.reset().await;
+    op["operation_id"] = json!(Uuid::new_v4());
+    op["action"] = json!("clean");
+    op["environment_revision"] = json!(4);
+    op["generation"] = json!(3);
+    assert!(
+        http.put(endpoint(&op))
+            .bearer_auth(token)
+            .json(&op)
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
+    mock_context(&iam, id, &secret, 3, Some("2026-09-16T00:00:00Z")).await;
+    assert!(
+        registry.state_for_key(&app, &secret).await.is_err(),
+        "clean must preserve disabled state"
+    );
+    op["operation_id"] = json!(Uuid::new_v4());
+    op["action"] = json!("restore");
+    op["environment_revision"] = json!(5);
+    assert!(
+        http.put(endpoint(&op))
+            .bearer_auth(token)
+            .json(&op)
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
+    let restored = registry.state_for_key(&app, &secret).await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM actor_snapshots")
+        .fetch_one(restored.store.pool())
+        .await?;
+    assert_eq!(count, 0, "restore must not undo a clean");
+    // Fresh IAM readiness gates already-open request generations too.
+    iam.reset().await;
+    assert!(
+        registry
+            .request_fence(id, restored.testing_generation.ok_or("generation")?)
+            .await
+            .is_err()
+    );
+    op["operation_id"] = json!(Uuid::new_v4());
+    op["action"] = json!("rotate-key");
+    op["environment_revision"] = json!(6);
+    op["key_version"] = json!(2);
+    op["testing_key"] = json!("N".repeat(32));
+    let test_admin = PostgresStore::connect(&testing_db).await?;
+    let schema = format!("dm_test_{}", id.simple());
+    let checksum: Vec<u8> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT checksum FROM {schema}.__dm_migrations WHERE version=1"
+    )))
+    .fetch_one(test_admin.pool())
+    .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE {schema}.__dm_migrations SET checksum=''::bytea WHERE version=1"
+    )))
+    .execute(test_admin.pool())
+    .await?;
+    let failed = http
+        .put(endpoint(&op))
+        .bearer_auth(token)
+        .json(&op)
+        .send()
+        .await?;
+    assert_eq!(failed.status(), 500);
+    let receipt: Value = http
+        .get(endpoint(&op))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(receipt["state"], "failed");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE {schema}.__dm_migrations SET checksum=$1 WHERE version=1"
+    )))
+    .bind(checksum)
+    .execute(test_admin.pool())
+    .await?;
+    assert!(
+        http.put(endpoint(&op))
+            .bearer_auth(token)
+            .json(&op)
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
+    op["operation_id"] = json!(Uuid::new_v4());
+    op["action"] = json!("purge");
+    op["environment_revision"] = json!(7);
+    assert!(
+        http.put(endpoint(&op))
+            .bearer_auth(token)
+            .json(&op)
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
+    assert!(
+        http.put(endpoint(&op))
+            .bearer_auth(token)
+            .json(&op)
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
+    mock_context(&iam, id, &secret, 3, None).await;
+    assert!(
+        registry.state_for_key(&app, &secret).await.is_err(),
+        "purged tombstone blocks rediscovery"
+    );
+    let test_admin = PostgresStore::connect(&testing_db).await?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)")
+            .bind(format!("dm_test_{}", id.simple()))
+            .fetch_one(test_admin.pool())
+            .await?;
+    assert!(!exists);
+    assert_eq!(
+        http.put(endpoint(&clean))
+            .bearer_auth(token)
+            .json(&clean)
+            .send()
+            .await?
+            .status(),
+        200,
+        "old receipt is replayable without an effect"
+    );
+    server.abort();
     Ok(())
 }

@@ -35,7 +35,8 @@ pub async fn build_app_state(settings: Settings) -> AppResult<AppState> {
     let identity = Arc::new(identity.with_directory(store.clone()));
     let testing = match &settings.testing {
         Some(configuration) => Some(Arc::new(
-            crate::testing::TestingRegistry::new(store.clone(), configuration).await?,
+            crate::testing::TestingRegistry::new(store.clone(), configuration, &settings.iam)
+                .await?,
         )),
         None => None,
     };
