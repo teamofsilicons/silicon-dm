@@ -72,6 +72,9 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+    cli_version = tomllib.loads((ROOT / "crates/cli/Cargo.toml").read_text())["package"]["version"]
+    if cli_version != version:
+        raise SystemExit("The CLI version must match the DM app release version")
     manifest = (ROOT / "honeycomb.yaml").read_text()
     for key, expected in (("app_id", "tos>dm"), ("version", version)):
         match = re.search(rf"^{key}:\s*[\"']?([^\s\"'#]+)[\"']?\s*(?:#.*)?$", manifest, re.MULTILINE)

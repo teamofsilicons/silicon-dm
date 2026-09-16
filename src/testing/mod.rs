@@ -119,6 +119,7 @@ impl TestingRegistry {
                 || url.password().is_some()
                 || url.query().is_some()
                 || url.fragment().is_some()
+                || url.path() != "/"
                 || (url.scheme() != "https"
                     && !(url.scheme() == "http"
                         && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))))

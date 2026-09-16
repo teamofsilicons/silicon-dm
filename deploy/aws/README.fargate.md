@@ -191,3 +191,14 @@ the root filesystem read-only. The spool survives a process restart within the
 task; unsent diagnostics can be lost when the task is replaced. It contains no
 message payloads or authentication credentials. Message durability is independent
 of this best-effort telemetry spool.
+
+## Honeycomb participant configuration
+
+Add `DM_HONEYCOMB_SERVICE_TOKEN` and `DM_HONEYCOMB_BASE_URL` to the deployment's
+application secret to enable shared test lifecycle control and activity reporting.
+Provision a dedicated shared credential through the service secret stores and
+register the DM backend in Honeycomb's participant registry. Reuse that credential
+on later deployments; bootstrap preserves an existing runtime credential if omitted
+and refuses an implicit rotation. End users only provide their test app secret.
+Both API and worker task definitions load these fields from the runtime secret.
+Migration 0022 precedes the API rollout. See [the participant contract](../../docs/honeycomb-lifecycle.md).

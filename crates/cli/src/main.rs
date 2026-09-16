@@ -192,7 +192,7 @@ enum Command {
         #[command(subcommand)]
         command: Relay,
     },
-    /// Configure hourly best-effort release checks and automatic CLI installation.
+    /// Show Honeycomb installation and update guidance.
     Updates {
         #[command(subcommand)]
         command: Updates,

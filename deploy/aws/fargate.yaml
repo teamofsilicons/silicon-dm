@@ -694,6 +694,12 @@ Resources:
         - Name: DM_LOG_FILTER
           Value: info,silicon_dm=info
         Secrets:
+        - Name: DM_HONEYCOMB_SERVICE_TOKEN
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_HONEYCOMB_SERVICE_TOKEN::'
+        - Name: DM_HONEYCOMB_BASE_URL
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_HONEYCOMB_BASE_URL::'
         - Name: DM_SPACE_STATION_TABLE_KEY
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_SPACE_STATION_TABLE_KEY::'
@@ -850,6 +856,12 @@ Resources:
         - Name: DM_LOG_FILTER
           Value: info,silicon_dm=info
         Secrets:
+        - Name: DM_HONEYCOMB_SERVICE_TOKEN
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_HONEYCOMB_SERVICE_TOKEN::'
+        - Name: DM_HONEYCOMB_BASE_URL
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_HONEYCOMB_BASE_URL::'
         - Name: DM_SPACE_STATION_TABLE_KEY
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_SPACE_STATION_TABLE_KEY::'

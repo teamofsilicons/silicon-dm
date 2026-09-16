@@ -1,18 +1,21 @@
 # Test in an isolated environment
 
 Use the same DM API, Rust client, CLI, and website against an empty sandbox.
-IAM owns its identities and lifecycle. DM owns its isolated message data.
+Honeycomb owns creation and lifecycle. IAM owns identities and authentication;
+DM owns its isolated message data.
 
-## Create the world in IAM
+## Create the world in Honeycomb
 
-Create an IAM testing environment and import the `tos>dm` application. Save that
-application's test `app_secret`, and create the Carbon or Silicon identities and
-memberships your scenario needs. Follow [IAM testing environments](https://docs.iam.teamofsilicons.com/api/testing-environments/).
+Create a shared testing environment in Honeycomb and include `tos>dm`. Wait for
+shared readiness, then use DM's test `app_secret`. IAM provides the sandbox
+Carbon/Silicon identities, memberships, authentication and signed webhooks.
+See [Honeycomb](https://docs.honeycomb.teamofsilicons.com/) for environment management.
 
-DM needs no manually paired environment, separate DM root key, or shared IAM
-root key. It validates the application's secret using the official IAM SDK's
-secret-selected testing context and initializes local storage on first use.
-IAM's environment UUID is also DM's UUID for discovered environments.
+Honeycomb prepares DM through its protected participant API. The shared
+`environment_id` is also DM's ID. No user needs to pair a DM environment or
+enter an environment root key. DM validates the app secret against IAM's current
+state. When the participant integration is configured, missing preparation is
+an error; runtime discovery cannot create an uncoordinated sandbox.
 
 ## Enter with the CLI
 
@@ -52,13 +55,17 @@ Pass `X-Testing-Environment-Key: <test-app-secret>` with every HTTP request,
 including `/api/v1/iam`, login, refresh, and user operations. The historical
 header name is retained for compatibility. `/api/v1/iam` returns the selected
 UUID, generation, and non-secret metadata. The secret is never returned there.
+Bind `X-Testing-Environment-Generation` to that observed generation on mutations.
+Missing or stale generations fail closed; login/refresh do not require it.
 
 ```rust
 let client = silicon_dm_client::Client::new("https://backend.dm.teamofsilicons.com")?
     .with_test_key(test_app_secret)?;
 let environment = client.iam().await?;
 let tokens = client.login(test_slt_or_public_id, "stable-test-login-key").await?;
-let authenticated = client.with_auth(tokens.access_token, tokens.organization_id);
+let authenticated = client
+    .with_testing_generation(environment.testing_generation.ok_or("missing generation")?)?
+    .with_auth(tokens.access_token, tokens.organization_id);
 ```
 
 The optional runtime also provides
@@ -80,14 +87,18 @@ Each environment uses a separate schema in a testing database distinct from
 production. Message data, drafts, receipts, versions, directory projections,
 webhook receipts, background jobs, contract counters, and realtime hubs are
 scoped to it. Local queues and caches include the environment and generation.
-An IAM reset invalidates old generations and erases the old test schema before
-new requests can use it. A durable pending marker keeps failed resets closed
-until they can finish. IAM names and descriptions synchronize on verified use.
+Honeycomb clean blocks requests and deliveries, invalidates open connections,
+and removes all DM-owned test records before reporting completion. This includes
+messages, drafts, groups, receipts, presence, queued deliveries and directory
+projections. Attachment links are references; DM never deletes another app's files.
+Completed retries return the original receipt without cleaning subsequent data.
+A failed cleanup stays fenced until the same operation succeeds.
 
-IAM root-key rotation does not require users to re-pair DM; the app secret selects
-the current IAM environment. Retired environments and revoked app secrets fail
-live IAM validation. IAM remains the lifecycle authority for auto-discovered
-worlds; DM does not apply its old independent 15-day idle policy to them.
+Disable blocks runtime access while retaining data. Restore requires IAM readiness
+and does not undo a clean. Control operations still work with test sessions disabled.
+Purge retains only a secret-free lifecycle tombstone and receipts to reject stale
+recreation and recover lost responses. DM reports activity to Honeycomb and no longer
+runs independent environment retirement. See [participant operations](honeycomb-lifecycle.md).
 
 ## Webhooks and external actions
 
@@ -107,4 +118,5 @@ endpoints when exercising integrations with such systems.
 Older DM root-key environments retain their original isolated credentials and
 controls. They are separate from automatically discovered IAM environments.
 [Legacy administration](testing-legacy.md) describes that compatibility path;
-new users should follow the app-secret flow above.
+new users should follow the Honeycomb app-secret flow above. New manual pairing
+is disabled when Honeycomb participant authentication is configured.

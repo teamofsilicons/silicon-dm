@@ -31,24 +31,10 @@ local loopback callback addresses.
 
 ## Updates
 
-Automatic updates are on. The daemon claims a check once per hour even when no
-CLI command runs. It checks the stable crates.io CLI release and installs a newer
-version with Cargo. Only the installed Cargo `bin/dm` is replaced; custom and
-development builds are reported as such. Registry/build failures leave the old
-binary available and are retried later.
-
-```sh
-dm updates status
-dm updates disable
-dm updates enable
-dm updates check
-dm updates install
-```
-
-The running daemon uses its loaded code until restarted; queues persist. Restart
-with the installed binary after an update. The standalone Rust library cannot
-replace code already linked into a process; its optional update policy updates
-an explicitly selected application manifest and rebuilds it.
+Honeycomb owns CLI installation and update policy. Use `honeycomb install 'tos>dm'`.
+DM's daemon handles relay delivery and never replaces the CLI. Legacy `dm updates`
+commands report this guidance. Manage Rust dependencies through your project.
+Restart a running daemon after upgrading to load the new code; durable queues persist.
 
 ## Backend configuration
 

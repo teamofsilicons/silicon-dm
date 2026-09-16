@@ -213,12 +213,6 @@ The client and CLI are published on crates.io. For each new release, publish
 client version. Use the appropriate crates.io owner account and review the
 package contents and release version before publication.
 
-After publication, install the CLI into a separate directory/profile and
-manually exercise `updates check`, `updates install`, `updates status`, and
-the persisted enable/disable setting. Automatic replacement requires an
-installed executable; it deliberately does not overwrite a checkout's debug
-binary. The default Rust client reports available updates without state or file
-changes. Its optional [SDK runtime](client/runtime.md) supplies a default-on
-hourly policy and dependency-update/rebuild execution for an explicitly selected
-application manifest; the consuming application owns policy persistence and
-restarting with the rebuilt code.
+Build a Honeycomb archive using [the release guide](honeycomb-release.md).
+Honeycomb owns installation and updates; DM does not run Cargo or replace itself.
+Rust libraries remain normal project dependencies.

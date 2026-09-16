@@ -87,6 +87,16 @@ macro_rules! guide {
 }
 
 const GUIDES: &[Guide] = &[
+    guide!(
+        "honeycomb-lifecycle",
+        "Honeycomb lifecycle participant",
+        "honeycomb-lifecycle.md"
+    ),
+    guide!(
+        "honeycomb-release",
+        "Honeycomb CLI release packaging",
+        "honeycomb-release.md"
+    ),
     guide!("groups", "Groups and membership", "groups.md"),
     guide!("getting-started", "Start using DM", "getting-started.md"),
     guide!("building", "Build on DM", "building.md"),

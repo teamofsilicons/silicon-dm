@@ -11,7 +11,7 @@ info:
     upsert messages by (id, version). Attachments are stored links and are never uploaded, fetched,
     or proxied by DM. Every DM JSON request and response has exactly type and data at the root.
     Message text is data.message and metadata is data.metadata. Bodyless HTTP requests, 204
-    responses, and signed incoming IAM webhook payloads retain their HTTP/provider contracts.
+    responses, signed incoming IAM webhook payloads, and internal Honeycomb participant messages retain their provider contracts.
 servers:
 - url: https://backend.dm.teamofsilicons.com/api/v1
 security:
@@ -36,12 +36,62 @@ tags:
 - name: Auth
   description: IAM application-session exchange and maintenance
 - name: Testing
-  description: Production-owned test environments; lifecycle control uses production IAM authority
+  description: Honeycomb owns shared test lifecycle; legacy controls require production IAM authority
 - name: IAM webhooks
   description: Signed IAM callbacks, outside the /api/v1 base path
 - name: Operations
   description: Deployment health probes
 paths:
+  /internal/honeycomb/organizations/{org_id}/testing-environments/{environment_id}/operations/{operation_id}:
+    servers:
+    - url: https://backend.dm.teamofsilicons.com
+    parameters:
+    - name: org_id
+      in: path
+      required: true
+      schema: {type: string}
+    - name: environment_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    - name: operation_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    put:
+      tags: [Testing]
+      operationId: applyHoneycombLifecycle
+      summary: Apply a protected Honeycomb lifecycle instruction
+      description: Plain coordinator JSON, without the public DM envelope. Retry the identical instruction and operation ID. Completion follows test database cleanup; failures remain fenced.
+      security: [{honeycombService: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/HoneycombOperation'}
+      responses:
+        '200':
+          description: Exact completed receipt or replay
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HoneycombReceipt'}
+        '400': {description: Invalid instruction or path/body mismatch}
+        '401': {description: Missing or invalid service credential}
+        '409': {description: 'Stale revision, conflicting retry, or incompatible transition'}
+        '500': {description: Failed operation; inspect receipt and retry identical instruction}
+    get:
+      tags: [Testing]
+      operationId: getHoneycombLifecycleReceipt
+      summary: Recover a pending, completed or failed lifecycle receipt
+      security: [{honeycombService: []}]
+      responses:
+        '200':
+          description: Secret-free durable receipt
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HoneycombReceipt'}
+        '401': {description: Missing or invalid service credential}
+        '404': {description: Unknown operation for the requested organization}
   "/groups":
     get:
       tags:
@@ -2035,6 +2085,10 @@ paths:
           description: Dependency or migration unavailable
 components:
   securitySchemes:
+    honeycombService:
+      type: http
+      scheme: bearer
+      description: Dedicated Honeycomb service credential, independent of test sessions.
     bearerAuth:
       type: http
       scheme: bearer
@@ -2145,6 +2199,46 @@ components:
               data:
                 "$ref": "#/components/schemas/Error"
   schemas:
+    HoneycombOperation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, environment_id, org_id, app_id, environment_revision, generation, key_version, action, testing_key]
+      properties:
+        operation_id: {type: string, format: uuid}
+        environment_id: {type: string, format: uuid}
+        org_id: {type: string, minLength: 1, maxLength: 128}
+        app_id: {type: string}
+        environment_revision: {type: integer, minimum: 1}
+        generation: {type: integer, minimum: 1}
+        key_version: {type: integer, minimum: 1}
+        action:
+          type: string
+          enum: [prepare, import, refresh-import, rotate-key, clean, disable, restore, purge, retire-applications]
+        testing_key: {type: string, pattern: '^[A-Za-z0-9]{32}$', writeOnly: true}
+        name: {type: [string, 'null'], minLength: 1, maxLength: 128}
+        description: {type: [string, 'null'], maxLength: 4096}
+        snapshot: {}
+        reason: {type: string}
+        retired_apps:
+          type: array
+          items: {type: string}
+    HoneycombReceipt:
+      type: object
+      required: [operation_id, environment_id, app_id, environment_revision, generation, key_version, state, retired_apps]
+      properties:
+        operation_id: {type: string, format: uuid}
+        environment_id: {type: string, format: uuid}
+        app_id: {type: string}
+        environment_revision: {type: integer, minimum: 1}
+        generation: {type: integer, minimum: 1}
+        key_version: {type: integer, minimum: 1}
+        state: {type: string, enum: [pending, completed, failed]}
+        target_state:
+          type: string
+          description: Intended local state, present in pending and failed receipts.
+        retired_apps:
+          type: array
+          items: {type: string}
     ConversationAddress:
       description: Direct conversation UUID or immutable group address g:org:group-slug. Legacy group UUIDs remain accepted as aliases. Renaming a group does not change its address.
       oneOf:

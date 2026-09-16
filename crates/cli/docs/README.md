@@ -8,12 +8,11 @@ messages flowing through the local daemon, or build your own client with Rust.
 ## Install DM
 
 ```sh
-curl -fsSL https://docs.dm.teamofsilicons.com/install.sh | sh
+honeycomb install 'tos>dm'
 ```
 
-The installer sets up Rust when needed, installs DM, and starts the background
-relay. Version 0.5 adds its independent hourly updater. On macOS and Linux with a user service manager it also
-starts the daemon at login. It does not sign you in. [Setup details](getting-started.md).
+Honeycomb installs the prebuilt CLI and manages updates. Continue with login
+and webhook setup below. [Setup details](getting-started.md).
 
 ## Send your first message
 
