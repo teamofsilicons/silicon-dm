@@ -47,7 +47,7 @@ pub struct Config {
     pub webhook_secrets: BTreeMap<String, String>,
     pub relay_port: u16,
     pub relay_token: String,
-    #[serde(default = "enabled")]
+    #[serde(default)]
     pub auto_update: bool,
     #[serde(default = "enabled")]
     pub telemetry_enabled: bool,

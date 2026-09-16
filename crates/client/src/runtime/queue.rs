@@ -118,13 +118,13 @@ impl Queue {
                 |r| r.get(0),
             )
             .optional()?;
-        if previous.is_some() && previous != Some(next) {
+        if previous != Some(next) {
             let stream = stream_session(session, previous);
             tx.execute(
                 "UPDATE inbox SET delivered=-1 WHERE session=?1 AND delivered=0",
                 params![stream],
             )?;
-            tx.execute("UPDATE outbox SET state='failed',error=?2 WHERE session=?1 AND state='pending'",params![session,json!({"code":"testing_generation_changed","message":"test environment changed; inspect then explicitly resubmit this request"}).to_string()])?;
+            tx.execute("UPDATE outbox SET state='failed',error=?2 WHERE session=?1 AND state='pending' AND (expected_generation IS NULL OR expected_generation<>?3)",params![session,json!({"code":"testing_generation_changed","message":"test environment changed; inspect then explicitly resubmit this request"}).to_string(),next])?;
         }
         tx.execute("INSERT INTO generations(session,generation) VALUES(?1,?2) ON CONFLICT(session) DO UPDATE SET generation=excluded.generation",params![session,next])?;
         tx.commit()?;
@@ -279,6 +279,14 @@ impl Queue {
                 |r| r.get(0),
             )
             .optional()?;
+        if request.testing_environment_id.is_some()
+            && request.request.is_mutation()
+            && request.testing_generation.or(known).is_none()
+        {
+            bail!(
+                "connect to the test environment before queuing mutations; its generation is unknown"
+            );
+        }
         conn.execute(
         "INSERT INTO outbox(request_id,session,request,created,expected_generation) VALUES(?1,?2,?3,?4,?5)",
         params![
@@ -581,5 +589,67 @@ mod group_address_tests {
             "g:tos:product-design",
             &old
         ));
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    #[test]
+    fn unknown_and_old_sends_cannot_cross_a_clean_or_an_environment() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("dm-generation-{}", Uuid::new_v4()));
+        let state = store::Store::new(&root)?;
+        let queue = Queue::open(&state)?;
+        let id = Uuid::new_v4();
+        let session = store::session_key("default", Some(id));
+        let mut request = RelayRequest {
+            request_id: Uuid::new_v4(),
+            profile: "default".into(),
+            testing_environment_id: Some(id),
+            testing_generation: None,
+            request: crate::relay::Operation::CreateConversation {
+                participant_ids: vec!["alice".into(), "bob".into()],
+                idempotency_key: "fixture".into(),
+            },
+        };
+        assert!(
+            queue
+                .enqueue(&request, &serde_json::to_value(&request)?)
+                .is_err()
+        );
+        // A pre-upgrade, unknown-generation row must not inherit the first new generation.
+        queue.database()?.execute(
+            "INSERT INTO outbox(request_id,session,request,created) VALUES('legacy',?1,'{}',0)",
+            params![session],
+        )?;
+        queue.adopt_generation(&session, Some(1))?;
+        queue.enqueue(&request, &serde_json::to_value(&request)?)?;
+        let old = request.request_id;
+        request.request_id = Uuid::new_v4();
+        request.testing_environment_id = None;
+        queue.enqueue(&request, &serde_json::to_value(&request)?)?;
+        let production = request.request_id;
+        request.request_id = Uuid::new_v4();
+        request.testing_environment_id = Some(Uuid::new_v4());
+        request.testing_generation = Some(9);
+        queue.enqueue(&request, &serde_json::to_value(&request)?)?;
+        let other = request.request_id;
+        queue.adopt_generation(&session, Some(2))?;
+        for (id, expected) in [
+            ("legacy".into(), "failed"),
+            (old.to_string(), "failed"),
+            (production.to_string(), "pending"),
+            (other.to_string(), "pending"),
+        ] {
+            let status: String = queue.database()?.query_row(
+                "SELECT state FROM outbox WHERE request_id=?1",
+                params![id],
+                |r| r.get(0),
+            )?;
+            assert_eq!(status, expected);
+        }
+        drop(queue);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

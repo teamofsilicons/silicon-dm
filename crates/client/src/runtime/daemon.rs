@@ -301,6 +301,33 @@ async fn submit(
             "log in to this profile and testing environment first",
         );
     }
+    // Capture the current generation before acknowledging a new test mutation.
+    // An offline, never-bound send cannot be relabeled after a clean.
+    if request.testing_environment_id.is_some() && request.request.is_mutation() {
+        let session = store::session_key(&request.profile, request.testing_environment_id);
+        if context.queue.generation(&session).ok().flatten().is_none() {
+            let discovery = async {
+                let profile =
+                    store::profile(&config, &request.profile, request.testing_environment_id)?;
+                let info = store::client(&config, profile)?.iam().await?;
+                if info.testing_environment_id != request.testing_environment_id {
+                    bail!("testing environment mismatch");
+                }
+                let generation = info
+                    .testing_generation
+                    .context("testing generation unavailable")?;
+                context.queue.adopt_generation(&session, Some(generation))
+            }
+            .await;
+            if discovery.is_err() {
+                return error(
+                    StatusCode::CONFLICT,
+                    "testing_generation_unavailable",
+                    "Cannot queue this test mutation until the sandbox is ready. Reconnect and submit it again.",
+                );
+            }
+        }
+    }
     let queued = context.queue.enqueue(&request, &envelope.data);
     let request_id = request.request_id;
     drop(request);
