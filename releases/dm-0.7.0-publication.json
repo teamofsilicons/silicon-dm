@@ -16,7 +16,8 @@
     "id": "4a763db8-1b61-48a3-bed2-c9ffb19fb3f5",
     "plan_id": "cb73ee5f-3d1b-4e69-be9d-a6e9f9feb834",
     "state": "awaiting_validator",
-    "visibility": "private"
+    "visibility": "private",
+    "required_gate": "Honeycomb validator approval"
   },
   "requested_iam_scopes": {
     "iam": [
@@ -29,5 +30,27 @@
     "external": []
   },
   "credentials": "Stored outside Git with owner-only permissions; existing webhook signing secret retained. Production IAM app secret and runtime secret updated to the accepted registration credential.",
-  "public_availability": "Pending Honeycomb validator approval; not public yet."
+  "public_availability": "Pending Honeycomb validator approval; not public yet.",
+  "installation_verification": {
+    "remote_download": "Honeycomb authenticated download and archive SHA-256 verification passed",
+    "target": "macos-aarch64",
+    "version_output": "dm 0.7.0",
+    "binary_sha256_matches_build_record": true,
+    "embedded_honeycomb_guide": true,
+    "local_alias": "dm-honeycomb",
+    "alias_reason": "Existing unmanaged dm command on PATH was preserved"
+  },
+  "runtime_credentials": {
+    "application_secret_version": "47c398a1-502c-4877-9f5f-44b49f570b47",
+    "runtime_secret_version": "2ea4d12f-48ff-4511-8aba-9d516c7b12d1",
+    "credential_probe": "New credential accepted by IAM OAuth introspection (HTTP 200, inactive sentinel token); previous credential rejected with invalid_client",
+    "api_task": "cf2b98c56a954cc49607df31a2710d06",
+    "worker_task": "9968ace588b14244bbffd9776c817e99",
+    "images": "Existing task definitions retained; credential reload only",
+    "ecs_services_stable": true,
+    "public_health_probes": {
+      "live": 204,
+      "ready": 204
+    }
+  }
 }
