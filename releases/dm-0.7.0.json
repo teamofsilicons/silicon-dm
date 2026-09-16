@@ -1,0 +1,72 @@
+{
+  "app_id": "tos>dm",
+  "version": "0.7.0",
+  "source_commit": "f985bcfda370f2fce2ebb24acf7401f09f0eb0f4",
+  "archive": {
+    "path": "dist/dm-0.7.0.tar.gz",
+    "bytes": 28716183,
+    "sha256": "59cb1f2fc3b961469c213b09dba939f534c14c761453cc66e1cdba190283183e"
+  },
+  "validation": {
+    "honeycomb_directory": true,
+    "honeycomb_archive": true,
+    "exact_files": "honeycomb.yaml and six native executables",
+    "windows_runtime_note": "PE architecture and system DLL imports verified; Windows execution not tested"
+  },
+  "targets": [
+    {
+      "target": "linux-x86_64",
+      "rust_triple": "x86_64-unknown-linux-gnu",
+      "path": "targets/linux-x86_64/bin/dm",
+      "bytes": 11808128,
+      "sha256": "670b2ba42aa2843f8c13d0839e8d4e0097361ed353d7787662622b02f9f3554d",
+      "version_smoke_test": "dm 0.7.0",
+      "runtime": "glibc 2.28 minimum; Debian bookworm smoke test"
+    },
+    {
+      "target": "linux-aarch64",
+      "rust_triple": "aarch64-unknown-linux-gnu",
+      "path": "targets/linux-aarch64/bin/dm",
+      "bytes": 9928120,
+      "sha256": "c5bb65c83981d59fd5e34281ea59a9970889191b3cdc2926bd451bf4008d9c0c",
+      "version_smoke_test": "dm 0.7.0",
+      "runtime": "glibc 2.28 minimum; Debian bookworm smoke test"
+    },
+    {
+      "target": "windows-x86_64",
+      "rust_triple": "x86_64-pc-windows-msvc",
+      "path": "targets/windows-x86_64/bin/dm.exe",
+      "bytes": 12006400,
+      "sha256": "af8741db336123545419fe5029e15ef79de8459fe4429d5c4ed4d168952bb23a",
+      "version_smoke_test": "not_run",
+      "runtime": "system DLLs only; static C runtime"
+    },
+    {
+      "target": "windows-aarch64",
+      "rust_triple": "aarch64-pc-windows-msvc",
+      "path": "targets/windows-aarch64/bin/dm.exe",
+      "bytes": 10533888,
+      "sha256": "0062ef9557298435d028a60568039a9138e720e6384a27ad98d7b28e535bfbaf",
+      "version_smoke_test": "not_run",
+      "runtime": "system DLLs only; static C runtime"
+    },
+    {
+      "target": "macos-x86_64",
+      "rust_triple": "x86_64-apple-darwin",
+      "path": "targets/macos-x86_64/bin/dm",
+      "bytes": 11371152,
+      "sha256": "cf395e70c367467b65a2f8da1bb775b3095aa693cc2719c07c2e4af2b03458fd",
+      "version_smoke_test": "dm 0.7.0",
+      "runtime": "macOS native or Rosetta smoke test"
+    },
+    {
+      "target": "macos-aarch64",
+      "rust_triple": "aarch64-apple-darwin",
+      "path": "targets/macos-aarch64/bin/dm",
+      "bytes": 9941680,
+      "sha256": "95e022789e6027c89793442fd63d3b23c306d70700494aa1071529694b96d15c",
+      "version_smoke_test": "dm 0.7.0",
+      "runtime": "macOS native or Rosetta smoke test"
+    }
+  ]
+}
