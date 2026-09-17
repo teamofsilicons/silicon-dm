@@ -1,0 +1,167 @@
+{
+  "app_id": "tos>dm",
+  "version": "0.8.0",
+  "source_commit": "936a3d90f738df5a3ed54112170629d9a32d98d5",
+  "deployed_at": "2026-09-17T14:20:30.209263+00:00",
+  "archive": {
+    "path": "dist/dm-0.8.0.tar.gz",
+    "bytes": 29325990,
+    "sha256": "29e095e694a28a27374567303bd1060186cc336bde64f3317c216228c7719c64"
+  },
+  "targets": [
+    {
+      "target": "linux-x86_64",
+      "path": "targets/linux-x86_64/bin/dm",
+      "sha256": "fe26a9b726d21f83cc97a22d6f609e96c747da2362dc7f78c3fa626a774d3354",
+      "bytes": 12011072
+    },
+    {
+      "target": "linux-aarch64",
+      "path": "targets/linux-aarch64/bin/dm",
+      "sha256": "37a074792b02b57e1b0a5ee930debcc0cba668d17cf078e60bd2ee040838f691",
+      "bytes": 10082392
+    },
+    {
+      "target": "windows-x86_64",
+      "path": "targets/windows-x86_64/bin/dm.exe",
+      "sha256": "bd9172520cf61016c5546bb68383f5d586435ba5d018a448fa59298d9bc9836e",
+      "bytes": 12425728
+    },
+    {
+      "target": "windows-aarch64",
+      "path": "targets/windows-aarch64/bin/dm.exe",
+      "sha256": "db168914aec5c3b42d4f17242ab93a62fe9fb60df195dce80ef2f4f23872f149",
+      "bytes": 10833408
+    },
+    {
+      "target": "macos-x86_64",
+      "path": "targets/macos-x86_64/bin/dm",
+      "sha256": "b732c409efc2f0530e77b76982618a317c453b89827d0cce760b142c1baa43d3",
+      "bytes": 11572464
+    },
+    {
+      "target": "macos-aarch64",
+      "path": "targets/macos-aarch64/bin/dm",
+      "sha256": "7a97c117d17a192a84d48aa7d86df701ef298118e8a2f8f004d034de6acfad6f",
+      "bytes": 10090656
+    }
+  ],
+  "publication": {
+    "visibility": "public",
+    "state": "active",
+    "latest_version": "0.8.0",
+    "honeycomb_upload_verified": true,
+    "anonymous_native_install_verified": "macos-aarch64: dm 0.8.0",
+    "crates_io": [
+      "silicon-dm-protocol@0.8.0",
+      "silicon-dm-client@0.8.0",
+      "silicon-dm-cli@0.8.0"
+    ]
+  },
+  "backend": {
+    "aws_profile": "silicon-production",
+    "region": "us-east-1",
+    "stack": "silicon-dm-production",
+    "stack_status": "UPDATE_COMPLETE",
+    "migration": "0023_direct_conversation_addresses.sql",
+    "migration_exit_code": 0,
+    "database_snapshot": "dm-pre-080-20260917-936a3d9",
+    "runtime_image": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-dm-production@sha256:9e569d0c1ceaef85b12b779d027ef24097037a70cb13f49bab82f479b4d1d53c",
+    "bootstrap_image": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-dm-production@sha256:696d9a8710fbfa360dc041283f0f704764db89c01d60e08ee4752abfcde09ec3",
+    "api_task_definition": "silicon-dm-api:12",
+    "worker_task_definition": "silicon-dm-worker:12",
+    "api_rollout": "COMPLETED",
+    "worker_rollout": "COMPLETED"
+  },
+  "gateway": {
+    "instance": "i-06b6670e5b2c53a3d",
+    "image": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-dm-production@sha256:dca7c7619323ff673e061bed38825265e94fba3ba0482fbaf690383cc3444231",
+    "ssm_command": "ba329968-3edd-400b-b93d-9be1bdd9e0dd",
+    "persistent_state_preserved": true
+  },
+  "frontend": {
+    "origin": "https://dm.teamofsilicons.com",
+    "deployment": "https://silicon-dm-frontend-6hynuvg8p-saketdev12-5675s-projects.vercel.app"
+  },
+  "docs": {
+    "origin": "https://docs.dm.teamofsilicons.com",
+    "deployment": "https://silicon-dm-docs-p0l9ak0to-saketdev12-5675s-projects.vercel.app",
+    "build": "31 pages and local links validated; prebuilt Vercel output preserves response security headers and legacy docs redirects"
+  },
+  "interface": {
+    "source_commit": "1e4f63a5bc040cc2cb6d8057dfc0f2fe8130151f",
+    "gateway_image": "234951665042.dkr.ecr.us-east-1.amazonaws.com/interface-web@sha256:90c287c3b8191aa38400592b9ff31a10f6379a9ee18772dbebf82a5b633a28d1",
+    "frontend_deployment": "https://interface-ad0v6on1l-saketdev12-5675s-projects.vercel.app",
+    "authenticated_history_verified": true,
+    "canonical_direct_address_verified": true,
+    "reply_composer_sender_and_content_verified": true
+  },
+  "validation": {
+    "rust_tests": 84,
+    "dm_web_tests": 18,
+    "interface_tests": 316,
+    "strict_clippy_and_format": true,
+    "live_http": [
+      {
+        "url": "https://backend.dm.teamofsilicons.com/live",
+        "status": 204,
+        "bytes": 0
+      },
+      {
+        "url": "https://backend.dm.teamofsilicons.com/ready",
+        "status": 204,
+        "bytes": 0
+      },
+      {
+        "url": "https://backend.dm.teamofsilicons.com/api/v1/contracts",
+        "status": 200,
+        "bytes": 1728,
+        "version": "0.8.0",
+        "compatibility": [
+          {
+            "http": 2,
+            "minimum_client": "0.8.0",
+            "shared": 1,
+            "websocket": 4
+          }
+        ]
+      },
+      {
+        "url": "https://gateway.dm.teamofsilicons.com/healthz",
+        "status": 200,
+        "bytes": 42
+      },
+      {
+        "url": "https://backend.interface.teamofsilicons.com/healthz",
+        "status": 200,
+        "bytes": 37
+      },
+      {
+        "url": "https://dm.teamofsilicons.com/",
+        "status": 200,
+        "bytes": 537
+      },
+      {
+        "url": "https://interface.teamofsilicons.com/",
+        "status": 200,
+        "bytes": 923
+      },
+      {
+        "url": "https://docs.dm.teamofsilicons.com/",
+        "status": 200,
+        "bytes": 6191,
+        "csp": "default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self' https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        "schema_terms": null
+      },
+      {
+        "url": "https://docs.dm.teamofsilicons.com/wire-format/",
+        "status": 200,
+        "bytes": 12668,
+        "csp": "default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self' https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        "schema_terms": true
+      }
+    ],
+    "live_send_verification": "Not performed: saved isolated CLI test credentials returned 401, including refresh and fixture login. Authenticated production history and reply preview were verified without sending messages.",
+    "windows_execution": "Not run on Windows; both native PE architectures validated during packaging."
+  }
+}
