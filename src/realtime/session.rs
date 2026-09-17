@@ -556,7 +556,21 @@ impl SessionRuntime {
                 let conversation_id = self
                     .state
                     .store
-                    .resolve_conversation_id(&self.authority.organization_id, &conversation_id)
+                    .resolve_destination(
+                        &self.authority,
+                        &conversation_id,
+                        false,
+                        self.state.identity.as_ref(),
+                    )
+                    .await?;
+                let message_id = self
+                    .state
+                    .store
+                    .resolve_message_id(
+                        &self.authority.organization_id,
+                        conversation_id,
+                        &message_id,
+                    )
                     .await?;
                 if device_id != self.consumer_id {
                     return Err(AppError::Forbidden);
@@ -591,9 +605,24 @@ impl SessionRuntime {
                 let conversation_id = self
                     .state
                     .store
-                    .resolve_conversation_id(&self.authority.organization_id, &conversation_id)
+                    .resolve_destination(
+                        &self.authority,
+                        &conversation_id,
+                        true,
+                        self.state.identity.as_ref(),
+                    )
                     .await?;
-                let mut message = *message;
+                let mut raw = *message;
+                self.state
+                    .store
+                    .resolve_message_input(
+                        &self.authority.organization_id,
+                        conversation_id,
+                        &mut raw,
+                    )
+                    .await?;
+                let mut message: crate::domain::MessageCreate = serde_json::from_value(raw)
+                    .map_err(|_| AppError::validation("invalid message content"))?;
                 if org_id != self.authority.organization_id {
                     return Err(AppError::Forbidden);
                 }
@@ -811,7 +840,46 @@ async fn send_public_frame(
     frame: &ServerFrame,
 ) -> AppResult<()> {
     let mut value = serde_json::to_value(frame).map_err(AppError::internal)?;
+    if let ServerFrame::ReceiptRecorded { message_id, .. } = frame {
+        let message = state.store.load_message(*message_id).await?;
+        value["data"]["message_id"] =
+            serde_json::json!(silicon_dm_protocol::message_code(message.sequence));
+        value["data"]["conversation_id"] = serde_json::json!(message.conversation_id);
+    }
+    if let ServerFrame::Receipt { message_id, .. } = frame {
+        let message = state.store.load_message(*message_id).await?;
+        let mut data = serde_json::to_value(message).map_err(AppError::internal)?;
+        for key in ["delivery_id", "actor_id", "delivery_sequence"] {
+            data[key] = value["data"][key].clone();
+        }
+        value["data"] = data;
+    }
+    state.store.public_messages(&mut value).await?;
     state.store.public_conversation_ids(&mut value).await?;
+    if matches!(
+        frame,
+        ServerFrame::Message { .. } | ServerFrame::Receipt { .. }
+    ) {
+        let kind = match frame {
+            ServerFrame::Receipt { status, .. } => match status {
+                crate::domain::MessageStatus::Read => "message.read",
+                crate::domain::MessageStatus::Failed => "message.failed",
+                _ => "message.delivered",
+            },
+            _ if !value["data"]["deleted_at"].is_null() => "message.deleted",
+            _ if value["data"]["version"].as_i64().unwrap_or(1) > 1 => "message.updated",
+            _ => "message.created",
+        };
+        value["type"] = serde_json::json!(kind);
+        value["metadata"] = serde_json::json!({"source":"dm","delivery_id":value["data"]["delivery_id"],"delivery_sequence":value["data"]["delivery_sequence"]});
+        if let Some(data) = value["data"].as_object_mut() {
+            if let Some(actor) = data.remove("actor_id") {
+                data.insert("recipient_id".into(), actor);
+            }
+            data.remove("delivery_id");
+            data.remove("delivery_sequence");
+        }
+    }
     let encoded = serde_json::to_string(&value).map_err(AppError::internal)?;
     socket
         .send(SocketMessage::Text(encoded.into()))

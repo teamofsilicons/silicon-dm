@@ -2,7 +2,7 @@
 //! retain their normal semantics; every JSON document has exactly type and data.
 use serde::{Deserialize, Serialize};
 
-pub const WEBSOCKET_VERSION: u16 = 3;
+pub const WEBSOCKET_VERSION: u16 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +30,7 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
         .trim_matches('/');
     let p: Vec<_> = path.split('/').collect();
     match (method, p.as_slice()) {
+        ("POST", ["messages"]) => "message.created",
         (_, ["iam"]) => "iam",
         (_, ["contracts"]) => "contracts",
         (_, ["reports"]) => "report",
@@ -46,10 +47,10 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
         (_, ["groups", _, "members"]) => "invite_group_members",
         ("POST", ["conversations"]) => "create_conversation",
         (_, ["conversations"]) => "conversations",
-        ("POST", ["conversations", _, "messages"]) => "new_message",
+        ("POST", ["conversations", _, "messages"]) => "message.created",
         (_, ["conversations", _, "messages"]) => "messages",
-        ("PATCH", ["conversations", _, "messages", _]) => "edit_message",
-        ("DELETE", ["conversations", _, "messages", _]) => "delete_message",
+        ("PATCH", ["conversations", _, "messages", _]) => "message.updated",
+        ("DELETE", ["conversations", _, "messages", _]) => "message.deleted",
         (_, ["conversations", _, "messages", _]) => "message",
         (_, ["conversations", _, "messages", _, "receipts"]) => "receipt",
         (_, ["conversations", _, "bundles"]) => "create_bundle",
@@ -182,5 +183,71 @@ mod group_id_tests {
         ] {
             assert!(!super::valid_group_id(id), "{id}");
         }
+    }
+}
+
+/// Conversation-local base-36 ID, padded to at least three characters.
+/// Internal message sequences start at one; public identifiers start at 000.
+pub fn message_code(sequence: i64) -> Option<String> {
+    let mut value = u64::try_from(sequence.checked_sub(1)?).ok()?;
+    let mut digits = Vec::new();
+    loop {
+        digits.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(value % 36) as usize]);
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+    while digits.len() < 3 {
+        digits.push(b'0');
+    }
+    digits.reverse();
+    String::from_utf8(digits).ok()
+}
+
+/// Decode only canonical IDs; reject aliases such as 0000, uppercase or overflow.
+pub fn message_sequence(code: &str) -> Option<i64> {
+    if !(3..=13).contains(&code.len()) {
+        return None;
+    }
+    let mut value = 0_i64;
+    for byte in code.bytes() {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'z' => byte - b'a' + 10,
+            _ => return None,
+        };
+        value = value.checked_mul(36)?.checked_add(i64::from(digit))?;
+    }
+    let sequence = value.checked_add(1)?;
+    (message_code(sequence)?.as_str() == code).then_some(sequence)
+}
+
+#[cfg(test)]
+mod message_code_tests {
+    #[test]
+    fn boundaries_and_canonical_round_trips() {
+        for (n, code) in [
+            (1, "000"),
+            (10, "009"),
+            (11, "00a"),
+            (36, "00z"),
+            (37, "010"),
+            (46656, "zzz"),
+            (46657, "1000"),
+            (1679616, "zzzz"),
+            (1679617, "10000"),
+        ] {
+            assert_eq!(super::message_code(n).as_deref(), Some(code));
+            assert_eq!(super::message_sequence(code), Some(n));
+        }
+        assert_eq!(
+            super::message_sequence(&super::message_code(i64::MAX).unwrap()),
+            Some(i64::MAX)
+        );
+        for code in ["", "00", "0000", "ABC", "a/b", "zzzzzzzzzzzzz"] {
+            assert_eq!(super::message_sequence(code), None);
+        }
+        assert_eq!(super::message_code(0), None);
     }
 }

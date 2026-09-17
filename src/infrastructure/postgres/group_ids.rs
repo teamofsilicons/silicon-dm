@@ -6,6 +6,63 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 impl PostgresStore {
+    /// Resolve a direct recipient using the same IAM checks as explicit chat creation.
+    pub(crate) async fn resolve_destination(
+        &self,
+        auth: &crate::application::auth::AuthContext,
+        value: &str,
+        create: bool,
+        identity: &dyn crate::application::ports::IdentityProvider,
+    ) -> AppResult<Uuid> {
+        if Uuid::parse_str(value).is_ok() || value.starts_with("g:") || value.contains("::") {
+            return self
+                .resolve_conversation_id(&auth.organization_id, value)
+                .await;
+        }
+        let recipient: crate::domain::ActorId = value
+            .parse()
+            .map_err(|_| AppError::validation("invalid recipient"))?;
+        let recipient = recipient.base_actor_id().map_err(AppError::validation)?;
+        if recipient == auth.actor.id {
+            return Err(AppError::validation("recipient must be another account"));
+        }
+        let actors = vec![auth.actor.id.clone(), recipient.clone()];
+        let participants = identity.authorize_participants(auth, &actors).await?;
+        let participants = crate::api::handlers::verify_resolved_actors(&actors, participants)?;
+        if !participants.contains(&auth.actor) {
+            return Err(AppError::Forbidden);
+        }
+        if !create {
+            let mut ordered = participants;
+            ordered.sort_by(|a, b| {
+                (a.actor_type.as_str(), a.id.as_str()).cmp(&(b.actor_type.as_str(), b.id.as_str()))
+            });
+            let address = ordered
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>()
+                .join("::");
+            return self
+                .resolve_conversation_id(&auth.organization_id, &address)
+                .await;
+        }
+        let key = format!(
+            "recipient-chat:{}",
+            blake3::hash(recipient.as_str().as_bytes()).to_hex()
+        );
+        let conversation = self
+            .create_conversation(crate::application::commands::CreateConversationCommand {
+                organization_id: auth.organization_id.clone(),
+                creator: auth.actor.clone(),
+                participants,
+                idempotency_key: key
+                    .parse()
+                    .map_err(|_| AppError::validation("invalid idempotency key"))?,
+            })
+            .await?;
+        Ok(conversation.id)
+    }
+
     /// Resolve an address in the authenticated organization. UUID aliases keep old links usable.
     pub(crate) async fn resolve_conversation_id(
         &self,
@@ -15,13 +72,13 @@ impl PostgresStore {
         if let Ok(id) = Uuid::parse_str(value) {
             return Ok(id);
         }
-        if !silicon_dm_protocol::valid_group_id(value) {
+        if !silicon_dm_protocol::valid_group_id(value) && !value.contains("::") {
             return Err(AppError::validation(
-                "expected a conversation UUID or g:org:group-slug",
+                "expected a direct conversation address, UUID or g:org:group-slug",
             ));
         }
         sqlx::query_scalar(
-            "SELECT conversation_id FROM groups WHERE organization_id=$1 AND public_id=$2",
+            "SELECT id FROM conversation_addresses WHERE organization_id=$1 AND public_id=$2",
         )
         .bind(org.as_str())
         .bind(value)
@@ -48,12 +105,11 @@ impl PostgresStore {
             return Ok(());
         }
         let ids: Vec<_> = ids.into_iter().collect();
-        let rows: Vec<(Uuid, String)> = sqlx::query_as(
-            "SELECT conversation_id,public_id FROM groups WHERE conversation_id=ANY($1)",
-        )
-        .bind(ids)
-        .fetch_all(self.pool())
-        .await?;
+        let rows: Vec<(Uuid, String)> =
+            sqlx::query_as("SELECT id,public_id FROM conversation_addresses WHERE id=ANY($1)")
+                .bind(ids)
+                .fetch_all(self.pool())
+                .await?;
         let ids: HashMap<_, _> = rows.into_iter().collect();
         visit_ids(value, &mut |field| {
             if let Some(public) = field

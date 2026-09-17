@@ -194,21 +194,22 @@ struct StoredDeliveryIdentity {
     #[serde(rename = "type")]
     kind: String,
     message: Option<StoredMessageIdentity>,
-    message_id: Option<Uuid>,
+    message_id: Option<String>,
     data: Option<StoredDeliveryData>,
 }
 #[derive(serde::Deserialize)]
 struct StoredDeliveryData {
-    id: Option<Uuid>,
+    #[serde(rename = "message-id", alias = "id")]
+    id: Option<String>,
     conversation_id: Option<String>,
     sender: Option<crate::Actor>,
     sequence: Option<i64>,
     created_at: Option<String>,
-    message_id: Option<Uuid>,
+    message_id: Option<String>,
 }
 #[derive(serde::Deserialize)]
 struct StoredMessageIdentity {
-    id: Uuid,
+    id: String,
     conversation_id: String,
     sender: crate::Actor,
     sequence: i64,
@@ -217,27 +218,45 @@ struct StoredMessageIdentity {
 // Existing queues may replay the same immutable message with its new public address.
 // The caller also verifies message UUID, sender, sequence, and creation timestamp.
 fn same_conversation_identity(old: &str, new: &str) -> bool {
-    old == new || (Uuid::parse_str(old).is_ok() && silicon_dm_protocol::valid_group_id(new))
+    old == new
+        || (Uuid::parse_str(old).is_ok()
+            && (silicon_dm_protocol::valid_group_id(new) || new.contains("::")))
 }
 fn same_delivery_identity(old: &StoredDeliveryIdentity, new: &ServerFrame) -> bool {
     match new {
         ServerFrame::Message { message: new, .. }
-            if matches!(old.kind.as_str(), "message" | "new_message") =>
+            if matches!(
+                old.kind.as_str(),
+                "message"
+                    | "new_message"
+                    | "message.created"
+                    | "message.updated"
+                    | "message.deleted"
+            ) =>
         {
             if let Some(data) = &old.data {
-                return data.id == Some(new.id)
+                return (data.id.as_ref() == Some(&new.id)
+                    || data
+                        .sequence
+                        .and_then(silicon_dm_protocol::message_code)
+                        .as_ref()
+                        == Some(&new.id))
                     && data
                         .conversation_id
                         .as_ref()
                         .is_some_and(|old| same_conversation_identity(old, &new.conversation_id))
                     && data.sender.as_ref() == Some(&new.sender)
-                    && data.sequence == Some(new.sequence)
+                    && data.sequence.is_none_or(|n| {
+                        n == new.sequence
+                            || silicon_dm_protocol::message_code(n).as_ref() == Some(&new.id)
+                    })
                     && data.created_at.as_ref() == Some(&new.created_at);
             }
             let Some(old) = &old.message else {
                 return false;
             };
-            old.id == new.id
+            (old.id == new.id
+                || silicon_dm_protocol::message_code(old.sequence).as_ref() == Some(&new.id))
                 && same_conversation_identity(&old.conversation_id, &new.conversation_id)
                 && old.sender == new.sender
                 && old.sequence == new.sequence
@@ -245,11 +264,23 @@ fn same_delivery_identity(old: &StoredDeliveryIdentity, new: &ServerFrame) -> bo
         }
         ServerFrame::Receipt {
             message_id: new, ..
-        } if old.kind == "receipt" => {
+        } if matches!(
+            old.kind.as_str(),
+            "receipt" | "message.delivered" | "message.read" | "message.failed"
+        ) =>
+        {
             old.message_id
                 .as_ref()
-                .or_else(|| old.data.as_ref().and_then(|data| data.message_id.as_ref()))
-                == Some(new)
+                .or_else(|| {
+                    old.data
+                        .as_ref()
+                        .and_then(|data| data.message_id.as_ref().or(data.id.as_ref()))
+                })
+                .is_some_and(|id| {
+                    id == new
+                        || (Uuid::parse_str(id).is_ok()
+                            && silicon_dm_protocol::message_sequence(new).is_some())
+                })
         }
         _ => false,
     }

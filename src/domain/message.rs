@@ -12,7 +12,7 @@ use super::{
 };
 
 /// Durable metadata for a generic attachment.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Attachment {
     /// Stable HTTPS resource URL.
     pub permanent_url: Url,
@@ -25,6 +25,40 @@ pub struct Attachment {
     /// Declared byte size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+}
+impl<'de> Deserialize<'de> for Attachment {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Details {
+            permanent_url: url::Url,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            content_type: Option<String>,
+            #[serde(default)]
+            size: Option<u64>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            Link(url::Url),
+            Details(Details),
+        }
+        Ok(match Input::deserialize(deserializer)? {
+            Input::Link(permanent_url) => Self {
+                permanent_url,
+                name: None,
+                content_type: None,
+                size: None,
+            },
+            Input::Details(d) => Self {
+                permanent_url: d.permanent_url,
+                name: d.name,
+                content_type: d.content_type,
+                size: d.size,
+            },
+        })
+    }
 }
 
 /// Durable metadata for a voice attachment.
@@ -243,7 +277,11 @@ impl MessageCreate {
         for address in [&self.sender_id, &self.recipient_id].into_iter().flatten() {
             address.address_parts()?;
         }
-        if self.text.as_ref().is_some_and(String::is_empty) {
+        if self.text.as_ref().is_some_and(String::is_empty)
+            && self.attachments.is_empty()
+            && self.voice.is_none()
+            && self.gif.is_none()
+        {
             return Err("message text must contain at least one character");
         }
         let has_content = self.text.is_some()
@@ -260,7 +298,7 @@ impl MessageCreate {
         {
             return Err("message text exceeds 100,000,000 characters");
         }
-        if self.voice.is_none() && self.voice_transcript.is_some() {
+        if self.voice.is_none() && self.attachments.is_empty() && self.voice_transcript.is_some() {
             return Err("voice_transcript requires a voice attachment");
         }
         if self

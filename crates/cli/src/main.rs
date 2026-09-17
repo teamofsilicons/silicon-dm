@@ -146,7 +146,7 @@ enum Command {
         #[command(subcommand)]
         command: Groups,
     },
-    /// Send, reply, inspect, edit or delete messages with preserved metadata.
+    /// Send, reply, inspect, edit or delete messages using recipient addresses and short IDs.
     Messages {
         #[command(subcommand)]
         command: Messages,
@@ -327,7 +327,7 @@ struct Content {
     /// Intended participant address, for example deliberate@cos:tos.
     #[arg(long, visible_alias = "to")]
     recipient_id: Option<String>,
-    /// Full MessageCreate JSON file or '-'; supports voice, transcript, GIF and metadata.
+    /// Message JSON file or '-'; supports text, attachment URLs, transcript and reply.
     #[arg(long)]
     data: Option<PathBuf>,
     #[arg(long)]
@@ -335,12 +335,12 @@ struct Content {
     /// Existing attachment URL, repeatable. DM never uploads the file.
     #[arg(long = "attachment")]
     attachments: Vec<url::Url>,
-    /// Preserved JSON object, including '{}'.
-    #[arg(long)]
+    /// Retired message metadata option; use the fixed message fields.
+    #[arg(long, hide = true)]
     metadata: Option<String>,
     /// Original message in this conversation.
     #[arg(long)]
-    reply_to: Option<Uuid>,
+    reply_to: Option<String>,
 }
 impl Content {
     fn read(self) -> Result<MessageCreate> {
@@ -358,9 +358,10 @@ impl Content {
         if let Some(text) = self.text {
             m.text = Some(text)
         }
-        if let Some(metadata) = self.metadata {
-            m.metadata =
-                serde_json::from_str(&metadata).context("--metadata must be a JSON object")?
+        if self.metadata.is_some() || !m.metadata.is_empty() {
+            bail!(
+                "Message metadata was removed in DM 0.8. Use message, attachments, voice_transcript and reply."
+            );
         }
         if self.reply_to.is_some() {
             m.reply_to_message_id = self.reply_to
@@ -391,7 +392,7 @@ impl Content {
 enum Messages {
     /// List newest-first message history with a resumable cursor.
     List {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
         #[command(flatten)]
         page: Pagination,
@@ -400,17 +401,17 @@ enum Messages {
     },
     /// Fetch a message including its current version or deletion tombstone.
     Show {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
-        #[arg(help = "Message UUID from messages send/list")]
-        message: Uuid,
+        #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
+        message: String,
     },
     /// Send any combination of text, existing links, voice or GIFs.
     #[command(
-        after_help = "EXAMPLES\n  dm messages send CONVERSATION_ID --text 'Hello' --metadata '{\"task_id\":\"t42\"}'\n  dm messages send CONVERSATION_ID --attachment https://example.com/file.pdf\n  dm messages send CONVERSATION_ID --text 'Reply' --reply-to MESSAGE_ID\n  dm messages send CONVERSATION_ID --data message.json\n\nJSON: {\"text\":\"Hello\",\"attachments\":[],\"metadata\":{}}. Voice uses {\"permanent_url\":\"https://...\",\"duration_milliseconds\":1000}; voice_transcript is optional.\nNEXT: dm messages list CONVERSATION_ID"
+        after_help = "EXAMPLES\n  dm messages send cos:tos --text 'hey'\n  dm messages send cos:tos --attachment https://example.com/file.pdf\n  dm messages send cos:tos --text \"what's up\" --reply-to 000\n  dm messages send cos:tos --data message.json\n\nJSON: {\"message\":\"hey\",\"attachments\":[],\"voice_transcript\":null,\"reply\":null}. Audio URLs go in attachments.\nNEXT: dm messages list cos:tos"
     )]
     Send {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
         #[command(flatten)]
         content: Content,
@@ -423,10 +424,10 @@ enum Messages {
         after_help = "Fetch with messages show first. Supply the complete intended content and observed --version. A conflict never overwrites a newer revision. Retry with the original --idempotency-key."
     )]
     Edit {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
-        #[arg(help = "Message UUID from messages send/list")]
-        message: Uuid,
+        #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
+        message: String,
         #[arg(
             long,
             help = "Observed version from messages show; prevents overwriting newer changes"
@@ -437,10 +438,10 @@ enum Messages {
     },
     /// Store a tombstone using the observed current version.
     Delete {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
-        #[arg(help = "Message UUID from messages send/list")]
-        message: Uuid,
+        #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
+        message: String,
         #[arg(
             long,
             help = "Observed version from messages show; prevents overwriting newer changes"
@@ -452,24 +453,24 @@ enum Messages {
 enum Receipts {
     /// Report receipt by this recipient device.
     Delivered {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
-        #[arg(help = "Message UUID from messages send/list")]
-        message: Uuid,
+        #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
+        message: String,
     },
     /// Report that this recipient read the message; delivery is implied.
     Read {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
-        #[arg(help = "Message UUID from messages send/list")]
-        message: Uuid,
+        #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
+        message: String,
     },
 }
 #[derive(Subcommand)]
 enum Drafts {
     /// Fetch this actor's current synchronized private draft.
     Get {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
     },
     /// Full DraftInput JSON. Version 0 creates; replacement requires the current version.
@@ -477,7 +478,7 @@ enum Drafts {
         after_help = "Fields: message_content, attachments, voice, voice_transcript, gif, metadata, reply_to_message_id. A 409 preserves the server draft where available; fetch, resolve and save with its new version."
     )]
     Put {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
         #[arg(long)]
         data: PathBuf,
@@ -486,22 +487,22 @@ enum Drafts {
     },
     /// Delete this actor's current private draft.
     Delete {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
     },
 }
 #[derive(Subcommand)]
 enum Bundles {
-    /// JSON: message_ids (1-100 unique UUIDs), display_message (normal message content).
+    /// JSON: message_ids (1-100 unique conversation-local codes), display_message (normal message content).
     Create {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
         #[arg(long)]
         data: PathBuf,
     },
     /// Expand a bundle into its display and original messages.
     Show {
-        #[arg(help = "Conversation UUID or group address, e.g. g:tos:product-design")]
+        #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
         bundle: Uuid,
     },

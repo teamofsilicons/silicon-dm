@@ -76,11 +76,18 @@ impl IdentityProvider for Identity {
         _: &AuthContext,
         ids: &[ActorId],
     ) -> AppResult<Vec<ActorRef>> {
+        if ids.iter().any(|id| id.as_str() == "blocked") {
+            return Err(AppError::Forbidden);
+        }
         Ok(ids
             .iter()
             .map(|id| ActorRef {
                 id: id.clone(),
-                actor_type: ActorType::Carbon,
+                actor_type: if id.as_str() == "cos:tos" {
+                    ActorType::Silicon
+                } else {
+                    ActorType::Carbon
+                },
             })
             .collect())
     }
@@ -976,10 +983,8 @@ async fn group_address_socket_roundtrip(
             }
             if value["type"] == "message_accepted" {
                 assert_eq!(value["data"]["conversation_id"], id);
-                assert_eq!(
-                    value["data"]["metadata"]["conversation_id"],
-                    "leave-this-alone"
-                );
+                assert!(value["data"].get("metadata").is_none());
+                assert!(value["data"]["message-id"].as_str().is_some());
                 let _: silicon_dm_client::models::ServerFrame =
                     serde_json::from_value(value.clone())?;
                 break;
@@ -1316,6 +1321,222 @@ async fn honeycomb_lifecycle_is_authenticated_fenced_and_retry_safe() -> Result 
         200,
         "old receipt is replayable without an effect"
     );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "exercise recipient addressing and fixed message snapshots across their full lifecycle"
+)]
+async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_replies() -> Result {
+    use silicon_dm_client::{Client, MessageCreate, ReceiptStatus};
+    let container = Postgres::default().with_tag("16-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@{}:{}/postgres",
+        container.get_host().await?,
+        container.get_host_port_ipv4(5432).await?
+    );
+    let app = state(settings(url, "http://localhost:9999")?).await?;
+    let pool = app.store.pool().clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let server =
+        tokio::spawn(
+            async move { axum::serve(listener, silicon_dm::api::build_router(app)).await },
+        );
+    let alice = Client::new(&base)?.with_auth("token-alice", "tos");
+    let bob = Client::new(&base)?.with_auth("token-bob", "tos");
+    let text: MessageCreate = serde_json::from_value(json!({"message":"hey"}))?;
+    let first = alice.send_message("bob", &text, "first-direct").await?;
+    assert_eq!(first.id, "000");
+    assert_eq!(first.conversation_id, "alice::bob");
+    assert_eq!(first.content.recipient_id.as_deref(), Some("bob"));
+    assert_eq!(
+        alice.send_message("bob", &text, "first-direct").await?.id,
+        first.id
+    );
+    let reply: MessageCreate = serde_json::from_value(
+        json!({"message":"what's up","reply":{"message-id":"000","content":{"message":"forged"}}}),
+    )?;
+    let second = bob.send_message("alice", &reply, "reply-direct").await?;
+    assert_eq!(second.id, "001");
+    assert_eq!(second.conversation_id, first.conversation_id);
+    let quote = second.reply.as_ref().ok_or("missing quote")?;
+    assert_eq!(quote.sender.id, "alice");
+    assert_eq!(
+        quote.content.as_ref().and_then(|c| c.message.as_deref()),
+        Some("hey")
+    );
+    let attachments: MessageCreate = serde_json::from_value(
+        json!({"attachments":["https://files.example/voice.ogg","https://files.example/note.pdf"],"voice_transcript":"hello"}),
+    )?;
+    let third = alice
+        .send_message("bob", &attachments, "attachments-direct")
+        .await?;
+    assert_eq!(third.id, "002");
+    assert_eq!(third.content.text.as_deref(), Some(""));
+    assert_eq!(third.content.attachments.len(), 2);
+    assert_eq!(third.content.voice_transcript.as_deref(), Some("hello"));
+    assert!(
+        alice
+            .send_message("bob", &MessageCreate::default(), "empty-direct")
+            .await
+            .is_err()
+    );
+    assert!(alice.message("bob", "../000").await.is_err());
+    assert!(
+        alice
+            .send_message("blocked", &text, "denied-direct")
+            .await
+            .is_err()
+    );
+    let legacy: (Uuid, Uuid) =
+        sqlx::query_as("SELECT conversation_id,id FROM messages WHERE text_content='hey'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(alice.message(legacy.0, legacy.1).await?.id, "000");
+    let edited = alice
+        .edit_message(
+            "bob",
+            "000",
+            &serde_json::from_value(json!({"message":"heyy"}))?,
+            1,
+            "edit-direct",
+        )
+        .await?;
+    assert_eq!(edited.id, "000");
+    assert_eq!(edited.version, Some(2));
+    assert!(edited.updated_at.is_some());
+    let mut listener = alice.connect(&["alice".into()], "schema-listener").await?;
+    let read = bob
+        .record_receipt("alice", "000", ReceiptStatus::Read, "test-device")
+        .await?;
+    assert!(read.read_at.is_some());
+    let event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = listener.next().await.ok_or("socket closed")??;
+            if !frame.is_text() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(frame.to_text()?)?;
+            if value["type"] == "message.read" {
+                return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(value);
+            }
+        }
+    })
+    .await??;
+    assert_eq!(event["data"]["message-id"], "000");
+    assert_eq!(event["data"]["recipient_id"], "alice");
+    assert_eq!(event["data"]["message"], "heyy");
+    assert!(event["data"]["read_at"].is_string());
+    assert!(event["data"].get("delivery_id").is_none());
+    assert!(event["data"].get("sequence").is_none());
+    assert_eq!(event["metadata"]["source"], "dm");
+    let decoded: silicon_dm_client::ServerFrame = serde_json::from_value(event.clone())?;
+    assert_eq!(serde_json::to_value(decoded)?, event);
+    listener.close(None).await?;
+    let deleted = alice
+        .delete_message("bob", "000", 2, "delete-direct")
+        .await?;
+    let tombstone = serde_json::to_value(&deleted)?;
+    assert_eq!(tombstone["message-id"], "000");
+    assert!(tombstone["message"].is_null());
+    assert_eq!(tombstone["attachments"], json!([]));
+    assert!(
+        alice
+            .message("bob", "001")
+            .await?
+            .reply
+            .ok_or("quote")?
+            .content
+            .is_none()
+    );
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE conversations DISABLE TRIGGER conversations_enforce_update_policy")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE conversations SET next_message_sequence=46656 WHERE id=$1")
+        .bind(legacy.0)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE conversations ENABLE TRIGGER conversations_enforce_update_policy")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let last = alice.send_message("bob", &text, "last-three-digit").await?;
+    let next = alice.send_message("bob", &text, "first-four-digit").await?;
+    assert_eq!(last.id, "zzz");
+    assert_eq!(next.id, "1000");
+    let (left, right) = tokio::join!(
+        alice.send_message("bob", &text, "concurrent-left"),
+        bob.send_message("alice", &text, "concurrent-right")
+    );
+    assert_ne!(left?.id, right?.id);
+    let other = alice
+        .send_message("cos:tos", &text, "other-conversation")
+        .await?;
+    assert_eq!(other.conversation_id, "alice::cos:tos");
+    assert_eq!(other.id, "000");
+    assert!(bob.message(&other.conversation_id, "000").await.is_err());
+    let cross_reply: MessageCreate =
+        serde_json::from_value(json!({"message":"invalid reply","reply":{"message-id":legacy.1}}))?;
+    assert!(
+        alice
+            .send_message("cos:tos", &cross_reply, "cross-chat-reply")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        alice.message("cos:tos", "000").await?.conversation_id,
+        other.conversation_id
+    );
+    let http = reqwest::Client::new();
+    let raw: Value = http
+        .get(format!(
+            "{base}/api/v1/conversations/alice::bob/messages/002"
+        ))
+        .bearer_auth("token-alice")
+        .header("X-Org-ID", "tos")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let data = raw["data"].as_object().ok_or("message data")?;
+    let mut expected = vec![
+        "message-id",
+        "conversation_id",
+        "recipient_id",
+        "sender",
+        "message",
+        "attachments",
+        "voice_transcript",
+        "reply",
+        "bundle",
+        "version",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+        "delivered_at",
+        "read_at",
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        data.keys().map(String::as_str).collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        data["attachments"],
+        json!([
+            "https://files.example/voice.ogg",
+            "https://files.example/note.pdf"
+        ])
+    );
+    let response=http.post(format!("{base}/api/v1/messages")).bearer_auth("token-bob").header("X-Org-ID","tos").header("Idempotency-Key","body-recipient").json(&json!({"type":"message.created","data":{"recipient_id":"alice","message":"from body"}})).send().await?.error_for_status()?;
+    let direct: Value = response.json().await?;
+    assert_eq!(direct["data"]["conversation_id"], "alice::bob");
     server.abort();
     Ok(())
 }

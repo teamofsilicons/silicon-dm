@@ -5,21 +5,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::{
-    Activity, ActorId, IdempotencyKey, Message, MessageCreate, OrganizationId, ReceiptStatus,
-};
+use crate::domain::{Activity, ActorId, IdempotencyKey, Message, OrganizationId, ReceiptStatus};
 
 /// Current application-level WebSocket protocol version.
 pub const PROTOCOL_VERSION: u16 = silicon_dm_protocol::WEBSOCKET_VERSION;
 
 /// Frames accepted from an authenticated client.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(
-    tag = "type",
-    content = "data",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
+#[derive(Clone, Debug)]
 pub enum ClientFrame {
     /// Application heartbeat response. It is never persisted or sequenced.
     Pong {
@@ -54,7 +46,65 @@ pub enum ClientFrame {
         /// Parent conversation.
         conversation_id: String,
         /// Message being acknowledged.
-        message_id: Uuid,
+        message_id: String,
+        /// Monotonic receipt state.
+        status: ReceiptStatus,
+        /// Stable client device identifier.
+        device_id: String,
+    },
+    /// Creates a durable conversation message over the realtime connection.
+    SendMessage {
+        /// Represented sender.
+        actor_id: ActorId,
+        /// Organization scope.
+        org_id: OrganizationId,
+        /// Parent conversation.
+        conversation_id: String,
+        /// Retry-safe client key.
+        idempotency_key: IdempotencyKey,
+        /// Normal message content.
+        message: Box<serde_json::Value>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(remote = "ClientFrame")]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+enum ClientFrameWire {
+    /// Application heartbeat response. It is never persisted or sequenced.
+    Pong {
+        /// Echoed server ping identifier.
+        ping_id: String,
+    },
+    /// Cumulative transport acknowledgement for one represented actor.
+    Ack {
+        /// Delivery stream owner.
+        actor_id: ActorId,
+        /// Highest contiguously processed delivery sequence.
+        through_sequence: i64,
+    },
+    /// Requests replay after a client-owned durable cursor.
+    Resume {
+        /// Delivery stream owner.
+        actor_id: ActorId,
+        /// Last sequence durably processed by the client; zero starts at the beginning.
+        after_sequence: i64,
+    },
+    /// Updates or clears transient activity for one represented actor.
+    Presence {
+        /// Actor whose activity changed.
+        actor_id: ActorId,
+        /// Current activity; null clears it while retaining online state.
+        activity: Option<Activity>,
+    },
+    /// Records a device-aware delivered or read receipt.
+    Receipt {
+        /// Represented recipient actor.
+        actor_id: ActorId,
+        /// Parent conversation.
+        conversation_id: String,
+        /// Message being acknowledged.
+        message_id: String,
         /// Monotonic receipt state.
         status: ReceiptStatus,
         /// Stable client device identifier.
@@ -73,8 +123,23 @@ pub enum ClientFrame {
         idempotency_key: IdempotencyKey,
         /// Normal message content.
         #[serde(flatten)]
-        message: Box<MessageCreate>,
+        message: Box<serde_json::Value>,
     },
+}
+
+impl<'de> Deserialize<'de> for ClientFrame {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value
+            .as_object()
+            .is_none_or(|o| o.len() != 2 || !o.contains_key("type") || !o.contains_key("data"))
+        {
+            return Err(serde::de::Error::custom(
+                "expected a type/data command envelope",
+            ));
+        }
+        ClientFrameWire::deserialize(value).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Payload stored in one actor's durable delivery stream.
@@ -256,7 +321,7 @@ mod tests {
         })?;
         assert_eq!(encoded.get("type"), Some(&serde_json::json!("ping")));
         assert!(encoded.get("delivery_sequence").is_none());
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
         Ok(())
     }
 
@@ -272,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_frame_advertises_protocol_version_three() -> Result<(), Box<dyn std::error::Error>> {
+    fn ready_frame_advertises_protocol_version_four() -> Result<(), Box<dyn std::error::Error>> {
         let encoded = serde_json::to_value(ServerFrame::Ready {
             testing_generation: None,
             protocol_version: PROTOCOL_VERSION,
@@ -283,7 +348,7 @@ mod tests {
         assert_eq!(encoded.get("type"), Some(&serde_json::json!("ready")));
         assert_eq!(
             encoded.pointer("/data/protocol_version"),
-            Some(&serde_json::json!(3))
+            Some(&serde_json::json!(4))
         );
         Ok(())
     }
@@ -310,6 +375,7 @@ mod tests {
         let ClientFrame::SendMessage { message, .. } = decoded else {
             return Err("voice command decoded as the wrong frame variant".into());
         };
+        let message: crate::domain::MessageCreate = serde_json::from_value(*message)?;
         assert_eq!(
             message
                 .voice
@@ -331,7 +397,12 @@ mod tests {
         {
             voice.remove("duration_milliseconds");
         }
-        assert!(serde_json::from_value::<ClientFrame>(missing_duration).is_err());
+        assert!(
+            serde_json::from_value::<crate::domain::MessageCreate>(
+                missing_duration["data"].clone()
+            )
+            .is_err()
+        );
         Ok(())
     }
 }

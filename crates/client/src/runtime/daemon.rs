@@ -13,7 +13,7 @@ use axum::{
 };
 use fs2::FileExt;
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -837,48 +837,41 @@ async fn webhooks(context: RuntimeContext) {
         }
     }
 }
-#[derive(Serialize)]
-struct CallbackPayload<'a> {
-    #[serde(rename = "type")]
-    kind: &'a str,
-    data: CallbackData<'a>,
-    // Silicon's native event contract requires a root metadata object. Message
-    // metadata remains unmodified inside data; these are transport identifiers.
-    metadata: CallbackMetadata<'a>,
-}
-#[derive(Serialize)]
-struct CallbackMetadata<'a> {
-    source: &'static str,
-    delivery_id: &'a str,
-}
-#[derive(Serialize)]
-struct CallbackData<'a> {
-    profile: &'a str,
-    testing_environment_id: Option<Uuid>,
-    #[serde(flatten)]
-    event: &'a Value,
-}
-
 /// Only queued v2 frames are upgraded here; live sockets require v3.
 fn upgrade_callback_frame(mut frame: Value) -> Value {
-    if frame.get("data").is_some() {
-        return frame;
-    }
-    let Some(fields) = frame.as_object_mut() else {
-        return frame;
-    };
-    let mut kind = fields.remove("type").unwrap_or(Value::Null);
-    if kind == "message" {
-        kind = json!("new_message");
-        if let Some(Value::Object(mut message)) = fields.remove("message") {
-            if let Some(text) = message.remove("text") {
-                message.insert("message".into(), text);
+    if frame.get("data").is_none() {
+        let Some(fields) = frame.as_object_mut() else {
+            return frame;
+        };
+        let mut kind = fields.remove("type").unwrap_or(Value::Null);
+        if kind == "message" {
+            kind = json!("new_message");
+            if let Some(Value::Object(mut message)) = fields.remove("message") {
+                if let Some(text) = message.remove("text") {
+                    message.insert("message".into(), text);
+                }
+                fields.extend(message);
             }
-            message.entry("metadata").or_insert_with(|| json!({}));
-            fields.extend(message);
         }
+        frame = json!({"type":kind,"data":frame});
     }
-    json!({"type":kind,"data":frame})
+    if frame["type"] == "new_message"
+        && let Ok(mut message) = serde_json::from_value::<crate::Message>(frame["data"].clone())
+    {
+        if let Some(code) = silicon_dm_protocol::message_code(message.sequence) {
+            message.id = code;
+        }
+        message.content.recipient_id = frame["data"]["actor_id"].as_str().map(str::to_owned);
+        let kind = if message.deleted_at.is_some() {
+            "message.deleted"
+        } else if message.version.unwrap_or(1) > 1 {
+            "message.updated"
+        } else {
+            "message.created"
+        };
+        return json!({"type":kind,"data":message,"metadata":{"source":"dm","delivery_id":frame["data"]["delivery_id"],"delivery_sequence":frame["data"]["delivery_sequence"]}});
+    }
+    frame
 }
 async fn deliver_webhook(
     context: RuntimeContext,
@@ -938,17 +931,19 @@ async fn deliver_webhook(
     let Some(event) = item.frame.get("data") else {
         return;
     };
-    let payload = CallbackPayload {
-        kind,
-        data: CallbackData {
-            profile: &profile.name,
-            testing_environment_id: profile.testing_environment_id,
-            event,
-        },
-        metadata: CallbackMetadata {
-            source: "dm",
-            delivery_id: &item.delivery_id,
-        },
+    let payload = if kind.starts_with("message.") {
+        item.frame.clone()
+    } else {
+        let mut data = event.clone();
+        let delivery_sequence = data["delivery_sequence"].clone();
+        if let Some(fields) = data.as_object_mut() {
+            if let Some(actor) = fields.remove("actor_id") {
+                fields.insert("recipient_id".into(), actor);
+            }
+            fields.remove("delivery_id");
+            fields.remove("delivery_sequence");
+        }
+        json!({"type":kind,"data":data,"metadata":{"source":"dm","delivery_id":item.delivery_id,"delivery_sequence":delivery_sequence}})
     };
     let mut request = http.post(webhook_url);
     if let Ok(config) = context.store.load()
@@ -1033,7 +1028,10 @@ fn acknowledges_callback(body: &[u8], delivery_id: &str) -> bool {
         .is_ok_and(|ack| ack.status == "ok" && !ack.event_id.is_nil())
 }
 fn delivery_receipt(item: &queue::WebhookWork, profile: &store::Profile) -> Option<RelayRequest> {
-    if item.frame.get("type")?.as_str()? != "new_message" {
+    if !matches!(
+        item.frame.get("type")?.as_str()?,
+        "new_message" | "message.created" | "message.updated"
+    ) {
         return None;
     }
     let message = item.frame.get("data")?;
@@ -1043,7 +1041,11 @@ fn delivery_receipt(item: &queue::WebhookWork, profile: &store::Profile) -> Opti
         return None;
     }
     let conversation_id = message.get("conversation_id")?.as_str()?.parse().ok()?;
-    let message_id = message.get("id")?.as_str()?.parse().ok()?;
+    let message_id = message
+        .get("message-id")
+        .or_else(|| message.get("id"))?
+        .as_str()?
+        .to_owned();
     let digest =
         blake3::hash(format!("delivered:{}:{}", item.session, item.delivery_id).as_bytes());
     let mut bytes = [0_u8; 16];
@@ -1088,16 +1090,15 @@ mod wire_tests {
                     assert_eq!(body.as_object().map(serde_json::Map::len), Some(3));
                     assert_eq!(
                         body["metadata"],
-                        json!({"source":"dm", "delivery_id":Uuid::nil()})
+                        json!({"source":"dm", "delivery_id":Uuid::nil(),"delivery_sequence":1})
                     );
-                    assert_eq!(body["type"], "new_message");
+                    assert_eq!(body["type"], "message.created");
                     assert_eq!(body["data"]["message"], "hello");
-                    assert_eq!(
-                        body["data"]["metadata"],
-                        json!({"type":"user", "data":{"message":"nested"}})
-                    );
-                    assert_eq!(body["data"]["profile"], "default");
-                    assert_eq!(body["data"]["recipient_id"], "deliberate@cos:tos");
+                    assert!(body["data"].get("metadata").is_none());
+                    assert!(body["data"].get("profile").is_none());
+                    assert!(body["data"].get("sequence").is_none());
+                    assert_eq!(body["data"]["message-id"], "000");
+                    assert_eq!(body["data"]["recipient_id"], "cos:tos");
                     assert_eq!(headers["idempotency-key"], Uuid::nil().to_string());
                     let ack = json!({"acknowledged":true,"delivery_id":Uuid::nil()});
                     // A legacy bare ACK must not mark delivery complete.

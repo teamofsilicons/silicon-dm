@@ -685,7 +685,7 @@ async fn resolve_sender(
     Ok(actor)
 }
 
-pub(super) fn verify_resolved_actors(
+pub(crate) fn verify_resolved_actors(
     requested: &[ActorId],
     resolved: Vec<ActorRef>,
 ) -> AppResult<Vec<ActorRef>> {
@@ -715,6 +715,59 @@ fn validate_gif_query(query: &str) -> AppResult<()> {
 
 fn iam_contract_error() -> AppError {
     AppError::DependencyUnavailable { dependency: "iam" }
+}
+
+/// Sends to an account or group without a client-side conversation lookup.
+pub(super) async fn send_to_recipient(
+    State(state): State<AppState>,
+    Authenticated(authority): Authenticated,
+    Idempotency(idempotency_key): Idempotency,
+    ApiJson(mut input): ApiJson<serde_json::Value>,
+) -> AppResult<(StatusCode, Json<Message>)> {
+    let recipient = input["recipient_id"]
+        .as_str()
+        .ok_or_else(|| AppError::validation("recipient_id is required"))?
+        .to_owned();
+    let conversation_id = state
+        .store
+        .resolve_destination(&authority, &recipient, true, state.identity.as_ref())
+        .await?;
+    state
+        .store
+        .check_group_access(&authority, conversation_id)
+        .await?;
+    state
+        .store
+        .resolve_message_input(&authority.organization_id, conversation_id, &mut input)
+        .await?;
+    if recipient.starts_with("g:")
+        || recipient.contains("::")
+        || Uuid::parse_str(&recipient).is_ok()
+    {
+        input
+            .as_object_mut()
+            .ok_or_else(|| AppError::validation("message must be an object"))?
+            .remove("recipient_id");
+    }
+    let content: MessageCreate = serde_json::from_value(input)
+        .map_err(|_| AppError::validation("invalid message content"))?;
+    let sender = resolve_sender(&state, &authority, content.sender_id.as_ref()).await?;
+    state
+        .store
+        .require_participant(&authority.organization_id, &sender, conversation_id)
+        .await?;
+    let content = prepare_message_content(&state, content)?;
+    let message = state
+        .store
+        .send_message(SendMessageCommand {
+            organization_id: authority.organization_id,
+            conversation_id,
+            sender,
+            content,
+            idempotency_key,
+        })
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(message)))
 }
 
 #[cfg(test)]

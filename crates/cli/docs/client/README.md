@@ -35,15 +35,11 @@ let tokens = dm.login(&short_lived_token, &Uuid::new_v4().to_string()).await?;
 // callbacks after login through LocalRuntime, or own the WebSocket directly.
 let dm = dm.with_auth(&tokens.access_token, &tokens.organization_id);
 let identity = dm.me().await?;
-let conversation = dm.create_conversation(
-    &[other_actor_public_id], &Uuid::new_v4().to_string()
-).await?;
 let mut content = MessageCreate::default();
 content.text = Some("Hello".into());
-content.metadata.insert("task_id".into(), serde_json::json!("task-42"));
 let retry_key = Uuid::new_v4().to_string();
-let message = dm.send_message(conversation.id, &content, &retry_key).await?;
-let history = dm.messages(conversation.id, &PageRequest::default(), false).await?;
+let message = dm.send_message(&other_actor_public_id, &content, &retry_key).await?;
+let history = dm.messages(&message.conversation_id, &PageRequest::default(), false).await?;
 ```
 
 The example's `short_lived_token` and `other_actor_public_id` come from your
@@ -98,10 +94,10 @@ and subscription IDs remain canonical, with the prefixed sender in its message.
 | --- | --- | --- |
 | Identity | `login`, `refresh`, `logout`, `me` | SLT/token and original retry key |
 | Conversations | `conversations`, `create_conversation` | Page request; participant public IDs and retry key |
-| Messages | `messages`, `message`, `send_message`, `edit_message`, `delete_message` | Conversation address and message UUID, content, observed version, retry key |
+| Messages | `messages`, `message`, `send_message`, `edit_message`, `delete_message` | Conversation address and message code, content, observed version, retry key |
 | Receipts | `record_receipt` | Delivered/read state and stable device ID |
 | Drafts | `draft`, `put_draft`, `delete_draft` | Full content; version zero for create or observed version for replacement; versions are retained across deletion |
-| Bundles | `create_bundle`, `bundle` | 1–100 message UUIDs and a display message; Silicon authority |
+| Bundles | `create_bundle`, `bundle` | 1–100 conversation-local message codes and a display message; Silicon authority |
 | Presence | `presence`; `ClientFrame::Presence` over a socket | Actor public ID; activity or null |
 | GIFs | `gifs` with `GifList` | Trending, search query, or recent |
 | Sandbox management | `create_test_environment`, `test_environments`, `test_environment`, `update_test_environment`, `test_environment_key`, `rotate_test_environment_key`, `clean_test_environment`, `delete_test_environment`, `restore_test_environment` | Production owner/creator authority and stable mutation keys; clean may use the root key |
@@ -109,24 +105,9 @@ and subscription IDs remain canonical, with the prefixed sender in its message.
 | Local relay | `relay::RelayClient` | Local relay URL and its private local bearer |
 | Optional runtime | `runtime::LocalRuntime::{login,start,start_with,run,client,store}` | Explicit state directory, local callback, and daemon executable; feature `runtime` |
 
-Every public message and draft includes `metadata`, a JSON **object** defaulting
-to `{}`. Numbers, booleans, strings, nulls, objects and arrays can be values within
-that object. The root metadata value must remain an object. Sending, replay,
-history, drafts, bundle display messages and revisions retain it. A reply sets
-`reply_to_message_id`. A metadata-only revision still sends the complete content
-with `edit_message`; omitted fields are removed by full replacement.
+Messages use the [fixed schema](../wire-format.md). `Message.id` is the conversation-local code and serializes as `message-id`; always scope it by conversation. `MessageCreate.text` serializes as `message`, attachments serialize as HTTPS URL strings, and `reply_to_message_id` serializes as `reply: {"message-id":"..."}`. New JSON input accepts that reply object directly. Reply sender/content are server-owned.
 
-Attachments use `Attachment { permanent_url, name?, content_type?, size? }` and
-are supplied links. Plain URLs inside text need no special treatment. DM does
-not upload or fetch files. Attachments can be the entire message. Voice includes
-`duration_milliseconds`; optional `voice_transcript` is supplied by the caller.
-Historical voice rows may contain a null duration. GIFs contain `provider_id`,
-`url`, optional `preview_url`, and optional `title`.
-
-Message revisions keep the same message ID and increment the version. Deletion
-returns a tombstone with `deleted_at`; update your view to remove its content.
-Check both ID and version when processing events. Transport deduplication uses
-the distinct `delivery_id`, not just `message.id`.
+Audio goes in `attachments`; `voice_transcript` is optional. An attachment-only message uses empty text. Message metadata is no longer returned. Drafts retain their separate editable content schema. Legacy UUID aliases and old attachment objects remain accepted by the backend.
 
 ## Errors, pagination and retries
 

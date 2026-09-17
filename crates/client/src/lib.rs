@@ -190,7 +190,7 @@ impl Client {
         let mut request = self
             .http
             .request(method, self.endpoint(path)?)
-            .header("X-DM-Contract-Version", "1")
+            .header("X-DM-Contract-Version", "2")
             .header(
                 "X-DM-Telemetry",
                 if self.telemetry_enabled { "on" } else { "off" },
@@ -400,8 +400,16 @@ impl Client {
     pub async fn message(
         &self,
         conversation: impl std::fmt::Display,
-        message: Uuid,
+        message: impl std::fmt::Display,
     ) -> Result<Message> {
+        let message = message.to_string();
+        if Uuid::parse_str(&message).is_err()
+            && silicon_dm_protocol::message_sequence(&message).is_none()
+        {
+            return Err(Error::Configuration(
+                "expected a conversation-local message code or legacy UUID".into(),
+            ));
+        }
         let conversation = conversation.to_string();
         validate_conversation_id(&conversation)?;
         self.json(self.request(
@@ -413,11 +421,19 @@ impl Client {
     pub async fn edit_message(
         &self,
         conversation: impl std::fmt::Display,
-        message: Uuid,
+        message: impl std::fmt::Display,
         content: &MessageCreate,
         version: i64,
         key: &str,
     ) -> Result<Message> {
+        let message = message.to_string();
+        if Uuid::parse_str(&message).is_err()
+            && silicon_dm_protocol::message_sequence(&message).is_none()
+        {
+            return Err(Error::Configuration(
+                "expected a conversation-local message code or legacy UUID".into(),
+            ));
+        }
         let conversation = conversation.to_string();
         validate_conversation_id(&conversation)?;
         self.json(
@@ -434,10 +450,18 @@ impl Client {
     pub async fn delete_message(
         &self,
         conversation: impl std::fmt::Display,
-        message: Uuid,
+        message: impl std::fmt::Display,
         version: i64,
         key: &str,
     ) -> Result<Message> {
+        let message = message.to_string();
+        if Uuid::parse_str(&message).is_err()
+            && silicon_dm_protocol::message_sequence(&message).is_none()
+        {
+            return Err(Error::Configuration(
+                "expected a conversation-local message code or legacy UUID".into(),
+            ));
+        }
         let conversation = conversation.to_string();
         validate_conversation_id(&conversation)?;
         self.json(
@@ -453,10 +477,18 @@ impl Client {
     pub async fn record_receipt(
         &self,
         conversation: impl std::fmt::Display,
-        message: Uuid,
+        message: impl std::fmt::Display,
         status: ReceiptStatus,
         device: &str,
     ) -> Result<Message> {
+        let message = message.to_string();
+        if Uuid::parse_str(&message).is_err()
+            && silicon_dm_protocol::message_sequence(&message).is_none()
+        {
+            return Err(Error::Configuration(
+                "expected a conversation-local message code or legacy UUID".into(),
+            ));
+        }
         let conversation = conversation.to_string();
         validate_conversation_id(&conversation)?;
         self.json(
@@ -809,11 +841,16 @@ pub async fn check_update() -> Result<UpdateInfo> {
 }
 
 fn validate_conversation_id(value: &str) -> Result<()> {
-    if Uuid::parse_str(value).is_ok() || silicon_dm_protocol::valid_group_id(value) {
+    if !value.is_empty()
+        && value.len() <= 515
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-.:@".contains(&c))
+    {
         Ok(())
     } else {
         Err(Error::Configuration(
-            "expected a conversation UUID or g:org:group-slug".into(),
+            "expected an account ID, direct conversation address, UUID or group address".into(),
         ))
     }
 }

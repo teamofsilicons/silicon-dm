@@ -9,7 +9,7 @@ The public API is `https://backend.dm.teamofsilicons.com/api/v1`. The machine-re
 Every JSON request and response has exactly `type` and `data` at the root.
 See [wire format](../wire-format.md) for all operation names and migration details.
 Except for full envelope examples, the payloads and field lists below describe
-`data`. Message text is `message`, and metadata is its sibling inside `data`.
+`data`. Message text is `message`; attachments are URL strings. Durable callbacks carry transport metadata at the root.
 
 ## Authentication and request conventions
 
@@ -69,57 +69,26 @@ The three session mutations require an idempotency key but no separate Bearer or
 
 The authenticated actor must participate in a conversation to access its history, messages, drafts, receipts, or bundles. Organization membership alone is not conversation access. Conversation listing has no implicit organization-wide administrator bypass.
 
-## Messages, replies, attachments, and metadata
+## Messages, replies and attachments
 
-| Method and path | Behavior |
-| --- | --- |
-| `GET /conversations/{conversation_id}/messages` | List newest messages; `include_bundled_members=true` includes originals hidden by bundle display messages |
-| `POST /conversations/{conversation_id}/messages` | Durably persist and queue content; return the message with status 202 |
-| `GET /conversations/{conversation_id}/messages/{message_id}` | Read the latest message, including a deletion tombstone |
-| `PATCH /conversations/{conversation_id}/messages/{message_id}` | Original sender replaces content with exact `If-Match` version and idempotency key; return 200 |
-| `DELETE /conversations/{conversation_id}/messages/{message_id}` | Original sender publishes a content-free tombstone with exact `If-Match` version and idempotency key; return 200 message |
+The [fixed message schema](../wire-format.md) defines all fields and examples. Send directly to the authorized recipient:
 
-A message creation or full replacement can combine any supported content:
+```http
+POST /api/v1/conversations/cos:tos/messages
+Authorization: Bearer ACCESS_TOKEN
+X-Org-ID: tos
+X-DM-Contract-Version: 2
+Idempotency-Key: retry-key-0001
+Content-Type: application/json
 
-```json
-{
-  "message": "The recording and notes are ready.",
-  "attachments": [{
-    "permanent_url": "https://files.example.test/notes.pdf",
-    "name": "notes.pdf",
-    "content_type": "application/pdf",
-    "size": 2048
-  }],
-  "voice": {
-    "permanent_url": "https://files.example.test/recording.ogg",
-    "content_type": "audio/ogg",
-    "duration_milliseconds": 42000
-  },
-  "voice_transcript": "Here are the meeting notes.",
-  "metadata": {"topic":"planning","source":{"kind":"agent"},"labels":["meeting"]}
-}
+{"type":"message.created","data":{"message":"hey","attachments":[],"voice_transcript":null,"reply":null}}
 ```
 
-`metadata` is an arbitrary JSON **object**, always returned even when `{}`; its nested JSON values are preserved. It can accompany every message kind, a bundle display message, or a draft. Metadata alone does not satisfy message content requirements. `reply_to_message_id` optionally references an existing message in the same conversation. Cross-conversation or nonexistent targets fail; editing a message to reply to itself fails. `sender_id` is optional routing information and cannot impersonate another actor.
+You can instead POST `/messages` with `recipient_id` in `data`. Direct conversation IDs are canonical member pairs; groups retain their group addresses. A message is identified by its conversation and short `message-id`, starting at `000`. UUID aliases remain accepted.
 
-DM stores attachment links and declared metadata only. It does not upload, fetch, scan, transcribe, proxy, or exchange the links. There is no temporary-URL endpoint and no special file-provider requirement. An attachment object has required `permanent_url` and optional `name`, `content_type`, and `size`. A voice object has the same fields plus required positive `duration_milliseconds`; `voice_transcript` belongs alongside `voice`. GIF content is `{"provider_id":"...","url":"https://...","preview_url":"https://...","title":"..."}` with preview/title optional.
+A reply supplies `reply: {"message-id":"000"}`. The server supplies the referenced sender/content. Use HTTPS URL strings in `attachments`, including audio or GIFs. Text may be empty when attachments exist. Audio transcription belongs in `voice_transcript`. Message metadata and separate voice/GIF objects are no longer public fields.
 
-| Content or transport | Limit |
-| --- | --- |
-| Message text, draft text | 100,000,000 Unicode scalar values each |
-| Voice transcript | 100,000,000 Unicode scalar values independently of text |
-| Attachments plus optional voice item | 100 total |
-| Declared size of each attachment/voice item | 5 GiB, 5,368,709,120 bytes; DM does not transfer the file |
-| Voice duration | 1–172,800,000 milliseconds, up to 48 hours |
-| Attachment link | HTTPS, host required, no username/password, at most 8,192 encoded bytes |
-| Attachment name | 1–1,024 characters when supplied |
-| Declared content type | 1–255 bytes when supplied |
-| Default encoded HTTP body/WebSocket text frame | 128 MiB, 134,217,728 bytes |
-| Maximum configurable encoded body cap | 3 GiB through `DM_MAX_HTTP_BODY_BYTES`; increase only with adequate process memory |
-
-Logical character counts differ from encoded transport bytes. A large Unicode body, escaped JSON, or combined text and transcript can exceed the default byte cap while each text field satisfies its logical limit. Deployments that require those extremes must explicitly increase `DM_MAX_HTTP_BODY_BYTES`; oversized input receives 413 or the corresponding socket frame-limit closure. Bodies are parsed in memory, so a larger cap requires corresponding memory capacity. Auth and IAM webhook routes keep their smaller independent caps.
-
-A stored message has stable `id`, `conversation_id`, typed `sender`, conversation `sequence`, `status`, `created_at`, `version` initially 1, nullable `deleted_at`, metadata, optional reply target, content, receipt timestamps, optional failure reason, and optional bundle reference. Edits increase `version` without changing message ID or original sequence. PATCH is a **full content replacement**: omitted optional content is cleared and omitted metadata becomes `{}`. Send the complete desired content, not a JSON merge patch. Use `If-Match: "1"` after reading version 1. A stale version returns 409. Deletion clears the public content/metadata/reply and sets `deleted_at`; it does not remove the stable message record. Deleted messages cannot be edited or resurrected. Retries with the original idempotency key do not create another revision.
+PATCH `/conversations/{chat}/messages/{code}` uses `type: "message.updated"`, a complete replacement content body, `If-Match`, and a stable idempotency key. DELETE uses the same path and headers with no body; its type is `message.deleted`. IDs remain stable and versions increment. All message output fields remain present, with null timestamps/optional values and empty lists where appropriate.
 
 ## Receipts and durable delivery
 
@@ -151,7 +120,7 @@ Draft input uses `message_content` for text, and supports `attachments`, `voice`
 
 `GET /gifs/trending` returns safe Giphy results. `GET /gifs/search?q=...` accepts a nonempty search of at most 50 characters without controls. Both return `{items: Gif[]}`. `GET /gifs/recent` returns the authenticated Carbon's last 20 distinct used GIFs; Silicon recent history is not supported. Sending a GIF records usage. GIF discovery requires a configured Giphy API key; external provider failure is surfaced instead of returning fabricated results.
 
-## WebSocket protocol version 3
+## WebSocket protocol version 4
 
 ```text
 GET /api/v1/ws?org_id=your-org&device_id=my-device&actors=actor-id
@@ -160,7 +129,7 @@ Authorization: Bearer oat_REDACTED
 
 Repeat the `actors` query parameter rather than using comma-separated IDs. `org_id` and `device_id` must each occur exactly once. IAM must authorize every requested actor; the current adapter represents only its authenticated principal. A relay serving multiple accounts opens a separate authenticated connection for each account. Pass the DM test key header when selecting a test environment. Persist `ready.data.testing_generation` and send it as the optional `testing_generation` query parameter on reconnect. Production returns null. If the generation changed after a test clean or lifecycle change, clear old local cursors and archive the old inbox before replay. A missing/mismatched test generation makes the backend start at sequence 0 and clamp resume requests to 0, so a stale cursor cannot hide new messages.
 
-The backend immediately sends `ready` with `protocol_version: 3`, `connection_id`, `actors`, and `acknowledged_through` keyed by actor ID. Client-to-server frames are:
+The backend immediately sends `ready` with `protocol_version: 4`, `connection_id`, `actors`, and `acknowledged_through` keyed by actor ID. Client-to-server frames are:
 
 | Type | Fields inside `data` | Meaning |
 | --- | --- | --- |
@@ -179,11 +148,11 @@ Server-to-client frames are:
 | `ping` | `ping_id` | Reply immediately; never ACK it |
 | `message_accepted` | `idempotency_key`, flattened Message fields | Ephemeral durable-send confirmation; never transport-ACK it |
 | `receipt_recorded` | `message_id`, `status` | Ephemeral receipt confirmation; never transport-ACK it |
-| `new_message` | `delivery_id`, `actor_id`, `delivery_sequence`, flattened Message fields | Durably apply creation/revision/tombstone and ACK contiguous progress |
-| `receipt` | `delivery_id`, `actor_id`, `delivery_sequence`, `message_id`, `status` | Durably apply monotonic aggregate status and ACK progress |
+| `message.created`, `message.updated`, `message.deleted` | Fixed message snapshot; transport fields in root `metadata` | Durably apply creation/revision/tombstone and ACK contiguous progress |
+| `message.delivered`, `message.read`, `message.failed` | Fixed message snapshot; transport fields in root `metadata` | Durably apply monotonic aggregate status and ACK progress |
 | `error` | `code`, `message`, `recoverable` | Handle the failed command while preserving retryable work |
 
-Delivery IDs are stable across retries. Actor delivery sequences are separate from conversation message sequences. Every participant, including sender devices, receives message/revision/tombstone deliveries. Deduplicate by `delivery_id`; **upsert by message ID and content version**, so an edit does not become a second visible message. A replay of an older delivery may carry the current message revision; ignore stale content versions and do not resurrect a deletion. Do not ACK a gap or an envelope that has not been durably processed. The client/relay's exact-request acknowledgment belongs to its local command API; backend WebSocket confirmations use the schemas above.
+Delivery IDs are stable across retries. Actor delivery sequences are separate from conversation message sequences. Every participant, including sender devices, receives message/revision/tombstone deliveries. Deduplicate by `delivery_id`; **upsert by conversation ID, message code and content version**, so an edit does not become a second visible message. A replay of an older delivery may carry the current message revision; ignore stale content versions and do not resurrect a deletion. Do not ACK a gap or an envelope that has not been durably processed. The client/relay's exact-request acknowledgment belongs to its local command API; backend WebSocket confirmations use the schemas above.
 
 A ping is sent every 30 seconds. Only a pong with the matching current ping ID renews the heartbeat. Two minutes without a valid pong closes with `4000`, reason `heartbeat-timeout`. Heartbeats are not persisted, ACKed, or sequenced. IAM revalidation closes revoked authority with `4001`/`authorization-revoked` and unavailable authority with `1013`/`authorization-unavailable`. Test cleanup, deletion, or key rotation also disconnects stale sessions. Reconnect with current credentials, the current test key, and durable local cursors.
 

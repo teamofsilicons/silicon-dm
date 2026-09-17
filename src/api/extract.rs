@@ -100,7 +100,13 @@ impl FromRequestParts<AppState> for Authenticated {
                 if let Some(value) = parameters.get(field) {
                     let id = state
                         .store
-                        .resolve_conversation_id(&context.organization_id, value)
+                        .resolve_destination(
+                            &context,
+                            value,
+                            parts.method == axum::http::Method::POST
+                                && parts.uri.path().ends_with("/messages"),
+                            state.identity.as_ref(),
+                        )
                         .await?;
                     if field == "conversation_id" {
                         state.store.check_group_access(&context, id).await?;
@@ -108,8 +114,21 @@ impl FromRequestParts<AppState> for Authenticated {
                     parameters.insert(field.into(), id.to_string());
                 }
             }
+            if let (Some(conversation), Some(message)) = (
+                parameters.get("conversation_id"),
+                parameters.get("message_id"),
+            ) {
+                let conversation = conversation.parse().map_err(|_| AppError::NotFound)?;
+                let id = state
+                    .store
+                    .resolve_message_id(&context.organization_id, conversation, message)
+                    .await?;
+                parameters.insert("message_id".into(), id.to_string());
+            }
             parts.extensions.insert(ResolvedPath(parameters));
         }
+        parts.extensions.insert(context.clone());
+        parts.extensions.insert(state.store.clone());
         Ok(Self(context))
     }
 }
@@ -207,15 +226,38 @@ where
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         let expected =
             silicon_dm_protocol::http_type(request.method().as_str(), request.uri().path());
-        let Json(envelope) = Json::<silicon_dm_protocol::Envelope<T>>::from_request(request, state)
-            .await
-            .map_err(|rejection| ApiInputRejection::from_json(&rejection))?;
+        let store = request
+            .extensions()
+            .get::<crate::infrastructure::postgres::PostgresStore>()
+            .cloned();
+        let context = request.extensions().get::<AuthContext>().cloned();
+        let conversation = request
+            .extensions()
+            .get::<ResolvedPath>()
+            .and_then(|p| p.0.get("conversation_id"))
+            .and_then(|v| v.parse().ok());
+        let Json(mut envelope) =
+            Json::<silicon_dm_protocol::Envelope<serde_json::Value>>::from_request(request, state)
+                .await
+                .map_err(|rejection| ApiInputRejection::from_json(&rejection))?;
         if envelope.kind != expected {
             return Err(ApiInputRejection::validation(
                 "request type does not match this endpoint",
             ));
         }
-        Ok(Self(envelope.data))
+        if let (Some(store), Some(context), Some(conversation)) = (store, context, conversation) {
+            store
+                .resolve_message_input(&context.organization_id, conversation, &mut envelope.data)
+                .await
+                .map_err(|_| {
+                    ApiInputRejection::validation(
+                        "message reference is invalid or unavailable in this conversation",
+                    )
+                })?;
+        }
+        serde_json::from_value(envelope.data)
+            .map(Self)
+            .map_err(|_| ApiInputRejection::validation("request data is invalid"))
     }
 }
 

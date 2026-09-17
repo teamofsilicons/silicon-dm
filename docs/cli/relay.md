@@ -40,36 +40,11 @@ route those to the appropriate local silicon handler.
 ## Callback wire contract
 
 For each durable server event, the daemon posts to the endpoint stored for that
-actor profile. The callback URL never reaches the DM server. Example body:
+actor profile. The callback URL never reaches the DM server. Callbacks use the complete [fixed message event](../wire-format.md#fixed-message-output), with `type`, `data`, and root `metadata`.
 
-```json
-{
-  "type": "new_message",
-  "data": {
-    "delivery_id": "53968d42-d72b-4719-aa34-9c8b0c36d3bc",
-    "actor_id": "your-actor-public-id",
-    "profile": "writer",
-    "testing_environment_id": null,
-    "delivery_sequence": 12,
-    "id": "message-uuid",
-    "conversation_id": "conversation-uuid",
-    "version": 1,
-    "message": "Hello",
-    "metadata": {}
-  },
-  "metadata": {
-    "source": "dm",
-    "delivery_id": "53968d42-d72b-4719-aa34-9c8b0c36d3bc"
-  }
-}
-```
+`data` has `message-id`, `conversation_id`, `recipient_id`, sender, content, reply, bundle, version and all timestamps. `recipient_id` is the receiving account. No local profile, testing selector, caller metadata or old `actor_id` is included. Configure each callback endpoint for its intended environment. Root `metadata` contains `source: "dm"`, the delivery UUID and `delivery_sequence`.
 
-The abbreviated `data` above also includes the remaining stored message fields.
-Local callbacks add a root `metadata` object for Silicon compatibility. It contains
-transport identifiers; caller-owned message metadata remains unchanged in
-`data.metadata`. Receipt callbacks use the same envelope with `type: "receipt"`. The
-daemon sends `Idempotency-Key` equal to the delivery ID. Your endpoint must
-durably accept/deduplicate the event and respond with HTTP 2xx and JSON:
+Created, updated, deleted, delivered and read events use their respective `message.*` types and the same fields. The daemon sends `Idempotency-Key` equal to the delivery UUID. Your endpoint must durably accept/deduplicate the event and respond with HTTP 2xx and JSON:
 
 ```json
 {"type":"ack","data":{"acknowledged":true,"delivery_id":"53968d42-d72b-4719-aa34-9c8b0c36d3bc"}}

@@ -58,7 +58,7 @@ async fn sdk_http_send_and_response_preserve_content_headers_and_metadata() -> R
         .send_message(Uuid::nil(), &content, "stable-message-key")
         .await?;
     assert_eq!(result.content.text, content.text);
-    assert_eq!(result.content.metadata, content.metadata);
+    assert!(result.content.metadata.is_empty());
     assert_eq!(result.content.recipient_id, content.recipient_id);
     assert_eq!(result.content.attachments.len(), 1);
     server.abort();
@@ -133,12 +133,13 @@ fn websocket_command_and_delivery_round_trip_between_backend_and_sdk() -> Result
         delivery_id: Uuid::nil(),
         actor_id: "cos:tos".parse()?,
         delivery_sequence: 1,
-        message: Box::new(message(&content)?),
+        message: Box::new(message(&serde_json::from_value(*content)?)?),
     };
     let delivery = serde_json::to_value(frame)?;
     assert_eq!(delivery.as_object().map(serde_json::Map::len), Some(2));
     assert_eq!(delivery["data"]["message"], "hello");
-    assert_eq!(delivery["data"]["metadata"], encoded["data"]["metadata"]);
+    assert_eq!(delivery["data"]["metadata"], json!({}));
+    assert!(encoded["data"].get("metadata").is_none());
     let received: silicon_dm_client::ServerFrame = serde_json::from_value(delivery)?;
     let silicon_dm_client::ServerFrame::Message {
         message,

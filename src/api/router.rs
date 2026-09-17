@@ -39,6 +39,7 @@ fn build_plane_router(state: AppState) -> Router {
             "/groups/{group_id}/members",
             post(super::groups::invite).delete(super::groups::remove),
         )
+        .route("/messages", post(handlers::send_to_recipient))
         .route("/iam", get(auth_handlers::iam))
         .route(
             "/reports",

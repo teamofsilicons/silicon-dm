@@ -14,9 +14,9 @@ fn selected(request: &Request) -> Result<(&'static str, i32), &'static str> {
     let (family, current, header) = if path.ends_with("/ws/shared") {
         ("shared", 1, "x-dm-protocol-version")
     } else if path.ends_with("/ws") {
-        ("websocket", 3, "x-dm-protocol-version")
+        ("websocket", 4, "x-dm-protocol-version")
     } else {
-        ("http", 1, "x-dm-contract-version")
+        ("http", 2, "x-dm-contract-version")
     };
     let mut values = request.headers().get_all(header).iter();
     let first = values.next();
@@ -44,7 +44,7 @@ pub(super) async fn negotiate(
     }
     let (family,version)=match selected(&request) {
         Ok(selected)=>selected,
-        Err(message)=>return (StatusCode::NOT_ACCEPTABLE,Json(json!({"error":{"code":"unsupported_contract","message":message},"compatible":{"http":[1],"websocket":[3],"shared":[1]}}))).into_response(),
+        Err(message)=>return (StatusCode::NOT_ACCEPTABLE,Json(json!({"error":{"code":"unsupported_contract","message":message},"compatible":{"http":[2],"websocket":[4],"shared":[1]}}))).into_response(),
     };
     if !request.uri().path().ends_with("/contracts") {
         match admit(&state,family,version).await {
@@ -56,10 +56,10 @@ pub(super) async fn negotiate(
     let mut response = next.run(request).await;
     response
         .headers_mut()
-        .insert("x-dm-contract-version", HeaderValue::from_static("1"));
+        .insert("x-dm-contract-version", HeaderValue::from_static("2"));
     response.headers_mut().insert(
         "x-dm-protocol-version",
-        HeaderValue::from_static(if family == "websocket" { "3" } else { "1" }),
+        HeaderValue::from_static(if family == "websocket" { "4" } else { "1" }),
     );
     response
 }
@@ -94,7 +94,7 @@ pub(super) async fn describe(State(state): State<AppState>) -> AppResult<Json<se
             .fetch_all(state.store.pool())
             .await?;
     Ok(Json(
-        json!({"service":"silicon-dm","service_version":env!("CARGO_PKG_VERSION"),"contracts":rows,"compatibility":[{"http":1,"websocket":3,"shared":1,"minimum_client":"0.5.0","legacy_client":"0.4.x (standalone socket)"}],"features":{"groups":{"minimum_client":"0.7.0","id_format":"g:{organization}:{creation-name-slug}","ids_immutable":true,"legacy_uuid_aliases":true,"guide":"https://docs.dm.teamofsilicons.com/groups/"}},"policy":{"breaking_changes":"new contract version; existing consumers retain their negotiated shape","additive_changes":"optional fields only","sunset_after_idle_days":7,"deprecation_required":true},"docs":"https://docs.dm.teamofsilicons.com/contracts/"}),
+        json!({"service":"silicon-dm","service_version":env!("CARGO_PKG_VERSION"),"contracts":rows,"compatibility":[{"http":2,"websocket":4,"shared":1,"minimum_client":"0.8.0"}],"features":{"groups":{"minimum_client":"0.7.0","id_format":"g:{organization}:{creation-name-slug}","ids_immutable":true,"legacy_uuid_aliases":true,"guide":"https://docs.dm.teamofsilicons.com/groups/"}},"policy":{"breaking_changes":"new contract version; existing consumers retain their negotiated shape","additive_changes":"optional fields only","sunset_after_idle_days":7,"deprecation_required":true},"docs":"https://docs.dm.teamofsilicons.com/contracts/"}),
     ))
 }
 
@@ -105,8 +105,8 @@ mod tests {
     fn negotiation_rejects_unsupported_and_duplicate_versions()
     -> Result<(), Box<dyn std::error::Error>> {
         for (path, header, good) in [
-            ("/api/v1/iam", "x-dm-contract-version", "1"),
-            ("/api/v1/ws", "x-dm-protocol-version", "3"),
+            ("/api/v1/iam", "x-dm-contract-version", "2"),
+            ("/api/v1/ws", "x-dm-protocol-version", "4"),
             ("/api/v1/ws/shared", "x-dm-protocol-version", "1"),
         ] {
             let req = Request::builder()

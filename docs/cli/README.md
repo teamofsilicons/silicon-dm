@@ -86,60 +86,25 @@ disables that login and clears its tokens; pending requests remain stored.
 ## Messaging
 
 ```sh
-dm conversations create --participant OTHER_ACTOR_ID
-dm conversations list --limit 20
-dm messages send CONVERSATION_ID --text 'Hello' --metadata '{"task_id":"42"}'
-dm messages send CONVERSATION_ID --attachment https://example.com/report.pdf
-dm messages send CONVERSATION_ID --text 'Reply' --reply-to MESSAGE_UUID
-dm messages list CONVERSATION_ID --limit 20
-dm messages show CONVERSATION_ID MESSAGE_UUID
+dm conversations list
+dm messages send cos:tos --text 'hey'
+dm messages send cos:tos --attachment https://files.example/report.pdf
+dm messages send cos:tos --text "what's up" --reply-to 000
+dm messages list cos:tos
+dm messages show cos:tos 000
+dm messages edit cos:tos 000 --version 1 --text 'heyy'
+dm messages delete cos:tos 000 --version 2
 ```
 
-Participant IDs are IAM public actor IDs, not local profile names. The current
-actor is added automatically. A conversation is scoped to its exact participant
-set. Repeated `--participant` and `--attachment` flags add multiple values.
+The authenticated sender supplies a recipient ID; DM resolves or creates the permitted direct chat. You may also pass the canonical conversation address or a group ID. Codes are conversation-local lowercase base36: `000` through `zzz`, then `1000` onward. Edits/deletion/retries preserve the code.
 
-For combinations of media, use `--data message.json`. This file is message
-content; the client adds the [wire envelope](../wire-format.md) when sending:
+For attachments, audio and replies, `--data message.json` accepts:
 
 ```json
-{
-  "message": "Voice note and attachment",
-  "attachments": [{"permanent_url": "https://example.com/report.pdf"}],
-  "voice": {
-    "permanent_url": "https://example.com/note.ogg",
-    "duration_milliseconds": 12500,
-    "content_type": "audio/ogg"
-  },
-  "voice_transcript": "The report is ready.",
-  "metadata": {"task_id": "42", "labels": ["review"], "priority": 2}
-}
+{"message":"broo check this","attachments":["https://files.example/voice.ogg"],"voice_transcript":"The report is ready.","reply":{"message-id":"000"}}
 ```
 
-`--data -` reads JSON from stdin. Flags supplied alongside a JSON body replace
-its text/metadata/reply fields and append attachment links. The root `metadata`
-must be an object; empty `{}` is preserved and sent. A message must still contain
-text, an attachment, voice or a GIF. DM stores existing links and never uploads a
-file. A URL included in plain text remains plain text. The server enforces text,
-attachment-count/declared-size and voice-duration limits.
-
-Edit and delete use the version from `messages show`:
-
-```sh
-dm messages edit CONVERSATION_ID MESSAGE_UUID --version 1 \
-  --text 'Corrected text' --metadata '{"task_id":"42"}'
-dm messages delete CONVERSATION_ID MESSAGE_UUID --version 2
-```
-
-Edit is full replacement: preserve all existing fields you intend to retain.
-Delete returns a tombstone. Neither operation can overwrite an unseen revision.
-On conflict, inspect the structured error and current server state, then make
-an explicit resolution. Reuse the original idempotency key only when retrying
-the identical attempted mutation; a changed request needs a new key.
-
-`messages list` returns newest-first pages. Pass the returned `next_cursor` as
-`--cursor`; null ends traversal. `--include-bundled-members` includes hidden
-original bundle messages.
+Use `--data -` for stdin. CLI flags override text and reply, and append attachment URLs. `--metadata` is retired. Text alone, attachments alone, or both are valid; an empty message with no attachments is rejected. DM stores links without uploading or fetching files. Replies include server-resolved sender/content on output. See the [message schema](../wire-format.md) for the fixed fields.
 
 ## Drafts, bundles, receipts, presence and GIFs
 

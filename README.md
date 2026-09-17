@@ -16,9 +16,10 @@ IAM owns identities and sessions. DM uses the official `silicon-iam-client` and
 exchanges an IAM-issued short-lived token for an application session. Application
 secrets stay on the backend. DM exposes no OBO endpoints.
 
-Messages support text, attachment links, voice metadata/transcripts, GIFs,
-metadata, replies, edits, deletion tombstones, receipts, bundles, and versioned
-drafts. PostgreSQL commits messages and delivery outboxes together. Client relay
+Messages use recipient addresses and conversation-local IDs (`000` … `zzz`, then
+`1000`). The [fixed schema](docs/wire-format.md) supports text, attachment links,
+voice transcripts, replies, edits, deletion tombstones, receipts and bundles.
+Drafts retain their separate versioned content schema. PostgreSQL commits messages and delivery outboxes together. Client relay
 storage commits inbound deliveries before transport ACK, and persists outgoing
 requests and idempotency keys before sending. Reconnects replay durable state.
 

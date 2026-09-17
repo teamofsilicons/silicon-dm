@@ -11,6 +11,7 @@ mod iam_directory;
 mod idempotency;
 mod messages;
 mod presence;
+mod public_messages;
 mod revisions;
 mod rows;
 

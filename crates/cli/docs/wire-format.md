@@ -1,138 +1,120 @@
-# DM JSON wire format
+# DM message schema
 
-Every DM JSON request, response, WebSocket frame, and outgoing actor webhook has
-exactly two root fields: `type` and `data`, except local webhook callbacks, which
-also include transport `metadata` for the Silicon event contract. The operation/event name belongs in
-`type`; all content, routing, delivery IDs, and metadata belong inside `data`.
-Additional root fields and mismatched REST request types are rejected.
+DM 0.8 uses HTTP contract **2** and WebSocket frames **4** (including frames inside shared transport 1). Upgrade the API, worker, CLI/relay, web frontend, and webhook consumers together. Requests use `{ "type": "...", "data": {...} }`. Durable message events additionally carry root transport `metadata`.
+
+## Address a recipient
+
+Authenticated senders can send directly to an authorized Carbon or Silicon ID:
+
+```sh
+dm messages send cos:tos --text 'hey'
+dm messages send cos:tos --text "what's up" --reply-to 000
+dm messages send g:tos:team --attachment https://files.example/report.pdf
+```
+
+`POST /api/v1/conversations/cos:tos/messages` resolves or creates the permitted direct conversation. `POST /api/v1/messages` also accepts `recipient_id` inside `data`. IAM permission checks still apply. Other conversation routes accept the recipient to resolve an existing chat.
+
+Direct conversation addresses order Carbon before Silicon, then lexically within the same type: `saket::cos:tos` is the same chat in both directions. Groups retain immutable `g:tos:team` addresses. Always scope identifiers by organization and testing environment. Internal conversation/message UUIDs stay intact and existing UUID aliases remain accepted.
+
+## Short message IDs
+
+`message-id` is a lowercase base36 code local to the conversation, not a UUID. It starts at `000`, advances through `001` … `009`, `00a` … `zzz`, then grows to `1000`. There are 46,656 three-character values. Length grows again whenever the current space is exhausted. Existing messages derive their codes from the durable conversation counter, so no history is renumbered.
+
+Edits, deletion and idempotent retries preserve the code. Deleted codes are never reused. Identify a message using `(organization, testing environment, conversation_id, message-id)`; caches must not key on the short code alone. No public message `sequence` is needed.
+
+## Send content
 
 ```json
 {
-  "type": "new_message",
+  "type": "message.created",
   "data": {
-    "message": "Hello",
-    "metadata": {"task_id": "42"}
+    "recipient_id": "cos:tos",
+    "message": "broo check this",
+    "attachments": ["https://files.example/report.pdf"],
+    "voice_transcript": null,
+    "reply": null
   }
 }
 ```
 
-Message text is `data.message`, a string when supplied. `data.metadata` is the
-caller-owned JSON object and is always emitted for message content, including
-`{}`. Arbitrary nested metadata is preserved. Attachments, voice, transcript,
-GIF, reply targets, and ISI-qualified sender/recipient IDs are siblings inside
-`data`. Attachment-only messages can omit the text field. A received message
-also includes its `id`, `conversation_id`, `sender`, version, sequence, and
-other stored message fields inside `data`.
+Text alone, attachments alone, or both are valid. Omitted/empty text with no attachments is rejected. Attachments are HTTPS URL strings, at most 100 per message. DM does not upload or fetch them. Audio and GIF URLs use this same list. An audio message can include `voice_transcript`; the transcript requires an attachment.
 
-This is a breaking wire-format change. Upgrade the server, Rust client/CLI,
-web gateway/frontend, and webhook consumers together. WebSocket protocol is
-now **3**, advertised at `ready.data.protocol_version`. Live connections and
-REST JSON inputs use the new envelopes. The relay can read saved v2 inbox
-entries and convert their pending callbacks to the new envelope, retaining the
-delivery ID. Old queued outbox operations remain readable. Edit retry hashes
-retain their pre-envelope representation.
+A reply input needs only `"reply": {"message-id": "000"}`. DM resolves the target in the same authorized conversation and supplies its sender and current content. Client-supplied quotations are ignored. The quoted content is null once the original is deleted. Text and transcripts retain the existing 100,000,000-character limits.
 
-## HTTP
+## Fixed message output
 
-HTTP URLs, methods, headers, status codes, query parameters, authentication,
-idempotency keys, and conditional versions keep their existing meaning.
-Bodyless requests (including GET and DELETE operations without input) stay
-bodyless, and HTTP 204 responses stay empty. The signed **incoming IAM webhook**
-uses IAM's own schema and exact signed bytes. Requests DM makes to IAM or Giphy
-also follow those providers' contracts.
+Every message snapshot includes the same fields, including null timestamps and empty lists:
 
-For `POST /api/v1/conversations/{id}/messages`, send the example above with the
-normal Bearer, `X-Org-ID`, and `Idempotency-Key` headers. Its 202 response is
-`{"type":"new_message","data":{...stored message fields...}}`.
+```json
+{
+  "type": "message.created",
+  "data": {
+    "message-id": "001",
+    "conversation_id": "saket::cos:tos",
+    "recipient_id": "cos:tos",
+    "sender": {"id": "saket", "type": "carbon"},
+    "message": "what's up",
+    "attachments": [],
+    "voice_transcript": null,
+    "reply": {
+      "message-id": "000",
+      "sender": {"id": "cos:tos", "type": "silicon"},
+      "content": {"message": "hey", "attachments": [], "voice_transcript": null}
+    },
+    "bundle": null,
+    "version": 1,
+    "created_at": "2026-09-17T07:17:32Z",
+    "updated_at": null,
+    "deleted_at": null,
+    "delivered_at": null,
+    "read_at": null
+  },
+  "metadata": {
+    "source": "dm",
+    "delivery_id": "01a0ae3a-5186-7e22-9bbe-73818b2f0881",
+    "delivery_sequence": 12
+  }
+}
+```
 
-For login, send `{"type":"login","data":{"slt":"oac_..."}}`.
-The response uses `type: "login"` with session fields inside `data`.
-For a message list, GET with normal pagination query parameters; the response is
-`{"type":"messages","data":{"items":[...],"next_cursor":null}}`.
-Each list item is a message payload; `metadata` stays with that message.
+`bundle` preserves the existing bundle feature and is null for ordinary messages. Message bodies have no `actor_id`, `sequence`, `status`, `profile`, caller `metadata`, or separate `voice`/`gif` object. No `interface_attachment_ids` are emitted. A deleted message keeps its identity, sender, version and timestamps with `message: null`, empty attachments, and null transcript/reply. Attachment-only messages use `message: ""`.
 
-| HTTP route (under `/api/v1`) | Method → request/success type |
+History responses identify the intended account/group in `recipient_id`. Each callback identifies the receiving account in `recipient_id`, including a sender's own copy; `conversation_id` identifies the chat/group. The `sender` object identifies the actual author.
+
+## Events and transport
+
+| Event | Meaning |
 | --- | --- |
-| `/iam` | GET → `iam` |
-| `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/me` | `login`, `refresh`, `logout`, `me` respectively |
-| `/conversations` | GET → `conversations`; POST → `create_conversation` |
-| `/conversations/{id}/messages` | GET → `messages`; POST → `new_message` |
-| `/conversations/{id}/messages/{message}` | GET → `message`; PATCH → `edit_message`; DELETE → `delete_message` |
-| `/conversations/{id}/messages/{message}/receipts` | POST → `receipt` |
-| `/conversations/{id}/bundles` | POST → `create_bundle` |
-| `/conversations/{id}/bundles/{bundle}` | GET → `bundle` |
-| `/conversations/{id}/draft` | GET → `draft`; PUT → `put_draft`; DELETE → `delete_draft` |
-| `/presence/{actor}` | GET → `presence` |
-| `/gifs/{trending,search,recent}` | GET → `gifs` |
-| `/testing-environments` | GET → `testing_environments`; POST → `create_testing_environment` |
-| `/testing-environments/{id}` | GET → `testing_environment`; PATCH → `update_testing_environment`; DELETE → `delete_testing_environment` |
-| `/testing-environments/{id}/key` | GET → `testing_environment_key` |
-| `/testing-environments/{id}/rotate-key` | POST → `rotate_testing_environment_key` |
-| `/testing-environments/{id}/restore` | POST → `restore_testing_environment` |
-| `/testing-environments/{id}/clean` | POST → `clean_testing_environment` |
+| `message.created` | A version-1 message snapshot |
+| `message.updated` | An edited message snapshot |
+| `message.deleted` | A content-free tombstone |
+| `message.delivered` | Delivery receipt with the current full message |
+| `message.read` | Read receipt with the current full message |
+| `message.failed` | Failed-delivery notification with the current full message |
 
-Errors use `{"type":"error","data":{"error":{"code":"...","message":"..."}}}`.
-An existing-draft conflict instead puts the current draft in `data` with HTTP
-409 and `type: "error"`. The Rust client's `Error::Api.body` and frontend
-`ApiError.body` expose the decoded `data`, retaining access to conflict state.
-The [OpenAPI document](../openapi.yaml) specifies complete wire request/response
-schemas. Payload fragments in the API guide describe `data` unless explicitly
-shown as a full envelope.
+`version` advances on edits/deletion, not receipts. `updated_at` records the most recent content edit. Receipt timestamps remain null until recorded. Replayed delivery records hydrate the current message; an older delivery can therefore carry a newer edit/tombstone. Apply content by conversation, code and version; never resurrect deleted content.
 
-## WebSocket
+`delivery_id` remains a UUID, stable across transport retries. `delivery_sequence` is the receiving account's ordered ACK/replay cursor, independent of message codes. These transport fields appear once, in root `metadata`, on durable WebSocket events and callbacks. HTTP message responses have only `type` and `data`, since an HTTP response is not an actor-stream delivery.
 
-All v3 frames, including ping, pong, resume, ACK, presence, receipt, readiness,
-acceptance, and errors, use the same envelope:
+| HTTP operation | Type |
+| --- | --- |
+| POST `/conversations/{recipient-or-chat}/messages` or `/messages` | `message.created` |
+| GET `/conversations/{chat}/messages` | `messages` (paginated `data.items`) |
+| GET `/conversations/{chat}/messages/{code}` | `message` |
+| PATCH `/conversations/{chat}/messages/{code}` | `message.updated` |
+| DELETE `/conversations/{chat}/messages/{code}` | `message.deleted` |
+| POST `/conversations/{chat}/messages/{code}/receipts` | `receipt` (current full message response) |
 
-```json
-{"type":"ping","data":{"ping_id":"p-1"}}
-```
-```json
-{"type":"pong","data":{"ping_id":"p-1"}}
-```
-```json
-{"type":"ack","data":{"actor_id":"cos:tos","through_sequence":12}}
-```
+HTTP authorization, idempotency keys, conditional versions, and opaque cursors retain their meaning. PATCH replaces content. Errors retain `type: "error"` and `data.error`. Bodyless requests and 204 responses stay bodyless.
 
-A client send has `type: "new_message"`; `data` contains `actor_id`, `org_id`,
-`conversation_id`, `idempotency_key`, and flattened message content. A durable
-server delivery also has `type: "new_message"`; `data` contains `delivery_id`,
-`actor_id`, `delivery_sequence`, and flattened stored message fields.
-`message_accepted` similarly flattens the stored message alongside its
-`idempotency_key`. Edits/deletion deliveries remain `new_message` events with
-the same message `data.id`, a higher `data.version`, and updated/tombstone content.
+WebSocket control commands retain `type`/`data`: `new_message` sends content with `actor_id`, `org_id`, `conversation_id` (recipient accepted), and `idempotency_key`. `message_accepted` confirms it with the full message and retry key. `receipt` commands use the chat and short `message_id`; `receipt_recorded` confirms the short reference. ACK/resume still select an `actor_id` stream with `through_sequence`/`after_sequence`. Heartbeats are unsequenced.
 
-Rust enum names remain `ClientFrame::SendMessage` and `ServerFrame::Message`.
-Serde produces/consumes the new wire shape. Rust message structs retain the
-`text` field for source compatibility and serialize it as `message`.
-
-## Relay and webhooks
-
-Local `POST /requests` uses `{"type":"request","data":{...RelayRequest...}}`.
-The data includes `request_id`, `profile`, optional testing fields, and the
-existing typed `request` operation. `RelayClient::submit` wraps its typed argument;
-`submit_value` and `dm relay submit --data` accept the full envelope.
-Extra fields **inside data** are retained and echoed exactly. Acknowledgements
-use `type: "request"`; polling uses `request_result` or `request_status`;
-`GET /status` uses `relay_status`. Their fields live in `data` and the SDK
-returns decoded typed values. The echoed `data.request` contains the full
-original request envelope.
-
-Outgoing webhook deliveries use the WebSocket event type and flattened `data`,
-plus `data.profile`, `data.testing_environment_id`, and root
-`metadata: {"source":"dm","delivery_id":"..."}`. Message metadata stays in `data.metadata`. The full callback example
-and retry behavior are in [relay callbacks](cli/relay.md). A webhook consumer
-must durably accept the event before responding with HTTP 2xx and:
+Callbacks no longer expose local profile or testing-selector fields. A callback endpoint should be configured for its intended environment. Persist the event before responding with HTTP 2xx and:
 
 ```json
 {"type":"ack","data":{"acknowledged":true,"delivery_id":"received UUID"}}
 ```
 
-The exact delivery ID is required. Missing/false acknowledgments, mismatched
-IDs, old flat ACKs, invalid JSON, non-2xx responses, and oversized responses all
-leave the callback pending for retry. The outgoing `Idempotency-Key` header
-remains equal to the delivery ID.
+Silicon endpoints may alternatively respond `{"status":"ok","event_id":"NON_NIL_UUID"}`. The outgoing `Idempotency-Key` is the delivery UUID. Missing or mismatched acknowledgements leave delivery pending. Saved legacy message callbacks are projected to the fixed shape without changing delivery IDs; old receipt-only queue entries retain their original receipt contract.
 
-Silicon webhook endpoints may instead acknowledge with HTTP 2xx and
-`{"status":"ok","event_id":"NON_NIL_UUID"}`. This alternative applies only to
-local webhook acknowledgements; REST and WebSocket envelopes are unchanged.
+See [OpenAPI](../openapi.yaml) for schemas and [contracts](contracts.md) for negotiation.

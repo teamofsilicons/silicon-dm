@@ -54,7 +54,7 @@ pub enum Operation {
     },
     GetMessage {
         conversation_id: String,
-        message_id: Uuid,
+        message_id: String,
     },
     SendMessage {
         conversation_id: String,
@@ -63,20 +63,20 @@ pub enum Operation {
     },
     EditMessage {
         conversation_id: String,
-        message_id: Uuid,
+        message_id: String,
         message: MessageCreate,
         version: i64,
         idempotency_key: String,
     },
     DeleteMessage {
         conversation_id: String,
-        message_id: Uuid,
+        message_id: String,
         version: i64,
         idempotency_key: String,
     },
     Receipt {
         conversation_id: String,
-        message_id: Uuid,
+        message_id: String,
         status: ReceiptStatus,
         device_id: String,
     },
@@ -194,7 +194,7 @@ impl Operation {
             Self::GetMessage {
                 conversation_id,
                 message_id,
-            } => serde_json::to_value(client.message(conversation_id, *message_id).await?)?,
+            } => serde_json::to_value(client.message(conversation_id, message_id).await?)?,
             Self::SendMessage {
                 conversation_id,
                 message,
@@ -214,7 +214,7 @@ impl Operation {
                 client
                     .edit_message(
                         conversation_id,
-                        *message_id,
+                        message_id,
                         message,
                         *version,
                         idempotency_key,
@@ -228,7 +228,7 @@ impl Operation {
                 idempotency_key,
             } => serde_json::to_value(
                 client
-                    .delete_message(conversation_id, *message_id, *version, idempotency_key)
+                    .delete_message(conversation_id, message_id, *version, idempotency_key)
                     .await?,
             )?,
             Self::Receipt {
@@ -238,7 +238,7 @@ impl Operation {
                 device_id,
             } => serde_json::to_value(
                 client
-                    .record_receipt(conversation_id, *message_id, *status, device_id)
+                    .record_receipt(conversation_id, message_id, *status, device_id)
                     .await?,
             )?,
             Self::GetDraft { conversation_id } => {

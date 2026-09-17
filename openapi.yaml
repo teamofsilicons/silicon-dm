@@ -1,14 +1,14 @@
 openapi: 3.1.0
 info:
   title: Silicon DM API
-  version: 0.7.0
+  version: 0.8.0
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
   description: Carbon/Silicon messaging, IAM application sessions, and isolated testing
     environments. Bearer tokens must be issued to DM and bound to the selected organization. See
     SocketFrame for WebSocket protocol version 3; sender devices also receive deliveries and clients
-    upsert messages by (id, version). Attachments are stored links and are never uploaded, fetched,
+    upsert messages by (conversation_id, message-id, version). Attachments are stored links and are never uploaded, fetched,
     or proxied by DM. Every DM JSON request and response has exactly type and data at the root.
     Message text is data.message and metadata is data.metadata. Bodyless HTTP requests, 204
     responses, signed incoming IAM webhook payloads, and internal Honeycomb participant messages retain their provider contracts.
@@ -888,7 +888,7 @@ paths:
               properties:
                 type:
                   type: string
-                  const: new_message
+                  const: message.created
                 data:
                   "$ref": "#/components/schemas/MessageCreate"
       responses:
@@ -905,7 +905,7 @@ paths:
                 properties:
                   type:
                     type: string
-                    const: new_message
+                    const: message.created
                   data:
                     "$ref": "#/components/schemas/Message"
         '401':
@@ -925,8 +925,7 @@ paths:
         in: path
         required: true
         schema:
-          type: string
-          format: uuid
+          $ref: '#/components/schemas/MessageReference'
       - "$ref": "#/components/parameters/TestingKey"
       requestBody:
         required: true
@@ -1570,7 +1569,7 @@ paths:
                 properties:
                   type:
                     type: string
-                    const: edit_message
+                    const: message.updated
                   data:
                     "$ref": "#/components/schemas/Message"
         '401':
@@ -1609,7 +1608,7 @@ paths:
               properties:
                 type:
                   type: string
-                  const: edit_message
+                  const: message.updated
                 data:
                   "$ref": "#/components/schemas/MessageCreate"
     delete:
@@ -1638,7 +1637,7 @@ paths:
                 properties:
                   type:
                     type: string
-                    const: delete_message
+                    const: message.deleted
                   data:
                     "$ref": "#/components/schemas/Message"
         '401':
@@ -2083,6 +2082,53 @@ paths:
           description: Ready
         '503':
           description: Dependency or migration unavailable
+  /messages:
+    post:
+      tags:
+      - Messages
+      operationId: sendToRecipient
+      summary: Send to an authorized recipient without a conversation ID
+      parameters:
+      - "$ref": "#/components/parameters/OrgId"
+      - "$ref": "#/components/parameters/IdempotencyKey"
+      - "$ref": "#/components/parameters/TestingKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - type
+              - data
+              properties:
+                type:
+                  type: string
+                  const: message.created
+                data:
+                  "$ref": "#/components/schemas/MessageCreate"
+      responses:
+        '202':
+          description: Message durably accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                - type
+                - data
+                properties:
+                  type:
+                    type: string
+                    const: message.created
+                  data:
+                    "$ref": "#/components/schemas/Message"
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+        default:
+          "$ref": "#/components/responses/Error"
 components:
   securitySchemes:
     honeycombService:
@@ -2154,8 +2200,7 @@ components:
       in: path
       required: true
       schema:
-        type: string
-        format: uuid
+        $ref: '#/components/schemas/MessageReference'
     MessageVersion:
       name: If-Match
       in: header
@@ -2240,13 +2285,14 @@ components:
           type: array
           items: {type: string}
     ConversationAddress:
-      description: Direct conversation UUID or immutable group address g:org:group-slug. Legacy group UUIDs remain accepted as aliases. Renaming a group does not change its address.
-      oneOf:
-      - type: string
-        format: uuid
-      - type: string
-        pattern: '^g:[A-Za-z0-9][A-Za-z0-9_-]{0,254}:[a-z0-9]+(-[a-z0-9]+)*$'
-        examples: ['g:tos:product-design']
+      type: string
+      description: Immutable direct address, ordered Carbon before Silicon then lexically,
+        or g:org:group-slug. UUID aliases remain accepted. Conversation routes also accept
+        an authorized recipient account, resolving or creating the direct chat on send.
+        Scope all addresses by organization and testing environment.
+      examples:
+      - saket::cos:tos
+      - g:tos:team
     "GroupSettings":
       type: "object"
       required:
@@ -2467,146 +2513,118 @@ components:
     MessageCreate:
       type: object
       properties:
-        sender_id:
+        message:
           type: string
-          description: Explicit sender account, optionally ISI@silicon:org (for example
-            compose@writer:tos). The underlying account must be authorized by IAM; ISI requires a
-            silicon.
-        recipient_id:
-          type: string
-          maxLength: 255
-          description: Optional intended participant address, such as deliberate@cos:tos. ISI
-            requires a silicon participant. This is routing metadata; all conversation participants
-            still receive the message and retain normal history access.
+          maxLength: 100000000
+          default: ''
         attachments:
           type: array
           maxItems: 100
           items:
-            "$ref": "#/components/schemas/Attachment"
-          description: Combined attachment and voice item count may not exceed 100.
-        voice:
-          "$ref": "#/components/schemas/VoiceAttachment"
-          description: Counts toward the combined 100 attachment-item maximum.
+            "$ref": "#/components/schemas/AttachmentLink"
         voice_transcript:
           type:
           - string
           - 'null'
           maxLength: 100000000
-          description: Optional client-supplied transcript preserved as message content; requires
-            voice.
-        gif:
-          "$ref": "#/components/schemas/Gif"
-        metadata:
-          type: object
-          additionalProperties: true
-          default: {}
-          description: Arbitrary caller-owned JSON object, always returned. Nested JSON values are
-            preserved. PATCH is full replacement; include the metadata to retain it.
-        reply_to_message_id:
-          type:
-          - string
-          - 'null'
-          format: uuid
-          description: Reply target in this same conversation. A message cannot reply to itself.
-        message:
+        reply:
+          anyOf:
+          - type: object
+            required:
+            - message-id
+            properties:
+              message-id:
+                "$ref": "#/components/schemas/MessageReference"
+          - type: 'null'
+        recipient_id:
           type: string
-          minLength: 1
-          maxLength: 100000000
+          description: Required for POST /messages; otherwise the path supplies the destination.
+        sender_id:
+          type: string
+          description: Explicit represented sender when authorized.
       anyOf:
       - required:
         - message
         properties:
-          message: {}
+          message:
+            minLength: 1
       - required:
         - attachments
         properties:
           attachments:
             minItems: 1
-      - required:
-        - voice
-        properties:
-          voice: {}
-      - required:
-        - gif
-        properties:
-          gif: {}
-      allOf:
-      - if:
-          required:
-          - voice_transcript
-          properties:
-            voice_transcript:
-              type: string
-        then:
-          required:
-          - voice
-          properties:
-            voice: {}
-      description: At least one content item (text, attachments, voice, or GIF) is required.
-        Metadata alone does not count as content. On PATCH this is a full replacement; omitted
-        metadata becomes {}, and omitted optional fields are cleared. Routing is immutable on PATCH;
-        omitted sender_id and recipient_id retain the original route. Logical text/transcript limits
-        apply independently; the configured encoded-body limit may be lower.
+      description: Text, attachments, or both. Audio goes in attachments with optional voice_transcript.
+        Supply only the referenced message-id for a reply; sender and quoted content come
+        from the server. Legacy UUID references and old attachment objects remain accepted
+        on input.
     Message:
       type: object
+      additionalProperties: false
       required:
-      - id
+      - message-id
       - conversation_id
+      - recipient_id
       - sender
-      - sequence
-      - status
-      - created_at
-      - metadata
+      - message
+      - attachments
+      - voice_transcript
+      - reply
+      - bundle
       - version
+      - created_at
+      - updated_at
       - deleted_at
+      - delivered_at
+      - read_at
       properties:
-        id:
-          type: string
-          format: uuid
+        message-id:
+          "$ref": "#/components/schemas/MessageCode"
         conversation_id:
-          $ref: '#/components/schemas/ConversationAddress'
-        sender:
-          "$ref": "#/components/schemas/ActorRef"
-        sender_id:
-          type: string
-          description: Qualified sender address when an ISI was supplied; sender.id remains the
-            canonical IAM identity.
+          "$ref": "#/components/schemas/ConversationAddress"
         recipient_id:
           type: string
-          description: Intended recipient address, including the optional ISI prefix, preserved in
-            history and delivery.
-        sequence:
-          type: integer
-          minimum: 1
-        status:
-          type: string
-          enum:
-          - waiting
-          - sent
-          - delivered
-          - read
-          - failed
+          description: 'History: the destination account or group. Callback: the receiving
+            account, including the sender copy.'
+        sender:
+          "$ref": "#/components/schemas/ActorRef"
+        message:
+          type:
+          - string
+          - 'null'
+          maxLength: 100000000
         attachments:
           type: array
           maxItems: 100
           items:
-            "$ref": "#/components/schemas/Attachment"
-          description: Combined attachment and voice item count may not exceed 100.
-        voice:
-          "$ref": "#/components/schemas/StoredVoiceAttachment"
+            "$ref": "#/components/schemas/AttachmentLink"
         voice_transcript:
           type:
           - string
           - 'null'
           maxLength: 100000000
-        gif:
-          "$ref": "#/components/schemas/Gif"
+        reply:
+          anyOf:
+          - "$ref": "#/components/schemas/Reply"
+          - type: 'null'
         bundle:
           anyOf:
           - "$ref": "#/components/schemas/BundleRef"
           - type: 'null'
+        version:
+          type: integer
+          minimum: 1
         created_at:
           type: string
+          format: date-time
+        updated_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        deleted_at:
+          type:
+          - string
+          - 'null'
           format: date-time
         delivered_at:
           type:
@@ -2618,51 +2636,9 @@ components:
           - string
           - 'null'
           format: date-time
-        failure_reason:
-          type:
-          - string
-          - 'null'
-        metadata:
-          type: object
-          additionalProperties: true
-          default: {}
-          description: Arbitrary caller-owned JSON object, always returned. Nested JSON values are
-            preserved. PATCH is full replacement; include the metadata to retain it.
-        reply_to_message_id:
-          type:
-          - string
-          - 'null'
-          format: uuid
-          description: Reply target in this same conversation. A message cannot reply to itself.
-        version:
-          type: integer
-          minimum: 1
-          description: Content version, initially 1. Edits and deletion increment it; receipts do
-            not.
-        deleted_at:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        message:
-          type: string
-          minLength: 1
-          maxLength: 100000000
-      allOf:
-      - if:
-          required:
-          - voice_transcript
-          properties:
-            voice_transcript:
-              type: string
-        then:
-          required:
-          - voice
-          properties:
-            voice: {}
-      description: Latest version of a durable message. Deleted messages remain as content-free
-        tombstones with the same id, sequence, sender, and version. Do not resurrect them from older
-        replayed deliveries.
+      description: Fixed current snapshot. All fields are present. Text is empty for attachment-only
+        sends, null for tombstones. Upsert by conversation_id, message-id and version. Delivery
+        records may hydrate the current edited or deleted snapshot on replay.
     BundleRef:
       type: object
       required:
@@ -2689,8 +2665,7 @@ components:
           maxItems: 100
           uniqueItems: true
           items:
-            type: string
-            format: uuid
+            "$ref": "#/components/schemas/MessageReference"
         display_message:
           "$ref": "#/components/schemas/MessageCreate"
     Bundle:
@@ -2707,14 +2682,13 @@ components:
           type: string
           format: uuid
         conversation_id:
-          $ref: '#/components/schemas/ConversationAddress'
+          "$ref": "#/components/schemas/ConversationAddress"
         original_message_ids:
           type: array
           minItems: 1
           maxItems: 100
           items:
-            type: string
-            format: uuid
+            "$ref": "#/components/schemas/MessageReference"
         display_message:
           "$ref": "#/components/schemas/Message"
         created_by:
@@ -2762,14 +2736,13 @@ components:
           type: object
           additionalProperties: true
           default: {}
-          description: Arbitrary caller-owned JSON object, always returned. Nested JSON values are
-            preserved. PATCH is full replacement; include the metadata to retain it.
+          description: Arbitrary caller-owned JSON object, always returned. Nested JSON
+            values are preserved. PATCH is full replacement; include the metadata to retain
+            it.
         reply_to_message_id:
-          type:
-          - string
-          - 'null'
-          format: uuid
-          description: Reply target in this same conversation. A message cannot reply to itself.
+          anyOf:
+          - "$ref": "#/components/schemas/MessageReference"
+          - type: 'null'
       allOf:
       - if:
           required:
@@ -2792,14 +2765,14 @@ components:
       - metadata
       properties:
         conversation_id:
-          $ref: '#/components/schemas/ConversationAddress'
+          "$ref": "#/components/schemas/ConversationAddress"
         actor_id:
           type: string
         version:
           type: integer
           minimum: 1
-          description: Monotonic token retained across draft deletion and automatic clearing. Gaps
-            are allowed. Use this returned value for the next save.
+          description: Monotonic token retained across draft deletion and automatic clearing.
+            Gaps are allowed. Use this returned value for the next save.
         message_content:
           type: string
           maxLength: 100000000
@@ -2824,14 +2797,13 @@ components:
           type: object
           additionalProperties: true
           default: {}
-          description: Arbitrary caller-owned JSON object, always returned. Nested JSON values are
-            preserved. PATCH is full replacement; include the metadata to retain it.
+          description: Arbitrary caller-owned JSON object, always returned. Nested JSON
+            values are preserved. PATCH is full replacement; include the metadata to retain
+            it.
         reply_to_message_id:
-          type:
-          - string
-          - 'null'
-          format: uuid
-          description: Reply target in this same conversation. A message cannot reply to itself.
+          anyOf:
+          - "$ref": "#/components/schemas/MessageReference"
+          - type: 'null'
       allOf:
       - if:
           required:
@@ -3005,10 +2977,9 @@ components:
             actor_id:
               type: string
             conversation_id:
-              $ref: '#/components/schemas/ConversationAddress'
+              "$ref": "#/components/schemas/ConversationAddress"
             message_id:
-              type: string
-              format: uuid
+              "$ref": "#/components/schemas/MessageReference"
             status:
               type: string
               enum:
@@ -3070,7 +3041,7 @@ components:
           - testing_generation
           properties:
             protocol_version:
-              const: 3
+              const: 4
             connection_id:
               type: string
               format: uuid
@@ -3121,19 +3092,91 @@ components:
           type: string
           const: message_accepted
         data:
-          allOf:
-          - type: object
-            description: Ephemeral confirmation that a new_message command was durably accepted. It
-              does not consume a delivery sequence and is not ACKed.
-            required:
-            - idempotency_key
-            properties:
-              idempotency_key:
-                type: string
-                minLength: 8
-                maxLength: 255
-                pattern: "^[!-~]{8,255}$"
-          - "$ref": "#/components/schemas/Message"
+          type: object
+          additionalProperties: false
+          required:
+          - message-id
+          - conversation_id
+          - recipient_id
+          - sender
+          - message
+          - attachments
+          - voice_transcript
+          - reply
+          - bundle
+          - version
+          - created_at
+          - updated_at
+          - deleted_at
+          - delivered_at
+          - read_at
+          - idempotency_key
+          properties:
+            message-id:
+              "$ref": "#/components/schemas/MessageCode"
+            conversation_id:
+              "$ref": "#/components/schemas/ConversationAddress"
+            recipient_id:
+              type: string
+              description: 'History: the destination account or group. Callback: the receiving
+                account, including the sender copy.'
+            sender:
+              "$ref": "#/components/schemas/ActorRef"
+            message:
+              type:
+              - string
+              - 'null'
+              maxLength: 100000000
+            attachments:
+              type: array
+              maxItems: 100
+              items:
+                "$ref": "#/components/schemas/AttachmentLink"
+            voice_transcript:
+              type:
+              - string
+              - 'null'
+              maxLength: 100000000
+            reply:
+              anyOf:
+              - "$ref": "#/components/schemas/Reply"
+              - type: 'null'
+            bundle:
+              anyOf:
+              - "$ref": "#/components/schemas/BundleRef"
+              - type: 'null'
+            version:
+              type: integer
+              minimum: 1
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type:
+              - string
+              - 'null'
+              format: date-time
+            deleted_at:
+              type:
+              - string
+              - 'null'
+              format: date-time
+            delivered_at:
+              type:
+              - string
+              - 'null'
+              format: date-time
+            read_at:
+              type:
+              - string
+              - 'null'
+              format: date-time
+            idempotency_key:
+              type: string
+          description: Fixed current snapshot. All fields are present. Text is empty for
+            attachment-only sends, null for tombstones. Upsert by conversation_id, message-id
+            and version. Delivery records may hydrate the current edited or deleted snapshot
+            on replay.
     ReceiptRecordedFrame:
       type: object
       additionalProperties: false
@@ -3146,15 +3189,14 @@ components:
           const: receipt_recorded
         data:
           type: object
-          description: Ephemeral confirmation that a device receipt was durably recorded. It does
-            not consume a delivery sequence and is not ACKed.
+          description: Ephemeral confirmation that a device receipt was durably recorded.
+            It does not consume a delivery sequence and is not ACKed.
           required:
           - message_id
           - status
           properties:
             message_id:
-              type: string
-              format: uuid
+              "$ref": "#/components/schemas/MessageReference"
             status:
               type: string
               enum:
@@ -3166,68 +3208,34 @@ components:
       required:
       - type
       - data
+      - metadata
       properties:
         type:
-          type: string
-          const: new_message
+          enum:
+          - message.created
+          - message.updated
+          - message.deleted
         data:
-          allOf:
-          - type: object
-            required:
-            - delivery_id
-            - actor_id
-            - delivery_sequence
-            properties:
-              delivery_id:
-                type: string
-                format: uuid
-              actor_id:
-                type: string
-              delivery_sequence:
-                type: integer
-                minimum: 1
-            description: Durable creation, edit, or deletion delivered to every participant,
-              including sender devices. The message is the latest version; repeated or older
-              delivery records can therefore contain the same latest message. Deduplicate transport
-              by delivery_id and upsert content by data.id/version.
-          - "$ref": "#/components/schemas/Message"
+          "$ref": "#/components/schemas/Message"
+        metadata:
+          "$ref": "#/components/schemas/DeliveryMetadata"
     ReceiptDeliveryFrame:
       type: object
       additionalProperties: false
       required:
       - type
       - data
+      - metadata
       properties:
         type:
-          type: string
-          const: receipt
+          enum:
+          - message.delivered
+          - message.read
+          - message.failed
         data:
-          type: object
-          required:
-          - delivery_id
-          - actor_id
-          - delivery_sequence
-          - message_id
-          - status
-          properties:
-            delivery_id:
-              type: string
-              format: uuid
-            actor_id:
-              type: string
-            delivery_sequence:
-              type: integer
-              minimum: 1
-            message_id:
-              type: string
-              format: uuid
-            status:
-              type: string
-              enum:
-              - sent
-              - delivered
-              - read
-              - failed
+          "$ref": "#/components/schemas/Message"
+        metadata:
+          "$ref": "#/components/schemas/DeliveryMetadata"
     SocketErrorFrame:
       type: object
       additionalProperties: false
@@ -3522,3 +3530,86 @@ components:
           - 'null'
           description: Empty string clears displayed description; omitted/null leaves unchanged.
       additionalProperties: false
+
+    MessageCode:
+      type: string
+      pattern: "^(?:[0-9a-z]{3}|[1-9a-z][0-9a-z]{3,12})$"
+      examples:
+      - '000'
+      - 00a
+      - zzz
+      - '1000'
+      description: Lowercase base36 message code, scoped to the conversation. Starts at
+        000, grows to 1000 after zzz; never reused.
+
+    MessageReference:
+      oneOf:
+      - "$ref": "#/components/schemas/MessageCode"
+      - type: string
+        format: uuid
+
+    AttachmentLink:
+      type: string
+      format: uri
+      maxLength: 8192
+      pattern: "^https://(?![^/?#]*@)[^/?#]+(?:[/?#]|$)"
+      description: A credential-free HTTPS attachment link. DM stores the URL without fetching
+        it.
+
+    Reply:
+      type: object
+      additionalProperties: false
+      required:
+      - message-id
+      - sender
+      - content
+      properties:
+        message-id:
+          "$ref": "#/components/schemas/MessageCode"
+        sender:
+          "$ref": "#/components/schemas/ActorRef"
+        content:
+          anyOf:
+          - type: object
+            required:
+            - message
+            - attachments
+            - voice_transcript
+            properties:
+              message:
+                type:
+                - string
+                - 'null'
+                maxLength: 100000000
+              attachments:
+                type: array
+                maxItems: 100
+                items:
+                  "$ref": "#/components/schemas/AttachmentLink"
+              voice_transcript:
+                type:
+                - string
+                - 'null'
+                maxLength: 100000000
+          - type: 'null'
+          description: Server-resolved current reply content, or null after the referenced
+            message is deleted.
+
+    DeliveryMetadata:
+      type: object
+      additionalProperties: false
+      required:
+      - source
+      - delivery_id
+      - delivery_sequence
+      properties:
+        source:
+          const: dm
+        delivery_id:
+          type: string
+          format: uuid
+        delivery_sequence:
+          type: integer
+          minimum: 1
+          description: Per receiving account transport cursor for ACK and replay; not a
+            message sequence.

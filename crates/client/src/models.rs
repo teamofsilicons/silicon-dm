@@ -4,6 +4,20 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Reply {
+    #[serde(rename = "message-id")]
+    pub message_id: String,
+    pub sender: Actor,
+    pub content: Option<ReplyContent>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplyContent {
+    pub message: Option<String>,
+    pub attachments: Vec<String>,
+    pub voice_transcript: Option<String>,
+}
+
 /// JSON object that is preserved with every message and draft.
 pub type Metadata = Map<String, Value>;
 
@@ -21,7 +35,7 @@ pub struct Actor {
     pub id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Attachment {
     pub permanent_url: url::Url,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,6 +45,41 @@ pub struct Attachment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
 }
+impl<'de> Deserialize<'de> for Attachment {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Details {
+            permanent_url: url::Url,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            content_type: Option<String>,
+            #[serde(default)]
+            size: Option<u64>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            Link(url::Url),
+            Details(Details),
+        }
+        Ok(match Input::deserialize(deserializer)? {
+            Input::Link(permanent_url) => Self {
+                permanent_url,
+                name: None,
+                content_type: None,
+                size: None,
+            },
+            Input::Details(d) => Self {
+                permanent_url: d.permanent_url,
+                name: d.name,
+                content_type: d.content_type,
+                size: d.size,
+            },
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoiceAttachment {
     #[serde(flatten)]
@@ -47,8 +96,22 @@ pub struct Gif {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct MessageCreate {
+    pub sender_id: Option<String>,
+    /// Optional recipient address, for example deliberate@cos:tos.
+    pub recipient_id: Option<String>,
+    pub text: Option<String>,
+    pub attachments: Vec<Attachment>,
+    pub voice: Option<VoiceAttachment>,
+    pub voice_transcript: Option<String>,
+    pub gif: Option<Gif>,
+    pub metadata: Metadata,
+    pub reply_to_message_id: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(remote = "MessageCreate")]
+struct MessageCreateWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_id: Option<String>,
     /// Optional recipient address, for example deliberate@cos:tos.
@@ -68,12 +131,51 @@ pub struct MessageCreate {
     #[serde(default)]
     pub metadata: Metadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_to_message_id: Option<Uuid>,
+    pub reply_to_message_id: Option<String>,
+}
+impl<'de> Deserialize<'de> for MessageCreate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = Value::deserialize(deserializer)?;
+        if let Some(reply) = value.get("reply").filter(|r| !r.is_null()) {
+            let id = reply
+                .get("message-id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| serde::de::Error::custom("reply requires message-id"))?
+                .to_owned();
+            value["reply_to_message_id"] = Value::String(id);
+        }
+        MessageCreateWire::deserialize(value).map_err(serde::de::Error::custom)
+    }
+}
+impl Serialize for MessageCreate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut attachments = self
+            .attachments
+            .iter()
+            .map(|a| a.permanent_url.to_string())
+            .collect::<Vec<_>>();
+        if let Some(voice) = &self.voice {
+            attachments.push(voice.attachment.permanent_url.to_string());
+        }
+        if let Some(gif) = &self.gif {
+            attachments.push(gif.url.to_string());
+        }
+        let mut value = serde_json::json!({"message":self.text.as_deref().unwrap_or(""),"attachments":attachments,"voice_transcript":self.voice_transcript,"reply":self.reply_to_message_id.as_ref().map(|id|serde_json::json!({"message-id":id}))});
+        if let Some(id) = &self.sender_id {
+            value["sender_id"] = Value::String(id.clone());
+        }
+        if let Some(id) = &self.recipient_id {
+            value["recipient_id"] = Value::String(id.clone());
+        }
+        value.serialize(serializer)
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum MessageStatus {
     Waiting,
+    #[default]
     Sent,
     Delivered,
     Read,
@@ -85,15 +187,39 @@ pub enum ReceiptStatus {
     Delivered,
     Read,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Message {
-    pub id: Uuid,
+    pub id: String,
     pub conversation_id: String,
     pub sender: Actor,
     pub sequence: i64,
     pub status: MessageStatus,
+    pub content: MessageCreate,
+    pub reply: Option<Reply>,
+    pub created_at: String,
+    pub delivered_at: Option<String>,
+    pub read_at: Option<String>,
+    pub failure_reason: Option<String>,
+    pub bundle: Option<BundleRef>,
+    pub version: Option<i64>,
+    pub updated_at: Option<String>,
+    pub deleted_at: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(remote = "Message")]
+struct MessageWire {
+    #[serde(rename = "message-id", alias = "id")]
+    pub id: String,
+    pub conversation_id: String,
+    pub sender: Actor,
+    #[serde(default, skip_serializing)]
+    pub sequence: i64,
+    #[serde(default, skip_serializing)]
+    pub status: MessageStatus,
     #[serde(flatten)]
     pub content: MessageCreate,
+    #[serde(default)]
+    pub reply: Option<Reply>,
     pub created_at: String,
     #[serde(default)]
     pub delivered_at: Option<String>,
@@ -110,6 +236,51 @@ pub struct Message {
     #[serde(default)]
     pub deleted_at: Option<String>,
 }
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut message = MessageWire::deserialize(deserializer)?;
+        if let Some(sequence) = silicon_dm_protocol::message_sequence(&message.id) {
+            message.sequence = sequence;
+        }
+        if message.read_at.is_some() {
+            message.status = MessageStatus::Read;
+        } else if message.delivered_at.is_some() {
+            message.status = MessageStatus::Delivered;
+        }
+        if let Some(reply) = &message.reply {
+            message.content.reply_to_message_id = Some(reply.message_id.clone());
+        }
+        Ok(message)
+    }
+}
+impl Serialize for Message {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut attachments = self
+            .content
+            .attachments
+            .iter()
+            .map(|a| a.permanent_url.to_string())
+            .collect::<Vec<_>>();
+        if let Some(voice) = &self.content.voice {
+            attachments.push(voice.attachment.permanent_url.to_string());
+        }
+        if let Some(gif) = &self.content.gif {
+            attachments.push(gif.url.to_string());
+        }
+        let deleted = self.deleted_at.is_some();
+        if deleted {
+            attachments.clear();
+        }
+        serde_json::json!({"message-id":self.id,"conversation_id":self.conversation_id,
+            "recipient_id":self.content.recipient_id,"sender":self.sender,
+            "message":if deleted {None} else {Some(self.content.text.as_deref().unwrap_or(""))},
+            "attachments":attachments,"voice_transcript":if deleted {None} else {self.content.voice_transcript.as_deref()},
+            "reply":self.reply,"bundle":self.bundle,"version":self.version,"created_at":self.created_at,"updated_at":self.updated_at,
+            "deleted_at":self.deleted_at,"delivered_at":self.delivered_at,"read_at":self.read_at
+        }).serialize(serializer)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BundleRef {
     pub id: Uuid,
@@ -178,7 +349,7 @@ pub struct DraftInput {
     #[serde(default)]
     pub metadata: Metadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_to_message_id: Option<Uuid>,
+    pub reply_to_message_id: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Draft {
@@ -191,14 +362,14 @@ pub struct Draft {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BundleCreate {
-    pub message_ids: Vec<Uuid>,
+    pub message_ids: Vec<String>,
     pub display_message: MessageCreate,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bundle {
     pub id: Uuid,
     pub conversation_id: String,
-    pub original_message_ids: Vec<Uuid>,
+    pub original_message_ids: Vec<String>,
     pub display_message: Message,
     pub created_by: Actor,
     pub created_at: String,
@@ -313,7 +484,7 @@ pub enum ClientFrame {
     Receipt {
         actor_id: String,
         conversation_id: String,
-        message_id: Uuid,
+        message_id: String,
         status: ReceiptStatus,
         device_id: String,
     },
@@ -327,9 +498,54 @@ pub enum ClientFrame {
         message: Box<MessageCreate>,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Clone, Debug)]
 pub enum ServerFrame {
+    Ready {
+        protocol_version: u16,
+        connection_id: Uuid,
+        actors: Vec<String>,
+        acknowledged_through: BTreeMap<String, i64>,
+        testing_generation: Option<i64>,
+    },
+    Ping {
+        ping_id: String,
+    },
+    MessageAccepted {
+        idempotency_key: String,
+        message: Box<Message>,
+    },
+    ReceiptRecorded {
+        message_id: String,
+        status: ReceiptStatus,
+    },
+    Message {
+        delivery_id: Uuid,
+        actor_id: String,
+        delivery_sequence: i64,
+        message: Box<Message>,
+    },
+    Receipt {
+        delivery_id: Uuid,
+        actor_id: String,
+        delivery_sequence: i64,
+        message_id: String,
+        status: MessageStatus,
+        snapshot: Option<Box<Message>>,
+    },
+    Error {
+        code: String,
+        message: String,
+        recoverable: bool,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(
+    remote = "ServerFrame",
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case"
+)]
+enum ServerFrameWire {
     Ready {
         protocol_version: u16,
         connection_id: Uuid,
@@ -347,7 +563,7 @@ pub enum ServerFrame {
         message: Box<Message>,
     },
     ReceiptRecorded {
-        message_id: Uuid,
+        message_id: String,
         status: ReceiptStatus,
     },
     #[serde(rename = "new_message")]
@@ -362,8 +578,10 @@ pub enum ServerFrame {
         delivery_id: Uuid,
         actor_id: String,
         delivery_sequence: i64,
-        message_id: Uuid,
+        message_id: String,
         status: MessageStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<Box<Message>>,
     },
     Error {
         code: String,
@@ -371,6 +589,96 @@ pub enum ServerFrame {
         recoverable: bool,
     },
 }
+impl<'de> Deserialize<'de> for ServerFrame {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = Value::deserialize(deserializer)?;
+        let kind = value["type"].as_str().unwrap_or("").to_owned();
+        if kind.starts_with("message.") {
+            let metadata = value["metadata"].clone();
+            let snapshot = value["data"].clone();
+            let data = value
+                .get_mut("data")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| serde::de::Error::custom("missing event data"))?;
+            data.insert("delivery_id".into(), metadata["delivery_id"].clone());
+            data.insert(
+                "delivery_sequence".into(),
+                metadata["delivery_sequence"].clone(),
+            );
+            data.insert(
+                "actor_id".into(),
+                data.get("recipient_id").cloned().unwrap_or(Value::Null),
+            );
+            if matches!(
+                kind.as_str(),
+                "message.read" | "message.delivered" | "message.failed"
+            ) {
+                data.insert("snapshot".into(), snapshot);
+                data.insert(
+                    "message_id".into(),
+                    data.get("message-id").cloned().unwrap_or(Value::Null),
+                );
+                data.insert(
+                    "status".into(),
+                    Value::String(kind.trim_start_matches("message.").into()),
+                );
+                value["type"] = Value::String("receipt".into());
+            } else {
+                value["type"] = Value::String("new_message".into());
+            }
+            value.as_object_mut().unwrap().remove("metadata");
+        }
+        ServerFrameWire::deserialize(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for ServerFrame {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (delivery_id, actor_id, delivery_sequence, message, kind) = match self {
+            Self::Message {
+                delivery_id,
+                actor_id,
+                delivery_sequence,
+                message,
+            } => (
+                delivery_id,
+                actor_id,
+                delivery_sequence,
+                message,
+                if message.deleted_at.is_some() {
+                    "message.deleted"
+                } else if message.version.unwrap_or(1) > 1 {
+                    "message.updated"
+                } else {
+                    "message.created"
+                },
+            ),
+            Self::Receipt {
+                delivery_id,
+                actor_id,
+                delivery_sequence,
+                snapshot: Some(message),
+                status,
+                ..
+            } => (
+                delivery_id,
+                actor_id,
+                delivery_sequence,
+                message,
+                match status {
+                    MessageStatus::Read => "message.read",
+                    MessageStatus::Failed => "message.failed",
+                    _ => "message.delivered",
+                },
+            ),
+            _ => return ServerFrameWire::serialize(self, serializer),
+        };
+        let mut data = serde_json::to_value(message).map_err(serde::ser::Error::custom)?;
+        data["recipient_id"] = Value::String(actor_id.clone());
+        serde_json::json!({"type":kind,"data":data,"metadata":{"source":"dm","delivery_id":delivery_id,"delivery_sequence":delivery_sequence}}).serialize(serializer)
+    }
+}
+
 impl ServerFrame {
     pub fn delivery_position(&self) -> Option<(Uuid, &str, i64)> {
         match self {

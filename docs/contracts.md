@@ -11,11 +11,10 @@ information. In a sandbox, supply its app secret; lifecycle counters are isolate
 
 | Consumer | HTTP contract | Standalone frames | Shared transport |
 | --- | --- | --- | --- |
-| DM client / CLI 0.5.x | 1 | 3 | 1 |
-| DM client / CLI 0.4.x | 1 | 3 | Not used; standalone connection retained |
+| DM client / CLI 0.8.x | 2 | 4 | 1 |
 
-HTTP clients send `X-DM-Contract-Version: 1`. Standalone WebSocket clients may
-send `X-DM-Protocol-Version: 3`; shared clients use version `1`. Omitting a version
+HTTP clients send `X-DM-Contract-Version: 2`. Standalone WebSocket clients may
+send `X-DM-Protocol-Version: 4`; shared clients use version `1`. Omitting a version
 retains the existing default. Unsupported or repeated version headers are rejected
 with 406 and compatibility information. Responses identify the selected versions.
 
@@ -40,7 +39,7 @@ actor can use the subscription. Responses and commands use:
 {"type":"channel","data":{"subscription_id":"local-profile-id","frame":{"type":"pong","data":{"ping_id":"PING-ID"}}}}
 ```
 
-The inner frame is an unchanged WebSocket v3 frame. Each subscription receives
+The inner frame is an WebSocket v4 frame. Each subscription receives
 its own `ready`, cursors, and generation. The outer transport also has its own
 `ping`/`pong`. Respond immediately at the same layer as the incoming ping.
 `unsubscribe` removes one subscription. Authentication failures do not confer
@@ -49,15 +48,9 @@ slow or overflowing clients disconnect and recover through durable replay.
 
 ## Backward compatibility
 
-Existing HTTP v1 and standalone WebSocket v3 consumers keep their shapes.
-Shared transport is an additive endpoint. Optional discovery fields do not change
-existing mandatory fields. Breaking changes require a new contract, explicit
-compatibility documentation, and consumer-driven tests; package SemVer alone is
-not a protocol negotiation mechanism.
+HTTP 2 and WebSocket 4 introduce recipient addressing, conversation-local message codes and the [fixed message schema](wire-format.md). Older version headers are rejected with 406; update consumers together. Shared transport remains version 1, with version-4 inner frames. Legacy conversation/message UUID aliases still resolve, and durable history is preserved. Discovery retains predecessor lifecycle records.
 
-The common HTTP and v3 envelope has exactly `type` and `data`, with message
-metadata inside `data`. Local callbacks intentionally have `type`, `data`, and
-`metadata`, as specified in [the relay guide](cli/relay.md).
+Durable events have `type`, `data`, and transport `metadata`. Other requests/responses retain `type` and `data`. Drafts and local relay operation records retain their separate schemas.
 
 ## Deprecation and sunset
 
