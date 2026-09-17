@@ -81,8 +81,25 @@ fn silicon_home_and_explicit_overrides_are_isolated() -> TestResult<()> {
     )?;
     assert!(configured.join(".silicon-dm").is_dir());
     assert!(home.join(".silicon-dm/home_dir").is_file());
+    // Replacing an existing pointer and credential file must work on Windows too.
+    run(
+        &home,
+        &[
+            "config",
+            "home",
+            configured.to_str().ok_or("path encoding")?,
+        ],
+        None,
+    )?;
     run(&home, &["updates", "disable"], None)?;
     assert!(configured.join(".silicon-dm/config.json").is_file());
+    let saved: Value =
+        serde_json::from_slice(&fs::read(configured.join(".silicon-dm/config.json"))?)?;
+    assert_eq!(saved["auto_update"], false);
+    assert!(
+        fs::read_dir(configured.join(".silicon-dm"))?
+            .all(|entry| entry.is_ok_and(|e| e.path().extension().is_none_or(|ext| ext != "tmp")))
+    );
     let invalid = home.join("not-a-directory");
     fs::write(&invalid, "file")?;
     assert!(

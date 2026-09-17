@@ -160,7 +160,10 @@ pub fn set_home_directory(home: impl AsRef<Path>) -> Result<PathBuf> {
     file.write_all(directory.to_string_lossy().as_bytes())?;
     file.write_all(b"\n")?;
     file.sync_all()?;
+    drop(file);
     fs::rename(temporary, pointer)?;
+    // Windows cannot open directories through File::open; the file was synced above.
+    #[cfg(unix)]
     File::open(base)?.sync_all()?;
     Ok(directory)
 }
@@ -209,7 +212,9 @@ impl Store {
         let mut file = secure_open(&temporary)?;
         file.write_all(&serde_json::to_vec_pretty(&config)?)?;
         file.sync_all()?;
+        drop(file);
         fs::rename(&temporary, &path)?;
+        #[cfg(unix)]
         File::open(&root)?.sync_all()?;
         FileExt::unlock(&lock)?;
         Ok(result)
