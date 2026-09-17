@@ -133,17 +133,14 @@ pub(super) async fn get_message(
         .map(Json)
 }
 
-/// Replaces the sender's message content using an exact observed version.
+/// Replaces content and appends the previous content to history.
 pub(super) async fn edit_message(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
     ApiPath(path): ApiPath<MessagePath>,
-    IfMatch(version): IfMatch,
     Idempotency(key): Idempotency,
     ApiJson(input): ApiJson<MessageCreate>,
 ) -> AppResult<Json<Message>> {
-    let version = version
-        .ok_or_else(|| AppError::validation("If-Match is required when editing a message"))?;
     state
         .store
         .revise_message(
@@ -151,7 +148,6 @@ pub(super) async fn edit_message(
             &context.actor,
             path.conversation_id,
             path.message_id,
-            version,
             &key,
             Some(input),
         )
@@ -159,16 +155,13 @@ pub(super) async fn edit_message(
         .map(Json)
 }
 
-/// Deletes the sender's message by publishing a versioned tombstone.
+/// Marks the sender's message deleted without adding history.
 pub(super) async fn delete_message(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
     ApiPath(path): ApiPath<MessagePath>,
-    IfMatch(version): IfMatch,
     Idempotency(key): Idempotency,
 ) -> AppResult<Json<Message>> {
-    let version = version
-        .ok_or_else(|| AppError::validation("If-Match is required when deleting a message"))?;
     state
         .store
         .revise_message(
@@ -176,7 +169,6 @@ pub(super) async fn delete_message(
             &context.actor,
             path.conversation_id,
             path.message_id,
-            version,
             &key,
             None,
         )
@@ -590,16 +582,17 @@ fn parse_realtime_query(raw_query: Option<&str>) -> AppResult<RealtimeConnectQue
                         .map_err(|_| AppError::validation("org_id is invalid"))?,
                 );
             }
-            "actors" => {
+            "members" => {
                 if actor_ids.len() == 100 {
                     return Err(AppError::validation(
-                        "actors must contain between 1 and 100 unique actor IDs",
+                        "members must contain between 1 and 100 unique actor IDs",
                     ));
                 }
-                actor_ids
-                    .push(ActorId::from_str(&value).map_err(|_| {
-                        AppError::validation("actors contains an invalid actor ID")
-                    })?);
+                actor_ids.push(
+                    ActorId::from_str(&value).map_err(|_| {
+                        AppError::validation("members contains an invalid actor ID")
+                    })?,
+                );
             }
             "device_id" => {
                 if device_id.is_some() {
@@ -635,12 +628,14 @@ fn parse_realtime_query(raw_query: Option<&str>) -> AppResult<RealtimeConnectQue
 
     if actor_ids.is_empty() {
         return Err(AppError::validation(
-            "actors must contain between 1 and 100 unique actor IDs",
+            "members must contain between 1 and 100 unique actor IDs",
         ));
     }
     let unique_actors = actor_ids.iter().collect::<BTreeSet<_>>();
     if unique_actors.len() != actor_ids.len() {
-        return Err(AppError::validation("actors must contain unique actor IDs"));
+        return Err(AppError::validation(
+            "members must contain unique actor IDs",
+        ));
     }
     let device_id =
         device_id.ok_or_else(|| AppError::validation("device_id must be supplied exactly once"))?;
@@ -822,7 +817,7 @@ mod tests {
     fn realtime_query_accepts_repeated_unique_actor_parameters()
     -> Result<(), Box<dyn std::error::Error>> {
         let query = parse_realtime_query(Some(
-            "org_id=org-1&actors=carbon-1&actors=silicon-1&device_id=device-1",
+            "org_id=org-1&members=carbon-1&members=silicon-1&device_id=device-1",
         ))?;
         assert_eq!(query.organization_id.as_str(), "org-1");
         assert_eq!(query.actor_ids.len(), 2);
@@ -834,13 +829,13 @@ mod tests {
     fn realtime_query_rejects_duplicate_and_excess_actor_parameters() {
         assert!(
             parse_realtime_query(Some(
-                "org_id=org-1&actors=carbon-1&actors=carbon-1&device_id=device-1"
+                "org_id=org-1&members=carbon-1&members=carbon-1&device_id=device-1"
             ))
             .is_err()
         );
 
         let actors = (0..101)
-            .map(|index| format!("actors=actor-{index}"))
+            .map(|index| format!("members=actor-{index}"))
             .collect::<Vec<_>>()
             .join("&");
         let query = format!("org_id=org-1&{actors}&device_id=device-1");
@@ -851,7 +846,7 @@ mod tests {
     fn realtime_query_accepts_exactly_one_hundred_actors() -> Result<(), Box<dyn std::error::Error>>
     {
         let actors = (0..100)
-            .map(|index| format!("actors=actor-{index}"))
+            .map(|index| format!("members=actor-{index}"))
             .collect::<Vec<_>>()
             .join("&");
         let query = format!("org_id=org-1&{actors}&device_id=device-1");
@@ -862,12 +857,12 @@ mod tests {
     #[test]
     fn realtime_query_requires_single_valid_context_fields() {
         for query in [
-            "actors=carbon-1&device_id=device-1",
-            "org_id=org-1&org_id=org-2&actors=carbon-1&device_id=device-1",
-            "org_id=org-1&actors=carbon-1",
-            "org_id=org-1&actors=carbon-1&device_id=one&device_id=two",
-            "org_id=org-1&actors=carbon-1&device_id=%0A",
-            "org_id=org-1&actors=carbon-1&device_id=device-1&unknown=value",
+            "members=carbon-1&device_id=device-1",
+            "org_id=org-1&org_id=org-2&members=carbon-1&device_id=device-1",
+            "org_id=org-1&members=carbon-1",
+            "org_id=org-1&members=carbon-1&device_id=one&device_id=two",
+            "org_id=org-1&members=carbon-1&device_id=%0A",
+            "org_id=org-1&members=carbon-1&device_id=device-1&unknown=value",
         ] {
             assert!(
                 parse_realtime_query(Some(query)).is_err(),

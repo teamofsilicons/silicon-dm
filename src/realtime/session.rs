@@ -13,8 +13,8 @@ use crate::{
     application::{
         auth::{AuthContext, PresentedCredential},
         commands::{
-            OpenRealtimeSessionCommand, RecordReceiptCommand, SendMessageCommand,
-            UpdateRealtimeActivityCommand,
+            CreateBundleCommand, OpenRealtimeSessionCommand, RecordReceiptCommand,
+            SendMessageCommand, UpdateRealtimeActivityCommand,
         },
         messaging::{prepare_message_content, validate_device_id},
         ports::AuthenticationRequest,
@@ -384,30 +384,39 @@ impl SessionRuntime {
                 if text.len() > self.state.settings.server.max_body_bytes {
                     return Ok(Some(SocketExit::server(1009, "frame-too-large")));
                 }
-                let Ok(frame) = serde_json::from_str::<ClientFrame>(text.as_str()) else {
-                    send_public_frame(
-                        &self.state,
+                let raw = serde_json::from_str::<serde_json::Value>(text.as_str());
+                drop(text);
+                let correlation = raw.as_ref().ok().map(command_context);
+                let frame = raw
+                    .ok()
+                    .and_then(|value| serde_json::from_value::<ClientFrame>(value).ok());
+                let Some(frame) = frame else {
+                    send_command_error(
                         socket,
-                        &ServerFrame::recoverable_error(
-                            "invalid_frame",
-                            "client frame is not valid protocol JSON",
-                        ),
+                        correlation.as_ref(),
+                        &AppError::validation("client frame is not valid protocol JSON"),
                     )
                     .await?;
                     return Ok(None);
                 };
-                // The parsed command owns its content; release the raw frame
-                // before database work and response serialization duplicate it.
-                drop(text);
                 match self.handle_client_frame(frame).await {
                     Ok(ClientOutcome::None) => {}
                     Ok(ClientOutcome::Respond(frame)) => {
                         send_public_frame(&self.state, socket, &frame).await?;
                     }
                     Ok(ClientOutcome::Replay(actor_id)) => {
+                        let after = self.sent_through.get(&actor_id).copied().unwrap_or(0);
+                        send_server_frame(
+                            socket,
+                            &command_response(
+                                "resume.success",
+                                serde_json::json!({"member_id":actor_id,"after_sequence":after}),
+                            ),
+                        )
+                        .await?;
                         self.replay_actor(socket, &actor_id).await?;
                     }
-                    Err(error) => send_error(socket, &error).await?,
+                    Err(error) => send_command_error(socket, correlation.as_ref(), &error).await?,
                 }
                 Ok(None)
             }
@@ -458,6 +467,77 @@ impl SessionRuntime {
             serde_json::json!({"session_id":self.session_id,"stage":stage}),
         );
         match frame {
+            ClientFrame::PingError { .. } => Ok(ClientOutcome::None),
+            ClientFrame::CreateBundle {
+                actor_id,
+                org_id,
+                conversation_id,
+                idempotency_key,
+                bundle,
+            } => {
+                if org_id != self.authority.organization_id {
+                    return Err(AppError::Forbidden);
+                }
+                let creator = self.actor(&actor_id)?.clone();
+                if creator.actor_type != crate::domain::ActorType::Silicon {
+                    return Err(AppError::Forbidden);
+                }
+                let conversation_id = self
+                    .state
+                    .store
+                    .resolve_destination(
+                        &self.authority,
+                        &conversation_id,
+                        false,
+                        self.state.identity.as_ref(),
+                    )
+                    .await?;
+                self.state
+                    .store
+                    .check_group_access(&self.authority, conversation_id)
+                    .await?;
+                self.state
+                    .store
+                    .require_participant(&org_id, &creator, conversation_id)
+                    .await?;
+                let mut raw = *bundle;
+                self.state
+                    .store
+                    .resolve_message_input(&org_id, conversation_id, &mut raw)
+                    .await
+                    .map_err(|error| {
+                        if matches!(error, AppError::NotFound) {
+                            AppError::conflict(
+                                "one or more bundle messages are unavailable or already bundled",
+                            )
+                        } else {
+                            error
+                        }
+                    })?;
+                let mut bundle: crate::domain::BundleCreate = serde_json::from_value(raw)
+                    .map_err(|_| AppError::validation("invalid bundle content"))?;
+                bundle.validate().map_err(AppError::validation)?;
+                bundle.display_message =
+                    prepare_message_content(&self.state, bundle.display_message)?;
+                let bundle = self
+                    .state
+                    .store
+                    .create_bundle(CreateBundleCommand {
+                        organization_id: org_id,
+                        conversation_id,
+                        creator,
+                        bundle,
+                        idempotency_key: idempotency_key.clone(),
+                    })
+                    .await?;
+                let mut data = serde_json::to_value(bundle).map_err(AppError::internal)?;
+                data["member_id"] = serde_json::json!(actor_id);
+                data["idempotency_key"] = serde_json::json!(idempotency_key);
+                Ok(ClientOutcome::Respond(Box::new(command_response(
+                    "bundle.success",
+                    data,
+                ))))
+            }
             ClientFrame::Pong { ping_id } => {
                 if self.pending_ping_id.as_deref() != Some(ping_id.as_str()) {
                     return Err(AppError::validation(
@@ -502,7 +582,20 @@ impl SessionRuntime {
                     "delivery.acknowledged",
                     serde_json::json!({"session_id":self.session_id,"sequence":through_sequence,"success":true}),
                 );
-                Ok(ClientOutcome::None)
+                let stored = self
+                    .state
+                    .store
+                    .acknowledged_cursors(
+                        &self.authority.organization_id,
+                        &[actor],
+                        &self.consumer_id,
+                    )
+                    .await?;
+                let through = stored.get(actor_id.as_str()).copied().unwrap_or(0);
+                Ok(ClientOutcome::Respond(Box::new(command_response(
+                    "ack.success",
+                    serde_json::json!({"member_id":actor_id,"through_sequence":through}),
+                ))))
             }
             ClientFrame::Resume {
                 actor_id,
@@ -539,12 +632,15 @@ impl SessionRuntime {
                     .update_realtime_activity(UpdateRealtimeActivityCommand {
                         session_id: self.session_id,
                         organization_id: self.authority.organization_id.clone(),
-                        actor_id,
+                        actor_id: actor_id.clone(),
                         activity,
                         activity_expires_at: expiry,
                     })
                     .await?;
-                Ok(ClientOutcome::None)
+                Ok(ClientOutcome::Respond(Box::new(command_response(
+                    "presence.success",
+                    serde_json::json!({"member_id":actor_id,"activity":activity}),
+                ))))
             }
             ClientFrame::Receipt {
                 actor_id,
@@ -602,6 +698,10 @@ impl SessionRuntime {
                 idempotency_key,
                 message,
             } => {
+                if org_id != self.authority.organization_id {
+                    return Err(AppError::Forbidden);
+                }
+                self.actor(&actor_id)?;
                 let conversation_id = self
                     .state
                     .store
@@ -867,11 +967,11 @@ async fn send_public_frame(
                 _ => "message.delivered",
             },
             _ if !value["data"]["deleted_at"].is_null() => "message.deleted",
-            _ if value["data"]["version"].as_i64().unwrap_or(1) > 1 => "message.updated",
+            _ if !value["data"]["updated_at"].is_null() => "message.updated",
             _ => "message.created",
         };
         value["type"] = serde_json::json!(kind);
-        value["metadata"] = serde_json::json!({"source":"dm","delivery_id":value["data"]["delivery_id"],"delivery_sequence":value["data"]["delivery_sequence"]});
+        value["data"]["metadata"] = serde_json::json!({"source":"dm","delivery_id":value["data"]["delivery_id"],"delivery_sequence":value["data"]["delivery_sequence"]});
         if let Some(data) = value["data"].as_object_mut() {
             if let Some(actor) = data.remove("actor_id") {
                 data.insert("recipient_id".into(), actor);
@@ -949,6 +1049,74 @@ fn safe_close_reason(reason: &str) -> String {
     } else {
         output
     }
+}
+
+fn command_response(kind: &str, data: serde_json::Value) -> ServerFrame {
+    ServerFrame::CommandResponse(serde_json::Value::Object(serde_json::Map::from_iter([
+        ("type".into(), serde_json::Value::String(kind.into())),
+        ("data".into(), data),
+    ])))
+}
+fn command_context(value: &serde_json::Value) -> serde_json::Value {
+    let kind = value["type"].as_str().unwrap_or("");
+    let kind = if matches!(
+        kind,
+        "bundle" | "message.create" | "ack" | "resume" | "presence" | "receipt"
+    ) {
+        format!("{kind}.error")
+    } else {
+        "connection.error".into()
+    };
+    let mut data = serde_json::Map::new();
+    if kind != "connection.error" {
+        for key in [
+            "member_id",
+            "conversation_id",
+            "message_id",
+            "idempotency_key",
+            "device_id",
+            "through_sequence",
+            "after_sequence",
+        ] {
+            if let Some(v) = value["data"].get(key) {
+                let valid = match key {
+                    "through_sequence" | "after_sequence" => v.as_i64().is_some_and(|n| n >= 0),
+                    "idempotency_key" => v
+                        .as_str()
+                        .is_some_and(|s| s.parse::<crate::domain::IdempotencyKey>().is_ok()),
+                    _ => v.as_str().is_some_and(|s| {
+                        !s.is_empty() && s.len() <= 255 && !s.chars().any(char::is_control)
+                    }),
+                };
+                if valid {
+                    data.insert(key.into(), v.clone());
+                }
+            }
+        }
+    }
+    serde_json::json!({"type":kind,"data":data})
+}
+async fn send_command_error(
+    socket: &mut Transport,
+    correlation: Option<&serde_json::Value>,
+    error: &AppError,
+) -> AppResult<()> {
+    let mut value = correlation
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({"type":"connection.error","data":{}}));
+    let code = if matches!(error, AppError::Validation(_)) {
+        if value["type"] == "connection.error" {
+            "invalid_frame"
+        } else {
+            "invalid_request"
+        }
+    } else {
+        error.code()
+    };
+    value["data"]["code"] = serde_json::json!(code);
+    value["data"]["message"] = serde_json::json!(error.to_string());
+    value["data"]["recoverable"] = serde_json::json!(true);
+    send_server_frame(socket, &ServerFrame::CommandResponse(value)).await
 }
 
 #[cfg(test)]

@@ -113,10 +113,10 @@ export class Sockets {
         if (
           ![
             "telemetry",
-        "profile_id",
+            "profile_id",
             "device_id",
             "testing_generation",
-            "actors",
+            "members",
             "org_id",
           ].includes(key)
         )
@@ -162,11 +162,11 @@ export class Sockets {
       const target = new URL("/api/v1/ws", this.config.api);
       target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
       target.searchParams.set("org_id", current.profile.organization_id);
-      target.searchParams.set("actors", current.profile.actor.id);
+      target.searchParams.set("members", current.profile.actor.id);
       target.searchParams.set("device_id", device);
       if (
         url.searchParams
-          .getAll("actors")
+          .getAll("members")
           .some((actor) => actor !== current.profile.actor.id) ||
         (url.searchParams.has("org_id") &&
           url.searchParams.get("org_id") !== current.profile.organization_id)
@@ -191,7 +191,10 @@ export class Sockets {
       }
       let connected;
       try {
-        connected = await this.connect(target, telemetryHeaders(current.profile, url.searchParams.get("telemetry")));
+        connected = await this.connect(
+          target,
+          telemetryHeaders(current.profile, url.searchParams.get("telemetry")),
+        );
       } catch (error) {
         if (!(error instanceof GatewayError) || error.status !== 401)
           throw error;
@@ -200,7 +203,10 @@ export class Sockets {
           current.browser.id,
           current.profile.profile_id,
         );
-        connected = await this.connect(target, telemetryHeaders(current.profile, url.searchParams.get("telemetry")));
+        connected = await this.connect(
+          target,
+          telemetryHeaders(current.profile, url.searchParams.get("telemetry")),
+        );
       }
       const upstream = connected.socket;
       if (socket.destroyed) {
@@ -269,7 +275,10 @@ export class Sockets {
   }
 }
 
-function telemetryHeaders(profile: Parameters<typeof headersFor>[0], preference: string | null): Headers {
+function telemetryHeaders(
+  profile: Parameters<typeof headersFor>[0],
+  preference: string | null,
+): Headers {
   const headers = headersFor(profile);
   headers.set("X-DM-Source", "web");
   headers.set("X-DM-Telemetry", preference === "off" ? "off" : "on");

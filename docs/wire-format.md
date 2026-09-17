@@ -1,120 +1,72 @@
-# DM message schema
+# DM wire format
 
-DM 0.8 uses HTTP contract **2** and WebSocket frames **4** (including frames inside shared transport 1). Upgrade the API, worker, CLI/relay, web frontend, and webhook consumers together. Requests use `{ "type": "...", "data": {...} }`. Durable message events additionally carry root transport `metadata`.
+DM 0.9 uses HTTP contract **3**, WebSocket protocol **5**, and shared transport **2**. Upgrade the API, worker, CLI/relay, web gateway and callback consumers together. Explicit unsupported contract versions return 406.
 
-## Address a recipient
+Requests and responses use `{"type":"...","data":{...}}`. Full schemas and examples are in `openapi.yaml`.
 
-Authenticated senders can send directly to an authorized Carbon or Silicon ID:
+## Conversations and identifiers
 
-```sh
-dm messages send cos:tos --text 'hey'
-dm messages send cos:tos --text "what's up" --reply-to 000
-dm messages send g:tos:team --attachment https://files.example/report.pdf
-```
+`GET /api/v1/conversations` lists normal DMs and accessible groups. Participants include everyone with access. Filter its items for groups; there is no separate GET `/groups`. Group summaries omit `is_public`, `version`, and `invited_members`; group administration endpoints retain policy details.
 
-`POST /api/v1/conversations/cos:tos/messages` resolves or creates the permitted direct conversation. `POST /api/v1/messages` also accepts `recipient_id` inside `data`. IAM permission checks still apply. Other conversation routes accept the recipient to resolve an existing chat.
+Conversation IDs are immutable addresses such as `alice::bob` and `g:tos:engineering`. Message IDs use conversation-local lowercase base36 codes, starting at `000`, padded to three characters and expanding to `1000` after `zzz`. Legacy message/conversation UUID aliases remain accepted. Bundle IDs independently start at `001` in each conversation. A bundle reference is `{"id":"001","role":"display"}` on its summary or `{"id":"001","role":"member"}` on an original message.
 
-Direct conversation addresses order Carbon before Silicon, then lexically within the same type: `saket::cos:tos` is the same chat in both directions. Groups retain immutable `g:tos:team` addresses. Always scope identifiers by organization and testing environment. Internal conversation/message UUIDs stay intact and existing UUID aliases remain accepted.
+Conversation `last_message_status` is `sent`, `delivered`, `read`, or null. Group delivery/read requires every recipient. `updated_at` advances on messages, edits, deletion, reactions and group details/membership changes. Receipts, presence, typing and private drafts do not reorder conversations.
 
-## Short message IDs
+## Messages and history
 
-`message-id` is a lowercase base36 code local to the conversation, not a UUID. It starts at `000`, advances through `001` … `009`, `00a` … `zzz`, then grows to `1000`. There are 46,656 three-character values. Length grows again whenever the current space is exhausted. Existing messages derive their codes from the durable conversation counter, so no history is renumbered.
+A message contains `message-id`, `conversation_id`, `recipient_id`, `sender`, `message`, `attachments`, `voice_transcript`, `reply`, `bundle`, `history`, `created_at`, `updated_at`, `deleted_at`, `delivered_at` and `read_at`.
 
-Edits, deletion and idempotent retries preserve the code. Deleted codes are never reused. Identify a message using `(organization, testing environment, conversation_id, message-id)`; caches must not key on the short code alone. No public message `sequence` is needed.
+Attachments are credential-free HTTPS URLs. Text or at least one attachment is required. Attachment-only messages have empty text. Reply content is resolved by the server. Caller-supplied content cannot change sender authority or conversation routing.
 
-## Send content
+New messages have `history: []`. Every accepted edit appends the previous content snapshot, oldest first:
 
 ```json
 {
-  "type": "message.created",
-  "data": {
-    "recipient_id": "cos:tos",
-    "message": "broo check this",
-    "attachments": ["https://files.example/report.pdf"],
-    "voice_transcript": null,
-    "reply": null
-  }
+  "message": "See you Friday",
+  "history": [
+    {
+      "message": "See you Thursday",
+      "attachments": [],
+      "voice_transcript": null,
+      "reply": null,
+      "created_at": "2026-09-17T10:00:00Z"
+    }
+  ]
 }
 ```
 
-Text alone, attachments alone, or both are valid. Omitted/empty text with no attachments is rejected. Attachments are HTTPS URL strings, at most 100 per message. DM does not upload or fetch them. Audio and GIF URLs use this same list. An audio message can include `voice_transcript`; the transcript requires an attachment.
+A history entry's timestamp is when that content became current. Message edits/deletes have no numeric version or `If-Match`. Edits serialize under the message lock; later edits preserve the content they replace. Idempotency keys prevent duplicate retry entries. Group and draft concurrency tokens remain separate.
 
-A reply input needs only `"reply": {"message-id": "000"}`. DM resolves the target in the same authorized conversation and supplies its sender and current content. Client-supplied quotations are ignored. The quoted content is null once the original is deleted. Text and transcripts retain the existing 100,000,000-character limits.
+Deletion sets `deleted_at` without appending history. Stored history is retained; deleted public snapshots hide text, attachments, transcript, reply and history. Deleted messages cannot be edited or resurrected. Use `updated_at` to compare edits and always preserve a known deletion when merging delayed snapshots.
 
-## Fixed message output
+## WebSockets
 
-Every message snapshot includes the same fields, including null timestamps and empty lists:
+Standalone `/api/v1/ws` requires repeated `members`, `org_id`, and stable `device_id` query parameters plus bearer authorization. Device IDs are nonempty client-generated strings of at most 255 UTF-8 bytes without control characters. They are not required to be UUIDs. `connection.ready` gives a UUID connection ID, authorized members and saved ACK cursors.
 
-```json
-{
-  "type": "message.created",
-  "data": {
-    "message-id": "001",
-    "conversation_id": "saket::cos:tos",
-    "recipient_id": "cos:tos",
-    "sender": {"id": "saket", "type": "carbon"},
-    "message": "what's up",
-    "attachments": [],
-    "voice_transcript": null,
-    "reply": {
-      "message-id": "000",
-      "sender": {"id": "cos:tos", "type": "silicon"},
-      "content": {"message": "hey", "attachments": [], "voice_transcript": null}
-    },
-    "bundle": null,
-    "version": 1,
-    "created_at": "2026-09-17T07:17:32Z",
-    "updated_at": null,
-    "deleted_at": null,
-    "delivered_at": null,
-    "read_at": null
-  },
-  "metadata": {
-    "source": "dm",
-    "delivery_id": "01a0ae3a-5186-7e22-9bbe-73818b2f0881",
-    "delivery_sequence": 12
-  }
-}
-```
+| Command | Success | Failure |
+|---|---|---|
+| `message.create` | `message.create.success` | `message.create.error` |
+| `bundle` | `bundle.success` | `bundle.error` |
+| `receipt` | `receipt.success` | `receipt.error` |
+| `presence` | `presence.success` | `presence.error` |
+| `ack` | `ack.success` | `ack.error` |
+| `resume` | `resume.success` | `resume.error` |
+| server `ping` | client `ping.success` | client `ping.error` |
+| shared `subscribe` | channel `subscribe.success` | channel `subscribe.error` |
+| shared `unsubscribe` | outer `unsubscribe.success` | outer `unsubscribe.error` |
 
-`bundle` preserves the existing bundle feature and is null for ordinary messages. Message bodies have no `actor_id`, `sequence`, `status`, `profile`, caller `metadata`, or separate `voice`/`gif` object. No `interface_attachment_ids` are emitted. A deleted message keeps its identity, sender, version and timestamps with `message: null`, empty attachments, and null transcript/reply. Attachment-only messages use `message: ""`.
+Commands use `member_id`. Message/bundle commands additionally provide `org_id`, `conversation_id` and `idempotency_key`. Message content is directly in `data`. Bundle commands add `message_ids` and `display_message`: an authorized Silicon selects 1–100 distinct, previously unbundled messages in the same conversation and supplies the summary. Creation is atomic and identical retries return the original IDs. The CLI may use the equivalent HTTP operation; SDK callers can send `ClientFrame::CreateBundle` on either socket.
 
-History responses identify the intended account/group in `recipient_id`. Each callback identifies the receiving account in `recipient_id`, including a sender's own copy; `conversation_id` identifies the chat/group. The `sender` object identifies the actual author.
+Success replies have no delivery sequence and need no ACK. Command errors preserve available identifiers and include `code`, `message`, `recoverable`. Recoverable means the socket remains usable, not that the unchanged request will succeed. Unrecognized or malformed envelopes use `connection.error`.
 
-## Events and transport
-
-| Event | Meaning |
-| --- | --- |
-| `message.created` | A version-1 message snapshot |
-| `message.updated` | An edited message snapshot |
-| `message.deleted` | A content-free tombstone |
-| `message.delivered` | Delivery receipt with the current full message |
-| `message.read` | Read receipt with the current full message |
-| `message.failed` | Failed-delivery notification with the current full message |
-
-`version` advances on edits/deletion, not receipts. `updated_at` records the most recent content edit. Receipt timestamps remain null until recorded. Replayed delivery records hydrate the current message; an older delivery can therefore carry a newer edit/tombstone. Apply content by conversation, code and version; never resurrect deleted content.
-
-`delivery_id` remains a UUID, stable across transport retries. `delivery_sequence` is the receiving account's ordered ACK/replay cursor, independent of message codes. These transport fields appear once, in root `metadata`, on durable WebSocket events and callbacks. HTTP message responses have only `type` and `data`, since an HTTP response is not an actor-stream delivery.
-
-| HTTP operation | Type |
-| --- | --- |
-| POST `/conversations/{recipient-or-chat}/messages` or `/messages` | `message.created` |
-| GET `/conversations/{chat}/messages` | `messages` (paginated `data.items`) |
-| GET `/conversations/{chat}/messages/{code}` | `message` |
-| PATCH `/conversations/{chat}/messages/{code}` | `message.updated` |
-| DELETE `/conversations/{chat}/messages/{code}` | `message.deleted` |
-| POST `/conversations/{chat}/messages/{code}/receipts` | `receipt` (current full message response) |
-
-HTTP authorization, idempotency keys, conditional versions, and opaque cursors retain their meaning. PATCH replaces content. Errors retain `type: "error"` and `data.error`. Bodyless requests and 204 responses stay bodyless.
-
-WebSocket control commands retain `type`/`data`: `new_message` sends content with `actor_id`, `org_id`, `conversation_id` (recipient accepted), and `idempotency_key`. `message_accepted` confirms it with the full message and retry key. `receipt` commands use the chat and short `message_id`; `receipt_recorded` confirms the short reference. ACK/resume still select an `actor_id` stream with `through_sequence`/`after_sequence`. Heartbeats are unsequenced.
-
-Callbacks no longer expose local profile or testing-selector fields. A callback endpoint should be configured for its intended environment. Persist the event before responding with HTTP 2xx and:
+`message.created`, `message.updated`, `message.deleted`, `message.delivered`, `message.read` and `message.failed` are durable broadcasts. Their transport fields are inside `data.metadata`:
 
 ```json
-{"type":"ack","data":{"acknowledged":true,"delivery_id":"received UUID"}}
+{"type":"message.created","data":{"message-id":"000","metadata":{"source":"dm","delivery_id":"22222222-2222-4222-8222-000000000001","delivery_sequence":42}}}
 ```
 
-Silicon endpoints may alternatively respond `{"status":"ok","event_id":"NON_NIL_UUID"}`. The outgoing `Idempotency-Key` is the delivery UUID. Missing or mismatched acknowledgements leave delivery pending. Saved legacy message callbacks are projected to the fixed shape without changing delivery IDs; old receipt-only queue entries retain their original receipt contract.
+This abbreviated example shows placement; each delivery includes the full message snapshot. Callbacks use the same envelope. Metadata is not a content-history entry.
 
-See [OpenAPI](../openapi.yaml) for schemas and [contracts](contracts.md) for negotiation.
+ACKs are cumulative per member stream and device, across conversations. Reconnection automatically replays after the stored ACK. Explicit `resume` can replay earlier retained events without lowering the stored ACK. ACK only after durable local processing; never ACK beyond an emitted sequence. Changed testing generations reset local cursors and caches; production uses null.
+
+Shared `/api/v1/ws/shared` first sends `connection.prewarmed`. Subscribe independently for each account, token, organization and device, up to 64 subscriptions. Wrap inner frames as `{"type":"channel","data":{"subscription_id":"work","frame":{...}}}`. Each channel has its own heartbeat and authorization. Answer outer heartbeats too. Unsubscribe removes just one channel; `subscription.closed` is an unsolicited closure notice.

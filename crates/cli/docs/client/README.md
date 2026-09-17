@@ -85,7 +85,7 @@ and `Message.content.recipient_id` preserve the routing addresses. They survive
 history, WebSocket and callback delivery, replies when supplied, bundles and
 edits. Edits cannot change routing. Use a new idempotency key for a new route.
 ISI does not change conversation visibility or create another IAM principal;
-your receiving application dispatches the optional ISI. A socket's `actor_id`
+your receiving application dispatches the optional ISI. A socket's `member_id`
 and subscription IDs remain canonical, with the prefixed sender in its message.
 
 ## Operations
@@ -94,7 +94,7 @@ and subscription IDs remain canonical, with the prefixed sender in its message.
 | --- | --- | --- |
 | Identity | `login`, `refresh`, `logout`, `me` | SLT/token and original retry key |
 | Conversations | `conversations`, `create_conversation` | Page request; participant public IDs and retry key |
-| Messages | `messages`, `message`, `send_message`, `edit_message`, `delete_message` | Conversation address and message code, content, observed version, retry key |
+| Messages | `messages`, `message`, `send_message`, `edit_message`, `delete_message` | Conversation address and message code, content and retry key; history preserves prior edits |
 | Receipts | `record_receipt` | Delivered/read state and stable device ID |
 | Drafts | `draft`, `put_draft`, `delete_draft` | Full content; version zero for create or observed version for replacement; versions are retained across deletion |
 | Bundles | `create_bundle`, `bundle` | 1–100 conversation-local message codes and a display message; Silicon authority |

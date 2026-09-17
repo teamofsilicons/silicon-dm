@@ -121,7 +121,7 @@ fn websocket_command_and_delivery_round_trip_between_backend_and_sdk() -> Result
         message: Box::new(content),
     })?;
     assert_eq!(encoded.as_object().map(serde_json::Map::len), Some(2));
-    assert_eq!(encoded["type"], "new_message");
+    assert_eq!(encoded["type"], "message.create");
     assert_eq!(encoded["data"]["message"], "hello");
     let protocol::ClientFrame::SendMessage {
         message: content, ..

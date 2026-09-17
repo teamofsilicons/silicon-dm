@@ -61,7 +61,8 @@ pub(crate) struct MessageRecord {
 #[derive(Debug, FromRow)]
 struct MessageRevisionRecord {
     message_id: Uuid,
-    version: i64,
+    history: sqlx::types::Json<Vec<serde_json::Value>>,
+    updated_at: Option<OffsetDateTime>,
     content: Option<sqlx::types::Json<MessageCreate>>,
     deleted_at: Option<OffsetDateTime>,
 }
@@ -225,7 +226,7 @@ impl PostgresStore {
         messages: &mut [Message],
     ) -> AppResult<()> {
         let revisions = sqlx::query_as::<_, MessageRevisionRecord>(
-            "SELECT DISTINCT ON (message_id) message_id, version, content, deleted_at FROM message_revisions WHERE message_id = ANY($1) ORDER BY message_id, version DESC"
+            "SELECT message_id, history, updated_at, content, deleted_at FROM message_history WHERE message_id = ANY($1)"
         ).bind(ids).fetch_all(self.pool()).await?;
         let mut revisions = revisions
             .into_iter()
@@ -233,11 +234,27 @@ impl PostgresStore {
             .collect::<HashMap<_, _>>();
         for message in messages {
             if let Some(revision) = revisions.remove(&message.id) {
-                message.version = revision.version;
+                let original = serde_json::to_value(&*message).map_err(AppError::internal)?;
+                message.history = revision
+                    .history
+                    .0
+                    .into_iter()
+                    .map(|mut entry| {
+                        if entry["content"].is_null() {
+                            entry["content"] = original.clone();
+                        }
+                        entry
+                    })
+                    .collect();
+                message.updated_at = revision.updated_at;
                 message.deleted_at = revision.deleted_at;
-                let content = revision
-                    .content
-                    .map_or_else(MessageCreate::default, |content| content.0);
+                let content = if revision.deleted_at.is_some() {
+                    MessageCreate::default()
+                } else if let Some(content) = revision.content {
+                    content.0
+                } else {
+                    continue;
+                };
                 message.text = content.text;
                 message.attachments = content.attachments;
                 message.voice = content.voice;
@@ -267,7 +284,8 @@ fn map_message(
         }
     }
     Ok(Message {
-        version: 1,
+        history: Vec::new(),
+        updated_at: None,
         deleted_at: None,
         id: record.id,
         conversation_id: record.conversation_id,

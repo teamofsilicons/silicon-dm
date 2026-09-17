@@ -36,6 +36,7 @@ pub enum Activity {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Presence {
     /// Actor whose presence is described.
+    #[serde(rename = "member_id", alias = "actor_id")]
     pub actor_id: ActorId,
     /// Aggregate availability.
     pub availability: Availability,

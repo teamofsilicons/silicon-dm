@@ -24,7 +24,7 @@ use uuid::Uuid;
     version,
     about = "Silicon DM: reliable messaging for Carbons and Silicons",
     arg_required_else_help = true,
-    after_help = "FIRST STEPS\n  dm iam --json\n  dm login OAC_TOKEN\n  dm webhook http://localhost:9000/events\n  dm conversations create --participant ACTOR_ID\n  dm messages send CONVERSATION_ID --text 'Hello'\n  dm daemon status\n\nTESTING\n  dm --app-secret-file - login TEST_SLT_OR_PUBLIC_ID\n  dm --test ENV_UUID login status --json\n  dm --test ENV_UUID conversations list\n\nDocs: https://docs.dm.teamofsilicons.com\nRepository: https://github.com/teamofsilicons/silicon-dm\nRust package: https://crates.io/crates/silicon-dm-client\nEvery command has --help. State: ~/.silicon-dm (private credentials, durable inbox/outbox)."
+    after_help = "FIRST STEPS\n  dm iam --json\n  dm login OAC_TOKEN\n  dm webhook http://localhost:9000/events\n  dm conversations create --participant MEMBER_ID\n  dm messages send CONVERSATION_ID --text 'Hello'\n  dm daemon status\n\nTESTING\n  dm --app-secret-file - login TEST_SLT_OR_PUBLIC_ID\n  dm --test ENV_UUID login status --json\n  dm --test ENV_UUID conversations list\n\nDocs: https://docs.dm.teamofsilicons.com\nRepository: https://github.com/teamofsilicons/silicon-dm\nRust package: https://crates.io/crates/silicon-dm-client\nEvery command has --help. State: ~/.silicon-dm (private credentials, durable inbox/outbox)."
 )]
 struct Cli {
     /// Local profile; defaults to the name selected with profiles use.
@@ -127,11 +127,11 @@ enum Command {
     Contracts,
     /// Revoke the refresh-token family and stop this local profile's connection.
     Logout,
-    /// Show IAM actor, organization, capabilities and session.
+    /// Show IAM member, organization, capabilities and session.
     Whoami,
     /// Refresh tokens through DM and atomically update the local profile.
     Refresh,
-    /// List, select and configure independent actor logins.
+    /// List, select and configure independent member logins.
     Profiles {
         #[command(subcommand)]
         command: Profiles,
@@ -253,7 +253,7 @@ enum Conversations {
         #[command(flatten)]
         page: Pagination,
     },
-    /// Current actor is included automatically; repeat --participant for each other actor.
+    /// Current member is included automatically; repeat --participant for each other member.
     Create {
         #[arg(long = "participant", required = true)]
         participants: Vec<String>,
@@ -399,7 +399,7 @@ enum Messages {
         #[arg(long)]
         include_bundled_members: bool,
     },
-    /// Fetch a message including its current version or deletion tombstone.
+    /// Fetch a message including its content history and deletion state.
     Show {
         #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
@@ -419,34 +419,24 @@ enum Messages {
         #[arg(long)]
         dangerously_send_long_message: bool,
     },
-    /// Full replacement using --version from the current message; omitted fields are removed.
+    /// Full replacement; previous content is appended to history.
     #[command(
-        after_help = "Fetch with messages show first. Supply the complete intended content and observed --version. A conflict never overwrites a newer revision. Retry with the original --idempotency-key."
+        after_help = "Supply the complete intended content. Edits serialize in arrival order and preserve history. Retry with the original --idempotency-key."
     )]
     Edit {
         #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
         #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
         message: String,
-        #[arg(
-            long,
-            help = "Observed version from messages show; prevents overwriting newer changes"
-        )]
-        version: i64,
         #[command(flatten)]
         content: Content,
     },
-    /// Store a tombstone using the observed current version.
+    /// Mark a message deleted without adding a history entry.
     Delete {
         #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
         #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
         message: String,
-        #[arg(
-            long,
-            help = "Observed version from messages show; prevents overwriting newer changes"
-        )]
-        version: i64,
     },
 }
 #[derive(Subcommand)]
@@ -468,7 +458,7 @@ enum Receipts {
 }
 #[derive(Subcommand)]
 enum Drafts {
-    /// Fetch this actor's current synchronized private draft.
+    /// Fetch this member's current synchronized private draft.
     Get {
         #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
@@ -485,7 +475,7 @@ enum Drafts {
         #[arg(long, default_value_t = 0)]
         version: i64,
     },
-    /// Delete this actor's current private draft.
+    /// Delete this member's current private draft.
     Delete {
         #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
@@ -504,7 +494,7 @@ enum Bundles {
     Show {
         #[arg(help = "Recipient account, direct conversation address, or group address")]
         conversation: String,
-        bundle: Uuid,
+        bundle: String,
     },
 }
 #[derive(Clone, Copy, ValueEnum)]
@@ -530,7 +520,7 @@ impl ActivityValue {
 }
 #[derive(Subcommand)]
 enum PresenceCommands {
-    /// Show the actor's availability, activity and last-seen time.
+    /// Show the member's availability, activity and last-seen time.
     Get { actor_id: String },
     /// Send transient activity through the connected local relay.
     Set {
@@ -939,11 +929,11 @@ async fn run(cli: Cli) -> Result<Value> {
                 Ok(())
             })?;
             let (_, p) = store::fresh_profile(&session).await?;
-            Ok(json!({"refreshed":true,"actor":p.tokens.actor,"expires_at":p.expires_at}))
+            Ok(json!({"refreshed":true,"member":p.tokens.actor,"expires_at":p.expires_at}))
         }
         Command::Profiles { command } => match command {
             Profiles::List => Ok(
-                json!({"default_profile":config.default_profile,"profiles":config.profiles.values().map(|p|json!({"name":p.name,"actor":p.tokens.actor,"organization_id":p.tokens.organization_id,"base_url":p.base_url,"testing_environment_id":p.testing_environment_id,"webhook_url":p.webhook_url,"enabled":p.enabled})).collect::<Vec<_>>()}),
+                json!({"default_profile":config.default_profile,"profiles":config.profiles.values().map(|p|json!({"name":p.name,"member":p.tokens.actor,"organization_id":p.tokens.organization_id,"base_url":p.base_url,"testing_environment_id":p.testing_environment_id,"webhook_url":p.webhook_url,"enabled":p.enabled})).collect::<Vec<_>>()}),
             ),
             Profiles::Use { name } => {
                 if !config.profiles.values().any(|p| p.name == name) {
@@ -1110,23 +1100,19 @@ async fn run(cli: Cli) -> Result<Value> {
                     Messages::Edit {
                         conversation,
                         message,
-                        version,
                         content,
                     } => Operation::EditMessage {
                         conversation_id: conversation,
                         message_id: message,
                         message: content.read()?,
-                        version,
                         idempotency_key: key,
                     },
                     Messages::Delete {
                         conversation,
                         message,
-                        version,
                     } => Operation::DeleteMessage {
                         conversation_id: conversation,
                         message_id: message,
-                        version,
                         idempotency_key: key,
                     },
                 },

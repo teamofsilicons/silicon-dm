@@ -124,6 +124,17 @@ export function decodeData(value: any): any {
   if (!value || typeof value !== "object") return value;
   // Never traverse caller-owned metadata, even when it contains DM-looking keys.
   const data = { ...value };
+  for (const [wire, local] of [
+    ["member_id", "actor_id"],
+    ["creator_member_id", "creator_actor_id"],
+    ["creator_member_kind", "creator_actor_kind"],
+    ["member", "actor"],
+  ]) {
+    if (wire in data) {
+      data[local] = data[wire];
+      delete data[wire];
+    }
+  }
   if (data["message-id"] && data.conversation_id && data.sender) {
     data.id = localMessageKey(data.conversation_id, data["message-id"]);
     data.sequence = parseInt(data["message-id"], 36) + 1;
@@ -167,21 +178,36 @@ export function decodeData(value: any): any {
 }
 export function encodeFrame(frame: ObjectData): ObjectData {
   const { type, ...data } = frame;
+  if (data.actor_id !== undefined) {
+    data.member_id = data.actor_id;
+    delete data.actor_id;
+  }
   if (data.message_id) data.message_id = wireMessageId(data.message_id);
   if (type === "send_message") {
     const { message, ...routing } = data;
     return {
-      type: "new_message",
+      type: "message.create",
       data: { ...routing, ...encodeContent(message) },
     };
   }
-  return { type, data };
+  return { type: type === "pong" ? "ping.success" : type, data };
 }
 export function decodeFrame(value: unknown): any {
   const data = unwrap(value);
-  const type = (value as ObjectData).type;
+  let type = (value as ObjectData).type;
+  if (type === "connection.ready" || type === "subscribe.success") {
+    type = "ready";
+    data.actors = data.members;
+  }
+  if (type === "message.create.success") type = "message_accepted";
+  if (type === "receipt.success") type = "receipt_recorded";
+  if (type.endsWith(".error") || type === "subscription.closed") type = "error";
+  if (data.member_id !== undefined) {
+    data.actor_id = data.member_id;
+    delete data.member_id;
+  }
   if (type.startsWith("message.")) {
-    const metadata = (value as ObjectData).metadata;
+    const metadata = data.metadata ?? (value as ObjectData).metadata;
     const base = {
       delivery_id: metadata.delivery_id,
       delivery_sequence: metadata.delivery_sequence,

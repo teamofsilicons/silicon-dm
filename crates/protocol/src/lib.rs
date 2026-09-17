@@ -2,7 +2,7 @@
 //! retain their normal semantics; every JSON document has exactly type and data.
 use serde::{Deserialize, Serialize};
 
-pub const WEBSOCKET_VERSION: u16 = 4;
+pub const WEBSOCKET_VERSION: u16 = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -250,4 +250,17 @@ mod message_code_tests {
         }
         assert_eq!(super::message_code(0), None);
     }
+}
+
+/// Conversation-local bundle ID starting at 001, growing past zzz without truncation.
+pub fn bundle_code(sequence: i64) -> Option<String> {
+    if sequence < 1 {
+        return None;
+    }
+    message_code(sequence.checked_add(1)?)
+}
+/// Decode canonical positive bundle codes.
+pub fn bundle_sequence(code: &str) -> Option<i64> {
+    let sequence = message_sequence(code)?.checked_sub(1)?;
+    (sequence > 0).then_some(sequence)
 }

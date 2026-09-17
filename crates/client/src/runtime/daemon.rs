@@ -544,7 +544,7 @@ async fn shared_connected(
         if profile.testing_environment_id.is_some() && test_key.is_none() {
             bail!("testing key missing; production fallback forbidden");
         }
-        let subscribe = json!({"type":"subscribe","data":{"subscription_id":key,"token":profile.tokens.access_token,"organization_id":profile.tokens.organization_id,"actor_id":profile.tokens.actor.id,"device_id":profile.device_id,"testing_key":test_key,"testing_generation":generation,"telemetry_enabled":telemetry}});
+        let subscribe = json!({"type":"subscribe","data":{"subscription_id":key,"token":profile.tokens.access_token,"organization_id":profile.tokens.organization_id,"member_id":profile.tokens.actor.id,"device_id":profile.device_id,"testing_key":test_key,"testing_generation":generation,"telemetry_enabled":telemetry}});
         socket
             .send(Message::Text(subscribe.to_string().into()))
             .await?;
@@ -582,8 +582,8 @@ async fn shared_connected(
                     Message::Text(text)=> {
                         received=tokio::time::Instant::now();
                         let outer:Value=serde_json::from_str(&text).context("decode_frame")?;
-                        if outer["type"]=="ping" { socket.send(Message::Text(json!({"type":"pong","data":{"ping_id":outer["data"]["ping_id"]}}).to_string().into())).await?; continue; }
-                        if outer["type"]=="prewarmed" { if outer["data"]["protocol_version"]!=1 { bail!("unsupported shared protocol"); } continue; }
+                        if outer["type"]=="ping" { socket.send(Message::Text(json!({"type":"ping.success","data":{"ping_id":outer["data"]["ping_id"]}}).to_string().into())).await?; continue; }
+                        if outer["type"]=="connection.prewarmed" { if outer["data"]["protocol_version"]!=2 { bail!("unsupported shared protocol"); } continue; }
                         let key=outer["data"]["subscription_id"].as_str().context("subscription ID missing")?;
                         let profile=profiles.get(key).context("unknown subscription")?;
                         let raw=serde_json::to_string(&outer["data"]["frame"])?;
@@ -600,7 +600,7 @@ async fn shared_connected(
                                     if after>0 { shared_send(&mut socket,key,&ClientFrame::Ack {actor_id:actor.clone(),through_sequence:after}).await?; }
                                 }
                                 streams.insert(key.into(),stream);
-                                statuses.lock().await.insert(key.into(),json!({"state":"connected","shared_connection":true,"actor_id":profile.tokens.actor.id,"testing_environment_id":profile.testing_environment_id}));
+                                statuses.lock().await.insert(key.into(),json!({"state":"connected","shared_connection":true,"member_id":profile.tokens.actor.id,"testing_environment_id":profile.testing_environment_id}));
                             },
                             ServerFrame::Error {recoverable:false,..} => {
                                 channels.lock().await.remove(key);
@@ -837,8 +837,20 @@ async fn webhooks(context: RuntimeContext) {
         }
     }
 }
-/// Only queued v2 frames are upgraded here; live sockets require v3.
+/// Upgrade previously queued callback shapes without changing caller-owned content.
 fn upgrade_callback_frame(mut frame: Value) -> Value {
+    if frame["type"]
+        .as_str()
+        .is_some_and(|kind| kind.starts_with("message."))
+    {
+        if let Some(metadata) = frame
+            .as_object_mut()
+            .and_then(|object| object.remove("metadata"))
+        {
+            frame["data"]["metadata"] = metadata;
+        }
+        return frame;
+    }
     if frame.get("data").is_none() {
         let Some(fields) = frame.as_object_mut() else {
             return frame;
@@ -864,12 +876,14 @@ fn upgrade_callback_frame(mut frame: Value) -> Value {
         message.content.recipient_id = frame["data"]["actor_id"].as_str().map(str::to_owned);
         let kind = if message.deleted_at.is_some() {
             "message.deleted"
-        } else if message.version.unwrap_or(1) > 1 {
+        } else if message.updated_at.is_some() {
             "message.updated"
         } else {
             "message.created"
         };
-        return json!({"type":kind,"data":message,"metadata":{"source":"dm","delivery_id":frame["data"]["delivery_id"],"delivery_sequence":frame["data"]["delivery_sequence"]}});
+        let mut data = serde_json::to_value(message).unwrap_or(Value::Null);
+        data["metadata"] = json!({"source":"dm","delivery_id":frame["data"]["delivery_id"],"delivery_sequence":frame["data"]["delivery_sequence"]});
+        return json!({"type":kind,"data":data});
     }
     frame
 }
@@ -943,7 +957,10 @@ async fn deliver_webhook(
             fields.remove("delivery_id");
             fields.remove("delivery_sequence");
         }
-        json!({"type":kind,"data":data,"metadata":{"source":"dm","delivery_id":item.delivery_id,"delivery_sequence":delivery_sequence}})
+        {
+            data["metadata"] = json!({"source":"dm","delivery_id":item.delivery_id,"delivery_sequence":delivery_sequence});
+            json!({"type":kind,"data":data})
+        }
     };
     let mut request = http.post(webhook_url);
     if let Ok(config) = context.store.load()
@@ -1087,14 +1104,14 @@ mod wire_tests {
             post(move |headers: HeaderMap, Json(body): Json<Value>| {
                 let counter = counter.clone();
                 async move {
-                    assert_eq!(body.as_object().map(serde_json::Map::len), Some(3));
+                    assert_eq!(body.as_object().map(serde_json::Map::len), Some(2));
                     assert_eq!(
-                        body["metadata"],
+                        body["data"]["metadata"],
                         json!({"source":"dm", "delivery_id":Uuid::nil(),"delivery_sequence":1})
                     );
                     assert_eq!(body["type"], "message.created");
                     assert_eq!(body["data"]["message"], "hello");
-                    assert!(body["data"].get("metadata").is_none());
+                    assert!(body.get("metadata").is_none());
                     assert!(body["data"].get("profile").is_none());
                     assert!(body["data"].get("sequence").is_none());
                     assert_eq!(body["data"]["message-id"], "000");

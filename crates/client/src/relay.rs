@@ -65,13 +65,11 @@ pub enum Operation {
         conversation_id: String,
         message_id: String,
         message: MessageCreate,
-        version: i64,
         idempotency_key: String,
     },
     DeleteMessage {
         conversation_id: String,
         message_id: String,
-        version: i64,
         idempotency_key: String,
     },
     Receipt {
@@ -98,7 +96,7 @@ pub enum Operation {
     },
     GetBundle {
         conversation_id: String,
-        bundle_id: Uuid,
+        bundle_id: String,
     },
     GetPresence {
         actor_id: String,
@@ -208,27 +206,19 @@ impl Operation {
                 conversation_id,
                 message_id,
                 message,
-                version,
                 idempotency_key,
             } => serde_json::to_value(
                 client
-                    .edit_message(
-                        conversation_id,
-                        message_id,
-                        message,
-                        *version,
-                        idempotency_key,
-                    )
+                    .edit_message(conversation_id, message_id, message, idempotency_key)
                     .await?,
             )?,
             Self::DeleteMessage {
                 conversation_id,
                 message_id,
-                version,
                 idempotency_key,
             } => serde_json::to_value(
                 client
-                    .delete_message(conversation_id, message_id, *version, idempotency_key)
+                    .delete_message(conversation_id, message_id, idempotency_key)
                     .await?,
             )?,
             Self::Receipt {
@@ -265,7 +255,7 @@ impl Operation {
             Self::GetBundle {
                 conversation_id,
                 bundle_id,
-            } => serde_json::to_value(client.bundle(conversation_id, *bundle_id).await?)?,
+            } => serde_json::to_value(client.bundle(conversation_id, bundle_id).await?)?,
             Self::GetPresence { actor_id } => {
                 serde_json::to_value(client.presence(actor_id).await?)?
             }

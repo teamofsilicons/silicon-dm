@@ -201,7 +201,7 @@ pub struct Message {
     pub read_at: Option<String>,
     pub failure_reason: Option<String>,
     pub bundle: Option<BundleRef>,
-    pub version: Option<i64>,
+    pub history: Vec<Value>,
     pub updated_at: Option<String>,
     pub deleted_at: Option<String>,
 }
@@ -230,7 +230,7 @@ struct MessageWire {
     #[serde(default)]
     pub bundle: Option<BundleRef>,
     #[serde(default)]
-    pub version: Option<i64>,
+    pub history: Vec<Value>,
     #[serde(default)]
     pub updated_at: Option<String>,
     #[serde(default)]
@@ -275,7 +275,7 @@ impl Serialize for Message {
             "recipient_id":self.content.recipient_id,"sender":self.sender,
             "message":if deleted {None} else {Some(self.content.text.as_deref().unwrap_or(""))},
             "attachments":attachments,"voice_transcript":if deleted {None} else {self.content.voice_transcript.as_deref()},
-            "reply":self.reply,"bundle":self.bundle,"version":self.version,"created_at":self.created_at,"updated_at":self.updated_at,
+            "reply":self.reply,"bundle":self.bundle,"history":self.history,"created_at":self.created_at,"updated_at":self.updated_at,
             "deleted_at":self.deleted_at,"delivered_at":self.delivered_at,"read_at":self.read_at
         }).serialize(serializer)
     }
@@ -283,7 +283,7 @@ impl Serialize for Message {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BundleRef {
-    pub id: Uuid,
+    pub id: String,
     pub role: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -303,12 +303,28 @@ pub struct GroupCreate {
     #[serde(default)]
     pub member_ids: Vec<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct GroupDetails {
     #[serde(flatten)]
     pub settings: GroupSettings,
+    #[serde(default)]
     pub version: i64,
+    #[serde(default)]
     pub invited_members: Vec<Actor>,
+}
+impl Serialize for GroupDetails {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut value = serde_json::to_value(&self.settings).map_err(serde::ser::Error::custom)?;
+        if self.version == 0 {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("is_public");
+            }
+        } else {
+            value["version"] = serde_json::json!(self.version);
+            value["invited_members"] = serde_json::json!(self.invited_members);
+        }
+        value.serialize(serializer)
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Conversation {
@@ -318,6 +334,8 @@ pub struct Conversation {
     pub org_id: String,
     pub participants: Vec<Actor>,
     pub last_message: Option<Message>,
+    #[serde(default)]
+    pub last_message_status: Option<MessageStatus>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -354,6 +372,7 @@ pub struct DraftInput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Draft {
     pub conversation_id: String,
+    #[serde(rename = "member_id", alias = "actor_id")]
     pub actor_id: String,
     pub version: i64,
     #[serde(flatten)]
@@ -367,7 +386,7 @@ pub struct BundleCreate {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bundle {
-    pub id: Uuid,
+    pub id: String,
     pub conversation_id: String,
     pub original_message_ids: Vec<String>,
     pub display_message: Message,
@@ -387,6 +406,7 @@ pub enum Activity {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Presence {
+    #[serde(rename = "member_id", alias = "actor_id")]
     pub actor_id: String,
     pub availability: String,
     pub activity: Option<Activity>,
@@ -400,11 +420,13 @@ pub struct Tokens {
     pub token_type: String,
     pub expires_in: i64,
     pub scope: String,
+    #[serde(rename = "member", alias = "actor")]
     pub actor: Actor,
     pub organization_id: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Identity {
+    #[serde(rename = "member", alias = "actor")]
     pub actor: Actor,
     pub organization_id: String,
     pub principal_id: String,
@@ -437,7 +459,9 @@ pub struct TestEnvironmentUpdate {
 pub struct TestEnvironment {
     pub environment_id: Uuid,
     pub organization_id: String,
+    #[serde(rename = "creator_member_id", alias = "creator_actor_id")]
     pub creator_actor_id: String,
+    #[serde(rename = "creator_member_kind", alias = "creator_actor_kind")]
     pub creator_actor_kind: String,
     pub iam_app_id: String,
     pub version: i64,
@@ -466,36 +490,57 @@ pub struct TestEnvironmentKey {
     deny_unknown_fields
 )]
 pub enum ClientFrame {
-    Pong {
-        ping_id: String,
-    },
+    #[serde(rename = "ping.success")]
+    Pong { ping_id: String },
     Ack {
+        #[serde(rename = "member_id")]
         actor_id: String,
         through_sequence: i64,
     },
     Resume {
+        #[serde(rename = "member_id")]
         actor_id: String,
         after_sequence: i64,
     },
     Presence {
+        #[serde(rename = "member_id")]
         actor_id: String,
         activity: Option<Activity>,
     },
     Receipt {
+        #[serde(rename = "member_id")]
         actor_id: String,
         conversation_id: String,
         message_id: String,
         status: ReceiptStatus,
         device_id: String,
     },
-    #[serde(rename = "new_message")]
+    #[serde(rename = "message.create")]
     SendMessage {
+        #[serde(rename = "member_id")]
         actor_id: String,
         org_id: String,
         conversation_id: String,
         idempotency_key: String,
         #[serde(flatten)]
         message: Box<MessageCreate>,
+    },
+    #[serde(rename = "bundle")]
+    CreateBundle {
+        #[serde(rename = "member_id")]
+        actor_id: String,
+        org_id: String,
+        conversation_id: String,
+        idempotency_key: String,
+        #[serde(flatten)]
+        bundle: Box<BundleCreate>,
+    },
+    #[serde(rename = "ping.error")]
+    PingError {
+        ping_id: String,
+        code: String,
+        message: String,
+        recoverable: bool,
     },
 }
 #[derive(Clone, Debug)]
@@ -515,6 +560,7 @@ pub enum ServerFrame {
         message: Box<Message>,
     },
     ReceiptRecorded {
+        conversation_id: String,
         message_id: String,
         status: ReceiptStatus,
     },
@@ -537,6 +583,8 @@ pub enum ServerFrame {
         message: String,
         recoverable: bool,
     },
+    /// Explicit success/error response, preserving the command type and correlation fields.
+    CommandResponse(Value),
 }
 #[derive(Serialize, Deserialize)]
 #[serde(
@@ -546,9 +594,11 @@ pub enum ServerFrame {
     rename_all = "snake_case"
 )]
 enum ServerFrameWire {
+    #[serde(rename = "connection.ready")]
     Ready {
         protocol_version: u16,
         connection_id: Uuid,
+        #[serde(rename = "members", alias = "actors")]
         actors: Vec<String>,
         acknowledged_through: BTreeMap<String, i64>,
         #[serde(default)]
@@ -557,12 +607,15 @@ enum ServerFrameWire {
     Ping {
         ping_id: String,
     },
+    #[serde(rename = "message.create.success")]
     MessageAccepted {
         idempotency_key: String,
         #[serde(flatten)]
         message: Box<Message>,
     },
+    #[serde(rename = "receipt.success")]
     ReceiptRecorded {
+        conversation_id: String,
         message_id: String,
         status: ReceiptStatus,
     },
@@ -583,18 +636,33 @@ enum ServerFrameWire {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         snapshot: Option<Box<Message>>,
     },
+    #[serde(rename = "connection.error")]
     Error {
         code: String,
         message: String,
         recoverable: bool,
     },
+    #[serde(untagged)]
+    CommandResponse(Value),
 }
 impl<'de> Deserialize<'de> for ServerFrame {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut value = Value::deserialize(deserializer)?;
         let kind = value["type"].as_str().unwrap_or("").to_owned();
-        if kind.starts_with("message.") {
-            let metadata = value["metadata"].clone();
+        if matches!(
+            kind.as_str(),
+            "message.created"
+                | "message.updated"
+                | "message.deleted"
+                | "message.read"
+                | "message.delivered"
+                | "message.failed"
+        ) {
+            let metadata = value["data"]
+                .get("metadata")
+                .or_else(|| value.get("metadata"))
+                .cloned()
+                .unwrap_or(Value::Null);
             let snapshot = value["data"].clone();
             let data = value
                 .get_mut("data")
@@ -628,6 +696,30 @@ impl<'de> Deserialize<'de> for ServerFrame {
             }
             value.as_object_mut().unwrap().remove("metadata");
         }
+        match kind.as_str() {
+            "subscribe.success" | "ready" => {
+                value["type"] = Value::String("connection.ready".into())
+            }
+            "message_accepted" => value["type"] = Value::String("message.create.success".into()),
+            "receipt_recorded" => value["type"] = Value::String("receipt.success".into()),
+            "subscribe.error" | "subscription.closed" | "error" => {
+                value["type"] = Value::String("connection.error".into());
+                if value["data"]["message"].is_null() {
+                    value["data"]["message"] = Value::String("subscription closed".into());
+                }
+            }
+            "bundle.success"
+            | "bundle.error"
+            | "message.create.error"
+            | "ack.success"
+            | "ack.error"
+            | "resume.success"
+            | "resume.error"
+            | "presence.success"
+            | "presence.error"
+            | "receipt.error" => return Ok(Self::CommandResponse(value)),
+            _ => {}
+        }
         ServerFrameWire::deserialize(value).map_err(serde::de::Error::custom)
     }
 }
@@ -647,7 +739,7 @@ impl Serialize for ServerFrame {
                 message,
                 if message.deleted_at.is_some() {
                     "message.deleted"
-                } else if message.version.unwrap_or(1) > 1 {
+                } else if message.updated_at.is_some() {
                     "message.updated"
                 } else {
                     "message.created"
@@ -675,7 +767,8 @@ impl Serialize for ServerFrame {
         };
         let mut data = serde_json::to_value(message).map_err(serde::ser::Error::custom)?;
         data["recipient_id"] = Value::String(actor_id.clone());
-        serde_json::json!({"type":kind,"data":data,"metadata":{"source":"dm","delivery_id":delivery_id,"delivery_sequence":delivery_sequence}}).serialize(serializer)
+        data["metadata"] = serde_json::json!({"source":"dm","delivery_id":delivery_id,"delivery_sequence":delivery_sequence});
+        serde_json::json!({"type":kind,"data":data}).serialize(serializer)
     }
 }
 

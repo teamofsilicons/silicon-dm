@@ -204,7 +204,7 @@ export function connectRealtime(
     if (epoch !== connectionEpoch || stopped) return;
     if (frame.type === "ready") {
       if (
-        frame.protocol_version !== 4 ||
+        frame.protocol_version !== 5 ||
         frame.actors.length !== 1 ||
         frame.actors[0] !== actorId
       )

@@ -274,8 +274,16 @@ export function mergeMessage(
   incoming: Message,
 ): Message {
   if (!previous) return incoming;
-  const content =
-    (previous.version ?? 1) > (incoming.version ?? 1) ? previous : incoming;
+  const content = previous.deleted_at
+    ? previous
+    : incoming.deleted_at
+      ? incoming
+      : (previous.history?.length ?? 0) > (incoming.history?.length ?? 0)
+        ? previous
+        : Date.parse(previous.updated_at ?? previous.created_at) >
+            Date.parse(incoming.updated_at ?? incoming.created_at)
+          ? previous
+          : incoming;
   return {
     ...content,
     // Bundle membership is immutable and is not a content revision. A replay

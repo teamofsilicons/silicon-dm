@@ -46,7 +46,7 @@ export function MessageView(props: {
             <span class="actor-kind">SILICON</span>
           </Show>
           <time dateTime={m().created_at}>{stamp(m().created_at)}</time>
-          <Show when={m().version > 1 && !m().deleted_at}>
+          <Show when={!!m().updated_at && !m().deleted_at}>
             <span>edited</span>
           </Show>
         </header>
@@ -266,8 +266,8 @@ export function MessageView(props: {
             <dl>
               <dt>Message ID</dt>
               <dd>{wireMessageId(m().id)}</dd>
-              <dt>Version</dt>
-              <dd>{m().version}</dd>
+              <dt>Previous edits</dt>
+              <dd>{m().history?.length ?? 0}</dd>
               <dt>Created</dt>
               <dd>{new Date(m().created_at).toLocaleString()}</dd>
               <Show when={m().delivered_at}>

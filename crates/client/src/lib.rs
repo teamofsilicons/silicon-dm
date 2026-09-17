@@ -190,7 +190,7 @@ impl Client {
         let mut request = self
             .http
             .request(method, self.endpoint(path)?)
-            .header("X-DM-Contract-Version", "2")
+            .header("X-DM-Contract-Version", "3")
             .header(
                 "X-DM-Telemetry",
                 if self.telemetry_enabled { "on" } else { "off" },
@@ -296,8 +296,11 @@ impl Client {
     }
     /// Lists groups accessible to this token; group IDs are conversation IDs.
     pub async fn groups(&self, page: &PageRequest) -> Result<Page<Conversation>> {
-        self.json(self.request(Method::GET, "groups")?.query(page))
-            .await
+        let mut result = self.conversations(page).await?;
+        result
+            .items
+            .retain(|conversation| conversation.group.is_some());
+        Ok(result)
     }
     pub async fn group(&self, id: impl std::fmt::Display) -> Result<Conversation> {
         let id = id.to_string();
@@ -423,7 +426,6 @@ impl Client {
         conversation: impl std::fmt::Display,
         message: impl std::fmt::Display,
         content: &MessageCreate,
-        version: i64,
         key: &str,
     ) -> Result<Message> {
         let message = message.to_string();
@@ -441,7 +443,6 @@ impl Client {
                 Method::PATCH,
                 &format!("conversations/{conversation}/messages/{message}"),
             )?
-            .header("If-Match", version)
             .header("Idempotency-Key", key)
             .json(content),
         )
@@ -451,7 +452,6 @@ impl Client {
         &self,
         conversation: impl std::fmt::Display,
         message: impl std::fmt::Display,
-        version: i64,
         key: &str,
     ) -> Result<Message> {
         let message = message.to_string();
@@ -469,7 +469,6 @@ impl Client {
                 Method::DELETE,
                 &format!("conversations/{conversation}/messages/{message}"),
             )?
-            .header("If-Match", version)
             .header("Idempotency-Key", key),
         )
         .await
@@ -551,7 +550,7 @@ impl Client {
     pub async fn bundle(
         &self,
         conversation: impl std::fmt::Display,
-        bundle: Uuid,
+        bundle: &str,
     ) -> Result<Bundle> {
         let conversation = conversation.to_string();
         validate_conversation_id(&conversation)?;
@@ -704,7 +703,7 @@ impl Client {
                 )
                 .append_pair("device_id", device_id);
             for actor in actors {
-                query.append_pair("actors", actor);
+                query.append_pair("members", actor);
             }
         }
         if let Some(generation) = testing_generation {

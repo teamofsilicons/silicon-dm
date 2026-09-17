@@ -5,6 +5,32 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 impl PostgresStore {
+    pub(crate) async fn resolve_bundle_id(
+        &self,
+        org: &OrganizationId,
+        conversation: Uuid,
+        value: &str,
+    ) -> AppResult<Uuid> {
+        let sequence = silicon_dm_protocol::bundle_sequence(value).ok_or_else(|| {
+            AppError::validation("expected a conversation-local bundle code such as 001")
+        })?;
+        sqlx::query_scalar("SELECT id FROM message_bundles WHERE organization_id=$1 AND conversation_id=$2 AND sequence=$3")
+            .bind(org.as_str()).bind(conversation).bind(sequence).fetch_optional(self.pool()).await?.ok_or(AppError::NotFound)
+    }
+    async fn public_bundle_reference(&self, value: &mut Value) -> AppResult<()> {
+        if let Some(id) = value.as_str().and_then(|v| Uuid::parse_str(v).ok()) {
+            let sequence: i64 =
+                sqlx::query_scalar("SELECT sequence FROM message_bundles WHERE id=$1")
+                    .bind(id)
+                    .fetch_one(self.pool())
+                    .await?;
+            *value = json!(
+                silicon_dm_protocol::bundle_code(sequence)
+                    .ok_or_else(|| AppError::validation("bundle code overflow"))?
+            );
+        }
+        Ok(())
+    }
     pub(crate) async fn resolve_message_id(
         &self,
         org: &OrganizationId,
@@ -86,6 +112,24 @@ impl PostgresStore {
                     }
                 }
                 Value::Object(object) => {
+                    if object.contains_key("original_message_ids")
+                        && let Some(id) = object.get_mut("id")
+                    {
+                        self.public_bundle_reference(id).await?;
+                    }
+                    if object.contains_key("participants") && object.contains_key("last_message") {
+                        let last = &object["last_message"];
+                        let status = if last.is_null() {
+                            Value::Null
+                        } else if !last["read_at"].is_null() {
+                            json!("read")
+                        } else if !last["delivered_at"].is_null() {
+                            json!("delivered")
+                        } else {
+                            json!("sent")
+                        };
+                        object.insert("last_message_status".into(), status);
+                    }
                     if let Some(conversation) = object
                         .get("conversation_id")
                         .and_then(Value::as_str)
@@ -141,10 +185,6 @@ impl PostgresStore {
 
     async fn public_message(&self, value: &mut Value) -> AppResult<()> {
         let sequence = value["sequence"].as_i64().ok_or(AppError::NotFound)?;
-        let id = value["id"]
-            .as_str()
-            .and_then(|s| Uuid::parse_str(s).ok())
-            .ok_or(AppError::NotFound)?;
         let conversation = value["conversation_id"]
             .as_str()
             .and_then(|s| Uuid::parse_str(s).ok())
@@ -180,15 +220,34 @@ impl PostgresStore {
             let original = serde_json::to_value(original).map_err(AppError::internal)?;
             reply = json!({"message-id":silicon_dm_protocol::message_code(original["sequence"].as_i64().unwrap_or(0)), "sender":original["sender"], "content": if original["deleted_at"].is_null() { public_content(&original) } else { Value::Null }});
         }
-        let updated_at: Option<time::OffsetDateTime> = sqlx::query_scalar("SELECT created_at FROM message_revisions WHERE message_id=$1 AND deleted_at IS NULL ORDER BY version DESC LIMIT 1")
-            .bind(id).fetch_optional(self.pool()).await?;
+        let mut history = Vec::new();
+        if value["deleted_at"].is_null() {
+            for entry in value["history"].as_array().into_iter().flatten() {
+                let mut snapshot = public_content(&entry["content"]);
+                snapshot["created_at"] = entry["created_at"].clone();
+                if let Some(reply_id) = entry["content"]["reply_to_message_id"]
+                    .as_str()
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                {
+                    let original = self.load_message(reply_id).await?;
+                    let original = serde_json::to_value(original).map_err(AppError::internal)?;
+                    snapshot["reply"] = json!({"message-id":silicon_dm_protocol::message_code(original["sequence"].as_i64().unwrap_or(0)),"sender":original["sender"],"content":if original["deleted_at"].is_null() {public_content(&original)} else {Value::Null}});
+                } else {
+                    snapshot["reply"] = Value::Null;
+                }
+                history.push(snapshot);
+            }
+        }
+        if let Some(id) = value.get_mut("bundle").and_then(|b| b.get_mut("id")) {
+            self.public_bundle_reference(id).await?;
+        }
         let content = public_content(value);
         let mut output = json!({
             "message-id":silicon_dm_protocol::message_code(sequence), "conversation_id":public,
             "recipient_id":recipient, "sender":value["sender"], "message":content["message"],
             "attachments":content["attachments"], "voice_transcript":content["voice_transcript"],
-            "reply":if value["deleted_at"].is_null() {reply} else {Value::Null}, "bundle":value["bundle"], "version":value["version"], "created_at":value["created_at"],
-            "updated_at":updated_at.and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok()),
+            "reply":if value["deleted_at"].is_null() {reply} else {Value::Null}, "bundle":value["bundle"], "history":history, "created_at":value["created_at"],
+            "updated_at":value["updated_at"],
             "deleted_at":value["deleted_at"], "delivered_at":value["delivered_at"], "read_at":value["read_at"]
         });
         // Transport fields are moved into the envelope by the realtime adapter.

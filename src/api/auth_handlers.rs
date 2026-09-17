@@ -91,7 +91,7 @@ pub async fn me(Authenticated(context): Authenticated) -> Response {
     (
         no_store(),
         Json(json!({
-            "actor": context.actor,
+            "member": context.actor,
             "organization_id": context.organization_id,
             "principal_id": context.principal_id,
             "session_id": context.session_id,

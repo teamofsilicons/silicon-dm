@@ -47,6 +47,7 @@ pub struct Draft {
     /// Parent conversation.
     pub conversation_id: Uuid,
     /// Private owner.
+    #[serde(rename = "member_id", alias = "actor_id")]
     pub actor_id: ActorId,
     /// Monotonically increasing version.
     pub version: i64,

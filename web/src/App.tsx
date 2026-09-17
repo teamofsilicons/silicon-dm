@@ -445,13 +445,11 @@ function Workspace(props: {
       request<Message>(messagePath(conversation, message.id), {
         method: "PATCH",
         body,
-        version: message.version,
         idempotencyKey: key,
       }),
     deleteMessage: (message: Message, key: string) =>
       request<Message>(messagePath(message.conversation_id, message.id), {
         method: "DELETE",
-        version: message.version,
         idempotencyKey: key,
       }),
   };
@@ -587,7 +585,7 @@ function Workspace(props: {
       conversation_id: conversationId,
       sender: workspaceSession.actor!,
       sequence: optimisticSequence++,
-      version: 1,
+      history: [],
       status: "waiting",
       created_at: new Date().toISOString(),
     };
@@ -1271,7 +1269,7 @@ function Workspace(props: {
     )
       return;
     if (!validView(revision)) return;
-    const identifier = `${message.id}:${message.version}`;
+    const identifier = `${message.id}:${message.updated_at ?? message.created_at}`;
     const key = deleteKeys.get(identifier) || crypto.randomUUID();
     deleteKeys.set(identifier, key);
     try {

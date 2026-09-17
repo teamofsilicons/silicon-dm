@@ -1148,7 +1148,6 @@ async fn exercise_isi_routing(store: &PostgresStore) -> TestResult<()> {
             &sender,
             conversation.id,
             message.id,
-            1,
             &idempotency_key("isi-edit-message")?,
             Some(MessageCreate {
                 text: Some("edited".into()),
@@ -1177,7 +1176,6 @@ async fn exercise_isi_routing(store: &PostgresStore) -> TestResult<()> {
                 &sender,
                 conversation.id,
                 message.id,
-                2,
                 &idempotency_key("isi-reroute-edit")?,
                 Some(reroute)
             )

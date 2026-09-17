@@ -169,9 +169,12 @@ pub enum ReceiptStatus {
 /// Public durable message representation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Message {
-    /// Content version; edits and deletion advance this independently of receipts.
-    #[serde(default = "initial_message_version")]
-    pub version: i64,
+    /// Previous content snapshots, oldest first. Deletion does not add an entry.
+    #[serde(default)]
+    pub history: Vec<serde_json::Value>,
+    /// Most recent content edit time; receipts and deletion do not change it.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub updated_at: Option<OffsetDateTime>,
     /// A deleted message is a content-free tombstone.
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub deleted_at: Option<OffsetDateTime>,
@@ -228,10 +231,6 @@ pub struct Message {
     /// Stable operator-facing failure category, never a secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
-}
-
-const fn initial_message_version() -> i64 {
-    1
 }
 
 /// Cursor-paginated messages.

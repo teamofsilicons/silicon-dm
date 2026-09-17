@@ -27,10 +27,7 @@ use crate::{AppError, application::state::AppState};
 )]
 fn build_plane_router(state: AppState) -> Router {
     let public_api = Router::new()
-        .route(
-            "/groups",
-            get(super::groups::list).post(super::groups::create),
-        )
+        .route("/groups", post(super::groups::create))
         .route(
             "/groups/{group_id}",
             get(super::groups::get).patch(super::groups::update),

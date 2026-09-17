@@ -59,7 +59,7 @@ test("v3 socket deliveries decode into durable UI models and heartbeat uses an e
   assert.equal(frame.delivery_sequence, 2);
   assert.deepEqual(frame.message.metadata, raw.data.metadata);
   assert.deepEqual(encodeFrame({ type: "pong", ping_id: "p" }), {
-    type: "pong",
+    type: "ping.success",
     data: { ping_id: "p" },
   });
   assert.throws(() => decodeFrame({ type: "ping", ping_id: "old" }));
@@ -76,7 +76,7 @@ test("attachment-only sends and bundles use public content and scoped references
     conversation_id: "c",
     message: content,
   });
-  assert.equal(send.type, "new_message");
+  assert.equal(send.type, "message.create");
   assert.equal(send.data.metadata, undefined);
   assert.deepEqual(send.data.attachments, ["https://files.example/a"]);
   const bundle = encodeRequest("POST", "/api/dm/conversations/c/bundles", {

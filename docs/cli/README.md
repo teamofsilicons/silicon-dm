@@ -92,8 +92,8 @@ dm messages send cos:tos --attachment https://files.example/report.pdf
 dm messages send cos:tos --text "what's up" --reply-to 000
 dm messages list cos:tos
 dm messages show cos:tos 000
-dm messages edit cos:tos 000 --version 1 --text 'heyy'
-dm messages delete cos:tos 000 --version 2
+dm messages edit cos:tos 000 --text 'heyy'
+dm messages delete cos:tos 000
 ```
 
 The authenticated sender supplies a recipient ID; DM resolves or creates the permitted direct chat. You may also pass the canonical conversation address or a group ID. Codes are conversation-local lowercase base36: `000` through `zzz`, then `1000` onward. Edits/deletion/retries preserve the code.
@@ -228,3 +228,5 @@ To override, add `--dangerously-send-long-message`. The CLI prints a warning to 
 ```sh
 dm messages send CONVERSATION_ID --text 'Your message' --dangerously-send-long-message
 ```
+
+Message edits preserve prior content in `history`; new messages have an empty history. Message deletion adds no history entry. Only draft/group mutations use numeric versions. Bundle show accepts conversation-local codes such as `001`.

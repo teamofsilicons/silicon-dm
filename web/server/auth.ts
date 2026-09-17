@@ -122,7 +122,7 @@ export class Auth {
   ): Promise<Tokens> {
     const response = await this.authenticationRequest(path, body, testingKey);
     const value = await responseJson(response, 256 * 1024);
-    const actor = value.actor as Actor | undefined;
+    const actor = (value.member ?? value.actor) as Actor | undefined;
     if (
       typeof value.access_token !== "string" ||
       typeof value.refresh_token !== "string" ||
@@ -158,6 +158,7 @@ export class Auth {
       );
     return {
       ...value,
+      actor,
       organization_ids: [...new Set(organizations)],
     } as unknown as Tokens;
   }
@@ -180,20 +181,51 @@ export class Auth {
       environment = body.testing_environment_id;
     let environmentName: string | undefined;
     if (body.app_secret !== undefined) {
-      if (testingKey !== undefined || environment !== undefined || typeof body.app_secret !== "string" || !/^ask_[A-Za-z0-9_-]{43}$/.test(body.app_secret))
-        throw new GatewayError(400, "invalid_testing_environment", "Provide a valid IAM test app secret.");
+      if (
+        testingKey !== undefined ||
+        environment !== undefined ||
+        typeof body.app_secret !== "string" ||
+        !/^ask_[A-Za-z0-9_-]{43}$/.test(body.app_secret)
+      )
+        throw new GatewayError(
+          400,
+          "invalid_testing_environment",
+          "Provide a valid IAM test app secret.",
+        );
       const response = await fetch(new URL("/api/v1/iam", this.config.api), {
-        headers: { "X-Testing-Environment-Key": body.app_secret, Accept: "application/json" },
-        redirect: "error", signal: AbortSignal.timeout(20000),
+        headers: {
+          "X-Testing-Environment-Key": body.app_secret,
+          Accept: "application/json",
+        },
+        redirect: "error",
+        signal: AbortSignal.timeout(20000),
       });
-      if (!response.ok) { await response.body?.cancel(); throw new GatewayError(response.status === 401 ? 401 : 503, "testing_environment_unavailable", "The test app secret was rejected or its environment is unavailable. Production was not used."); }
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new GatewayError(
+          response.status === 401 ? 401 : 503,
+          "testing_environment_unavailable",
+          "The test app secret was rejected or its environment is unavailable. Production was not used.",
+        );
+      }
       const info = await responseJson(response);
-      if (typeof info.testing_environment_id !== "string" || !uuidPattern.test(info.testing_environment_id) || info.app_id !== this.config.appId)
-        throw new GatewayError(502, "invalid_testing_environment", "DM did not validate the test environment.");
+      if (
+        typeof info.testing_environment_id !== "string" ||
+        !uuidPattern.test(info.testing_environment_id) ||
+        info.app_id !== this.config.appId
+      )
+        throw new GatewayError(
+          502,
+          "invalid_testing_environment",
+          "DM did not validate the test environment.",
+        );
       testingKey = body.app_secret;
       environment = info.testing_environment_id;
-      const meta = info.testing_environment as Record<string, unknown> | undefined;
-      environmentName = typeof meta?.name === "string" ? meta.name : "Testing environment";
+      const meta = info.testing_environment as
+        | Record<string, unknown>
+        | undefined;
+      environmentName =
+        typeof meta?.name === "string" ? meta.name : "Testing environment";
     }
     if (
       (testingKey === undefined) !== (environment === undefined) ||
@@ -247,9 +279,15 @@ export class Auth {
       (p) => !replaced.has(p.profile_id),
     );
     browser.value.profiles.push(...profiles);
-    const previousSelection = browser.value.profiles.find(p=>p.profile_id===browser.value.selected);
-    if (environment && previousSelection && !previousSelection.testing_environment_id)
-      browser.value.production_profile_id=previousSelection.profile_id;
+    const previousSelection = browser.value.profiles.find(
+      (p) => p.profile_id === browser.value.selected,
+    );
+    if (
+      environment &&
+      previousSelection &&
+      !previousSelection.testing_environment_id
+    )
+      browser.value.production_profile_id = previousSelection.profile_id;
     browser.value.selected = profiles[0]!.profile_id;
     delete browser.value.flow;
     await this.sessions.save(browser);

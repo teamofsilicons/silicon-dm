@@ -125,6 +125,20 @@ impl FromRequestParts<AppState> for Authenticated {
                     .await?;
                 parameters.insert("message_id".into(), id.to_string());
             }
+            if let (Some(conversation), Some(bundle)) = (
+                parameters.get("conversation_id"),
+                parameters.get("bundle_id"),
+            ) {
+                let id = state
+                    .store
+                    .resolve_bundle_id(
+                        &context.organization_id,
+                        conversation.parse().map_err(|_| AppError::NotFound)?,
+                        bundle,
+                    )
+                    .await?;
+                parameters.insert("bundle_id".into(), id.to_string());
+            }
             parts.extensions.insert(ResolvedPath(parameters));
         }
         parts.extensions.insert(context.clone());

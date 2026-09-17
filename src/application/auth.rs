@@ -75,6 +75,7 @@ pub struct ApplicationSession {
     /// Effective space-separated scopes.
     pub scope: String,
     /// Verified Carbon or Silicon identity.
+    #[serde(rename = "member")]
     pub actor: ActorRef,
     /// Organization to supply as `X-Org-ID` on subsequent requests.
     pub organization_id: OrganizationId,

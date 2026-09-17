@@ -37,13 +37,17 @@ impl IdentityProvider for Identity {
             .expose_secret()
             .strip_prefix("token-")
             .ok_or(AppError::Unauthorized)?;
-        if !["alice", "bob"].contains(&id) || organization_id.as_str() != "tos" {
+        if !["alice", "bob", "cos:tos"].contains(&id) || organization_id.as_str() != "tos" {
             return Err(AppError::Unauthorized);
         }
         Ok(AuthContext {
             actor: ActorRef {
                 id: id.parse().map_err(|_| AppError::Unauthorized)?,
-                actor_type: ActorType::Carbon,
+                actor_type: if id == "cos:tos" {
+                    ActorType::Silicon
+                } else {
+                    ActorType::Carbon
+                },
             },
             principal_id: Uuid::from_u128(if id == "alice" { 1 } else { 2 }),
             session_id: None,
@@ -342,7 +346,7 @@ async fn shared_socket_authenticates_each_profile_and_contracts_retire_after_idl
         ("b", "bob", "token-bob"),
         ("invalid", "bob", "token-alice"),
     ] {
-        socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"type":"subscribe","data":{"subscription_id":id,"actor_id":actor,"token":token,"organization_id":"tos","device_id":format!("device-{id}"),"testing_key":null,"testing_generation":null}}).to_string().into())).await?;
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"type":"subscribe","data":{"subscription_id":id,"member_id":actor,"token":token,"organization_id":"tos","device_id":format!("device-{id}"),"testing_key":null,"testing_generation":null}}).to_string().into())).await?;
     }
     let mut ready = BTreeSet::new();
     let mut rejected = false;
@@ -356,7 +360,7 @@ async fn shared_socket_authenticates_each_profile_and_contracts_retire_after_idl
             if value["type"] == "ping" {
                 socket
                     .send(tokio_tungstenite::tungstenite::Message::Text(
-                        json!({"type":"pong","data":{"ping_id":value["data"]["ping_id"]}})
+                        json!({"type":"ping.success","data":{"ping_id":value["data"]["ping_id"]}})
                             .to_string()
                             .into(),
                     ))
@@ -364,10 +368,10 @@ async fn shared_socket_authenticates_each_profile_and_contracts_retire_after_idl
                 continue;
             }
             let id = value["data"]["subscription_id"].as_str().ok_or("id")?;
-            if value["data"]["frame"]["type"] == "ready" {
+            if value["data"]["frame"]["type"] == "subscribe.success" {
                 ready.insert(id.to_owned());
                 let expected = if id == "a" { "alice" } else { "bob" };
-                assert_eq!(value["data"]["frame"]["data"]["actors"], json!([expected]));
+                assert_eq!(value["data"]["frame"]["data"]["members"], json!([expected]));
             }
             if id == "invalid" {
                 assert_eq!(
@@ -518,10 +522,11 @@ async fn daemon_uses_one_connection(base: &str, pool: &sqlx::PgPool) -> Result {
         }
         Ok(())
     })?;
-    let before: i64 =
-        sqlx::query_scalar("SELECT requests FROM contract_versions WHERE family='shared'")
-            .fetch_one(pool)
-            .await?;
+    let before: i64 = sqlx::query_scalar(
+        "SELECT requests FROM contract_versions WHERE family='shared' AND version=2",
+    )
+    .fetch_one(pool)
+    .await?;
     let relay = runtime.client()?;
     let task = tokio::spawn(async move { runtime.run().await });
     tokio::time::timeout(Duration::from_secs(12), async {
@@ -537,10 +542,11 @@ async fn daemon_uses_one_connection(base: &str, pool: &sqlx::PgPool) -> Result {
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     })
     .await??;
-    let after: i64 =
-        sqlx::query_scalar("SELECT requests FROM contract_versions WHERE family='shared'")
-            .fetch_one(pool)
-            .await?;
+    let after: i64 = sqlx::query_scalar(
+        "SELECT requests FROM contract_versions WHERE family='shared' AND version=2",
+    )
+    .fetch_one(pool)
+    .await?;
     assert_eq!(
         after - before,
         1,
@@ -942,15 +948,15 @@ async fn group_address_socket_roundtrip(
     let frame = socket.next().await.ok_or("opening frame missing")??;
     assert!(frame.is_text());
     if shared {
-        socket.send(SocketMessage::Text(json!({"type":"subscribe","data":{"subscription_id":"group","actor_id":"alice","token":"token-alice","organization_id":"tos","device_id":"group-id-device","testing_key":null,"testing_generation":null}}).to_string().into())).await?;
+        socket.send(SocketMessage::Text(json!({"type":"subscribe","data":{"subscription_id":"group","member_id":"alice","token":"token-alice","organization_id":"tos","device_id":"group-id-device","testing_key":null,"testing_generation":null}}).to_string().into())).await?;
     }
-    let command = json!({"type":"new_message","data":{"actor_id":"alice","org_id":"tos","conversation_id":id,"idempotency_key":format!("group-id-socket-{shared}"),"message":"Address roundtrip","metadata":{"conversation_id":"leave-this-alone"}}});
+    let command = json!({"type":"message.create","data":{"member_id":"alice","org_id":"tos","conversation_id":id,"idempotency_key":format!("group-id-socket-{shared}"),"message":"Address roundtrip","metadata":{"conversation_id":"leave-this-alone"}}});
     if shared {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let frame = socket.next().await.ok_or("shared closed before ready")??;
                 let value: Value = serde_json::from_str(frame.to_text()?)?;
-                if value["data"]["frame"]["type"] == "ready" {
+                if value["data"]["frame"]["type"] == "subscribe.success" {
                     break;
                 }
             }
@@ -978,10 +984,13 @@ async fn group_address_socket_roundtrip(
             } else {
                 &value
             };
-            if value["type"] == "error" {
+            if value["type"]
+                .as_str()
+                .is_some_and(|kind| kind.rsplit('.').next() == Some("error"))
+            {
                 return Err(format!("socket rejected: {value}").into());
             }
-            if value["type"] == "message_accepted" {
+            if value["type"] == "message.create.success" {
                 assert_eq!(value["data"]["conversation_id"], id);
                 assert!(value["data"].get("metadata").is_none());
                 assert!(value["data"]["message-id"].as_str().is_some());
@@ -1402,12 +1411,12 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
             "bob",
             "000",
             &serde_json::from_value(json!({"message":"heyy"}))?,
-            1,
             "edit-direct",
         )
         .await?;
     assert_eq!(edited.id, "000");
-    assert_eq!(edited.version, Some(2));
+    assert_eq!(edited.history.len(), 1);
+    assert_eq!(edited.history[0]["message"], "hey");
     assert!(edited.updated_at.is_some());
     let mut listener = alice.connect(&["alice".into()], "schema-listener").await?;
     let read = bob
@@ -1433,13 +1442,11 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
     assert!(event["data"]["read_at"].is_string());
     assert!(event["data"].get("delivery_id").is_none());
     assert!(event["data"].get("sequence").is_none());
-    assert_eq!(event["metadata"]["source"], "dm");
+    assert_eq!(event["data"]["metadata"]["source"], "dm");
     let decoded: silicon_dm_client::ServerFrame = serde_json::from_value(event.clone())?;
     assert_eq!(serde_json::to_value(decoded)?, event);
     listener.close(None).await?;
-    let deleted = alice
-        .delete_message("bob", "000", 2, "delete-direct")
-        .await?;
+    let deleted = alice.delete_message("bob", "000", "delete-direct").await?;
     let tombstone = serde_json::to_value(&deleted)?;
     assert_eq!(tombstone["message-id"], "000");
     assert!(tombstone["message"].is_null());
@@ -1515,7 +1522,7 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
         "voice_transcript",
         "reply",
         "bundle",
-        "version",
+        "history",
         "created_at",
         "updated_at",
         "deleted_at",
@@ -1537,6 +1544,161 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
     let response=http.post(format!("{base}/api/v1/messages")).bearer_auth("token-bob").header("X-Org-ID","tos").header("Idempotency-Key","body-recipient").json(&json!({"type":"message.created","data":{"recipient_id":"alice","message":"from body"}})).send().await?.error_for_status()?;
     let direct: Value = response.json().await?;
     assert_eq!(direct["data"]["conversation_id"], "alice::bob");
+    server.abort();
+    Ok(())
+}
+
+async fn receive_kind(socket: &mut silicon_dm_client::Socket, kind: &str) -> Result<Value> {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let message = socket.next().await.ok_or("socket closed")??;
+            if !message.is_text() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(message.to_text()?)?;
+            if value["type"] == kind {
+                return Ok(value);
+            }
+        }
+    })
+    .await?
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one transaction fixture exercises the full message and bundle contract"
+)]
+async fn bundle_commands_and_history_are_atomic_and_retry_safe() -> Result {
+    use silicon_dm_client::{Client, ClientFrame, MessageCreate};
+    use tokio_tungstenite::tungstenite::Message as Frame;
+    let container = Postgres::default().with_tag("16-alpine").start().await?;
+    let app = state(settings(
+        format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?
+        ),
+        "http://localhost:9999",
+    )?)
+    .await?;
+    let pool = app.store.pool().clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let server =
+        tokio::spawn(
+            async move { axum::serve(listener, silicon_dm::api::build_router(app)).await },
+        );
+    let client = Client::new(&base)?.with_auth("token-cos:tos", "tos");
+    let content: MessageCreate = serde_json::from_value(json!({"message":"original"}))?;
+    let first = client
+        .send_message("alice", &content, "history-first")
+        .await?;
+    assert!(first.history.is_empty());
+    let changed: MessageCreate = serde_json::from_value(json!({"message":"edited"}))?;
+    let edit = client
+        .edit_message("alice", &first.id, &changed, "history-edit")
+        .await?;
+    assert_eq!(edit.history.len(), 1);
+    assert_eq!(edit.history[0]["message"], "original");
+    assert_eq!(
+        client
+            .edit_message("alice", &first.id, &changed, "history-edit")
+            .await?
+            .history
+            .len(),
+        1
+    );
+    let again: MessageCreate = serde_json::from_value(json!({"message":"second edit"}))?;
+    assert_eq!(
+        client
+            .edit_message("alice", &first.id, &again, "history-edit-two")
+            .await?
+            .history[1]["message"],
+        "edited"
+    );
+    let mut socket = client.connect(&["cos:tos".into()], "bundle-test").await?;
+    let ready = receive_kind(&mut socket, "connection.ready").await?;
+    assert_eq!(ready["data"]["members"], json!(["cos:tos"]));
+    let request = json!({"type":"bundle","data":{"member_id":"cos:tos","org_id":"tos","conversation_id":first.conversation_id,"idempotency_key":"bundle-socket-001","message_ids":[first.id],"display_message":{"message":"summary"}}});
+    socket.send(Frame::Text(request.to_string().into())).await?;
+    let accepted = receive_kind(&mut socket, "bundle.success").await?;
+    assert_eq!(accepted["data"]["id"], "001");
+    assert_eq!(
+        accepted["data"]["display_message"]["bundle"],
+        json!({"id":"001","role":"display"})
+    );
+    assert!(accepted["data"]["display_message"].get("version").is_none());
+    socket.send(Frame::Text(request.to_string().into())).await?;
+    assert_eq!(
+        receive_kind(&mut socket, "bundle.success").await?["data"]["id"],
+        "001"
+    );
+    let expanded = client.bundle(&first.conversation_id, "001").await?;
+    assert_eq!(
+        expanded.original_messages[0]
+            .bundle
+            .as_ref()
+            .ok_or("bundle")?
+            .role,
+        "member"
+    );
+    assert_eq!(expanded.original_messages[0].history.len(), 2);
+    let mut conflict = request.clone();
+    conflict["data"]["display_message"]["message"] = json!("different");
+    socket
+        .send(Frame::Text(conflict.to_string().into()))
+        .await?;
+    let error = receive_kind(&mut socket, "bundle.error").await?;
+    assert_eq!(error["data"]["code"], "conflict");
+    assert_eq!(error["data"]["idempotency_key"], "bundle-socket-001");
+    conflict["data"]["idempotency_key"] = json!("bundle-missing-002");
+    conflict["data"]["message_ids"] = json!(["zzz"]);
+    socket
+        .send(Frame::Text(conflict.to_string().into()))
+        .await?;
+    assert_eq!(
+        receive_kind(&mut socket, "bundle.error").await?["data"]["code"],
+        "conflict"
+    );
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM message_bundles),(SELECT count(*) FROM messages)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (1, 2));
+    let command = ClientFrame::Presence {
+        actor_id: "cos:tos".into(),
+        activity: Some(silicon_dm_client::Activity::Typing),
+    };
+    socket
+        .send(Frame::Text(serde_json::to_string(&command)?.into()))
+        .await?;
+    assert_eq!(
+        receive_kind(&mut socket, "presence.success").await?["data"]["member_id"],
+        "cos:tos"
+    );
+    let deleted = client
+        .delete_message("alice", &first.id, "history-delete")
+        .await?;
+    assert!(deleted.deleted_at.is_some());
+    assert!(deleted.history.is_empty());
+    let stored:Value=sqlx::query_scalar("SELECT history FROM message_history WHERE message_id=(SELECT id FROM messages WHERE sequence=1)").fetch_one(&pool).await?;
+    assert_eq!(stored.as_array().ok_or("history")?.len(), 2);
+    assert!(
+        client
+            .edit_message("alice", &first.id, &content, "after-delete")
+            .await
+            .is_err()
+    );
+    let page = client
+        .conversations(&silicon_dm_client::PageRequest::default())
+        .await?;
+    assert!(matches!(
+        page.items[0].last_message_status,
+        Some(silicon_dm_client::MessageStatus::Sent)
+    ));
+    socket.close(None).await?;
     server.abort();
     Ok(())
 }

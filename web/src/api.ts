@@ -514,31 +514,13 @@ export const dm = {
     conversation: string,
     id: string,
     body: MessageCreate,
-    version: number,
     key?: string,
   ) => {
     validateMessage(body);
-    return mutation<Message>(
-      "PATCH",
-      messagePath(conversation, id),
-      body,
-      key,
-      version,
-    );
+    return mutation<Message>("PATCH", messagePath(conversation, id), body, key);
   },
-  deleteMessage: (
-    conversation: string,
-    id: string,
-    version: number,
-    key?: string,
-  ) =>
-    mutation<Message>(
-      "DELETE",
-      messagePath(conversation, id),
-      undefined,
-      key,
-      version,
-    ),
+  deleteMessage: (conversation: string, id: string, key?: string) =>
+    mutation<Message>("DELETE", messagePath(conversation, id), undefined, key),
   receipt: async (
     conversation: string,
     id: string,

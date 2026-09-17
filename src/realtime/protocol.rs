@@ -65,6 +65,24 @@ pub enum ClientFrame {
         /// Normal message content.
         message: Box<serde_json::Value>,
     },
+    /// Creates an atomic bundle with caller-supplied display content.
+    CreateBundle {
+        /// Authorized creator.
+        actor_id: ActorId,
+        /// Authorized organization.
+        org_id: OrganizationId,
+        /// Existing conversation address.
+        conversation_id: String,
+        /// Stable retry key.
+        idempotency_key: IdempotencyKey,
+        /// Bundle input with public message codes.
+        bundle: Box<serde_json::Value>,
+    },
+    /// Failed heartbeat; does not refresh the connection lease.
+    PingError {
+        /// Ping being reported.
+        ping_id: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -72,6 +90,7 @@ pub enum ClientFrame {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum ClientFrameWire {
     /// Application heartbeat response. It is never persisted or sequenced.
+    #[serde(rename = "ping.success")]
     Pong {
         /// Echoed server ping identifier.
         ping_id: String,
@@ -79,6 +98,7 @@ enum ClientFrameWire {
     /// Cumulative transport acknowledgement for one represented actor.
     Ack {
         /// Delivery stream owner.
+        #[serde(rename = "member_id")]
         actor_id: ActorId,
         /// Highest contiguously processed delivery sequence.
         through_sequence: i64,
@@ -86,6 +106,7 @@ enum ClientFrameWire {
     /// Requests replay after a client-owned durable cursor.
     Resume {
         /// Delivery stream owner.
+        #[serde(rename = "member_id")]
         actor_id: ActorId,
         /// Last sequence durably processed by the client; zero starts at the beginning.
         after_sequence: i64,
@@ -93,6 +114,7 @@ enum ClientFrameWire {
     /// Updates or clears transient activity for one represented actor.
     Presence {
         /// Actor whose activity changed.
+        #[serde(rename = "member_id")]
         actor_id: ActorId,
         /// Current activity; null clears it while retaining online state.
         activity: Option<Activity>,
@@ -100,6 +122,7 @@ enum ClientFrameWire {
     /// Records a device-aware delivered or read receipt.
     Receipt {
         /// Represented recipient actor.
+        #[serde(rename = "member_id")]
         actor_id: ActorId,
         /// Parent conversation.
         conversation_id: String,
@@ -111,9 +134,10 @@ enum ClientFrameWire {
         device_id: String,
     },
     /// Creates a durable conversation message over the realtime connection.
-    #[serde(rename = "new_message")]
+    #[serde(rename = "message.create")]
     SendMessage {
         /// Represented sender.
+        #[serde(rename = "member_id")]
         actor_id: ActorId,
         /// Organization scope.
         org_id: OrganizationId,
@@ -124,6 +148,28 @@ enum ClientFrameWire {
         /// Normal message content.
         #[serde(flatten)]
         message: Box<serde_json::Value>,
+    },
+    /// Creates an atomic bundle with caller-supplied display content.
+    #[serde(rename = "bundle")]
+    CreateBundle {
+        /// Authorized creator.
+        #[serde(rename = "member_id")]
+        actor_id: ActorId,
+        /// Authorized organization.
+        org_id: OrganizationId,
+        /// Existing conversation address.
+        conversation_id: String,
+        /// Stable retry key.
+        idempotency_key: IdempotencyKey,
+        /// Bundle input with public message codes.
+        #[serde(flatten)]
+        bundle: Box<serde_json::Value>,
+    },
+    /// Failed heartbeat; does not refresh the connection lease.
+    #[serde(rename = "ping.error")]
+    PingError {
+        /// Ping being reported.
+        ping_id: String,
     },
 }
 
@@ -170,6 +216,7 @@ pub enum DeliveryPayload {
 )]
 pub enum ServerFrame {
     /// Initial session metadata and server-observed ACK cursors.
+    #[serde(rename = "connection.ready")]
     Ready {
         /// Protocol version used by this connection.
         protocol_version: u16,
@@ -178,6 +225,7 @@ pub enum ServerFrame {
         /// Unique connection identifier.
         connection_id: Uuid,
         /// IAM-authorized actors represented by the connection.
+        #[serde(rename = "members")]
         actors: Vec<ActorId>,
         /// Highest server-recorded ACK cursor keyed by actor ID.
         acknowledged_through: BTreeMap<String, i64>,
@@ -188,6 +236,7 @@ pub enum ServerFrame {
         ping_id: String,
     },
     /// Confirms that a realtime send command is durably accepted.
+    #[serde(rename = "message.create.success")]
     MessageAccepted {
         /// Retry-safe client key associated with the command.
         idempotency_key: IdempotencyKey,
@@ -196,6 +245,7 @@ pub enum ServerFrame {
         message: Box<Message>,
     },
     /// Confirms a monotonic device receipt was stored.
+    #[serde(rename = "receipt.success")]
     ReceiptRecorded {
         /// Message whose receipt was stored.
         message_id: Uuid,
@@ -229,6 +279,7 @@ pub enum ServerFrame {
         status: crate::domain::MessageStatus,
     },
     /// Structured protocol or command failure.
+    #[serde(rename = "connection.error")]
     Error {
         /// Stable machine-readable category.
         code: String,
@@ -237,6 +288,9 @@ pub enum ServerFrame {
         /// Whether the connection remains usable and the command may be retried.
         recoverable: bool,
     },
+    /// Explicit command response whose fields are already in the public contract.
+    #[serde(untagged)]
+    CommandResponse(serde_json::Value),
 }
 
 impl ServerFrame {
@@ -258,7 +312,8 @@ impl ServerFrame {
             | Self::Ping { .. }
             | Self::MessageAccepted { .. }
             | Self::ReceiptRecorded { .. }
-            | Self::Error { .. } => None,
+            | Self::Error { .. }
+            | Self::CommandResponse(_) => None,
         }
     }
 
@@ -309,7 +364,7 @@ mod tests {
     #[test]
     fn pong_matches_published_shape() -> Result<(), serde_json::Error> {
         let frame: ClientFrame =
-            serde_json::from_str(r#"{"type":"pong","data":{"ping_id":"p-1"}}"#)?;
+            serde_json::from_str(r#"{"type":"ping.success","data":{"ping_id":"p-1"}}"#)?;
         assert!(matches!(frame, ClientFrame::Pong { ping_id } if ping_id == "p-1"));
         Ok(())
     }
@@ -321,7 +376,7 @@ mod tests {
         })?;
         assert_eq!(encoded.get("type"), Some(&serde_json::json!("ping")));
         assert!(encoded.get("delivery_sequence").is_none());
-        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(PROTOCOL_VERSION, 5);
         Ok(())
     }
 
@@ -337,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_frame_advertises_protocol_version_four() -> Result<(), Box<dyn std::error::Error>> {
+    fn ready_frame_advertises_current_protocol_version() -> Result<(), Box<dyn std::error::Error>> {
         let encoded = serde_json::to_value(ServerFrame::Ready {
             testing_generation: None,
             protocol_version: PROTOCOL_VERSION,
@@ -345,10 +400,13 @@ mod tests {
             actors: vec!["carbon-1".parse()?],
             acknowledged_through: BTreeMap::from([("carbon-1".to_owned(), 7)]),
         })?;
-        assert_eq!(encoded.get("type"), Some(&serde_json::json!("ready")));
+        assert_eq!(
+            encoded.get("type"),
+            Some(&serde_json::json!("connection.ready"))
+        );
         assert_eq!(
             encoded.pointer("/data/protocol_version"),
-            Some(&serde_json::json!(4))
+            Some(&serde_json::json!(5))
         );
         Ok(())
     }
@@ -357,9 +415,9 @@ mod tests {
     fn protocol_v2_voice_command_requires_duration_and_preserves_transcript()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = serde_json::json!({
-            "type": "new_message",
+            "type": "message.create",
             "data": {
-            "actor_id": "carbon-1",
+            "member_id": "carbon-1",
             "org_id": "organization-1",
             "conversation_id": "018f0d52-7b2a-7e29-a41d-7c02b93f6f42",
             "idempotency_key": "voice-command-1",

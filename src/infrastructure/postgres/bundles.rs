@@ -247,7 +247,7 @@ impl PostgresStore {
         // The exact incremental check also covers metadata and attachments.
         let sizes = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT CASE WHEN revision.version IS NULL THEN
+            SELECT CASE WHEN revision.content IS NULL THEN
                 COALESCE(octet_length(message.text_content), 0)::bigint
                     + COALESCE(octet_length(message.voice_transcript), 0)::bigint
             ELSE
@@ -255,12 +255,7 @@ impl PostgresStore {
                     + COALESCE(octet_length(revision.content->>'voice_transcript'), 0)::bigint
             END
             FROM messages AS message
-            LEFT JOIN LATERAL (
-                SELECT version, content
-                FROM message_revisions
-                WHERE message_id = message.id
-                ORDER BY version DESC LIMIT 1
-            ) AS revision ON true
+            LEFT JOIN message_history AS revision ON revision.message_id = message.id
             WHERE message.id = ANY($1)
             "#,
         )

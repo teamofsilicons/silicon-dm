@@ -1,4 +1,4 @@
-//! Append-only message edits and deletion tombstones.
+//! Message content history and independent deletion state.
 
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -41,14 +41,14 @@ impl PostgresStore {
         Ok(message)
     }
 
-    /// Appends a full content replacement, or a content-free deletion tombstone.
+    /// Saves the previous content on edit, or marks deletion without adding history.
     ///
-    /// The original sender is the only editor. Compare-and-swap and idempotency
+    /// The original sender is the only editor. History and idempotency
     /// are checked while holding the message lock; delivery fan-out commits in
     /// that same transaction. Deleted messages cannot be edited or resurrected.
     ///
     /// # Errors
-    /// Rejects non-authors, stale versions, changed retry bodies, and invalid replies.
+    /// Rejects non-authors, deleted messages, changed retry bodies, and invalid replies.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub async fn revise_message(
         &self,
@@ -56,15 +56,9 @@ impl PostgresStore {
         actor: &ActorRef,
         conversation: Uuid,
         id: Uuid,
-        expected_version: i64,
         key: &IdempotencyKey,
         content: Option<MessageCreate>,
     ) -> AppResult<Message> {
-        if expected_version < 1 {
-            return Err(AppError::validation(
-                "If-Match must be a positive message version",
-            ));
-        }
         if let Some(content) = &content {
             content.validate().map_err(AppError::validation)?;
             if content
@@ -84,7 +78,6 @@ impl PostgresStore {
         let hash = request_hash(&(
             id,
             conversation,
-            expected_version,
             content.as_ref().map(MessageCreate::idempotency_content),
         ))?;
         let mut tx = self.pool().begin().await?;
@@ -120,17 +113,10 @@ impl PostgresStore {
             }
             IdempotencyClaim::Acquired => {}
         }
-        let current: Option<(i64, bool)> = sqlx::query_as(
-            "SELECT version, deleted_at IS NOT NULL FROM message_revisions WHERE message_id=$1 ORDER BY version DESC LIMIT 1"
-        ).bind(id).fetch_optional(&mut *tx).await?;
-        let (version, deleted) = current.unwrap_or((1, false));
+        let deleted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM message_history WHERE message_id=$1 AND deleted_at IS NOT NULL)")
+            .bind(id).fetch_one(&mut *tx).await?;
         if deleted {
             return Err(AppError::conflict("message has been deleted"));
-        }
-        if version != expected_version {
-            return Err(AppError::conflict(
-                "message version changed; fetch the current message before editing",
-            ));
         }
         if let Some(reply) = content
             .as_ref()
@@ -145,12 +131,21 @@ impl PostgresStore {
                 return Err(AppError::NotFound);
             }
         }
-        let next = version
-            .checked_add(1)
-            .ok_or_else(|| AppError::conflict("message version exhausted"))?;
-        sqlx::query("INSERT INTO message_revisions(id,message_id,version,content,deleted_at) VALUES($1,$2,$3,$4,CASE WHEN $4::jsonb IS NULL THEN clock_timestamp() ELSE NULL END)")
-            .bind(Uuid::now_v7()).bind(id).bind(next).bind(content.as_ref().map(sqlx::types::Json))
-            .execute(&mut *tx).await.map_err(map_constraint_error)?;
+        // The parent lock serializes edits; each accepted edit preserves the content it replaces.
+        if let Some(content) = &content {
+            sqlx::query("INSERT INTO message_history(message_id,content,history,updated_at) SELECT id,$2,jsonb_build_array(jsonb_build_object('content',NULL,'created_at',created_at)),clock_timestamp() FROM messages WHERE id=$1 ON CONFLICT(message_id) DO UPDATE SET history=message_history.history || jsonb_build_array(jsonb_build_object('content',message_history.content,'created_at',COALESCE(message_history.updated_at,(SELECT created_at FROM messages WHERE id=$1)))),content=$2,updated_at=clock_timestamp()")
+                .bind(id).bind(sqlx::types::Json(content)).execute(&mut *tx).await?;
+        } else {
+            sqlx::query("INSERT INTO message_history(message_id,deleted_at) VALUES($1,clock_timestamp()) ON CONFLICT(message_id) DO UPDATE SET deleted_at=clock_timestamp()")
+                .bind(id).execute(&mut *tx).await?;
+        }
+        // Private outbox discriminator prevents delivery deduplication from hiding later edits/deletions.
+        let next: i64 = sqlx::query_scalar("SELECT COALESCE(max(delivery_revision),0)+1 FROM actor_deliveries WHERE message_id=$1 AND delivery_kind='message'")
+            .bind(id).fetch_one(&mut *tx).await?;
+        sqlx::query("UPDATE conversations SET updated_at=clock_timestamp() WHERE id=$1")
+            .bind(conversation)
+            .execute(&mut *tx)
+            .await?;
         // Include sender devices so every authenticated view converges.
         let targets: Vec<(String, String)> = sqlx::query_as(
             "SELECT actor_kind::text, actor_id FROM effective_conversation_participants WHERE conversation_id=$1 AND organization_id=$2 ORDER BY actor_kind, actor_id"

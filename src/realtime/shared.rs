@@ -31,6 +31,7 @@ enum Input {
         subscription_id: String,
         token: SecretString,
         organization_id: OrganizationId,
+        #[serde(rename = "member_id")]
         actor_id: String,
         device_id: String,
         testing_key: Option<SecretString>,
@@ -45,8 +46,16 @@ enum Input {
     Unsubscribe {
         subscription_id: String,
     },
+    #[serde(rename = "ping.success")]
     Pong {
         ping_id: String,
+    },
+    #[serde(rename = "ping.error")]
+    PingError {
+        ping_id: String,
+        code: String,
+        message: String,
+        recoverable: bool,
     },
 }
 struct Channel {
@@ -156,7 +165,7 @@ async fn run(mut socket: WebSocket, state: AppState) {
     let mut ping = String::new();
     if socket
         .send(Message::Text(
-            json!({"type":"prewarmed","data":{"protocol_version":1,"max_subscriptions":64}})
+            json!({"type":"connection.prewarmed","data":{"protocol_version":2,"max_subscriptions":64}})
                 .to_string()
                 .into(),
         ))
@@ -176,11 +185,12 @@ async fn run(mut socket: WebSocket, state: AppState) {
                 socket.send(Message::Text(json!({"type":"ping","data":{"ping_id":ping}}).to_string().into())).await
             },
             Some((id, message)) = rx.recv() => {
-                let frame = match message {
+                let mut frame = match message {
                     Message::Text(text) => serde_json::from_str::<Value>(&text).unwrap_or(Value::Null),
-                    Message::Close(_) => { channels.remove(&id); json!({"type":"error","data":{"code":"subscription_closed","recoverable":false}}) },
+                    Message::Close(_) => { channels.remove(&id); json!({"type":"subscription.closed","data":{"code":"subscription_closed","recoverable":false}}) },
                     _ => continue,
                 };
+                if frame["type"] == "connection.ready" { frame["type"] = json!("subscribe.success"); }
                 socket.send(Message::Text(json!({"type":"channel","data":{"subscription_id":id,"frame":frame}}).to_string().into())).await
             },
             incoming = socket.next() => {
@@ -196,7 +206,7 @@ async fn run(mut socket: WebSocket, state: AppState) {
                                 if channels.contains_key(&id) || channels.len() >= 64 { break; }
                                 match tokio::time::timeout(Duration::from_secs(30), authorize(&state, input, tx.clone())).await {
                                     Ok(Ok((id, channel))) => { channels.insert(id,channel); Ok(()) },
-                                    _ => socket.send(Message::Text(json!({"type":"channel","data":{"subscription_id":id,"frame":{"type":"error","data":{"code":"subscription_rejected","message":"Refresh the profile or select a valid sandbox.","recoverable":false}}}}).to_string().into())).await,
+                                    _ => socket.send(Message::Text(json!({"type":"channel","data":{"subscription_id":id,"frame":{"type":"subscribe.error","data":{"code":"subscription_rejected","message":"Refresh the profile or select a valid sandbox.","recoverable":false}}}}).to_string().into())).await,
                                 }
                             },
                             Input::Channel {subscription_id, frame} => {
@@ -205,7 +215,8 @@ async fn run(mut socket: WebSocket, state: AppState) {
                                 } else { break; }
                                 Ok(())
                             },
-                            Input::Unsubscribe {subscription_id} => { channels.remove(&subscription_id); Ok(()) },
+                            Input::Unsubscribe {subscription_id} => { channels.remove(&subscription_id); socket.send(Message::Text(json!({"type":"unsubscribe.success","data":{"subscription_id":subscription_id}}).to_string().into())).await },
+                            Input::PingError {ping_id,code,message,recoverable} => { let _ = (ping_id,code,message,recoverable); Ok(()) },
                             Input::Pong {ping_id} => { if !ping.is_empty() && ping_id == ping { last_pong=tokio::time::Instant::now(); } Ok(()) },
                         }
                     },

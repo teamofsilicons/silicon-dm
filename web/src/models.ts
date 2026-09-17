@@ -60,7 +60,14 @@ export interface Message extends Omit<MessageCreate, "sender_id"> {
   conversation_id: string;
   sender: Actor;
   sequence: number;
-  version: number;
+  history: Array<{
+    message: string | null;
+    attachments: string[];
+    voice_transcript: string | null;
+    reply: unknown;
+    created_at: string;
+  }>;
+  updated_at?: string | null;
   status: MessageStatus;
   created_at: string;
   delivered_at?: string | null;

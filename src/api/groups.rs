@@ -1,15 +1,12 @@
 //! Named-group HTTP operations. All message operations reuse the conversation UUID.
 use super::{
-    extract::{ApiJson, ApiPath, ApiQuery, Authenticated, Idempotency, IfMatch},
+    extract::{ApiJson, ApiPath, Authenticated, Idempotency, IfMatch},
     handlers::verify_resolved_actors,
 };
 use crate::{
     AppError, AppResult,
     application::{auth::AuthContext, state::AppState},
-    domain::{
-        ActorId, ActorRef, Conversation, ConversationPage, GroupCreate, GroupDetails,
-        GroupSettings, PageRequest,
-    },
+    domain::{ActorId, ActorRef, Conversation, GroupCreate, GroupDetails, GroupSettings},
     infrastructure::postgres::groups::require_group_admin,
 };
 use axum::{
@@ -30,23 +27,6 @@ pub(super) struct Members {
     member_ids: Vec<ActorId>,
 }
 
-pub(super) async fn list(
-    State(state): State<AppState>,
-    Authenticated(auth): Authenticated,
-    ApiQuery(page): ApiQuery<PageRequest>,
-) -> AppResult<Json<ConversationPage>> {
-    state
-        .store
-        .list_conversations_scoped(
-            &auth.organization_id,
-            &auth.actor,
-            &page,
-            &auth.tag_ids.iter().flatten().copied().collect::<Vec<_>>(),
-            true,
-        )
-        .await
-        .map(Json)
-}
 pub(super) async fn get(
     State(state): State<AppState>,
     Authenticated(auth): Authenticated,

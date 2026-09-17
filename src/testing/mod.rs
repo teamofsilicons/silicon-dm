@@ -39,8 +39,10 @@ pub struct TestingEnvironment {
     /// Owning production organization.
     pub organization_id: String,
     /// Production actor who created the environment.
+    #[serde(rename = "creator_member_id")]
     pub creator_actor_id: String,
     /// Actor namespace of the creator.
+    #[serde(rename = "creator_member_kind")]
     pub creator_actor_kind: String,
     /// Friendly environment name.
     pub name: String,
