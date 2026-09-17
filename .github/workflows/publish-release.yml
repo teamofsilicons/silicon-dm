@@ -1,0 +1,55 @@
+name: Publish validated release bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag
+        required: true
+      build_run:
+        description: Successful six-platform release workflow run ID
+        required: true
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      BUILD_RUN: ${{ inputs.build_run }}
+    steps:
+      - name: Verify the build belongs to the release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$BUILD_RUN" =~ ^[0-9]+$ ]]
+          expected=$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN" > run.json
+          jq -e --arg sha "$expected" '.head_sha == $sha and .status == "completed" and .conclusion == "success" and .name == "Build validated Honeycomb release"' run.json
+      - name: Download and verify the completed bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "$BUILD_RUN" --name dm-honeycomb-release --dir bundle
+          cd bundle
+          version=${RELEASE_TAG#v}
+          sha256sum --check "dm-$version.tar.gz.sha256"
+          mkdir extracted
+          tar -xzf "dm-$version.tar.gz" -C extracted
+          (cd extracted && sha256sum --check "../dm-$version-binaries.sha256")
+      - name: Publish archive and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${RELEASE_TAG#v}
+          if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "DM $version" --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" --clobber "bundle/dm-$version.tar.gz" "bundle/dm-$version.tar.gz.sha256" "bundle/dm-$version-binaries.sha256"
+          gh release edit "$RELEASE_TAG" --draft=false --latest
