@@ -46,7 +46,11 @@ async function fixture(t: TestContext, saved = false) {
     let data: unknown = {};
     if (req.url === "/api/v1/iam") {
       res.statusCode = state.discoveryStatus;
-      data = { app_id: "tos>dm", testing_environment_id: environment, testing_environment: { name: "IAM sandbox" } };
+      data = {
+        app_id: "tos>dm",
+        testing_environment_id: environment,
+        testing_environment: { name: "IAM sandbox" },
+      };
     } else if (req.url?.endsWith("/key")) {
       res.statusCode = state.keyStatus;
       data = { environment_id: environment, root_key: state.key };
@@ -201,7 +205,7 @@ test("test login opens the existing DM API with isolated credentials and can ret
     assert.equal(call.headers["x-testing-environment-key"], rootKey);
     assert.equal(call.headers["x-org-id"], "test-org");
   }
-  const send = f.calls.find((c) => c.body?.type === "new_message")!;
+  const send = f.calls.find((c) => c.body?.type === "message.created")!;
   assert.equal(send.headers["x-testing-environment-generation"], "7");
   assert.equal(send.body.data.message, "Sandbox only");
   assert.equal(
@@ -310,74 +314,117 @@ test("entry requires production authentication, a valid environment, and the tru
   assert.equal(f.calls.length, 0);
 });
 
-
 test("app-secret entry discovers IAM sandbox, accepts a short test ID and keeps the secret server-side", async (t) => {
   const f = await fixture(t);
   const secret = "ask_" + "a".repeat(43);
-  const result = await f.request("/api/login", { app_secret: secret, slt: "a" });
+  const result = await f.request("/api/login", {
+    app_secret: secret,
+    slt: "a",
+  });
   assert.equal(result.status, 200);
   assert.equal(result.value.testing_environment_id, environment);
   assert.equal(result.value.testing_environment_name, "IAM sandbox");
   assert.equal(result.value.profiles.length, 2);
   assert(!JSON.stringify(result).includes(secret));
-  const discovery=f.calls.find(c=>c.path==="/api/v1/iam")!;
-  assert.equal(discovery.headers["x-testing-environment-key"],secret);
-  assert.equal(discovery.headers.authorization,undefined);
-  const login=f.calls.find(c=>c.path==="/api/v1/auth/login")!;
-  assert.equal(login.headers["x-testing-environment-key"],secret);
-  assert.equal(login.body.data.slt,"a");
+  const discovery = f.calls.find((c) => c.path === "/api/v1/iam")!;
+  assert.equal(discovery.headers["x-testing-environment-key"], secret);
+  assert.equal(discovery.headers.authorization, undefined);
+  const login = f.calls.find((c) => c.path === "/api/v1/auth/login")!;
+  assert.equal(login.headers["x-testing-environment-key"], secret);
+  assert.equal(login.body.data.slt, "a");
 });
 test("revoked app secrets never exchange an identity or use production", async (t) => {
   const f = await fixture(t);
-  f.state.discoveryStatus=401;
-  const result = await f.request("/api/login", { app_secret: "ask_"+"b".repeat(43), slt: "a" });
-  assert.equal(result.status,401);
-  assert(!f.calls.some(c=>c.path==="/api/v1/auth/login"));
-  assert.equal((await f.gateway.sessions.read(f.browser.id))!.value.selected,production);
+  f.state.discoveryStatus = 401;
+  const result = await f.request("/api/login", {
+    app_secret: "ask_" + "b".repeat(43),
+    slt: "a",
+  });
+  assert.equal(result.status, 401);
+  assert(!f.calls.some((c) => c.path === "/api/v1/auth/login"));
+  assert.equal(
+    (await f.gateway.sessions.read(f.browser.id))!.value.selected,
+    production,
+  );
 });
 
 test("exit restores production or sign-in without revoking saved testing sessions", async (t) => {
-  const f=await fixture(t,true);
+  const f = await fixture(t, true);
   await f.enter();
-  const result=await f.request("/api/testing-environments/exit",{},testProfile);
-  assert.equal(result.status,200);
-  assert.equal(result.value.profile_id,production);
-  const browser=(await f.gateway.sessions.read(f.browser.id))!;
-  browser.value.profiles=browser.value.profiles.filter(p=>p.testing_environment_id);
-  browser.value.selected=testProfile;
+  const result = await f.request(
+    "/api/testing-environments/exit",
+    {},
+    testProfile,
+  );
+  assert.equal(result.status, 200);
+  assert.equal(result.value.profile_id, production);
+  const browser = (await f.gateway.sessions.read(f.browser.id))!;
+  browser.value.profiles = browser.value.profiles.filter(
+    (p) => p.testing_environment_id,
+  );
+  browser.value.selected = testProfile;
   await f.gateway.sessions.save(browser);
-  const signedOut=await f.request("/api/testing-environments/exit",{},testProfile);
-  assert.equal(signedOut.status,200);
-  assert.equal(signedOut.value.authenticated,false);
-  assert.equal(signedOut.value.profiles.length,1);
+  const signedOut = await f.request(
+    "/api/testing-environments/exit",
+    {},
+    testProfile,
+  );
+  assert.equal(signedOut.status, 200);
+  assert.equal(signedOut.value.authenticated, false);
+  assert.equal(signedOut.value.profiles.length, 1);
 });
 
-test("groups use the authenticated gateway allowlist and selected sandbox credentials", async t => {
+test("groups use the authenticated gateway allowlist and selected sandbox credentials", async (t) => {
   const f = await fixture(t);
   const entered = await f.enter("test-slt-token");
-  const response = await f.request("/api/dm/groups", { name: "Research", member_ids: [] }, entered.value.profile_id);
+  const response = await f.request(
+    "/api/dm/groups",
+    { name: "Research", member_ids: [] },
+    entered.value.profile_id,
+  );
   assert.equal(response.status, 200);
-  const sent = f.calls.find(call => call.path === "/api/v1/groups");
+  const sent = f.calls.find((call) => call.path === "/api/v1/groups");
   assert(sent);
   assert.equal(sent.headers.authorization, "Bearer test-access");
   assert.equal(sent.headers["x-testing-environment-key"], rootKey);
-  assert.deepEqual(sent.body, { type: "create_group", data: { name: "Research", member_ids: [] } });
+  assert.deepEqual(sent.body, {
+    type: "create_group",
+    data: { name: "Research", member_ids: [] },
+  });
 });
 
-
-test("group addresses pass gateway routing and preserve sandbox credentials", async t => {
+test("group addresses pass gateway routing and preserve sandbox credentials", async (t) => {
   const f = await fixture(t);
   const entered = await f.enter("test-slt-token");
-  for (const path of ["groups/g:tos:product-design/members", "conversations/g:tos:product-design/messages", "conversations/g%3Atos%3Aproduct-design/messages"]) {
-    const response = await f.request(`/api/dm/${path}`, { member_ids: [], message: "Hello", metadata: {} }, entered.value.profile_id);
+  for (const path of [
+    "groups/g:tos:product-design/members",
+    "conversations/g:tos:product-design/messages",
+    "conversations/g%3Atos%3Aproduct-design/messages",
+  ]) {
+    const response = await f.request(
+      `/api/dm/${path}`,
+      { member_ids: [], message: "Hello", metadata: {} },
+      entered.value.profile_id,
+    );
     assert.equal(response.status, 200);
-    const sent = f.calls.find(call => call.path === `/api/v1/${path.replaceAll("%3A", ":")}`);
+    const sent = f.calls.find(
+      (call) => call.path === `/api/v1/${path.replaceAll("%3A", ":")}`,
+    );
     assert(sent);
     assert.equal(sent.headers.authorization, "Bearer test-access");
     assert.equal(sent.headers["x-testing-environment-key"], rootKey);
   }
-  for (const id of ["g:tos:bad--slug", "g:tos:-bad", "g:tos:UPPER", "g:tos:bad%2Fmembers"]) {
-    const response = await f.request(`/api/dm/groups/${id}/members`, { member_ids: [] }, entered.value.profile_id);
+  for (const id of [
+    "g:tos:bad--slug",
+    "g:tos:-bad",
+    "g:tos:UPPER",
+    "g:tos:bad%2Fmembers",
+  ]) {
+    const response = await f.request(
+      `/api/dm/groups/${id}/members`,
+      { member_ids: [] },
+      entered.value.profile_id,
+    );
     assert.equal(response.status, id.includes("%2F") ? 400 : 404);
   }
 });

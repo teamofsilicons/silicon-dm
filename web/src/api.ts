@@ -1,5 +1,5 @@
 import { telemetryEnabled, recordTelemetry } from "./telemetry";
-import { encodeRequest, decodeData, unwrap } from "./wire.ts";
+import { encodeRequest, decodeData, unwrap, wireMessageId } from "./wire.ts";
 import type {
   AppConfig,
   Attachment,
@@ -66,7 +66,8 @@ export interface ApiOptions extends Omit<RequestInit, "body"> {
 }
 let selectedSession: Session = { authenticated: false, profiles: [] };
 if (typeof window !== "undefined") {
-  const diagnosticError = () => recordTelemetry(selectedSession, gatewayOrigin(), "web_error", false);
+  const diagnosticError = () =>
+    recordTelemetry(selectedSession, gatewayOrigin(), "web_error", false);
   window.addEventListener("error", diagnosticError);
   window.addEventListener("unhandledrejection", diagnosticError);
 }
@@ -75,7 +76,8 @@ export function currentSession(): Session {
 }
 export function setSession(session: Session): Session {
   selectedSession = session;
-  if (typeof window !== "undefined") recordTelemetry(session, gatewayOrigin(), "page_view");
+  if (typeof window !== "undefined")
+    recordTelemetry(session, gatewayOrigin(), "page_view");
   return session;
 }
 export function pathSegment(value: string): string {
@@ -162,8 +164,8 @@ export async function api<T>(
   const url = new URL(target, gatewayOrigin());
   const headers = new Headers(requestOptions.headers);
   headers.set("Accept", "application/json");
-  headers.set("X-DM-Telemetry",telemetryEnabled() ? "on" : "off");
-  headers.set("X-DM-Source","web");
+  headers.set("X-DM-Telemetry", telemetryEnabled() ? "on" : "off");
+  headers.set("X-DM-Source", "web");
   const profile = profileId ?? session.profile_id;
   if (profile) headers.set("X-DM-Profile", profile);
   if (idempotencyKey) {
@@ -223,7 +225,13 @@ export async function api<T>(
       redirect: "error",
     });
   } catch (error) {
-    recordTelemetry(session, gatewayOrigin(), "request", false, performance.now()-diagnosticStart);
+    recordTelemetry(
+      session,
+      gatewayOrigin(),
+      "request",
+      false,
+      performance.now() - diagnosticStart,
+    );
     if (error instanceof DOMException && error.name === "AbortError")
       throw error;
     throw new ApiError(
@@ -241,7 +249,13 @@ export async function api<T>(
     window.dispatchEvent(
       new CustomEvent("dm:unauthorized", { detail: { profile_id: profile } }),
     );
-  recordTelemetry(session, gatewayOrigin(), "request", response.ok, performance.now()-diagnosticStart);
+  recordTelemetry(
+    session,
+    gatewayOrigin(),
+    "request",
+    response.ok,
+    performance.now() - diagnosticStart,
+  );
   if (response.status === 204) return undefined as T;
   let text = await response.text();
   let value: unknown;
@@ -399,19 +413,17 @@ export function validateMessage(message: MessageCreate): void {
       "validation_error",
       "Add text, an attachment, voice, or a GIF.",
     );
-  if (message.text === "")
-    throw new ApiError(
-      422,
-      "validation_error",
-      "Message text cannot be empty.",
-    );
   if (message.text && !countCharacters(message.text, 100_000_000))
     throw new ApiError(
       422,
       "validation_error",
       "Message text exceeds 100,000,000 characters.",
     );
-  if (message.voice_transcript != null && !message.voice)
+  if (
+    message.voice_transcript != null &&
+    !message.voice &&
+    !message.attachments?.length
+  )
     throw new ApiError(
       422,
       "validation_error",
@@ -466,7 +478,7 @@ export function validateMessage(message: MessageCreate): void {
 }
 const conversationPath = (id: string) => `/conversations/${pathSegment(id)}`;
 const messagePath = (conversation: string, id: string) =>
-  `${conversationPath(conversation)}/messages/${pathSegment(id)}`;
+  `${conversationPath(conversation)}/messages/${pathSegment(wireMessageId(id))}`;
 export const dm = {
   me: () => api<unknown>("/auth/me"),
   conversations: (cursor?: string | null, limit = 50) =>
@@ -742,5 +754,10 @@ export function retryOutbox(
 export { listOutbox, removeOutbox };
 
 export async function exitTesting(): Promise<Session> {
-  return setSession(await api<Session>("/api/testing-environments/exit", {method:"POST",body:{}}));
+  return setSession(
+    await api<Session>("/api/testing-environments/exit", {
+      method: "POST",
+      body: {},
+    }),
+  );
 }

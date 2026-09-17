@@ -1,14 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
 import type { Message } from "./models";
-import {
-  Avatar,
-  Icon,
-  IconButton,
-  JsonDetails,
-  downloadBlob,
-  safeUrl,
-  stamp,
-} from "./ui";
+import { wireMessageId } from "./wire";
+import { Avatar, Icon, IconButton, downloadBlob, safeUrl, stamp } from "./ui";
 
 export function MessageView(props: {
   message: Message;
@@ -75,7 +68,11 @@ export function MessageView(props: {
                 onClick={() => props.reference?.(m().reply_to_message_id!)}
               >
                 <Icon name="reply" size={14} />
-                View replied message
+                <span>
+                  {m().reply
+                    ? `${m().reply!.sender.id}: ${m().reply!.content ? (m().reply!.content!.message || m().reply!.content!.voice_transcript || `${m().reply!.content!.attachments.length} attachment(s)`).slice(0, 160) : "Message deleted"}`
+                    : "View replied message"}
+                </span>
                 <Icon name="chevron" size={12} />
               </button>
             </Show>
@@ -163,6 +160,14 @@ export function MessageView(props: {
                   </details>
                 </Show>
               </div>
+            </Show>
+            <Show when={!m().voice && m().voice_transcript}>
+              <details>
+                <summary>Transcript</summary>
+                <p class="message-text">
+                  {m().voice_transcript?.slice(0, 8000)}
+                </p>
+              </details>
             </Show>
             <For each={m().attachments}>
               {(attachment) => (
@@ -260,7 +265,7 @@ export function MessageView(props: {
           <div class="message-details">
             <dl>
               <dt>Message ID</dt>
-              <dd>{m().id}</dd>
+              <dd>{wireMessageId(m().id)}</dd>
               <dt>Version</dt>
               <dd>{m().version}</dd>
               <dt>Created</dt>
@@ -274,7 +279,6 @@ export function MessageView(props: {
                 <dd>{new Date(m().read_at!).toLocaleString()}</dd>
               </Show>
             </dl>
-            <JsonDetails value={m().metadata || {}} title="Metadata" />
           </div>
         </Show>
       </div>

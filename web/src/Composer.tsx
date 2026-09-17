@@ -1,6 +1,6 @@
 import { createSignal, For, Index, Show } from "solid-js";
 import { api } from "./api";
-import type { Attachment, Gif, MessageCreate, Metadata } from "./models";
+import type { Attachment, Gif, MessageCreate } from "./models";
 import { Busy, Icon, IconButton, Modal, Notice, safeUrl } from "./ui";
 
 export default function Composer(props: {
@@ -15,9 +15,7 @@ export default function Composer(props: {
   cancelContext?: () => void;
   draftLabel?: string;
 }) {
-  const [panel, setPanel] = createSignal<
-    "attachments" | "voice" | "gif" | "metadata"
-  >();
+  const [panel, setPanel] = createSignal<"attachments" | "voice" | "gif">();
   const [error, setError] = createSignal<unknown>();
   const [saving, setSaving] = createSignal(false);
   const update = (patch: Partial<MessageCreate>) =>
@@ -155,12 +153,6 @@ export default function Composer(props: {
                 label="Choose GIF"
                 onClick={() => setPanel("gif")}
               />
-              <IconButton
-                icon="more"
-                label="Message metadata"
-                active={Object.keys(props.value.metadata || {}).length > 0}
-                onClick={() => setPanel("metadata")}
-              />
               <Show when={props.save && !props.editing}>
                 <span class="toolbar-divider" />
                 <button
@@ -213,16 +205,6 @@ export default function Composer(props: {
           value={props.value}
           save={(patch) => {
             update(patch);
-            setPanel();
-          }}
-          close={() => setPanel()}
-        />
-      </Show>
-      <Show when={panel() === "metadata"}>
-        <MetadataEditor
-          value={props.value.metadata || {}}
-          save={(metadata) => {
-            update({ metadata });
             setPanel();
           }}
           close={() => setPanel()}
@@ -469,56 +451,6 @@ function VoiceEditor(props: {
           </button>
           <button class="button primary" type="submit">
             Use recording
-          </button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-function MetadataEditor(props: {
-  value: Metadata;
-  save: (value: Metadata) => void;
-  close: () => void;
-}) {
-  const [text, setText] = createSignal(JSON.stringify(props.value, null, 2)),
-    [error, setError] = createSignal<unknown>();
-  return (
-    <Modal
-      title="Message metadata"
-      subtitle="Optional structured context, preserved with the message."
-      close={props.close}
-    >
-      <form
-        class="stack"
-        onSubmit={(e) => {
-          e.preventDefault();
-          try {
-            const value = JSON.parse(text());
-            if (!value || Array.isArray(value) || typeof value !== "object")
-              throw Error("Metadata must be a JSON object.");
-            props.save(value);
-          } catch (e) {
-            setError(e);
-          }
-        }}
-      >
-        <Notice error={error()} />
-        <label>
-          JSON object
-          <textarea
-            class="code-input"
-            rows={10}
-            spellcheck={false}
-            value={text()}
-            onInput={(e) => setText(e.currentTarget.value)}
-          />
-        </label>
-        <div class="form-actions">
-          <button class="button" type="button" onClick={props.close}>
-            Cancel
-          </button>
-          <button class="button primary" type="submit">
-            Save metadata
           </button>
         </div>
       </form>

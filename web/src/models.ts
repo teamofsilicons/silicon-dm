@@ -47,6 +47,15 @@ export interface MessageCreate {
   gif?: Gif | null;
 }
 export interface Message extends Omit<MessageCreate, "sender_id"> {
+  reply?: {
+    "message-id": string;
+    sender: Actor;
+    content: null | {
+      message: string | null;
+      attachments: string[];
+      voice_transcript: string | null;
+    };
+  } | null;
   id: string;
   conversation_id: string;
   sender: Actor;
