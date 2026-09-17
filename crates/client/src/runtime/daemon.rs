@@ -843,10 +843,14 @@ fn upgrade_callback_frame(mut frame: Value) -> Value {
         .as_str()
         .is_some_and(|kind| kind.starts_with("message."))
     {
+        // Current callbacks keep delivery metadata in both locations. Prefer
+        // the canonical nested value, retaining support for older queued frames.
         if let Some(metadata) = frame
-            .as_object_mut()
-            .and_then(|object| object.remove("metadata"))
+            .pointer("/data/metadata")
+            .or_else(|| frame.get("metadata"))
+            .cloned()
         {
+            frame["metadata"] = metadata.clone();
             frame["data"]["metadata"] = metadata;
         }
         return frame;
@@ -883,7 +887,7 @@ fn upgrade_callback_frame(mut frame: Value) -> Value {
         };
         let mut data = serde_json::to_value(message).unwrap_or(Value::Null);
         data["metadata"] = json!({"source":"dm","delivery_id":frame["data"]["delivery_id"],"delivery_sequence":frame["data"]["delivery_sequence"]});
-        return json!({"type":kind,"data":data});
+        return json!({"type":kind,"metadata":data["metadata"].clone(),"data":data});
     }
     frame
 }
@@ -959,7 +963,7 @@ async fn deliver_webhook(
         }
         {
             data["metadata"] = json!({"source":"dm","delivery_id":item.delivery_id,"delivery_sequence":delivery_sequence});
-            json!({"type":kind,"data":data})
+            json!({"type":kind,"metadata":data["metadata"].clone(),"data":data})
         }
     };
     let mut request = http.post(webhook_url);
@@ -1104,14 +1108,14 @@ mod wire_tests {
             post(move |headers: HeaderMap, Json(body): Json<Value>| {
                 let counter = counter.clone();
                 async move {
-                    assert_eq!(body.as_object().map(serde_json::Map::len), Some(2));
+                    assert_eq!(body.as_object().map(serde_json::Map::len), Some(3));
                     assert_eq!(
                         body["data"]["metadata"],
                         json!({"source":"dm", "delivery_id":Uuid::nil(),"delivery_sequence":1})
                     );
                     assert_eq!(body["type"], "message.created");
                     assert_eq!(body["data"]["message"], "hello");
-                    assert!(body.get("metadata").is_none());
+                    assert_eq!(body["metadata"], body["data"]["metadata"]);
                     assert!(body["data"].get("profile").is_none());
                     assert!(body["data"].get("sequence").is_none());
                     assert_eq!(body["data"]["message-id"], "000");

@@ -972,6 +972,7 @@ async fn send_public_frame(
         };
         value["type"] = serde_json::json!(kind);
         value["data"]["metadata"] = serde_json::json!({"source":"dm","delivery_id":value["data"]["delivery_id"],"delivery_sequence":value["data"]["delivery_sequence"]});
+        value["metadata"] = value["data"]["metadata"].clone();
         if let Some(data) = value["data"].as_object_mut() {
             if let Some(actor) = data.remove("actor_id") {
                 data.insert("recipient_id".into(), actor);

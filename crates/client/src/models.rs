@@ -768,7 +768,7 @@ impl Serialize for ServerFrame {
         let mut data = serde_json::to_value(message).map_err(serde::ser::Error::custom)?;
         data["recipient_id"] = Value::String(actor_id.clone());
         data["metadata"] = serde_json::json!({"source":"dm","delivery_id":delivery_id,"delivery_sequence":delivery_sequence});
-        serde_json::json!({"type":kind,"data":data}).serialize(serializer)
+        serde_json::json!({"type":kind,"metadata":data["metadata"].clone(),"data":data}).serialize(serializer)
     }
 }
 

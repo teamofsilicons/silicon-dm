@@ -59,10 +59,10 @@ Commands use `member_id`. Message/bundle commands additionally provide `org_id`,
 
 Success replies have no delivery sequence and need no ACK. Command errors preserve available identifiers and include `code`, `message`, `recoverable`. Recoverable means the socket remains usable, not that the unchanged request will succeed. Unrecognized or malformed envelopes use `connection.error`.
 
-`message.created`, `message.updated`, `message.deleted`, `message.delivered`, `message.read` and `message.failed` are durable broadcasts. Their transport fields are inside `data.metadata`:
+`message.created`, `message.updated`, `message.deleted`, `message.delivered`, `message.read` and `message.failed` are durable broadcasts. Their transport fields are mirrored at top-level `metadata` and inside `data.metadata`:
 
 ```json
-{"type":"message.created","data":{"message-id":"000","metadata":{"source":"dm","delivery_id":"22222222-2222-4222-8222-000000000001","delivery_sequence":42}}}
+{"type":"message.created","metadata":{"source":"dm","delivery_id":"22222222-2222-4222-8222-000000000001","delivery_sequence":42},"data":{"message-id":"000","metadata":{"source":"dm","delivery_id":"22222222-2222-4222-8222-000000000001","delivery_sequence":42}}}
 ```
 
 This abbreviated example shows placement; each delivery includes the full message snapshot. Callbacks use the same envelope. Metadata is not a content-history entry.
