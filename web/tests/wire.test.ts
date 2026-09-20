@@ -172,32 +172,36 @@ test("v4 IDs, replies, bundles and receipts stay scoped to the chat", () => {
   );
 });
 
-test("sender creation success is a durable delivery only when it has delivery metadata", () => {
+test("created notifications and legacy creation deliveries stay separate from command success", () => {
   for (const type of [
+    "message.created",
+    // Read compatibility for deliveries produced by 0.9.3.
     "message.create",
     "message.create.successful",
-    "message.created",
   ]) {
-    const wire = {
-      type,
-      data: {
-        "message-id": "000",
-        conversation_id: "alice::bob",
-        recipient_id: "bob",
-        sender: { type: "carbon", id: "alice" },
-        message: "hello",
-        attachments: [],
-        metadata: {
-          source: "dm",
-          delivery_id: "delivery",
-          delivery_sequence: 1,
+    for (const recipient of ["alice", "bob"]) {
+      const wire = {
+        type,
+        data: {
+          "message-id": "000",
+          conversation_id: "alice::bob",
+          recipient_id: recipient,
+          sender: { type: "carbon", id: "alice" },
+          message: "hello",
+          attachments: [],
+          metadata: {
+            source: "dm",
+            delivery_id: "delivery",
+            delivery_sequence: 1,
+          },
         },
-      },
-    };
-    const frame = decodeFrame(wire);
-    assert.equal(frame.type, "message");
-    assert.equal(frame.delivery_id, "delivery");
-    assert.equal(frame.message.id, "alice::bob#000");
+      };
+      const frame = decodeFrame(wire);
+      assert.equal(frame.type, "message");
+      assert.equal(frame.delivery_id, "delivery");
+      assert.equal(frame.actor_id, recipient);
+      assert.equal(frame.message.id, "alice::bob#000");
+    }
   }
   for (const type of ["message.create.successful", "message.create.success"]) {
     const frame = decodeFrame({

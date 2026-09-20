@@ -2906,7 +2906,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-dm"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2949,7 +2949,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-dm-cli"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2968,7 +2968,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-dm-client"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2991,7 +2991,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-dm-protocol"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "axum",
  "futures-util",

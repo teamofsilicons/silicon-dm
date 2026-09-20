@@ -843,11 +843,26 @@ fn upgrade_callback_frame(mut frame: Value) -> Value {
         .as_str()
         .is_some_and(|kind| kind.starts_with("message."))
     {
-        if frame["type"] == "message.created" {
-            frame["type"] = json!(silicon_dm_protocol::message_creation_event(
-                frame["data"]["sender"]["id"].as_str().unwrap_or_default(),
-                frame["data"]["recipient_id"].as_str().unwrap_or_default(),
-            ));
+        let has_delivery_metadata = frame["data"]["metadata"]["delivery_id"].is_string()
+            || frame["metadata"]["delivery_id"].is_string();
+        // 0.9.3 queued recipient deliveries as message.create and sender
+        // copies as message.create.successful. Keep direct command replies
+        // untouched: only durable delivery metadata identifies these events.
+        if !has_delivery_metadata
+            && matches!(
+                frame["type"].as_str(),
+                Some("message.create" | "message.create.successful" | "message.create.success")
+            )
+        {
+            return frame;
+        }
+        if has_delivery_metadata
+            && matches!(
+                frame["type"].as_str(),
+                Some("message.create" | "message.create.successful")
+            )
+        {
+            frame["type"] = json!("message.created");
         }
         // Current callbacks keep delivery metadata in both locations. Prefer
         // the canonical nested value, retaining support for older queued frames.
@@ -1101,15 +1116,31 @@ mod wire_tests {
 
     #[tokio::test]
     async fn queued_v2_delivery_survives_upgrade_and_retries_until_enveloped_ack() -> Result<()> {
-        queued_delivery_ack(false).await
+        queued_delivery_ack(false, None, false).await
     }
 
     #[tokio::test]
     async fn queued_delivery_accepts_native_silicon_ack() -> Result<()> {
-        queued_delivery_ack(true).await
+        queued_delivery_ack(true, None, false).await
     }
 
-    async fn queued_delivery_ack(silicon: bool) -> Result<()> {
+    #[tokio::test]
+    async fn queued_093_creation_events_replay_as_created_without_changing_acknowledgements()
+    -> Result<()> {
+        for (kind, sender_copy) in [
+            ("message.create", false),
+            ("message.create.successful", true),
+        ] {
+            queued_delivery_ack(false, Some(kind), sender_copy).await?;
+        }
+        Ok(())
+    }
+
+    async fn queued_delivery_ack(
+        silicon: bool,
+        queued_kind: Option<&str>,
+        sender_copy: bool,
+    ) -> Result<()> {
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = attempts.clone();
         let app = Router::new().route(
@@ -1122,7 +1153,7 @@ mod wire_tests {
                         body["data"]["metadata"],
                         json!({"source":"dm", "delivery_id":Uuid::nil(),"delivery_sequence":1})
                     );
-                    assert_eq!(body["type"], "message.create");
+                    assert_eq!(body["type"], "message.created");
                     assert_eq!(body["data"]["message"], "hello");
                     assert_eq!(body["metadata"], body["data"]["metadata"]);
                     assert!(body["data"].get("profile").is_none());
@@ -1166,12 +1197,21 @@ mod wire_tests {
             config.profiles.insert("default:production".into(), profile);
             Ok(())
         })?;
-        let legacy = json!({
+        let sender = if sender_copy {
+            json!({"type":"silicon","id":"cos:tos"})
+        } else {
+            json!({"type":"carbon","id":"alice"})
+        };
+        let mut legacy = json!({
             "type":"message","delivery_id":Uuid::nil(),"actor_id":"cos:tos","delivery_sequence":1,
-            "message":{"id":Uuid::nil(),"conversation_id":Uuid::nil(),"sender":{"type":"carbon","id":"alice"},
+            "message":{"id":Uuid::nil(),"conversation_id":Uuid::nil(),"sender":sender,
                 "recipient_id":"deliberate@cos:tos","text":"hello","metadata":{"type":"user","data":{"message":"nested"}},
                 "sequence":1,"status":"sent","created_at":"2026-09-11T00:00:00Z","version":1}
         });
+        if let Some(kind) = queued_kind {
+            legacy = upgrade_callback_frame(legacy);
+            legacy["type"] = json!(kind);
+        }
         let upgraded = upgrade_callback_frame(legacy.clone());
         let frame: ServerFrame = serde_json::from_value(upgraded.clone())?;
         let queue = queue::Queue::open(&store)?;
@@ -1201,6 +1241,8 @@ mod wire_tests {
                 .queue
                 .webhook_is_pending("default:production", &Uuid::nil().to_string())?
         );
+        assert_eq!(context.queue.cursor("default:production", "cos:tos")?, 1);
+        assert!(context.queue.request_candidates()?.is_empty());
         deliver_webhook(
             context.clone(),
             queue::WebhookWork {
@@ -1217,11 +1259,48 @@ mod wire_tests {
                 .webhook_is_pending("default:production", &Uuid::nil().to_string())?
         );
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        assert_eq!(context.queue.request_candidates()?.len(), 1);
+        assert_eq!(
+            context.queue.request_candidates()?.len(),
+            usize::from(!sender_copy)
+        );
         server.abort();
         drop(context);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn callback_upgrade_preserves_commands_and_normalizes_delivery_metadata_locations() {
+        for kind in [
+            "message.create",
+            "message.create.successful",
+            "message.create.success",
+        ] {
+            let command = json!({"type":kind,"data":{"idempotency_key":"send-once","message":"hello","metadata":{"context":"caller-owned"}}});
+            assert_eq!(upgrade_callback_frame(command.clone()), command);
+        }
+        for kind in [
+            "message.created",
+            "message.create",
+            "message.create.successful",
+        ] {
+            for nested in [true, false] {
+                let metadata =
+                    json!({"source":"dm","delivery_id":Uuid::nil(),"delivery_sequence":7});
+                let mut event = json!({"type":kind,"data":{"message-id":"000","recipient_id":"cos:tos","message":"hello","sender":{"type":"silicon","id":"cos:tos"}}});
+                if nested {
+                    event["data"]["metadata"] = metadata.clone();
+                } else {
+                    event["metadata"] = metadata.clone();
+                }
+                let upgraded = upgrade_callback_frame(event);
+                assert_eq!(upgraded["type"], "message.created");
+                assert_eq!(upgraded["metadata"], metadata);
+                assert_eq!(upgraded["data"]["metadata"], metadata);
+                assert_eq!(upgraded["data"]["message"], "hello");
+                assert_eq!(upgraded["data"]["recipient_id"], "cos:tos");
+            }
+        }
     }
 
     #[test]

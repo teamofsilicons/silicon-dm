@@ -59,10 +59,10 @@ Commands use `member_id`. Message/bundle commands additionally provide `org_id`,
 
 Command success replies have no delivery sequence and need no ACK. Command errors preserve available identifiers and include `code`, `message`, `recoverable`. Recoverable means the socket remains usable, not that the unchanged request will succeed. Unrecognized or malformed envelopes use `connection.error`.
 
-`message.create`, `message.create.successful`, `message.updated`, `message.deleted`, `message.delivered`, `message.read` and `message.failed` are durable broadcasts. Their transport fields are mirrored at top-level `metadata` and inside `data.metadata`:
+`message.created`, `message.updated`, `message.deleted`, `message.delivered`, `message.read` and `message.failed` are durable broadcasts. Every participant, including the sender's devices, receives `message.created` for a new message. Their transport fields are mirrored at top-level `metadata` and inside `data.metadata`:
 
 ```json
-{"type":"message.create","metadata":{"source":"dm","delivery_id":"22222222-2222-4222-8222-000000000001","delivery_sequence":42},"data":{"message-id":"000","metadata":{"source":"dm","delivery_id":"22222222-2222-4222-8222-000000000001","delivery_sequence":42}}}
+{"type":"message.created","metadata":{"source":"dm","delivery_id":"22222222-2222-4222-8222-000000000001","delivery_sequence":42},"data":{"message-id":"000","metadata":{"source":"dm","delivery_id":"22222222-2222-4222-8222-000000000001","delivery_sequence":42}}}
 ```
 
 This abbreviated example shows placement; each delivery includes the full message snapshot. Callbacks use the same envelope. Metadata is not a content-history entry.
@@ -71,7 +71,7 @@ ACKs are cumulative per member stream and device, across conversations. Reconnec
 
 Shared `/api/v1/ws/shared` first sends `connection.prewarmed`. Subscribe independently for each account, token, organization and device, up to 64 subscriptions. Wrap inner frames as `{"type":"channel","data":{"subscription_id":"work","frame":{...}}}`. Each channel has its own heartbeat and authorization. Answer outer heartbeats too. Unsubscribe removes just one channel; `subscription.closed` is an unsolicited closure notice.
 
-Creation requests use `message.create` over HTTP and WebSocket. Successful command replies use `message.create.successful`; failed creates never emit it. Durable creation callbacks use `message.create.successful` for the sender's own devices and `message.create` for other recipients. Durable callbacks carry `metadata.delivery_id` and `metadata.delivery_sequence`; command replies do not. Clients still read older `message.created` deliveries and `message.create.success` command replies during upgrades.
+Creation requests use `message.create` over HTTP and WebSocket. The direct success reply to the initiating request uses `message.create.successful`; failed creates never emit it. Separately, every participant receives a durable `message.created` notification, including the sender's devices. Durable notifications and callbacks carry `metadata.delivery_id` and `metadata.delivery_sequence` and need ACKs after durable processing; command replies do not. During upgrades, clients also read the 0.9.3 delivery names `message.create` and `message.create.successful` when delivery metadata is present, and older `message.create.success` command replies.
 
 Draft saves use compare-and-swap versions. A stale save returns HTTP 409 with `data.error.code: draft_conflict`, recovery instructions, and the current draft fields in `data`. The save was not applied. Keep local content, resolve against the returned version, and retry explicitly.
 

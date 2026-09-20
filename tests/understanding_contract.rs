@@ -1380,10 +1380,7 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
     assert_eq!(first.id, "000");
     assert_eq!(first.conversation_id, "alice::bob");
     assert_eq!(first.content.recipient_id.as_deref(), Some("bob"));
-    for (client, recipient, kind) in [
-        (&alice, "alice", "message.create.successful"),
-        (&bob, "bob", "message.create"),
-    ] {
+    for (client, recipient) in [(&alice, "alice"), (&bob, "bob")] {
         let mut socket = client
             .connect(&[recipient.into()], "creation-observer")
             .await?;
@@ -1403,7 +1400,7 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
             }
         })
         .await??;
-        assert_eq!(event["type"], kind);
+        assert_eq!(event["type"], "message.created");
         assert_eq!(event["data"]["recipient_id"], recipient);
         assert_eq!(event["data"]["message-id"], "000");
         assert!(

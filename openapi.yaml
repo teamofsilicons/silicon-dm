@@ -1,7 +1,7 @@
 openapi: 3.1.0
 servers:
   - url: https://backend.dm.teamofsilicons.com
-info: {title: DM API, version: 0.9.3}
+info: {title: DM API, version: 0.9.4}
 security:
   - bearerAuth: []
 tags:
@@ -628,8 +628,8 @@ paths:
         is an unsolicited channel closure notice.
 
 
-        Commands use <command>, <command>.success and <command>.error. A response never needs another success response. channel is only an envelope. connection.ready,
-        connection.prewarmed, subscription.closed and message.create/updated/deleted/delivered/read/failed are unsolicited notifications, not command replies.
+        Commands use <command>, <command>.success and <command>.error, except message.create returns message.create.successful. A response never needs another success response. channel is only an envelope. connection.ready,
+        connection.prewarmed, subscription.closed and message.created/updated/deleted/delivered/read/failed are unsolicited notifications, not command replies.
         Only delivery events carrying data.metadata need delivery ACKs.'
       parameters:
         - in: header
@@ -700,16 +700,17 @@ paths:
                     idempotency_key: send-alice-bob-001
                     message: Can you review this?
                     attachments: []
-          - name: 'channel: message.create'
+          - name: 'channel: message.created'
             direction: server → client
             schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: Wrap any standalone server event, including its data.metadata. This example is the sender’s own delivery copy.
+            description: Creation notification delivered to every participant, including the sender’s devices. Delivery metadata is mirrored at frame.metadata and frame.data.metadata; ACK after durable processing.
             example:
               type: channel
               data:
                 subscription_id: alice-acme
                 frame:
-                  type: message.create
+                  type: message.created
+                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000001, delivery_sequence: 42}
                   data:
                     message-id: 00a
                     conversation_id: alice@example.com::bob@example.com
@@ -819,7 +820,7 @@ paths:
             schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
             description: After subscribing assistant-work as assistant:acme in acme. Durable creation confirmation, also returned for an identical retry.
               Correlate by member_id, conversation_id and idempotency_key. No delivery ACK for this frame; the display message is delivered separately as
-              message.create with data.metadata.
+              message.created with data.metadata.
             example:
               type: channel
               data:
@@ -1035,8 +1036,7 @@ paths:
           - name: 'channel: message.create.successful'
             direction: server → client
             schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Confirms this send is durable; delivery/read is tracked separately. No delivery ACK
-              for this confirmation.
+            description: Direct success reply on the initiating authenticated subscription for message.create. No delivery metadata or ACK; every participant separately receives message.created.
             example:
               type: channel
               data:
@@ -1082,6 +1082,7 @@ paths:
                 subscription_id: alice-acme
                 frame:
                   type: message.updated
+                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000002, delivery_sequence: 43}
                   data:
                     message-id: 00a
                     conversation_id: alice@example.com::bob@example.com
@@ -1115,6 +1116,7 @@ paths:
                 subscription_id: alice-acme
                 frame:
                   type: message.deleted
+                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000003, delivery_sequence: 44}
                   data:
                     message-id: 00a
                     conversation_id: alice@example.com::bob@example.com
@@ -1143,6 +1145,7 @@ paths:
                 subscription_id: alice-acme
                 frame:
                   type: message.delivered
+                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000004, delivery_sequence: 45}
                   data:
                     message-id: 00a
                     conversation_id: alice@example.com::bob@example.com
@@ -1171,6 +1174,7 @@ paths:
                 subscription_id: alice-acme
                 frame:
                   type: message.read
+                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000005, delivery_sequence: 46}
                   data:
                     message-id: 00a
                     conversation_id: alice@example.com::bob@example.com
@@ -1199,6 +1203,7 @@ paths:
                 subscription_id: alice-acme
                 frame:
                   type: message.failed
+                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000006, delivery_sequence: 47}
                   data:
                     message-id: 00a
                     conversation_id: alice@example.com::bob@example.com
@@ -1522,7 +1527,7 @@ paths:
         Use members in connection queries and connection.ready frames, and member_id in member-scoped commands.
 
         After HTTP 101, send JSON text frames. connection.ready reports protocol_version=5. Durable events carry delivery metadata inside data.metadata
-        for ACK/replay; only type and data appear at the root.
+        for ACK/replay, mirrored at root metadata. Command replies have only type and data at the root.
 
         Ping every 30 seconds requires ping.success with the same ping_id; 120 seconds without a valid ping.success closes the connection.
 
@@ -1531,8 +1536,8 @@ paths:
         See the WebSocket events catalogue in the local Swagger preview for exact frames in both directions.
 
 
-        Commands use <command>, <command>.success and <command>.error. A response never needs another success response. channel is only an envelope. connection.ready,
-        connection.prewarmed, subscription.closed and message.create/updated/deleted/delivered/read/failed are unsolicited notifications, not command replies.
+        Commands use <command>, <command>.success and <command>.error, except message.create returns message.create.successful. A response never needs another success response. channel is only an envelope. connection.ready,
+        connection.prewarmed, subscription.closed and message.created/updated/deleted/delivered/read/failed are unsolicited notifications, not command replies.
         Only delivery events carrying data.metadata need delivery ACKs.'
       x-websocket-frame: {$ref: '#/components/schemas/SocketFrame'}
       parameters:
@@ -1651,7 +1656,7 @@ paths:
             direction: server → client
             schema: {$ref: '#/components/schemas/BundleCreatedFrame'}
             description: Durable creation confirmation, also returned for an identical retry. Correlate by member_id, conversation_id and idempotency_key.
-              No delivery ACK for this frame; the display message is delivered separately as message.create with data.metadata.
+              No delivery ACK for this frame; the display message is delivered separately as message.created with data.metadata.
             example:
               type: bundle.success
               data:
@@ -1795,7 +1800,7 @@ paths:
           - name: message.create.successful
             direction: server → client
             schema: {$ref: '#/components/schemas/MessageAcceptedFrame'}
-            description: Confirms this send is durable; delivery/read is tracked separately. No delivery ACK for this confirmation.
+            description: Direct success reply to the initiating message.create command. This reply has no delivery metadata or ACK; every participant separately receives message.created.
             example:
               type: message.create.successful
               data:
@@ -1822,13 +1827,14 @@ paths:
             example:
               type: receipt.success
               data: {message_id: 00a, conversation_id: 'alice@example.com::bob@example.com', status: read}
-          - name: message.create
+          - name: message.created
             direction: server → client
             schema: {$ref: '#/components/schemas/MessageDeliveryFrame'}
             description: Full current message snapshot with recipient delivery metadata in data.metadata. ACK this delivery sequence. recipient_id identifies
               the receiving account, including sender copies; replay can contain a newer snapshot.
             example:
-              type: message.create
+              type: message.created
+              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000001, delivery_sequence: 42}
               data:
                 message-id: 00a
                 conversation_id: alice@example.com::bob@example.com
@@ -1853,6 +1859,7 @@ paths:
               the receiving account, including sender copies; replay can contain a newer snapshot.
             example:
               type: message.updated
+              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000002, delivery_sequence: 43}
               data:
                 message-id: 00a
                 conversation_id: alice@example.com::bob@example.com
@@ -1882,6 +1889,7 @@ paths:
               the receiving account, including sender copies; replay can contain a newer snapshot.
             example:
               type: message.deleted
+              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000003, delivery_sequence: 44}
               data:
                 message-id: 00a
                 conversation_id: alice@example.com::bob@example.com
@@ -1906,6 +1914,7 @@ paths:
               the receiving account, including sender copies; replay can contain a newer snapshot.
             example:
               type: message.delivered
+              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000004, delivery_sequence: 45}
               data:
                 message-id: 00a
                 conversation_id: alice@example.com::bob@example.com
@@ -1930,6 +1939,7 @@ paths:
               the receiving account, including sender copies; replay can contain a newer snapshot.
             example:
               type: message.read
+              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000005, delivery_sequence: 46}
               data:
                 message-id: 00a
                 conversation_id: alice@example.com::bob@example.com
@@ -1954,6 +1964,7 @@ paths:
               the receiving account, including sender copies; replay can contain a newer snapshot.
             example:
               type: message.failed
+              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000006, delivery_sequence: 47}
               data:
                 message-id: 00a
                 conversation_id: alice@example.com::bob@example.com
@@ -3623,6 +3634,7 @@ components:
           properties:
             ping_id: {type: string}
     MessageAcceptedFrame:
+      description: Direct success reply to the initiating message.create command, correlated by idempotency_key. No delivery metadata or ACK; every participant separately receives message.created. Failed creates never emit this reply.
       type: object
       additionalProperties: false
       required: [type, data]
@@ -3694,13 +3706,14 @@ components:
               enum: [delivered, read]
             conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
     MessageDeliveryFrame:
-      description: Creation is message.create for other recipients and message.create.successful for the sender's own devices. Durable deliveries carry delivery metadata; command replies do not.
+      description: Creation notifications use message.created for every participant, including the sender's devices. Durable notifications carry delivery metadata mirrored at metadata and data.metadata and need ACKs after durable processing; command replies do not.
       type: object
       additionalProperties: false
       required: [type, data]
       properties:
         type:
-          enum: [message.create, message.create.successful, message.updated, message.deleted]
+          enum: [message.created, message.updated, message.deleted]
+        metadata: {$ref: '#/components/schemas/DeliveryMetadata'}
         data: {$ref: '#/components/schemas/DeliveryMessage'}
     ReceiptDeliveryFrame:
       type: object
@@ -3709,6 +3722,7 @@ components:
       properties:
         type:
           enum: [message.delivered, message.read, message.failed]
+        metadata: {$ref: '#/components/schemas/DeliveryMetadata'}
         data: {$ref: '#/components/schemas/DeliveryMessage'}
     SocketErrorFrame:
       type: object
@@ -4262,7 +4276,7 @@ components:
                     must match the subscription member.'}
                 idempotency_key: {type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]{8,255}$'}
       description: Durable creation confirmation, also returned for an identical retry. Correlate by member_id, conversation_id and idempotency_key. No
-        delivery ACK for this frame; the display message is delivered separately as message.create with data.metadata.
+        delivery ACK for this frame; the display message is delivered separately as message.created with data.metadata.
     CommandErrorFrame:
       type: object
       additionalProperties: false

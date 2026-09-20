@@ -77,7 +77,7 @@ The [fixed message schema](../wire-format.md) defines all fields and examples. S
 POST /api/v1/conversations/cos:tos/messages
 Authorization: Bearer ACCESS_TOKEN
 X-Org-ID: tos
-X-DM-Contract-Version: 2
+X-DM-Contract-Version: 3
 Idempotency-Key: retry-key-0001
 Content-Type: application/json
 
@@ -86,9 +86,11 @@ Content-Type: application/json
 
 You can instead POST `/messages` with `recipient_id` in `data`. Direct conversation IDs are canonical member pairs; groups retain their group addresses. A message is identified by its conversation and short `message-id`, starting at `000`. UUID aliases remain accepted.
 
+The direct success reply to `message.create` uses `message.create.successful`. Every participant, including the sender's devices, separately receives a durable `message.created` notification. Only the notification carries delivery metadata and needs a transport ACK; a failed create never receives a success reply.
+
 A reply supplies `reply: {"message-id":"000"}`. The server supplies the referenced sender/content. Use HTTPS URL strings in `attachments`, including audio or GIFs. Text may be empty when attachments exist. Audio transcription belongs in `voice_transcript`. Message metadata and separate voice/GIF objects are no longer public fields.
 
-PATCH `/conversations/{chat}/messages/{code}` uses `type: "message.updated"`, a complete replacement content body, `If-Match`, and a stable idempotency key. DELETE uses the same path and headers with no body; its type is `message.deleted`. IDs remain stable and versions increment. All message output fields remain present, with null timestamps/optional values and empty lists where appropriate.
+PATCH `/conversations/{chat}/messages/{code}` uses `type: "message.updated"`, a complete replacement content body, and a stable idempotency key. DELETE uses the same path and headers with no body; its type is `message.deleted`. Messages have no numeric version or `If-Match`: edits append the previous content to `history`, while deletion sets `deleted_at`. All message output fields remain present, with null timestamps/optional values and empty lists where appropriate.
 
 ## Receipts and durable delivery
 
@@ -120,41 +122,41 @@ Draft input uses `message_content` for text, and supports `attachments`, `voice`
 
 `GET /gifs/trending` returns safe Giphy results. `GET /gifs/search?q=...` accepts a nonempty search of at most 50 characters without controls. Both return `{items: Gif[]}`. `GET /gifs/recent` returns the authenticated Carbon's last 20 distinct used GIFs; Silicon recent history is not supported. Sending a GIF records usage. GIF discovery requires a configured Giphy API key; external provider failure is surfaced instead of returning fabricated results.
 
-## WebSocket protocol version 4
+## WebSocket protocol version 5
 
 ```text
-GET /api/v1/ws?org_id=your-org&device_id=my-device&actors=actor-id
+GET /api/v1/ws?org_id=your-org&device_id=my-device&members=actor-id
 Authorization: Bearer oat_REDACTED
 ```
 
-Repeat the `actors` query parameter rather than using comma-separated IDs. `org_id` and `device_id` must each occur exactly once. IAM must authorize every requested actor; the current adapter represents only its authenticated principal. A relay serving multiple accounts opens a separate authenticated connection for each account. Pass the DM test key header when selecting a test environment. Persist `ready.data.testing_generation` and send it as the optional `testing_generation` query parameter on reconnect. Production returns null. If the generation changed after a test clean or lifecycle change, clear old local cursors and archive the old inbox before replay. A missing/mismatched test generation makes the backend start at sequence 0 and clamp resume requests to 0, so a stale cursor cannot hide new messages.
+Repeat the `members` query parameter rather than using comma-separated IDs. `org_id` and `device_id` must each occur exactly once. IAM must authorize every requested member; the current adapter represents only its authenticated principal. A relay serving multiple accounts opens a separate authenticated connection for each account or independently authenticated shared subscriptions. Pass the DM test key header when selecting a test environment. Persist `connection.ready.data.testing_generation` and send it as the optional `testing_generation` query parameter on reconnect. Production returns null. If the generation changed after a test clean or lifecycle change, clear old local cursors and archive the old inbox before replay. A missing/mismatched test generation makes the backend start at sequence 0 and clamp resume requests to 0, so a stale cursor cannot hide new messages.
 
-The backend immediately sends `ready` with `protocol_version: 4`, `connection_id`, `actors`, and `acknowledged_through` keyed by actor ID. Client-to-server frames are:
+The backend immediately sends `connection.ready` with `protocol_version: 5`, `connection_id`, `members`, and `acknowledged_through` keyed by member ID. Client-to-server frames are:
 
 | Type | Fields inside `data` | Meaning |
 | --- | --- | --- |
-| `pong` | `ping_id` | Immediately echo the server ping ID |
-| `ack` | `actor_id`, `through_sequence` | Cumulatively acknowledge the highest contiguous durably processed delivery |
-| `resume` | `actor_id`, `after_sequence` | Replay after durable local cursor; 0 starts the retained stream |
-| `presence` | `actor_id`, nullable `activity` | Update transient activity |
-| `receipt` | `actor_id`, `conversation_id`, `message_id`, `status`, `device_id` | Record delivered/read receipt for this device |
-| `new_message` | `actor_id`, `org_id`, `conversation_id`, `idempotency_key`, flattened MessageCreate fields | Send ordinary MessageCreate content over the connection |
+| `ping.success` | `ping_id` | Immediately echo the server ping ID |
+| `ack` | `member_id`, `through_sequence` | Cumulatively acknowledge the highest contiguous durably processed delivery |
+| `resume` | `member_id`, `after_sequence` | Replay after durable local cursor; 0 starts the retained stream |
+| `presence` | `member_id`, nullable `activity` | Update transient activity |
+| `receipt` | `member_id`, `conversation_id`, `message_id`, `status`, `device_id` | Record delivered/read receipt for this device |
+| `message.create` | `member_id`, `org_id`, `conversation_id`, `idempotency_key`, flattened MessageCreate fields | Send ordinary MessageCreate content over the connection |
 
 Server-to-client frames are:
 
 | Type | Fields inside `data` | Handling |
 | --- | --- | --- |
-| `ready` | Protocol/version/actor/cursor fields above | Initialize or resume local streams |
+| `connection.ready` | Protocol/version/member/cursor fields above | Initialize or resume local streams |
 | `ping` | `ping_id` | Reply immediately; never ACK it |
-| `message_accepted` | `idempotency_key`, flattened Message fields | Ephemeral durable-send confirmation; never transport-ACK it |
-| `receipt_recorded` | `message_id`, `status` | Ephemeral receipt confirmation; never transport-ACK it |
-| `message.create`, `message.create.successful`, `message.updated`, `message.deleted` | Fixed message snapshot; transport fields in root `metadata` | Durably apply creation/revision/tombstone and ACK contiguous progress |
+| `message.create.successful` | `idempotency_key`, flattened Message fields | Direct success reply to the initiating `message.create`; no delivery metadata or transport ACK |
+| `receipt.success` | `conversation_id`, `message_id`, `status` | Ephemeral receipt confirmation; never transport-ACK it |
+| `message.created`, `message.updated`, `message.deleted` | Fixed message snapshot; transport fields mirrored in root `metadata` and `data.metadata` | Every participant, including sender devices, durably applies the notification and ACKs contiguous progress |
 | `message.delivered`, `message.read`, `message.failed` | Fixed message snapshot; transport fields in root `metadata` | Durably apply monotonic aggregate status and ACK progress |
-| `error` | `code`, `message`, `recoverable` | Handle the failed command while preserving retryable work |
+| `message.create.error`, other `<command>.error`, `connection.error` | `code`, `message`, `recoverable`, available correlation fields | Handle the failure while preserving retryable work; never ACK it |
 
-Delivery IDs are stable across retries. Actor delivery sequences are separate from conversation message sequences. Every participant, including sender devices, receives message/revision/tombstone deliveries. Deduplicate by `delivery_id`; **upsert by conversation ID, message code and content version**, so an edit does not become a second visible message. A replay of an older delivery may carry the current message revision; ignore stale content versions and do not resurrect a deletion. Do not ACK a gap or an envelope that has not been durably processed. The client/relay's exact-request acknowledgment belongs to its local command API; backend WebSocket confirmations use the schemas above.
+Delivery IDs are stable across retries. Member delivery sequences are separate from conversation message sequences. Every participant, including sender devices, receives message/revision/tombstone deliveries. Deduplicate by `delivery_id`; **upsert by conversation ID, message code and `updated_at`**, so an edit does not become a second visible message. A replay of an older delivery may carry the current message snapshot; ignore stale content and do not resurrect a deletion. Do not ACK a gap or an envelope that has not been durably processed. The client/relay's exact-request acknowledgment belongs to its local command API; backend WebSocket confirmations use the schemas above.
 
-A ping is sent every 30 seconds. Only a pong with the matching current ping ID renews the heartbeat. Two minutes without a valid pong closes with `4000`, reason `heartbeat-timeout`. Heartbeats are not persisted, ACKed, or sequenced. IAM revalidation closes revoked authority with `4001`/`authorization-revoked` and unavailable authority with `1013`/`authorization-unavailable`. Test cleanup, deletion, or key rotation also disconnects stale sessions. Reconnect with current credentials, the current test key, and durable local cursors.
+A ping is sent every 30 seconds. Only ping.success with the matching current ping ID renews the heartbeat. Two minutes without a valid ping.success closes with `4000`, reason `heartbeat-timeout`. Heartbeats are not persisted, ACKed, or sequenced. IAM revalidation closes revoked authority with `4001`/`authorization-revoked` and unavailable authority with `1013`/`authorization-unavailable`. Test cleanup, deletion, or key rotation also disconnects stale sessions. Reconnect with current credentials, the current test key, and durable local cursors.
 
 ## Testing environment API
 

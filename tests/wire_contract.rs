@@ -165,14 +165,11 @@ fn websocket_command_and_delivery_round_trip_between_backend_and_sdk() -> Result
 }
 
 #[test]
-fn creation_delivery_distinguishes_sender_from_recipient_and_command_reply() -> Result {
+fn creation_delivery_is_created_for_all_recipients_and_distinct_from_command_reply() -> Result {
     let content: MessageCreate = serde_json::from_value(json!({"message":"hello"}))?;
     let message: silicon_dm_client::Message =
         serde_json::from_value(serde_json::to_value(message(&content)?)?)?;
-    for (recipient, kind) in [
-        ("cos:tos", "message.create.successful"),
-        ("alice", "message.create"),
-    ] {
+    for recipient in ["cos:tos", "alice"] {
         let frame = silicon_dm_client::ServerFrame::Message {
             delivery_id: Uuid::nil(),
             actor_id: recipient.into(),
@@ -180,14 +177,37 @@ fn creation_delivery_distinguishes_sender_from_recipient_and_command_reply() -> 
             message: Box::new(message.clone()),
         };
         let encoded = serde_json::to_value(frame)?;
-        assert_eq!(encoded["type"], kind);
-        let decoded: silicon_dm_client::ServerFrame = serde_json::from_value(encoded)?;
-        assert_eq!(
-            decoded
-                .delivery_position()
-                .map(|(_, actor, sequence)| (actor, sequence)),
-            Some((recipient, 1))
-        );
+        assert_eq!(encoded["type"], "message.created");
+        for kind in [
+            "message.created",
+            "message.create",
+            "message.create.successful",
+        ] {
+            for nested_metadata in [true, false] {
+                let mut legacy = encoded.clone();
+                legacy["type"] = json!(kind);
+                if nested_metadata {
+                    legacy
+                        .as_object_mut()
+                        .ok_or("missing frame")?
+                        .remove("metadata");
+                } else {
+                    legacy["data"]
+                        .as_object_mut()
+                        .ok_or("missing data")?
+                        .remove("metadata");
+                }
+                let decoded: silicon_dm_client::ServerFrame = serde_json::from_value(legacy)?;
+                assert_eq!(
+                    decoded.delivery_position(),
+                    Some((Uuid::nil(), recipient, 1))
+                );
+                let normalized = serde_json::to_value(decoded)?;
+                assert_eq!(normalized["type"], "message.created");
+                assert_eq!(normalized["metadata"], encoded["metadata"]);
+                assert_eq!(normalized["data"], encoded["data"]);
+            }
+        }
     }
     for kind in ["message.create.successful", "message.create.success"] {
         let mut data = serde_json::to_value(&message)?;

@@ -86,13 +86,12 @@ pub fn http_response_type(method: &str, path: &str) -> &'static str {
     }
 }
 
-/// Creation delivery for the sender's devices or for another recipient.
-pub fn message_creation_event(sender: &str, recipient: &str) -> &'static str {
-    if sender == recipient {
-        "message.create.successful"
-    } else {
-        "message.create"
-    }
+/// Creation delivery for every recipient, including the sender's devices.
+///
+/// The arguments remain accepted for callers compiled against the existing API.
+/// Command acceptance uses `message.create.successful` separately.
+pub fn message_creation_event(_sender: &str, _recipient: &str) -> &'static str {
+    "message.created"
 }
 
 /// Wrap serialized HTTP responses without copying or parsing large message bodies.
@@ -280,4 +279,25 @@ pub fn bundle_code(sequence: i64) -> Option<String> {
 pub fn bundle_sequence(code: &str) -> Option<i64> {
     let sequence = message_sequence(code)?.checked_sub(1)?;
     (sequence > 0).then_some(sequence)
+}
+
+#[cfg(test)]
+mod creation_tests {
+    #[test]
+    fn delivery_notification_is_distinct_from_command_and_direct_success() {
+        for recipient in ["alice", "bob"] {
+            assert_eq!(
+                super::message_creation_event("alice", recipient),
+                "message.created"
+            );
+        }
+        assert_eq!(
+            super::http_type("POST", "/api/v1/messages"),
+            "message.create"
+        );
+        assert_eq!(
+            super::http_response_type("POST", "/api/v1/messages"),
+            "message.create.successful"
+        );
+    }
 }
