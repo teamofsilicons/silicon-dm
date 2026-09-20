@@ -3,10 +3,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::collections::HashSet;
 
-const SAFE_CHARACTERS: usize = 400;
+const SAFE_CHARACTERS: usize = 140;
 pub const BLOCKED: &str = "message too long, not delivered. Your carbon would likely not read this long message, you can break this message down into multiple smaller messages, or just write a single short message, if you wanna still send the longer version you can send it by adding the flag --dangerously-send-long-message";
 pub const SENT_WARNING: &str =
-    "Message sent but it was above the 400 characters safe carbon read limits";
+    "Message sent but it was above the 140 characters safe carbon read limits";
 
 pub fn needs_check(actor: &Actor, message: &MessageCreate) -> bool {
     actor.actor_type == ActorType::Silicon
@@ -89,9 +89,9 @@ mod tests {
     #[test]
     fn unicode_boundary_and_authenticated_sender() -> Result<()> {
         for (text, expected) in [
-            ("x".repeat(400), false),
-            ("界".repeat(400), false),
-            ("🙂".repeat(401), true),
+            ("x".repeat(140), false),
+            ("界".repeat(140), false),
+            ("🙂".repeat(141), true),
         ] {
             let message: MessageCreate =
                 serde_json::from_value(json!({"text":text, "sender_id":"carbon"}))?;

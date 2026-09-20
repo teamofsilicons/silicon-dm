@@ -56,10 +56,21 @@ routes. The gateway supplies authorization, organization, and testing headers;
 browser-supplied authorization is never forwarded. Testing management requires
 a selected production profile. `X-DM-Profile` selects a browser profile for each
 HTTP call. `X-Testing-Environment-Generation` preserves the browser's mutation
-fence. Requests and responses stream with backpressure; an already-consumed
-mutation body is not replayed automatically after an upstream 401. Its access
-token is marked expired, so the browser can refresh and retry with the original
-idempotency key.
+fence. Requests and responses stream with backpressure. After an upstream 401,
+the gateway marks the access token expired and returns the rejection. The
+browser silently refreshes that profile and retries once with its original
+encoded body, idempotency key, version, testing generation, and cancellation
+signal. A rejected refresh or second 401 requires sign-in; temporary network
+or authentication-service failures retain the session.
+
+Run `npm test` from `web` for HTTP/WebSocket renewal and durable-session
+regressions. For the browser integration check, run `npm run test:session-browser`
+and open the printed URL. It uses the actual client, gateway, cookies, IndexedDB,
+and WebSockets with a loopback backend and fake credentials. It forces HTTP and
+WebSocket expiry, a temporary refresh outage, and refresh revocation, checking
+that rejected writes preserve their body and idempotency key on retry. The page
+and printed JSON report show the result. Stop the process with Ctrl+C; restart
+it for another run. This check does not contact deployed DM or IAM services.
 
 `/api/ws` authenticates the same cookie, accepts `profile_id`, `device_id`, and
 optional `testing_generation`, and supplies the selected actor and organization

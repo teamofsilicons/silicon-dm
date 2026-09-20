@@ -382,7 +382,7 @@ pub(super) async fn put_draft(
     ApiPath(path): ApiPath<ConversationPath>,
     IfMatch(expected_version): IfMatch,
     ApiJson(input): ApiJson<DraftInput>,
-) -> AppResult<(StatusCode, Json<Draft>)> {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     state
         .store
         .require_participant(
@@ -404,8 +404,18 @@ pub(super) async fn put_draft(
         })
         .await?;
     Ok(match outcome {
-        PutDraftOutcome::Saved(draft) => (StatusCode::OK, Json(draft)),
-        PutDraftOutcome::Conflict(draft) => (StatusCode::CONFLICT, Json(draft)),
+        PutDraftOutcome::Saved(draft) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(draft).map_err(AppError::internal)?),
+        ),
+        PutDraftOutcome::Conflict(draft) => {
+            let mut body = serde_json::to_value(draft).map_err(AppError::internal)?;
+            body["error"] = serde_json::json!({
+                "code": "draft_conflict",
+                "message": "The draft changed since the supplied version. Your save was not applied. Resolve against this draft and retry with its current version."
+            });
+            (StatusCode::CONFLICT, Json(body))
+        }
     })
 }
 

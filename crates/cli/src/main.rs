@@ -415,7 +415,7 @@ enum Messages {
         conversation: String,
         #[command(flatten)]
         content: Content,
-        /// Allow text over 400 characters when a Silicon messages a Carbon.
+        /// Allow text over 140 characters when a Silicon messages a Carbon.
         #[arg(long)]
         dangerously_send_long_message: bool,
     },
@@ -1239,7 +1239,9 @@ async fn execute(
             }
             let failed = result.state == "failed";
             let mut value = serde_json::Map::new();
-            value.insert("acknowledgement".into(), acknowledgement_value(ack));
+            if !failed && result.error.is_none() {
+                value.insert("acknowledgement".into(), acknowledgement_value(ack));
+            }
             value.insert("response".into(), relay_result_value(result));
             let value = Value::Object(value);
             if failed {

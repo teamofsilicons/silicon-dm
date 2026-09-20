@@ -793,6 +793,22 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
         .await?;
     assert_eq!(draft.conversation_id, group.id);
     assert_eq!(draft.content.metadata["conversation_id"], "unchanged");
+    let stale = owner
+        .put_draft(&group.id, &draft.content, 0)
+        .await
+        .err()
+        .ok_or("expected operation to fail")?;
+    let silicon_dm_client::Error::Api {
+        status, code, body, ..
+    } = stale
+    else {
+        return Err("expected a structured draft conflict".into());
+    };
+    assert_eq!(status, 409);
+    assert_eq!(code, "draft_conflict");
+    assert_eq!(body["version"], draft.version);
+    assert_eq!(body["conversation_id"], group.id);
+    assert_eq!(owner.draft(&group.id).await?.version, draft.version);
     owner.delete_draft(&group.id).await?;
     group_address_socket_roundtrip(&owner, &group.id, false).await?;
     group_address_socket_roundtrip(&owner, &group.id, true).await?;
@@ -990,7 +1006,9 @@ async fn group_address_socket_roundtrip(
             {
                 return Err(format!("socket rejected: {value}").into());
             }
-            if value["type"] == "message.create.success" {
+            if value["type"] == "message.create.successful"
+                && value["data"]["idempotency_key"].is_string()
+            {
                 assert_eq!(value["data"]["conversation_id"], id);
                 assert!(value["data"].get("metadata").is_none());
                 assert!(value["data"]["message-id"].as_str().is_some());
@@ -1362,6 +1380,40 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
     assert_eq!(first.id, "000");
     assert_eq!(first.conversation_id, "alice::bob");
     assert_eq!(first.content.recipient_id.as_deref(), Some("bob"));
+    for (client, recipient, kind) in [
+        (&alice, "alice", "message.create.successful"),
+        (&bob, "bob", "message.create"),
+    ] {
+        let mut socket = client
+            .connect(&[recipient.into()], "creation-observer")
+            .await?;
+        let event = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = socket
+                    .next()
+                    .await
+                    .ok_or("socket closed before creation")??;
+                if !frame.is_text() {
+                    continue;
+                }
+                let value: Value = serde_json::from_str(frame.to_text()?)?;
+                if value["data"]["metadata"]["delivery_id"].is_string() {
+                    return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(value);
+                }
+            }
+        })
+        .await??;
+        assert_eq!(event["type"], kind);
+        assert_eq!(event["data"]["recipient_id"], recipient);
+        assert_eq!(event["data"]["message-id"], "000");
+        assert!(
+            serde_json::from_value::<silicon_dm_client::ServerFrame>(event)?
+                .delivery_position()
+                .is_some()
+        );
+        socket.close(None).await?;
+    }
+
     assert_eq!(
         alice.send_message("bob", &text, "first-direct").await?.id,
         first.id

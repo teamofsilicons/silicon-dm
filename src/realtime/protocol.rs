@@ -236,7 +236,7 @@ pub enum ServerFrame {
         ping_id: String,
     },
     /// Confirms that a realtime send command is durably accepted.
-    #[serde(rename = "message.create.success")]
+    #[serde(rename = "message.create.successful")]
     MessageAccepted {
         /// Retry-safe client key associated with the command.
         idempotency_key: IdempotencyKey,

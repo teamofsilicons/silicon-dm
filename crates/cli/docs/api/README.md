@@ -81,7 +81,7 @@ X-DM-Contract-Version: 2
 Idempotency-Key: retry-key-0001
 Content-Type: application/json
 
-{"type":"message.created","data":{"message":"hey","attachments":[],"voice_transcript":null,"reply":null}}
+{"type":"message.create","data":{"message":"hey","attachments":[],"voice_transcript":null,"reply":null}}
 ```
 
 You can instead POST `/messages` with `recipient_id` in `data`. Direct conversation IDs are canonical member pairs; groups retain their group addresses. A message is identified by its conversation and short `message-id`, starting at `000`. UUID aliases remain accepted.
@@ -148,7 +148,7 @@ Server-to-client frames are:
 | `ping` | `ping_id` | Reply immediately; never ACK it |
 | `message_accepted` | `idempotency_key`, flattened Message fields | Ephemeral durable-send confirmation; never transport-ACK it |
 | `receipt_recorded` | `message_id`, `status` | Ephemeral receipt confirmation; never transport-ACK it |
-| `message.created`, `message.updated`, `message.deleted` | Fixed message snapshot; transport fields in root `metadata` | Durably apply creation/revision/tombstone and ACK contiguous progress |
+| `message.create`, `message.create.successful`, `message.updated`, `message.deleted` | Fixed message snapshot; transport fields in root `metadata` | Durably apply creation/revision/tombstone and ACK contiguous progress |
 | `message.delivered`, `message.read`, `message.failed` | Fixed message snapshot; transport fields in root `metadata` | Durably apply monotonic aggregate status and ACK progress |
 | `error` | `code`, `message`, `recoverable` | Handle the failed command while preserving retryable work |
 

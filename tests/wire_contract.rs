@@ -163,3 +163,144 @@ fn websocket_command_and_delivery_round_trip_between_backend_and_sdk() -> Result
     );
     Ok(())
 }
+
+#[test]
+fn creation_delivery_distinguishes_sender_from_recipient_and_command_reply() -> Result {
+    let content: MessageCreate = serde_json::from_value(json!({"message":"hello"}))?;
+    let message: silicon_dm_client::Message =
+        serde_json::from_value(serde_json::to_value(message(&content)?)?)?;
+    for (recipient, kind) in [
+        ("cos:tos", "message.create.successful"),
+        ("alice", "message.create"),
+    ] {
+        let frame = silicon_dm_client::ServerFrame::Message {
+            delivery_id: Uuid::nil(),
+            actor_id: recipient.into(),
+            delivery_sequence: 1,
+            message: Box::new(message.clone()),
+        };
+        let encoded = serde_json::to_value(frame)?;
+        assert_eq!(encoded["type"], kind);
+        let decoded: silicon_dm_client::ServerFrame = serde_json::from_value(encoded)?;
+        assert_eq!(
+            decoded
+                .delivery_position()
+                .map(|(_, actor, sequence)| (actor, sequence)),
+            Some((recipient, 1))
+        );
+    }
+    for kind in ["message.create.successful", "message.create.success"] {
+        let mut data = serde_json::to_value(&message)?;
+        data["idempotency_key"] = json!("send-retry");
+        let decoded: silicon_dm_client::ServerFrame =
+            serde_json::from_value(json!({"type":kind,"data":data}))?;
+        assert!(matches!(
+            decoded,
+            silicon_dm_client::ServerFrame::MessageAccepted { .. }
+        ));
+        assert!(decoded.delivery_position().is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn rest_creation_uses_a_command_and_a_successful_response() -> Result {
+    let app = Router::new()
+        .route(
+            "/api/v1/messages",
+            post(|ApiJson(value): ApiJson<Value>| async move { Json(value) }),
+        )
+        .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}/api/v1/messages", listener.local_addr()?);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    for kind in ["message.create", "message.created"] {
+        let response: Value = reqwest::Client::new()
+            .post(&url)
+            .json(&json!({"type":kind,"data":{"message":"hello"}}))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(response["type"], "message.create.successful");
+        assert_eq!(response["data"]["message"], "hello");
+    }
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_draft_conflict_keeps_remote_content_and_explains_recovery() -> Result {
+    let remote = json!({"conversation_id":Uuid::nil(),"member_id":"alice","version":3,"message_content":"newer text","metadata":{}});
+    let body = remote.clone();
+    let app = Router::new().route(
+        "/api/v1/conversations/{id}/draft",
+        axum::routing::put(move || {
+            let body = body.clone();
+            async move {
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({"type":"error","data":body})),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let error = Client::new(base)?
+        .put_draft(Uuid::nil(), &silicon_dm_client::DraftInput::default(), 1)
+        .await
+        .err()
+        .ok_or("expected operation to fail")?;
+    let silicon_dm_client::Error::Api {
+        status,
+        code,
+        message,
+        body,
+        ..
+    } = error
+    else {
+        return Err("expected draft conflict".into());
+    };
+    assert_eq!(status, 409);
+    assert_eq!(code, "draft_conflict");
+    assert!(message.contains("not applied"));
+    assert_eq!(*body, remote);
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_enveloped_http_failures_keep_the_upstream_body() -> Result {
+    let app = Router::new().route(
+        "/api/v1/conversations/{id}/draft",
+        axum::routing::get(|| async {
+            (StatusCode::BAD_GATEWAY, "upstream temporarily unavailable")
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let error = Client::new(base)?
+        .draft("alice+work@example.com::bob")
+        .await
+        .err()
+        .ok_or("expected operation to fail")?;
+    assert!(error.retryable());
+    let silicon_dm_client::Error::Api {
+        status,
+        message,
+        body,
+        ..
+    } = error
+    else {
+        return Err("expected HTTP failure".into());
+    };
+    assert_eq!(status, 502);
+    assert_eq!(message, "Bad Gateway");
+    assert_eq!(body["raw"], "upstream temporarily unavailable");
+    server.abort();
+    Ok(())
+}

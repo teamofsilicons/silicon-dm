@@ -157,6 +157,7 @@ export interface CreateTestingEnvironment {
   iam_webhook_key_version?: number;
 }
 export interface Profile {
+  authenticated?: boolean;
   profile_id: string;
   actor: Actor;
   organization_id: string;

@@ -766,11 +766,20 @@ pub fn validate_endpoint(url: &Url) -> Result<()> {
     }
     Ok(())
 }
+fn response_is_draft_conflict(body: &Value) -> bool {
+    body["version"].is_i64()
+        && body["conversation_id"].is_string()
+        && (body["member_id"].is_string() || body["actor_id"].is_string())
+}
 async fn checked(response: reqwest::Response) -> Result<reqwest::Response> {
     if response.status().is_success() {
         return Ok(response);
     }
     let status = response.status().as_u16();
+    let status_message = response
+        .status()
+        .canonical_reason()
+        .unwrap_or("HTTP request failed");
     let request_id = response
         .headers()
         .get("x-request-id")
@@ -781,20 +790,32 @@ async fn checked(response: reqwest::Response) -> Result<reqwest::Response> {
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
-    let body = response
-        .json::<Envelope<Value>>()
-        .await
-        .map(|e| e.data)
-        .unwrap_or(Value::Null);
+    let bytes = response.bytes().await?;
+    let body = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(mut value) if value.get("type").is_some() && value.get("data").is_some() => {
+            value["data"].take()
+        }
+        Ok(value) => value,
+        Err(_) => json!({"raw": String::from_utf8_lossy(&bytes)}),
+    };
+    let draft_conflict = status == 409 && response_is_draft_conflict(&body);
     let code = body
         .pointer("/error/code")
         .and_then(Value::as_str)
-        .unwrap_or("http_error")
+        .unwrap_or(if draft_conflict {
+            "draft_conflict"
+        } else {
+            "http_error"
+        })
         .to_owned();
     let message = body
         .pointer("/error/message")
         .and_then(Value::as_str)
-        .unwrap_or("request failed; inspect response body")
+        .unwrap_or(if draft_conflict {
+            "The draft changed since the supplied version. Your save was not applied. Resolve against the returned draft and retry with its current version."
+        } else {
+            status_message
+        })
         .to_owned();
     Err(Error::Api {
         status,
@@ -844,7 +865,7 @@ fn validate_conversation_id(value: &str) -> Result<()> {
         && value.len() <= 515
         && value
             .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"_-.:@".contains(&c))
+            .all(|c| c.is_ascii_alphanumeric() || b"_-.:@+".contains(&c))
     {
         Ok(())
     } else {

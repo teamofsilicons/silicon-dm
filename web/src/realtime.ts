@@ -251,6 +251,12 @@ export function connectRealtime(
         // their own positions again as the server catches up.
         return;
       }
+      if (frame.code === "unauthorized") {
+        // Access-token expiry uses the same authority close as revocation.
+        // Let close recovery try the saved refresh token before signing out.
+        target.close(4001, "authorization-expired");
+        return;
+      }
       const error = new ApiError(
         frame.code === "unauthorized" ? 401 : 0,
         frame.code,
@@ -442,27 +448,28 @@ export function connectRealtime(
         // below can take a few seconds when the network is degraded; leaving
         // the UI in "Connected" during that window makes sends look stuck.
         state(navigator.onLine ? "reconnecting" : "offline");
-        if (
+        const renew =
           event.code === 4001 &&
-          !event.reason.includes("testing-environment-changed")
-        ) {
-          stopWithError(
-            new ApiError(
-              401,
-              "unauthorized",
-              "This realtime session is no longer authorized.",
-            ),
-            true,
-          );
-          return;
-        }
-        void api<Session>("/api/session", { session })
+          !event.reason.includes("testing-environment-changed");
+        void api<Session>(
+          renew ? "/api/refresh" : "/api/session",
+          renew
+            ? {
+                method: "POST",
+                body: { profile_id: session.profile_id },
+                session,
+              }
+            : { session },
+        )
           .then((current) => {
             if (recoveryEpoch !== connectionEpoch || stopped || terminal)
               return;
             if (
+              !current.authenticated ||
               !current.profiles?.some(
-                (profile) => profile.profile_id === session.profile_id,
+                (profile) =>
+                  profile.profile_id === session.profile_id &&
+                  profile.authenticated !== false,
               )
             )
               stopWithError(

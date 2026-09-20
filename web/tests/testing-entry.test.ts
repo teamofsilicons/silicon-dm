@@ -205,7 +205,7 @@ test("test login opens the existing DM API with isolated credentials and can ret
     assert.equal(call.headers["x-testing-environment-key"], rootKey);
     assert.equal(call.headers["x-org-id"], "test-org");
   }
-  const send = f.calls.find((c) => c.body?.type === "message.created")!;
+  const send = f.calls.find((c) => c.body?.type === "message.create")!;
   assert.equal(send.headers["x-testing-environment-generation"], "7");
   assert.equal(send.body.data.message, "Sandbox only");
   assert.equal(
@@ -426,5 +426,44 @@ test("group addresses pass gateway routing and preserve sandbox credentials", as
       entered.value.profile_id,
     );
     assert.equal(response.status, id.includes("%2F") ? 400 : 404);
+  }
+});
+
+test("public conversation addresses and short message IDs reach drafts and messages", async (t) => {
+  const f = await fixture(t);
+  const entered = await f.enter("test-slt-token");
+  for (const path of [
+    "conversations/alice%3A%3Abob/draft",
+    "conversations/alice%40example.com%3A%3Abob/draft",
+    "conversations/alice%2Bwork%40example.com%3A%3Abob/draft",
+    "conversations/alice%3A%3Abob/messages/000",
+    "conversations/alice%3A%3Abob/bundles/001",
+  ]) {
+    const result = await f.request(
+      `/api/dm/${path}`,
+      undefined,
+      entered.value.profile_id,
+    );
+    assert.equal(result.status, 200, path);
+    const sent = f.calls.find(
+      (c) => c.path === `/api/v1/${decodeURIComponent(path)}`,
+    );
+    assert(sent, path);
+    assert.equal(sent.headers.authorization, "Bearer test-access");
+    assert.equal(sent.headers["x-testing-environment-key"], rootKey);
+  }
+  for (const path of [
+    "conversations/alice%2Fauth/draft",
+    "conversations/alice/messages/../auth",
+    "conversations/alice%253Abob/draft",
+  ]) {
+    const before = f.calls.length;
+    const result = await f.request(
+      `/api/dm/${path}`,
+      undefined,
+      entered.value.profile_id,
+    );
+    assert([400, 404].includes(result.status), path);
+    assert.equal(f.calls.length, before);
   }
 });

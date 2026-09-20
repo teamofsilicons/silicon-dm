@@ -270,10 +270,10 @@ It should also expose these specific endpoints:
 5) `unhook` the user should be able to run `dm unhook` to unhook the configured webhook connection which would simply unhook the said user.
 
 
-In CLI we would have a 400 characters limit for when a silicon tries to message a carbon, and when trying to send a message if the message is more than 400 characters, dont send the message, instead say  
+In CLI we would have a 140 characters limit for when a silicon tries to message a carbon, and when trying to send a message if the message is more than 140 characters, dont send the message, instead say  
 "message too long, not delivered. Your carbon would likely not read this long message, you can break this message down into multiple smaller messages, or just write a single short message, if you wanna still send the longer version you can send it by adding the flag --dangerously-send-long-message"
 
-And if --dangerously-send-long-message is attached in the message let the message go, still display the warning, "Message sent but it was above the 400 characters safe carbon read limits".
+And if --dangerously-send-long-message is attached in the message let the message go, still display the warning, "Message sent but it was above the 140 characters safe carbon read limits".
 
 
 # Cli experience

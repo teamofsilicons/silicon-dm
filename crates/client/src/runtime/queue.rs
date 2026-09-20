@@ -230,6 +230,8 @@ fn same_delivery_identity(old: &StoredDeliveryIdentity, new: &ServerFrame) -> bo
                 "message"
                     | "new_message"
                     | "message.created"
+                    | "message.create"
+                    | "message.create.successful"
                     | "message.updated"
                     | "message.deleted"
             ) =>

@@ -254,7 +254,9 @@ where
             Json::<silicon_dm_protocol::Envelope<serde_json::Value>>::from_request(request, state)
                 .await
                 .map_err(|rejection| ApiInputRejection::from_json(&rejection))?;
-        if envelope.kind != expected {
+        if envelope.kind != expected
+            && !(expected == "message.create" && envelope.kind == "message.created")
+        {
             return Err(ApiInputRejection::validation(
                 "request type does not match this endpoint",
             ));

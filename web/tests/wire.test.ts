@@ -22,7 +22,7 @@ test("message request uses links and keeps cached UI content unchanged", () => {
   };
   const wire = encodeRequest("POST", "/api/dm/conversations/c/messages", input);
   assert.deepEqual(Object.keys(wire).sort(), ["data", "type"]);
-  assert.equal(wire.type, "message.created");
+  assert.equal(wire.type, "message.create");
   assert.equal(wire.data.message, "hello");
   assert.equal(wire.data.text, undefined);
   assert.equal(wire.data.metadata, undefined);
@@ -170,4 +170,47 @@ test("v4 IDs, replies, bundles and receipts stay scoped to the chat", () => {
     }).original_message_ids,
     [a.id],
   );
+});
+
+test("sender creation success is a durable delivery only when it has delivery metadata", () => {
+  for (const type of [
+    "message.create",
+    "message.create.successful",
+    "message.created",
+  ]) {
+    const wire = {
+      type,
+      data: {
+        "message-id": "000",
+        conversation_id: "alice::bob",
+        recipient_id: "bob",
+        sender: { type: "carbon", id: "alice" },
+        message: "hello",
+        attachments: [],
+        metadata: {
+          source: "dm",
+          delivery_id: "delivery",
+          delivery_sequence: 1,
+        },
+      },
+    };
+    const frame = decodeFrame(wire);
+    assert.equal(frame.type, "message");
+    assert.equal(frame.delivery_id, "delivery");
+    assert.equal(frame.message.id, "alice::bob#000");
+  }
+  for (const type of ["message.create.successful", "message.create.success"]) {
+    const frame = decodeFrame({
+      type,
+      data: {
+        "message-id": "000",
+        conversation_id: "alice::bob",
+        idempotency_key: "retry-send",
+        message: "hello",
+        attachments: [],
+      },
+    });
+    assert.equal(frame.type, "message_accepted");
+    assert.equal(frame.delivery_id, undefined);
+  }
 });

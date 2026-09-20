@@ -607,7 +607,7 @@ enum ServerFrameWire {
     Ping {
         ping_id: String,
     },
-    #[serde(rename = "message.create.success")]
+    #[serde(rename = "message.create.successful", alias = "message.create.success")]
     MessageAccepted {
         idempotency_key: String,
         #[serde(flatten)]
@@ -652,12 +652,16 @@ impl<'de> Deserialize<'de> for ServerFrame {
         if matches!(
             kind.as_str(),
             "message.created"
+                | "message.create"
                 | "message.updated"
                 | "message.deleted"
                 | "message.read"
                 | "message.delivered"
                 | "message.failed"
-        ) {
+        ) || (kind == "message.create.successful"
+            && (value["data"]["metadata"]["delivery_id"].is_string()
+                || value["metadata"]["delivery_id"].is_string()))
+        {
             let metadata = value["data"]
                 .get("metadata")
                 .or_else(|| value.get("metadata"))
@@ -700,7 +704,7 @@ impl<'de> Deserialize<'de> for ServerFrame {
             "subscribe.success" | "ready" => {
                 value["type"] = Value::String("connection.ready".into())
             }
-            "message_accepted" => value["type"] = Value::String("message.create.success".into()),
+            "message_accepted" => value["type"] = Value::String("message.create.successful".into()),
             "receipt_recorded" => value["type"] = Value::String("receipt.success".into()),
             "subscribe.error" | "subscription.closed" | "error" => {
                 value["type"] = Value::String("connection.error".into());
@@ -742,7 +746,7 @@ impl Serialize for ServerFrame {
                 } else if message.updated_at.is_some() {
                     "message.updated"
                 } else {
-                    "message.created"
+                    silicon_dm_protocol::message_creation_event(&message.sender.id, actor_id)
                 },
             ),
             Self::Receipt {
@@ -768,7 +772,8 @@ impl Serialize for ServerFrame {
         let mut data = serde_json::to_value(message).map_err(serde::ser::Error::custom)?;
         data["recipient_id"] = Value::String(actor_id.clone());
         data["metadata"] = serde_json::json!({"source":"dm","delivery_id":delivery_id,"delivery_sequence":delivery_sequence});
-        serde_json::json!({"type":kind,"metadata":data["metadata"].clone(),"data":data}).serialize(serializer)
+        serde_json::json!({"type":kind,"metadata":data["metadata"].clone(),"data":data})
+            .serialize(serializer)
     }
 }
 

@@ -146,7 +146,7 @@ function destination(path: string): string {
     );
   return path.startsWith("/api/") ? path : `/api/dm${path}`;
 }
-/** One request only. Callers retry with the same mutation key; bodies are never silently replayed. */
+/** Renew authentication once after a rejected request, preserving its exact bytes and retry guards. */
 export async function api<T>(
   path: string,
   options: ApiOptions = {},
@@ -214,33 +214,59 @@ export async function api<T>(
     headers.set("Content-Type", "application/json");
   }
   const diagnosticStart = performance.now();
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      ...requestOptions,
-      headers,
-      body: encoded,
-      credentials: "include",
-      cache: "no-store",
-      redirect: "error",
-    });
-  } catch (error) {
-    recordTelemetry(
+  const send = async (): Promise<Response> => {
+    try {
+      return await fetch(url, {
+        ...requestOptions,
+        headers,
+        body: encoded,
+        credentials: "include",
+        cache: "no-store",
+        redirect: "error",
+      });
+    } catch (error) {
+      recordTelemetry(
+        session,
+        gatewayOrigin(),
+        "request",
+        false,
+        performance.now() - diagnosticStart,
+      );
+      if (error instanceof DOMException && error.name === "AbortError")
+        throw error;
+      throw new ApiError(
+        0,
+        "network_error",
+        "The server could not be reached. Your queued request can be retried with the same key.",
+        undefined,
+        idempotencyKey,
+      );
+    }
+  };
+  let response = await send();
+  if (response.status === 401 && profile && target.startsWith("/api/dm/")) {
+    await response.body?.cancel();
+    const renewed = await api<Session>("/api/refresh", {
+      method: "POST",
+      body: { profile_id: profile },
+      profileId: profile,
       session,
-      gatewayOrigin(),
-      "request",
-      false,
-      performance.now() - diagnosticStart,
-    );
-    if (error instanceof DOMException && error.name === "AbortError")
-      throw error;
-    throw new ApiError(
-      0,
-      "network_error",
-      "The server could not be reached. Your queued request can be retried with the same key.",
-      undefined,
-      idempotencyKey,
-    );
+      signal: requestOptions.signal,
+    });
+    if (!renewed.authenticated || renewed.profile_id !== profile) {
+      window.dispatchEvent(
+        new CustomEvent("dm:unauthorized", { detail: { profile_id: profile } }),
+      );
+      throw new ApiError(
+        401,
+        "login_required",
+        "Sign in to renew this profile.",
+      );
+    }
+    // A 401 is an authentication rejection, so the operation was not accepted.
+    // Keep the original body, version, idempotency key, and testing generation.
+    // In particular, never adopt a newer sandbox generation while retrying.
+    response = await send();
   }
   if (
     response.status === 401 &&

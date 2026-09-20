@@ -15,6 +15,16 @@ appropriate VPC endpoints plus outbound connectivity to IAM and Giphy.
 
 ## Images
 
+The manual [deployment image workflow](../../.github/workflows/deployment-images.yml) builds the backend runtime
+(including the RDS CA wrapper) and browser gateway on native ARM64 runners. It
+exports `dm-deployment-backend` and `dm-deployment-gateway` artifacts containing
+Docker image archives, revision/version/platform metadata, and `SHA256SUMS`.
+Verify those checksums and the expected commit, authenticate `crane` to ECR, then
+run `crane push backend.tar <ecr-repository>:<release-tag>` to copy the archive;
+no local Docker daemon is needed. The
+workflow has no AWS credentials and performs no registry push or deployment.
+It does not build the separate migration/bootstrap image.
+
 Build both images from the reviewed checkout. `BACKEND_IMAGE` must identify
 the immutable ARM64 backend image containing the reviewed binaries.
 

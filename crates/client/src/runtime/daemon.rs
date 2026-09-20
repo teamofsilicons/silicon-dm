@@ -843,6 +843,12 @@ fn upgrade_callback_frame(mut frame: Value) -> Value {
         .as_str()
         .is_some_and(|kind| kind.starts_with("message."))
     {
+        if frame["type"] == "message.created" {
+            frame["type"] = json!(silicon_dm_protocol::message_creation_event(
+                frame["data"]["sender"]["id"].as_str().unwrap_or_default(),
+                frame["data"]["recipient_id"].as_str().unwrap_or_default(),
+            ));
+        }
         // Current callbacks keep delivery metadata in both locations. Prefer
         // the canonical nested value, retaining support for older queued frames.
         if let Some(metadata) = frame
@@ -883,7 +889,10 @@ fn upgrade_callback_frame(mut frame: Value) -> Value {
         } else if message.updated_at.is_some() {
             "message.updated"
         } else {
-            "message.created"
+            silicon_dm_protocol::message_creation_event(
+                &message.sender.id,
+                frame["data"]["actor_id"].as_str().unwrap_or_default(),
+            )
         };
         let mut data = serde_json::to_value(message).unwrap_or(Value::Null);
         data["metadata"] = json!({"source":"dm","delivery_id":frame["data"]["delivery_id"],"delivery_sequence":frame["data"]["delivery_sequence"]});
@@ -1051,7 +1060,7 @@ fn acknowledges_callback(body: &[u8], delivery_id: &str) -> bool {
 fn delivery_receipt(item: &queue::WebhookWork, profile: &store::Profile) -> Option<RelayRequest> {
     if !matches!(
         item.frame.get("type")?.as_str()?,
-        "new_message" | "message.created" | "message.updated"
+        "new_message" | "message.created" | "message.create" | "message.updated"
     ) {
         return None;
     }
@@ -1113,7 +1122,7 @@ mod wire_tests {
                         body["data"]["metadata"],
                         json!({"source":"dm", "delivery_id":Uuid::nil(),"delivery_sequence":1})
                     );
-                    assert_eq!(body["type"], "message.created");
+                    assert_eq!(body["type"], "message.create");
                     assert_eq!(body["data"]["message"], "hello");
                     assert_eq!(body["metadata"], body["data"]["metadata"]);
                     assert!(body["data"].get("profile").is_none());

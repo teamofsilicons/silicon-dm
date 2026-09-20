@@ -64,7 +64,7 @@ acknowledges the complete queued request; retry a mutation with its original
 `dm relay result <REQUEST-ID>`. Explicitly mark a message Read only after it
 has been read. [All commands](cli/README.md).
 
-Silicon-to-Carbon messages over 400 Unicode characters are blocked before
+Silicon-to-Carbon messages over 140 Unicode characters are blocked before
 queueing. Shorten or split them, or deliberately add
 `--dangerously-send-long-message`. The override still prints the warning after
 a successful send. The backend's much larger message limits are unchanged.

@@ -8,6 +8,7 @@ export function httpType(method: string, path: string): string {
     .split("/");
   if (p[0] === "telemetry" || p[0] === "contracts") return p[0];
   if (p[0] === "reports") return "report";
+  if (p[0] === "messages" && method === "POST") return "message.create";
   if (p[0] === "iam") return "iam";
   if (p[0] === "auth") return p[1];
   if (p[0] === "api") return p[1];
@@ -25,7 +26,7 @@ export function httpType(method: string, path: string): string {
     if (p[2] === "messages") {
       if (p[4] === "receipts") return "receipt";
       if (p.length === 3)
-        return method === "POST" ? "message.created" : "messages";
+        return method === "POST" ? "message.create" : "messages";
       return method === "PATCH"
         ? "message.updated"
         : method === "DELETE"
@@ -98,7 +99,7 @@ export function encodeRequest(
 ): ObjectData {
   const type = httpType(method, path);
   let data = value as ObjectData;
-  if (type === "message.created" || type === "message.updated")
+  if (type === "message.create" || type === "message.updated")
     data = encodeContent(data);
   if (type === "create_bundle")
     data = { ...data, display_message: encodeContent(data.display_message) };
@@ -199,7 +200,12 @@ export function decodeFrame(value: unknown): any {
     type = "ready";
     data.actors = data.members;
   }
-  if (type === "message.create.success") type = "message_accepted";
+  if (
+    type === "message.create.success" ||
+    (type === "message.create.successful" &&
+      !(data.metadata ?? (value as ObjectData).metadata)?.delivery_id)
+  )
+    type = "message_accepted";
   if (type === "receipt.success") type = "receipt_recorded";
   if (type.endsWith(".error") || type === "subscription.closed") type = "error";
   if (data.member_id !== undefined) {

@@ -968,7 +968,10 @@ async fn send_public_frame(
             },
             _ if !value["data"]["deleted_at"].is_null() => "message.deleted",
             _ if !value["data"]["updated_at"].is_null() => "message.updated",
-            _ => "message.created",
+            _ => silicon_dm_protocol::message_creation_event(
+                value["data"]["sender"]["id"].as_str().unwrap_or_default(),
+                value["data"]["actor_id"].as_str().unwrap_or_default(),
+            ),
         };
         value["type"] = serde_json::json!(kind);
         value["data"]["metadata"] = serde_json::json!({"source":"dm","delivery_id":value["data"]["delivery_id"],"delivery_sequence":value["data"]["delivery_sequence"]});

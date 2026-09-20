@@ -21,7 +21,7 @@ impl<T> Envelope<T> {
     }
 }
 
-/// Stable operation discriminator for REST requests and successful responses.
+/// Stable operation discriminator for REST requests.
 pub fn http_type(method: &str, path: &str) -> &'static str {
     let path = path.split('?').next().unwrap_or(path);
     let path = path
@@ -30,7 +30,7 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
         .trim_matches('/');
     let p: Vec<_> = path.split('/').collect();
     match (method, p.as_slice()) {
-        ("POST", ["messages"]) => "message.created",
+        ("POST", ["messages"]) => "message.create",
         (_, ["iam"]) => "iam",
         (_, ["contracts"]) => "contracts",
         (_, ["reports"]) => "report",
@@ -47,7 +47,7 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
         (_, ["groups", _, "members"]) => "invite_group_members",
         ("POST", ["conversations"]) => "create_conversation",
         (_, ["conversations"]) => "conversations",
-        ("POST", ["conversations", _, "messages"]) => "message.created",
+        ("POST", ["conversations", _, "messages"]) => "message.create",
         (_, ["conversations", _, "messages"]) => "messages",
         ("PATCH", ["conversations", _, "messages", _]) => "message.updated",
         ("DELETE", ["conversations", _, "messages", _]) => "message.deleted",
@@ -78,6 +78,23 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
     }
 }
 
+/// Successful REST response discriminator, distinct from the creation request.
+pub fn http_response_type(method: &str, path: &str) -> &'static str {
+    match http_type(method, path) {
+        "message.create" => "message.create.successful",
+        other => other,
+    }
+}
+
+/// Creation delivery for the sender's devices or for another recipient.
+pub fn message_creation_event(sender: &str, recipient: &str) -> &'static str {
+    if sender == recipient {
+        "message.create.successful"
+    } else {
+        "message.create"
+    }
+}
+
 /// Wrap serialized HTTP responses without copying or parsing large message bodies.
 #[cfg(feature = "http")]
 pub async fn responses(
@@ -89,7 +106,7 @@ pub async fn responses(
         http::header,
     };
     use futures_util::{StreamExt, stream};
-    let kind = http_type(request.method().as_str(), request.uri().path());
+    let kind = http_response_type(request.method().as_str(), request.uri().path());
     let response = next.run(request).await;
     if !response
         .headers()

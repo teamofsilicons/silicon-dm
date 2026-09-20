@@ -14,14 +14,14 @@ fn response(data: Value) -> ResponseTemplate {
 #[tokio::test]
 async fn send_guard_precedes_queue_and_override_warns_only_after_delivery() -> Result<()> {
     for (sender, carbon, length, override_flag, data_file, state, expected_sends) in [
-        ("silicon", true, 401, false, false, "completed", 0),
-        ("silicon", true, 401, false, true, "completed", 0),
-        ("silicon", true, 400, false, false, "completed", 1),
-        ("carbon", true, 401, false, false, "completed", 1),
-        ("silicon", false, 401, false, false, "completed", 1),
-        ("silicon", true, 401, true, false, "completed", 1),
-        ("silicon", true, 401, true, true, "failed", 1),
-        ("silicon", true, 401, true, false, "pending", 1),
+        ("silicon", true, 141, false, false, "completed", 0),
+        ("silicon", true, 141, false, true, "completed", 0),
+        ("silicon", true, 140, false, false, "completed", 1),
+        ("carbon", true, 141, false, false, "completed", 1),
+        ("silicon", false, 141, false, false, "completed", 1),
+        ("silicon", true, 141, true, false, "completed", 1),
+        ("silicon", true, 141, true, true, "failed", 1),
+        ("silicon", true, 141, true, false, "pending", 1),
     ] {
         let server = MockServer::start().await;
         let directory = tempfile::tempdir()?;
@@ -113,6 +113,12 @@ async fn send_guard_precedes_queue_and_override_warns_only_after_delivery() -> R
             expected_sends == 1 && state != "failed",
             "{stderr}"
         );
+        if expected_sends == 1 && state == "failed" {
+            let failure: Value = serde_json::from_slice(&output.stdout)?;
+            assert!(failure.get("acknowledgement").is_none(), "{failure}");
+            assert_eq!(failure["response"]["state"], "failed");
+            assert_eq!(failure["response"]["error"]["code"], "denied");
+        }
         if expected_sends == 0 {
             assert!(
                 stderr.contains("message too long, not delivered."),
@@ -128,7 +134,7 @@ async fn send_guard_precedes_queue_and_override_warns_only_after_delivery() -> R
         }
         assert_eq!(
             stderr.contains(
-                "Message sent but it was above the 400 characters safe carbon read limits"
+                "Message sent but it was above the 140 characters safe carbon read limits"
             ),
             override_flag && state == "completed",
             "{stderr}"

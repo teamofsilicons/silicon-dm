@@ -1,0 +1,91 @@
+name: Build deployment images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    name: ARM64 ${{ matrix.image }} image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [backend, gateway]
+    env:
+      IMAGE_KIND: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Build the reviewed revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          image="silicon-dm-${IMAGE_KIND}:${GITHUB_SHA}"
+          labels=(
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}"
+            --label "org.opencontainers.image.version=${version}"
+          )
+          case "$IMAGE_KIND" in
+            backend)
+              base="silicon-dm-build:${GITHUB_SHA}"
+              docker build --platform linux/arm64 "${labels[@]}" --tag "$base" .
+              docker build --platform linux/arm64 "${labels[@]}" \
+                --file deploy/aws/Dockerfile.runtime \
+                --build-arg "BACKEND_IMAGE=$base" --tag "$image" .
+              ;;
+            gateway)
+              docker build --platform linux/arm64 "${labels[@]}" \
+                --file web/Dockerfile.gateway --tag "$image" web
+              ;;
+            *) exit 1 ;;
+          esac
+          printf 'IMAGE_TAG=%s\nIMAGE_VERSION=%s\n' "$image" "$version" >> "$GITHUB_ENV"
+
+      - name: Verify image identity and export archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir artifacts
+          docker image inspect "$IMAGE_TAG" > image-inspect.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          image = json.loads(Path("image-inspect.json").read_text())[0]
+          platform = f'{image["Os"]}/{image["Architecture"]}'
+          labels = image["Config"]["Labels"]
+          assert platform == "linux/arm64", f"Unexpected platform: {platform}"
+          assert labels["org.opencontainers.image.revision"] == os.environ["GITHUB_SHA"]
+          assert labels["org.opencontainers.image.version"] == os.environ["IMAGE_VERSION"]
+          metadata = {
+              "revision": os.environ["GITHUB_SHA"],
+              "version": os.environ["IMAGE_VERSION"],
+              "platform": platform,
+              "image": os.environ["IMAGE_TAG"],
+              "image_id": image["Id"],
+              "image_config": image["Config"],
+              "archive": f'{os.environ["IMAGE_KIND"]}.tar',
+          }
+          Path(f'artifacts/{os.environ["IMAGE_KIND"]}.metadata.json').write_text(
+              json.dumps(metadata, indent=2) + "\n"
+          )
+          PY
+          docker save --output "artifacts/${IMAGE_KIND}.tar" "$IMAGE_TAG"
+          cd artifacts
+          sha256sum "${IMAGE_KIND}.tar" "${IMAGE_KIND}.metadata.json" > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dm-deployment-${{ matrix.image }}
+          path: artifacts/
+          if-no-files-found: error
+          compression-level: 0
