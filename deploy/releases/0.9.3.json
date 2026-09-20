@@ -1,0 +1,73 @@
+{
+  "version": "0.9.3",
+  "verified_on": "2026-09-20",
+  "source_commit": "dd6d07538411d537fc6a25179b2d340a5f10b578",
+  "tag": "v0.9.3",
+  "validation": {
+    "rust_tests_passed": 90,
+    "web_tests_passed": 41,
+    "local_browser_session_checks_passed": 9,
+    "rustfmt": "passed",
+    "clippy": "passed",
+    "production_web_build": "passed",
+    "docs_build_and_links": "passed",
+    "ci": "https://github.com/teamofsilicons/silicon-dm/actions/runs/35518273139",
+    "native_cli_build": "https://github.com/teamofsilicons/silicon-dm/actions/runs/35518273141",
+    "deployment_image_build": "https://github.com/teamofsilicons/silicon-dm/actions/runs/35518278058"
+  },
+  "deployment": {
+    "backend": {
+      "stack": "silicon-dm-production",
+      "stack_status": "UPDATE_COMPLETE",
+      "image_digest": "sha256:2c3b0b7dc4a914ddad6e7efa4705dab4a47af1ddd7913a2b052752e2ba0dc207",
+      "platform": "linux/arm64",
+      "api_task_definition": "silicon-dm-api:15",
+      "worker_task_definition": "silicon-dm-worker:15",
+      "api_and_worker_rollouts": "COMPLETED",
+      "running_image_digests_verified": true,
+      "load_balancer_target": "healthy"
+    },
+    "gateway": {
+      "image_digest": "sha256:da732614d3ffbe71790d89d1d69a2acad5ba7e20b1bd7a63dff196f609f7e4e9",
+      "platform": "linux/arm64",
+      "rollout": "SSM update of existing systemd service",
+      "running_image_digest_verified": true,
+      "service": "active",
+      "load_balancer_target": "healthy",
+      "persistent_session_volume_preserved": true,
+      "previous_service_unit_retained_for_rollback": true
+    },
+    "frontend": {
+      "url": "https://dm.teamofsilicons.com",
+      "deployment": "dpl_5SC3iyZaf3WkJkwcx68E34wEUhrH",
+      "public_asset": "/assets/index-BJT6ZIUI.js",
+      "public_asset_verified": true
+    },
+    "docs": "https://docs.dm.teamofsilicons.com/release-0.9.3/",
+    "database_migration_required": false
+  },
+  "publication": {
+    "github": "https://github.com/teamofsilicons/silicon-dm/releases/tag/v0.9.3",
+    "github_draft": false,
+    "honeycomb_app": "tos>dm",
+    "honeycomb_latest_version": "0.9.3",
+    "honeycomb_visibility": "public",
+    "archive_sha256": "e26bb4be1630e695326aff70b680eb3c8a6575cf55b661bc2b41564ddd995c94",
+    "native_targets_validated": 6,
+    "fresh_anonymous_install": "passed",
+    "installed_version_output": "dm 0.9.3",
+    "crates_io": ["silicon-dm-protocol", "silicon-dm-client", "silicon-dm-cli"]
+  },
+  "live_checks": {
+    "backend_live_and_ready": 204,
+    "backend_service_version": "0.9.3",
+    "contracts": {"http": 3, "websocket": 5, "shared": 2},
+    "unsupported_http_contract": 406,
+    "shared_websocket_upgrade": 101,
+    "shared_websocket_prewarm_ping_and_unsubscribe": "passed",
+    "gateway_health": 200,
+    "gateway_draft_route_reaches_authentication": 401,
+    "credentialed_refresh_cors_preflight": 204,
+    "authenticated_browser_session_check": "Pending user completion of DM sign-in; forced-expiry recovery verified locally"
+  }
+}
