@@ -550,8 +550,20 @@ fn iam_actor(actor: &models::ActorRef) -> AppResult<ActorRef> {
 
 #[allow(clippy::needless_pass_by_value)] // Function adapter consumes map_err's owned SDK error.
 fn map_error(error: silicon_iam_client::Error) -> AppError {
+    if let Some(api) = error.api() {
+        if api.code == "invalid_client" {
+            return dependency_unavailable();
+        }
+        if matches!(api.status, 400 | 401 | 410)
+            && matches!(
+                api.code.as_str(),
+                "invalid_grant" | "refresh_token_reuse" | "unauthenticated" | "invalid_token"
+            )
+        {
+            return AppError::Unauthorized;
+        }
+    }
     match error.api().map(|error| error.status) {
-        Some(400 | 401 | 410) => AppError::Unauthorized,
         Some(403 | 404) => AppError::Forbidden,
         Some(409) => AppError::conflict(
             "IAM rejected a reused or conflicting operation; retry the original request with its original idempotency key",
@@ -568,4 +580,42 @@ fn map_error(error: silicon_iam_client::Error) -> AppError {
 
 fn dependency_unavailable() -> AppError {
     AppError::DependencyUnavailable { dependency: "iam" }
+}
+
+#[cfg(test)]
+mod session_error_tests {
+    use super::*;
+
+    #[test]
+    fn provider_rejections_do_not_masquerade_as_user_session_expiry() {
+        for (status, code, expired) in [
+            (401, "invalid_client", false),
+            (403, "invalid_client", false),
+            (400, "invalid_request", false),
+            (401, "unknown_auth_failure", false),
+            (410, "gone", false),
+            (503, "service_unavailable", false),
+            (400, "invalid_grant", true),
+            (401, "invalid_grant", true),
+            (400, "refresh_token_reuse", true),
+            (401, "unauthenticated", true),
+        ] {
+            let error = silicon_iam_client::ApiError {
+                status,
+                code: code.to_owned(),
+                message: "provider response".to_owned(),
+                details: None,
+                request_id: None,
+            };
+            let mapped = map_error(error.into());
+            if expired {
+                assert!(matches!(mapped, AppError::Unauthorized));
+            } else {
+                assert!(matches!(
+                    mapped,
+                    AppError::DependencyUnavailable { dependency: "iam" }
+                ));
+            }
+        }
+    }
 }
