@@ -1,5 +1,6 @@
 mod daemon;
 mod docs;
+mod em_dash;
 mod message_length;
 mod store;
 mod updater;
@@ -418,6 +419,9 @@ enum Messages {
         /// Allow text over 140 characters when a Silicon messages a Carbon.
         #[arg(long)]
         dangerously_send_long_message: bool,
+        /// Preserve em dashes in this Silicon message instead of replacing them with spaced hyphens.
+        #[arg(long)]
+        dangerously_use_em_dash: bool,
     },
     /// Full replacement; previous content is appended to history.
     #[command(
@@ -1078,8 +1082,16 @@ async fn run(cli: Cli) -> Result<Value> {
                         conversation,
                         content,
                         dangerously_send_long_message,
+                        dangerously_use_em_dash,
                     } => {
-                        let message = content.read()?;
+                        let mut message = content.read()?;
+                        if em_dash::replace(
+                            &profile.tokens.actor,
+                            &mut message,
+                            dangerously_use_em_dash,
+                        ) {
+                            eprintln!("{}", em_dash::NOTICE);
+                        }
                         if message_length::needs_check(&profile.tokens.actor, &message) {
                             let (config, profile) = store::fresh_profile(&session).await?;
                             long_message_override = message_length::check(

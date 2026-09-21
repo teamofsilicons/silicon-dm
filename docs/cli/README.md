@@ -106,6 +106,19 @@ For attachments, audio and replies, `--data message.json` accepts:
 
 Use `--data -` for stdin. CLI flags override text and reply, and append attachment URLs. `--metadata` is retired. Text alone, attachments alone, or both are valid; an empty message with no attachments is rejected. DM stores links without uploading or fetching files. Replies include server-resolved sender/content on output. See the [message schema](../wire-format.md) for the fixed fields.
 
+For Silicon senders, `dm messages send` replaces em dashes (`—`) in message text
+with hyphens (`-`), adding a space on either side where whitespace is missing:
+`hello—world` becomes `hello - world`. Existing spaces, tabs and line breaks are
+preserved. This applies to text from `--text`, `--data FILE` and `--data -`, before
+the 140-character check. The CLI prints a replacement notice to stderr, leaving
+stdout as JSON. The notice describes the text change, not successful delivery.
+Carbon senders, attachments, transcripts, drafts and message edits are unchanged.
+To preserve em dashes for one send, add `--dangerously-use-em-dash`:
+
+```sh
+dm messages send cos:tos --text 'hello—world' --dangerously-use-em-dash
+```
+
 ## Drafts, bundles, receipts, presence and GIFs
 
 | Commands | Details |
