@@ -38,5 +38,9 @@ coverage, strict Clippy, CI and ARM64 build, healthy ALB targets, and `/live` an
 returned its three existing conversations. The actual Interface Messages view
 loaded the existing history. No customer message was sent as a release probe.
 
-This records consumer readiness before IAM's canonical database switch.
-Post-switch retained-session results are recorded separately once completed.
+After IAM's canonical database switch, Maharaj's installed 0.9.4 CLI again
+authenticated through its retained saved session and returned exactly the same
+three conversation IDs. The actual Interface Messages view loaded the complete
+existing Maharaj history after a full page reload, with no unreadable-response
+or reconnect banner. Public readiness remained 204. No customer message was
+sent as a release probe.
