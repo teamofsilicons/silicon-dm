@@ -219,11 +219,31 @@ impl LocalRuntime {
                 serde_json::json!({"authenticated":false,"profile":name,"testing_environment_id":test}),
             );
         }
+        let key = store::session_key(name, test);
         let result = async {
-            let (config, profile) = self.store.fresh_profile(&store::session_key(name, test)).await?;
-            let identity = store::client(&config, &profile)?.me().await?;
-            Ok::<_, anyhow::Error>(serde_json::json!({"authenticated":true,"profile":name,"testing_environment_id":test,
-                "actor":identity.actor,"organization_id":identity.organization_id,"identity":identity,"webhook_url":profile.webhook_url}))
+            for attempt in 0..2 {
+                let (config, profile) = self.store.fresh_profile(&key).await?;
+                match store::client(&config, &profile)?.me().await {
+                    Err(crate::Error::Api { status: 401, .. }) if attempt == 0 => {
+                        // Access can be invalidated before its advertised expiry. Only
+                        // invalidate this generation; a concurrent renewal wins.
+                        self.store.update(|config| {
+                            if let Some(current) = config.profiles.get_mut(&key)
+                                && current.tokens.access_token == profile.tokens.access_token
+                            {
+                                current.expires_at = 0;
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    result => {
+                        let identity = result?;
+                        return Ok::<_, anyhow::Error>(serde_json::json!({"authenticated":true,"profile":name,"testing_environment_id":test,
+                            "actor":identity.actor,"organization_id":identity.organization_id,"identity":identity,"webhook_url":profile.webhook_url}));
+                    }
+                }
+            }
+            unreachable!("the second identity check returns directly")
         }.await;
         match result {
             Err(error)
@@ -444,15 +464,75 @@ mod tests {
         let _ = server.await;
 
         // A saved file alone is not evidence that its credentials are still valid.
-        let app = Router::new().route(
-            "/api/v1/auth/me",
-            get(|| async { StatusCode::UNAUTHORIZED }),
-        );
+        let app = Router::new()
+            .route(
+                "/api/v1/auth/me",
+                get(|| async { StatusCode::UNAUTHORIZED }),
+            )
+            .route(
+                "/api/v1/auth/refresh",
+                post(|| async { StatusCode::UNAUTHORIZED }),
+            );
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         assert_eq!(
             runtime.login_status("default", None).await?["authenticated"],
             false
+        );
+        server.abort();
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn early_access_rejection_renews_once_without_losing_the_family() -> Result<()> {
+        use axum::response::IntoResponse;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let app = Router::new()
+            .route("/api/v1/auth/refresh", post(move |Json(body): Json<Value>| {
+                let calls = observed.clone();
+                async move {
+                    assert_eq!(body["data"]["refresh_token"], "old");
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Json(json!({"access_token":"fresh-access","refresh_token":"fresh","token_type":"Bearer",
+                        "expires_in":1800,"scope":"dm","actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos"}))
+                }
+            }))
+            .route("/api/v1/auth/me", get(|headers: HeaderMap| async move {
+                if headers["authorization"] == "Bearer old-access" { return StatusCode::UNAUTHORIZED.into_response(); }
+                assert_eq!(headers["authorization"], "Bearer fresh-access");
+                Json(json!({"actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos",
+                    "principal_id":"principal","session_id":null,"org_role":null,"capabilities":[]})).into_response()
+            }))
+            .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let root = std::env::temp_dir().join(format!("dm-early-rejection-{}", Uuid::new_v4()));
+        let runtime = LocalRuntime::new(&root)?;
+        runtime.store.update(|config| {
+            config.profiles.insert("default:production".into(), serde_json::from_value(json!({
+                "name":"default","base_url":base,"device_id":"fixture","enabled":true,"expires_at":4_000_000_000u64,
+                "testing_environment_id":null,"webhook_url":null,
+                "tokens":{"access_token":"old-access","refresh_token":"old","token_type":"Bearer","expires_in":1800,
+                "scope":"dm","actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos"}}))?);
+            Ok(())
+        })?;
+        for _ in 0..2 {
+            assert_eq!(
+                LocalRuntime::new(&root)?
+                    .login_status("default", None)
+                    .await?["authenticated"],
+                true
+            );
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime.store.load()?.profiles["default:production"]
+                .tokens
+                .refresh_token,
+            "fresh"
         );
         server.abort();
         std::fs::remove_dir_all(root)?;

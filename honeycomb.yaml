@@ -2,7 +2,7 @@
 format_version: 1
 
 app_id: "tos>dm"
-version: "0.9.5"
+version: "0.9.6"
 
 bin:
   dm: "app"
