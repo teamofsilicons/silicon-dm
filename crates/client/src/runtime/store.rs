@@ -23,6 +23,8 @@ pub struct Profile {
     pub device_id: String,
     pub expires_at: u64,
     #[serde(default)]
+    pub refresh_started_at: Option<u64>,
+    #[serde(default)]
     pub testing_environment_id: Option<Uuid>,
     /// Local opt-in state; logging out retains durable inbox/outbox records.
     #[serde(default = "enabled")]
@@ -295,42 +297,57 @@ impl Store {
             .filter(|p| p.enabled)
             .context("profile is logged out")?
             .clone();
-        if profile.expires_at > now() + 60 {
+        if profile.expires_at > now() + 60 && profile.refresh_started_at.is_none() {
             return Ok((config, profile));
         }
         let lock = self.profile_lock(key).await?;
-        let config = self.load()?;
-        let profile = config
-            .profiles
-            .get(key)
-            .filter(|p| p.enabled)
-            .context("profile is logged out")?
-            .clone();
-        if profile.expires_at > now() + 60 {
-            return Ok((config, profile));
-        }
-        // The key is stable across a lost response and process restart.
-        let refresh_key = format!(
-            "dm-refresh-{}",
-            blake3::hash(profile.tokens.refresh_token.as_bytes())
-        );
-        let tokens = client(&config, &profile)?
-            .refresh(&profile.tokens.refresh_token, &refresh_key)
-            .await?;
-        let expires_at = now().saturating_add(tokens.expires_in.max(0) as u64);
-        self.update(|c| {
-            if let Some(current) = c.profiles.get_mut(key)
-                && current.tokens.refresh_token == profile.tokens.refresh_token
-            {
-                current.expires_at = expires_at;
-                current.tokens = tokens.clone();
+        for _ in 0..2 {
+            let config = self.load()?;
+            let profile = config
+                .profiles
+                .get(key)
+                .filter(|p| p.enabled)
+                .context("profile is logged out")?
+                .clone();
+            if profile.expires_at > now() + 60 && profile.refresh_started_at.is_none() {
+                return Ok((config, profile));
             }
-            Ok(())
-        })?;
-        FileExt::unlock(&lock)?;
-        let config = self.load()?;
-        let profile = config.profiles.get(key).context("profile removed")?.clone();
-        Ok((config, profile))
+            let started_at = profile.refresh_started_at.unwrap_or_else(now);
+            self.update(|c| {
+                if let Some(current) = c.profiles.get_mut(key)
+                    && current.tokens.refresh_token == profile.tokens.refresh_token
+                {
+                    current.refresh_started_at = Some(started_at);
+                }
+                Ok(())
+            })?;
+            // The key is stable across a lost response and process restart.
+            let refresh_key = format!(
+                "dm-refresh-{}",
+                blake3::hash(profile.tokens.refresh_token.as_bytes())
+            );
+            let tokens = client(&config, &profile)?
+                .refresh(&profile.tokens.refresh_token, &refresh_key)
+                .await?;
+            let expires_at = started_at.saturating_add(tokens.expires_in.max(0) as u64);
+            self.update(|c| {
+                if let Some(current) = c.profiles.get_mut(key)
+                    && current.tokens.refresh_token == profile.tokens.refresh_token
+                {
+                    current.expires_at = expires_at;
+                    current.tokens = tokens.clone();
+                    current.refresh_started_at = None;
+                }
+                Ok(())
+            })?;
+            let config = self.load()?;
+            let profile = config.profiles.get(key).context("profile removed")?.clone();
+            if profile.expires_at > now() + 60 {
+                FileExt::unlock(&lock)?;
+                return Ok((config, profile));
+            }
+        }
+        bail!("refreshed access token has no usable lifetime; retry the command")
     }
 }
 

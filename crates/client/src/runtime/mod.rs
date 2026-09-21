@@ -199,6 +199,7 @@ impl LocalRuntime {
                 name: options.profile.into(), base_url: options.base_url.into(), tokens: tokens.clone(),
                 webhook_url: options.webhook_url.map(ToString::to_string), device_id,
                 expires_at: store::now().saturating_add(tokens.expires_in.max(0) as u64),
+                refresh_started_at: None,
                 testing_environment_id: options.testing_environment_id, enabled: true,
             });
             Ok(())
@@ -453,6 +454,67 @@ mod tests {
             runtime.login_status("default", None).await?["authenticated"],
             false
         );
+        server.abort();
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delayed_refresh_replay_is_renewed_before_status_and_saved_for_the_next_process()
+    -> Result<()> {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = calls.clone();
+        let app = Router::new()
+            .route("/api/v1/auth/refresh", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let calls = observed.clone();
+                async move {
+                    let old = body["data"]["refresh_token"].as_str().unwrap();
+                    calls.lock().unwrap().push((old.to_owned(), headers["idempotency-key"].to_str().unwrap().to_owned()));
+                    let new = if old == "old" { "replayed" } else { assert_eq!(old, "replayed"); "fresh" };
+                    Json(json!({"access_token":format!("access-{new}"),"refresh_token":new,"token_type":"Bearer",
+                        "expires_in":1800,"scope":"dm","actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos"}))
+                }
+            }))
+            .route("/api/v1/auth/me", get(|headers: HeaderMap| async move {
+                assert_eq!(headers["authorization"], "Bearer access-fresh");
+                Json(json!({"actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos",
+                    "principal_id":"principal","session_id":null,"org_role":null,"capabilities":[]}))
+            }))
+            .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let root = std::env::temp_dir().join(format!("dm-refresh-replay-{}", Uuid::new_v4()));
+        let runtime = LocalRuntime::new(&root)?;
+        runtime.store.update(|config| {
+            config.profiles.insert("default:production".into(), serde_json::from_value(json!({
+                "name":"default","base_url":base,"device_id":"fixture","enabled":true,"expires_at":0,"refresh_started_at":1,
+                "testing_environment_id":null,"webhook_url":null,
+                "tokens":{"access_token":"old-access","refresh_token":"old","token_type":"Bearer","expires_in":1800,
+                "scope":"dm","actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos"}}))?);
+            Ok(())
+        })?;
+        assert_eq!(
+            runtime.login_status("default", None).await?["authenticated"],
+            true
+        );
+        let reopened = LocalRuntime::new(&root)?;
+        assert_eq!(
+            reopened.login_status("default", None).await?["authenticated"],
+            true
+        );
+        let saved = reopened.store.load()?;
+        assert_eq!(
+            saved.profiles["default:production"].tokens.refresh_token,
+            "fresh"
+        );
+        assert_eq!(
+            saved.profiles["default:production"].refresh_started_at,
+            None
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_ne!(calls[0].1, calls[1].1);
         server.abort();
         std::fs::remove_dir_all(root)?;
         Ok(())
