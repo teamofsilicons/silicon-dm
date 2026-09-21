@@ -30,6 +30,7 @@ export type Profile = {
   access_token: string;
   refresh_token: string;
   expires_at: number;
+  refresh_started_at?: number;
   auth_required?: boolean;
 };
 export type BrowserSession = {

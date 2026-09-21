@@ -313,8 +313,22 @@ export class Auth {
           "login_required",
           "Sign in to renew this browser profile.",
         );
-      if (force || profile.expires_at <= Date.now() + 30000) {
+      for (
+        let attempt = 0;
+        attempt < 2 &&
+        (force ||
+          profile.refresh_started_at !== undefined ||
+          profile.expires_at <= Date.now() + 30000);
+        attempt++
+      ) {
         try {
+          const started = profile.refresh_started_at ?? Date.now();
+          for (const sibling of browser.value.profiles)
+            if (sibling.refresh_token === profile.refresh_token)
+              sibling.refresh_started_at = started;
+          // Save the original attempt time before sending the deterministic
+          // refresh request. A replay after restart must not extend access TTL.
+          await this.sessions.save(browser);
           const tokens = await this.exchange(
             "/api/v1/auth/refresh",
             { refresh_token: profile.refresh_token },
@@ -337,14 +351,16 @@ export class Auth {
             Object.assign(sibling, {
               access_token: tokens.access_token,
               refresh_token: tokens.refresh_token,
-              expires_at: Date.now() + tokens.expires_in * 1000,
+              expires_at: started + tokens.expires_in * 1000,
               auth_required: !tokens.organization_ids!.includes(
                 sibling.organization_id,
               ),
             });
+            delete sibling.refresh_started_at;
             if (sibling.auth_required) this.invalidate(id, sibling.profile_id);
           }
           await this.sessions.save(browser);
+          force = false;
           if (profile.auth_required)
             throw new GatewayError(
               401,

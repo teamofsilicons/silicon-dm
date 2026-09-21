@@ -307,14 +307,20 @@ test(
     });
     assert.equal(unavailable.status, 503);
     const retryKey = f.refreshCalls().at(-1)!.idempotencyKey;
+    const pending = await f.saved();
+    const started = pending.profiles[0]!.refresh_started_at;
+    assert.equal(typeof started, "number");
+    assert.equal(pending.profiles[1]!.refresh_started_at, started);
+    assert.equal(
+      pending.profiles[0]!.refresh_token,
+      saved.profiles[0]!.refresh_token,
+    );
     await f.restart();
-    assert.deepEqual(await f.saved(), saved);
+    assert.deepEqual(await f.saved(), pending);
     const reused = await f.request("/api/session", sibling);
-    assert.equal(reused.status, 200);
-    assert.equal(reused.value.authenticated, true);
-    assert.equal(reused.value.profile_id, sibling);
-    assert.equal(f.refreshCalls().length, 2);
-    assert.equal(f.calls.at(-1)!.authorization, "Bearer fake-access-1");
+    assert.equal(reused.status, 503);
+    assert.equal(f.refreshCalls().length, 3);
+    assert.equal(f.refreshCalls().at(-1)!.idempotencyKey, retryKey);
 
     f.state.refreshStatus = 200;
     const renewed = await f.request("/api/refresh", primary, {
@@ -327,6 +333,9 @@ test(
       "fake-refresh-1",
     );
     assert.equal(f.refreshCalls().at(-1)!.idempotencyKey, retryKey);
+    const completed = await f.saved();
+    assert.equal(completed.profiles[0]!.expires_at, started! + 3600000);
+    assert.equal(completed.profiles[0]!.refresh_started_at, undefined);
     assert(
       (await f.saved()).profiles
         .slice(0, 2)
@@ -352,7 +361,10 @@ test(
       assert.equal(failed.status, 503);
       assert.equal(failed.value.error?.code, "authentication_unavailable");
       assert.equal(failed.headers.get("set-cookie"), null);
-      assert.deepEqual(await f.saved(), before);
+      const pending = await f.saved();
+      assert.equal(typeof pending.profiles[0]!.refresh_started_at, "number");
+      for (const profile of pending.profiles) delete profile.refresh_started_at;
+      assert.deepEqual(pending, before);
     }
     assert.equal(
       f.calls.filter((call) => call.path === "/api/v1/auth/me").length,
