@@ -17,8 +17,8 @@ use super::{PostgresStore, directory::refresh_directory_in};
 type AppliedProjection = (Option<String>, Option<String>, ActorType, i64, String);
 
 struct Projection {
-    membership_id: Uuid,
-    principal_id: Uuid,
+    membership_id: String,
+    iam_membership_id: Option<Uuid>,
     iam_organization_id: Uuid,
     organization_id: Option<String>,
     actor_type: ActorType,
@@ -40,8 +40,8 @@ impl PostgresStore {
         actor: &ActorRef,
     ) -> AppResult<()> {
         let projection = Projection {
-            membership_id: snapshot.membership_id,
-            principal_id: snapshot.principal_id,
+            membership_id: format!("{}[{}]", actor.id, snapshot.org_id),
+            iam_membership_id: Uuid::parse_str(&snapshot.membership_id).ok(),
             iam_organization_id: snapshot.organization_id,
             organization_id: Some(snapshot.org_id.clone()),
             actor_type: actor.actor_type,
@@ -58,8 +58,8 @@ impl PostgresStore {
         project_member(&mut tx, &projection).await?;
         // If a newer event won while introspection was in flight, its old role
         // or scope snapshot must not escape into the request's authorization.
-        let active: bool = sqlx::query_scalar("SELECT status = 'active' AND principal_id=$2 AND iam_organization_id=$3 AND actor_id=$4 AND iam_version=$5 AND authorization_epoch=$6 AND actor_kind=$7::text::actor_kind AND organization_id=$8 FROM iam_membership_projections WHERE membership_id = $1")
-            .bind(snapshot.membership_id).bind(snapshot.principal_id).bind(snapshot.organization_id).bind(actor.id.as_str())
+        let active: bool = sqlx::query_scalar("SELECT status = 'active' AND iam_organization_id=$2 AND actor_id=$3 AND iam_version=$4 AND authorization_epoch=$5 AND actor_kind=$6::text::actor_kind AND organization_id=$7 FROM iam_membership_projections WHERE membership_public_id = $1")
+            .bind(&projection.membership_id).bind(snapshot.organization_id).bind(actor.id.as_str())
             .bind(snapshot.membership_version).bind(snapshot.authorization_epoch).bind(actor.actor_type.as_str()).bind(&snapshot.org_id)
             .fetch_one(&mut *tx).await?;
         if active {
@@ -170,6 +170,7 @@ fn parse_member(event: &WebhookEvent, member: &Value) -> AppResult<Option<Projec
         .transpose()
         .map_err(|_| invalid_projection())?
         .map(String::from);
+    validate_public_membership(resource, actor_id.as_deref(), organization_id.as_deref())?;
     // Scope-filtered profiles without membership disclosure convey no active authority.
     if !removed && (epoch.is_none() || organization_id.is_none() || actor_id.is_none()) {
         return Ok(None);
@@ -193,8 +194,18 @@ fn parse_member(event: &WebhookEvent, member: &Value) -> AppResult<Option<Projec
         return Err(invalid_projection());
     }
     Ok(Some(Projection {
-        membership_id: required_uuid(resource, "id")?,
-        principal_id: required_uuid(resource, "principal_id")?,
+        membership_id: resource
+            .get("membership_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                actor_id
+                    .as_ref()
+                    .zip(organization_id.as_ref())
+                    .map(|(actor, org)| format!("{actor}[{org}]"))
+            })
+            .unwrap_or_else(|| resource["id"].as_str().unwrap_or_default().to_owned()),
+        iam_membership_id: Some(required_uuid(resource, "id")?),
         iam_organization_id,
         organization_id,
         actor_type,
@@ -221,19 +232,63 @@ fn parse_member(event: &WebhookEvent, member: &Value) -> AppResult<Option<Projec
     }))
 }
 
+fn validate_public_membership(
+    resource: &Value,
+    actor_id: Option<&str>,
+    organization_id: Option<&str>,
+) -> AppResult<()> {
+    if let Some(public_membership) = resource.get("membership_id") {
+        let value = public_membership.as_str().ok_or_else(invalid_projection)?;
+        let (actor, org) = value
+            .strip_suffix(']')
+            .and_then(|value| value.split_once('['))
+            .ok_or_else(invalid_projection)?;
+        actor.parse::<ActorId>().map_err(|_| invalid_projection())?;
+        org.parse::<OrganizationId>()
+            .map_err(|_| invalid_projection())?;
+        if actor_id.is_some_and(|known| known != actor)
+            || organization_id.is_some_and(|known| known != org)
+        {
+            return Err(invalid_projection());
+        }
+    }
+    Ok(())
+}
+
 async fn project_member(
     tx: &mut Transaction<'_, Postgres>,
     projection: &Projection,
 ) -> AppResult<()> {
     // Lock serializes independently delivered events and online introspection.
-    // UUID bindings are immutable. Equal-version removals win over active state.
+    // Canonical identity bindings are immutable. Equal-version removals win over active state.
     // A narrower credential does not erase known tags at the exact same IAM
     // version/epoch. Fresh token checks independently enforce its disclosure;
     // undisclosed tags at a newer authority version invalidate the cached grant.
+    let public_id = projection
+        .membership_id
+        .ends_with(']')
+        .then_some(&projection.membership_id);
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&projection.membership_id)
+        .execute(&mut **tx)
+        .await?;
+    let existing: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT membership_id FROM iam_membership_projections WHERE membership_public_id=$1 OR iam_membership_id=$2 OR membership_id=$2 OR (iam_organization_id=$3 AND actor_id=$4 AND organization_id=$5) FOR UPDATE"
+    ).bind(public_id).bind(projection.iam_membership_id).bind(projection.iam_organization_id).bind(&projection.actor_id).bind(&projection.organization_id).fetch_all(&mut **tx).await?;
+    if existing.len() > 1 {
+        return Err(invalid_projection());
+    }
+    let row_id = existing
+        .first()
+        .copied()
+        .or(projection.iam_membership_id)
+        .unwrap_or_else(Uuid::new_v4);
     let row: Option<AppliedProjection> = sqlx::query_as(
-        "INSERT INTO iam_membership_projections (membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status,tag_ids)
-         VALUES ($1,$2,$3,$4,$5::text::actor_kind,$6,$7,$8,$9,$10)
+        "INSERT INTO iam_membership_projections (membership_id,membership_public_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status,tag_ids,iam_membership_id)
+         VALUES ($1,$2,$3,$4,$5::text::actor_kind,$6,$7,$8,$9,$10,$11)
          ON CONFLICT (membership_id) DO UPDATE SET
+           membership_public_id = COALESCE(EXCLUDED.membership_public_id, iam_membership_projections.membership_public_id),
+           iam_membership_id = COALESCE(EXCLUDED.iam_membership_id, iam_membership_projections.iam_membership_id),
            organization_id = COALESCE(EXCLUDED.organization_id, iam_membership_projections.organization_id),
            actor_id = COALESCE(EXCLUDED.actor_id, iam_membership_projections.actor_id),
            iam_version = EXCLUDED.iam_version,
@@ -245,7 +300,8 @@ async fn project_member(
              THEN iam_membership_projections.tag_ids
              ELSE NULL END,
            status = EXCLUDED.status, refreshed_at = clock_timestamp()
-         WHERE iam_membership_projections.principal_id = EXCLUDED.principal_id
+         WHERE (iam_membership_projections.membership_public_id IS NULL OR EXCLUDED.membership_public_id IS NULL OR iam_membership_projections.membership_public_id = EXCLUDED.membership_public_id)
+           AND (iam_membership_projections.iam_membership_id IS NULL OR EXCLUDED.iam_membership_id IS NULL OR iam_membership_projections.iam_membership_id = EXCLUDED.iam_membership_id)
            AND iam_membership_projections.iam_organization_id = EXCLUDED.iam_organization_id
            AND iam_membership_projections.actor_kind = EXCLUDED.actor_kind
            AND (iam_membership_projections.organization_id IS NULL OR EXCLUDED.organization_id IS NULL OR iam_membership_projections.organization_id = EXCLUDED.organization_id)
@@ -256,9 +312,9 @@ async fn project_member(
                AND (EXCLUDED.status = 'removed' OR (iam_membership_projections.status = 'active'
                  AND EXCLUDED.authorization_epoch >= iam_membership_projections.authorization_epoch))))
          RETURNING organization_id, actor_id, actor_kind, iam_version, status")
-        .bind(projection.membership_id).bind(projection.principal_id).bind(projection.iam_organization_id)
+        .bind(row_id).bind(public_id).bind(projection.iam_organization_id)
         .bind(&projection.organization_id).bind(projection.actor_type.as_str()).bind(&projection.actor_id)
-        .bind(projection.version).bind(projection.epoch).bind(if projection.removed { "removed" } else { "active" }).bind(&projection.tag_ids)
+        .bind(projection.version).bind(projection.epoch).bind(if projection.removed { "removed" } else { "active" }).bind(&projection.tag_ids).bind(projection.iam_membership_id)
         .fetch_optional(&mut **tx).await?;
     let Some((Some(org), Some(actor_id), actor_type, version, status)) = row else {
         return Ok(());

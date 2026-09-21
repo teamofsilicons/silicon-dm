@@ -54,7 +54,7 @@ async fn upgrade_keeps_existing_groups_and_assigns_unique_stable_addresses() -> 
         .bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(Uuid::new_v4()).execute(store.pool()).await?;
     let auth = AuthContext {
         actor,
-        principal_id: Uuid::new_v4(),
+
         session_id: None,
         organization_id: org.clone(),
         org_role: Some("org_owner".into()),

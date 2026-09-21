@@ -28,6 +28,81 @@ type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+#[tokio::test]
+async fn canonical_iam_snapshots_and_tombstones_preserve_existing_directory_rows() -> TestResult<()>
+{
+    use serde_json::json;
+    use silicon_iam_client::models::{ApplicationAuthorization, WebhookEvent};
+
+    let database = TestDatabase::start().await?;
+    let store = &database.store;
+    let org: OrganizationId = "canonical-cutover".parse()?;
+    let actor = ActorRef {
+        actor_type: ActorType::Carbon,
+        id: "alice".parse()?,
+    };
+    let iam_org = Uuid::new_v4();
+    let old_membership = Uuid::new_v4();
+    store
+        .refresh_directory(&org, std::slice::from_ref(&actor))
+        .await?;
+    // This row was written by the previously deployed SDK1 consumer.
+    sqlx::query("INSERT INTO iam_membership_projections(membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status) VALUES($1,$2,$3,$4,'carbon','alice',1,1,'active')")
+        .bind(old_membership).bind(Uuid::new_v4()).bind(iam_org).bind(org.as_str())
+        .execute(store.pool()).await?;
+    let snapshot = |membership: &str| -> Result<ApplicationAuthorization, serde_json::Error> {
+        serde_json::from_value(json!({
+            "actor_type":"carbon","public_id":"alice","organization_id":iam_org,
+            "org_id":org,"membership_id":membership,"membership_version":1,
+            "authorization_epoch":1,"audience":"tos>dm","testing_environment_id":null,
+            "scopes":[],"org_role":"member","tags":[]
+        }))
+    };
+    for membership in [old_membership.to_string(), format!("alice[{org}]")] {
+        store
+            .project_iam_authorization(&snapshot(&membership)?, &actor)
+            .await?;
+    }
+    let rows: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT membership_id FROM iam_membership_projections WHERE organization_id=$1",
+    )
+    .bind(org.as_str())
+    .fetch_all(store.pool())
+    .await?;
+    assert_eq!(
+        rows,
+        vec![old_membership],
+        "identity cutover must retain the row"
+    );
+
+    // New IAM no longer discloses a principal UUID, including scoped removals.
+    let event: WebhookEvent = serde_json::from_value(json!({
+        "spec_version":"1.0","event_id":Uuid::new_v4(),
+        "event_type":"organization.membership.removed.v1","occurred_at":"2026-09-21T00:00:00Z",
+        "organization_id":iam_org,"aggregate":{},"data":{"current":{"members":[{
+            "resource":{"type":"organization_membership","id":old_membership,
+                "membership_id":format!("alice[{org}]"),"principal_type":"carbon","status":"removed","version":2},
+            "authorization":"removed"
+        }]}}
+    }))?;
+    let mut transaction = store.pool().begin().await?;
+    PostgresStore::project_iam_webhook(&mut transaction, &event).await?;
+    transaction.commit().await?;
+    assert!(
+        store
+            .project_iam_authorization(&snapshot(&format!("alice[{org}]"))?, &actor)
+            .await
+            .is_err()
+    );
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM iam_membership_projections WHERE membership_id=$1")
+            .bind(old_membership)
+            .fetch_one(store.pool())
+            .await?;
+    assert_eq!(status, "removed");
+    Ok(())
+}
+
 struct TestDatabase {
     _container: Option<ContainerAsync<Postgres>>,
     store: PostgresStore,
@@ -1360,7 +1435,7 @@ async fn groups_apply_current_iam_access_without_rewriting_history() -> TestResu
     }
     let authority = |actor: ActorRef, admin: bool, tags: Option<BTreeSet<Uuid>>| AuthContext {
         actor,
-        principal_id: Uuid::new_v4(),
+
         session_id: None,
         organization_id: org.clone(),
         org_role: admin.then(|| "org_admin".into()),

@@ -93,7 +93,9 @@ pub async fn me(Authenticated(context): Authenticated) -> Response {
         Json(json!({
             "member": context.actor,
             "organization_id": context.organization_id,
-            "principal_id": context.principal_id,
+            // DM clients historically require this string. It now contains
+            // the same canonical actor handle, never an IAM identity UUID.
+            "principal_id": context.actor.id,
             "session_id": context.session_id,
             "org_role": context.org_role,
             "capabilities": context.capabilities,

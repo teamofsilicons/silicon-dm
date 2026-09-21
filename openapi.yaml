@@ -3770,7 +3770,7 @@ components:
       properties:
         member: {$ref: '#/components/schemas/MemberRef'}
         organization_id: {type: string}
-        principal_id: {type: string, format: uuid}
+        principal_id: {type: string, description: Legacy DM response alias of member.id; contains the canonical Carbon or Silicon handle.}
         session_id:
           type: [string, 'null']
           format: uuid

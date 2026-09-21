@@ -49,7 +49,7 @@ impl IdentityProvider for Identity {
                     ActorType::Carbon
                 },
             },
-            principal_id: Uuid::from_u128(if id == "alice" { 1 } else { 2 }),
+
             session_id: None,
             organization_id: organization_id.clone(),
             org_role: (id == "alice").then(|| "org_admin".into()),

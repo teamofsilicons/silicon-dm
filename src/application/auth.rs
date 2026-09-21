@@ -20,8 +20,6 @@ pub enum PresentedCredential {
 pub struct AuthContext {
     /// Represented Carbon or Silicon, using IAM's canonical public identifier.
     pub actor: ActorRef,
-    /// IAM's stable principal UUID.
-    pub principal_id: Uuid,
     /// IAM session identifier when disclosed by introspection.
     pub session_id: Option<Uuid>,
     /// Active organization selected by the request.

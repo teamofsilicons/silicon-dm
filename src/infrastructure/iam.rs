@@ -229,9 +229,12 @@ impl IamClient {
         if inspected.audience.as_deref() != Some(self.app_id.as_str())
             || inspected.client_id.as_deref() != Some(self.app_id.as_str())
             || inspected.org_id.as_deref() != Some(organization_id.as_str())
-            || inspected.principal_id != Some(snapshot.principal_id)
+            || inspected
+                .public_id
+                .as_ref()
+                .is_some_and(|id| Some(id) != snapshot.public_id.as_ref())
             || inspected.actor_type != Some(expected_type)
-            || inspected.membership_id != Some(snapshot.membership_id)
+            || inspected.membership_id.as_ref() != Some(&snapshot.membership_id)
             || inspected.authorization_epoch != Some(snapshot.authorization_epoch)
             || inspected
                 .expires_at
@@ -239,8 +242,11 @@ impl IamClient {
             || snapshot.org_id != organization_id.as_str()
             || snapshot.audience != self.app_id
             || snapshot.testing_environment_id != self.environment_id
-            || snapshot.principal_id.is_nil()
-            || snapshot.membership_id.is_nil()
+            || Uuid::parse_str(&snapshot.membership_id).is_ok_and(|id| id.is_nil())
+            || (Uuid::parse_str(&snapshot.membership_id).is_err()
+                && snapshot.public_id.as_ref().is_none_or(|id| {
+                    snapshot.membership_id != format!("{id}[{}]", snapshot.org_id)
+                }))
             || snapshot.organization_id.is_nil()
             || snapshot.membership_version < 1
             || snapshot.authorization_epoch < 0
@@ -267,7 +273,6 @@ impl IamClient {
             .await?;
         Ok(AuthContext {
             actor,
-            principal_id: snapshot.principal_id,
             session_id: inspected.session_id,
             organization_id: organization_id.clone(),
             tag_ids: snapshot
@@ -303,7 +308,6 @@ impl IamClient {
         let mut organization_ids = Vec::new();
         for grant in grants {
             if grant.audience != self.app_id
-                || grant.principal_id != response_identity.principal_id
                 || grant.testing_environment_id != self.environment_id
                 || iam_actor(response_identity)?
                     != actor_ref(
@@ -337,8 +341,7 @@ impl IamClient {
             )
             .await?;
         let response_actor = iam_actor(response_identity)?;
-        if response_actor != context.actor || response_identity.principal_id != context.principal_id
-        {
+        if response_actor != context.actor {
             return Err(AppError::Unauthorized);
         }
         Ok(ApplicationSession {

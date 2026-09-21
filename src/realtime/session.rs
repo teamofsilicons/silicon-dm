@@ -365,7 +365,6 @@ impl SessionRuntime {
             })
             .await?;
         if current.actor != self.authority.actor
-            || current.principal_id != self.authority.principal_id
             || self.actors.keys().any(|id| !current.may_represent(id))
         {
             return Err(AppError::Unauthorized);
