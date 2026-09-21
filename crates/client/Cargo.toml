@@ -1,6 +1,6 @@
 [package]
 name = "silicon-dm-client"
-version = "0.9.4"
+version = "0.9.5"
 edition = "2024"
 rust-version = "1.98"
 license = "LicenseRef-Proprietary"
@@ -18,7 +18,7 @@ path = "src/bin/dm_relay.rs"
 required-features = ["runtime"]
 
 [dependencies]
-silicon-dm-protocol = { path = "../protocol", version = "0.9.4" }
+silicon-dm-protocol = { path = "../protocol", version = "0.9.5" }
 anyhow = { version = "1.0.100", optional = true }
 axum = { version = "0.8.9", features = ["json", "tokio", "http1"], optional = true }
 blake3 = { version = "1.8.2", optional = true }

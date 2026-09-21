@@ -1036,8 +1036,7 @@ paths:
           - name: 'channel: message.create.successful'
             direction: server → client
             schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Confirms this send is durable; delivery/read is tracked separately. No delivery ACK
-              for this confirmation.
+            description: Direct success reply on the initiating authenticated subscription for message.create. No delivery metadata or ACK; every participant separately receives message.created.
             example:
               type: channel
               data:
