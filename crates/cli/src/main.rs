@@ -1,4 +1,5 @@
 mod daemon;
+mod delivery;
 mod docs;
 mod em_dash;
 mod message_length;
@@ -25,7 +26,7 @@ use uuid::Uuid;
     version,
     about = "Silicon DM: reliable messaging for Carbons and Silicons",
     arg_required_else_help = true,
-    after_help = "FIRST STEPS\n  dm iam --json\n  dm login OAC_TOKEN\n  dm webhook http://localhost:9000/events\n  dm conversations create --participant MEMBER_ID\n  dm messages send CONVERSATION_ID --text 'Hello'\n  dm daemon status\n\nTESTING\n  dm --app-secret-file - login TEST_SLT_OR_PUBLIC_ID\n  dm --test ENV_UUID login status --json\n  dm --test ENV_UUID conversations list\n\nDocs: https://docs.dm.teamofsilicons.com\nRepository: https://github.com/teamofsilicons/silicon-dm\nRust package: https://crates.io/crates/silicon-dm-client\nEvery command has --help. State: ~/.silicon-dm (private credentials, durable inbox/outbox)."
+    after_help = "FIRST STEPS\n  dm iam --json\n  dm login --token-file -\n  dm delivery register\n  dm delivery login --token-file -\n  dm webhook http://localhost:9000/tings --all-apps\n  dm delivery status\n  dm messages send CONVERSATION_ID --text 'Hello'\n\nTing login requires its own Ting-bound SLT. Destinations receive raw Ting batches for all eligible apps and acknowledge HTTP 204.\nTESTING\n  dm --app-secret-file /private/dm-app-secret login --token-file -\n  dm --test ENV_UUID delivery login --token-file - --ting-app-secret-file /private/ting-app-secret --ting-environment-key-file /private/iam-environment-key\n\nDocs: https://docs.dm.teamofsilicons.com\nRepository: https://github.com/teamofsilicons/silicon-dm\nEvery command has --help. DM state holds private credentials and outgoing requests; Ting owns incoming delivery."
 )]
 struct Cli {
     /// Local profile; defaults to the name selected with profiles use.
@@ -67,7 +68,7 @@ struct Cli {
 enum Command {
     /// Exchange an IAM short-lived token, or run login status to verify the saved session.
     #[command(
-        after_help = "The callback URL stays local. Return HTTP 2xx with an enveloped DM acknowledgement or Silicon status=ok/event_id after accepting each callback. See dm docs relay. Deduplicate retries by delivery_id.\nNEXT: dm webhook <webhook-url>; dm login status --json; dm conversations list"
+        after_help = "DM login does not enroll delivery or attach a callback. NEXT: dm delivery register; dm delivery login --token-file - (a separate Ting-bound SLT); dm webhook URL --all-apps. Ting's system daemon sends raw batches and accepts HTTP 204."
     )]
     #[command(
         subcommand_precedence_over_arg = true,
@@ -85,7 +86,7 @@ enum Command {
             default_value = "https://backend.dm.teamofsilicons.com"
         )]
         base_url: String,
-        /// Optional local callback; normally configure after login with dm webhook URL.
+        /// Retired: rejected before reading the token. Use delivery login and webhook --all-apps.
         #[arg(long)]
         webhook: Option<url::Url>,
         /// File containing the SLT; '-' reads stdin, with hidden input on terminals.
@@ -101,12 +102,29 @@ enum Command {
         )]
         base_url: String,
     },
-    /// Configure the selected logged-in profile's local callback.
+    /// Manage explicit DM delivery consent and the separate Ting receiver login.
+    Delivery {
+        #[command(subcommand)]
+        command: delivery::Command,
+    },
+    /// Attach a generic raw-Ting endpoint directly to Ting's installed system daemon.
     Webhook {
         url: url::Url,
         /// Optional bearer secret for the local callback. Prefer a private file.
         #[arg(long)]
         secret_file: Option<PathBuf>,
+        /// Recover/reattach this exact Ting hook ID; omit to reuse the saved ID.
+        #[arg(long)]
+        id: Option<String>,
+        /// Explicitly transfer the same hook from another live receiver.
+        #[arg(long)]
+        takeover: bool,
+        /// Optional local health endpoint used by Ting during retry recovery.
+        #[arg(long)]
+        health_url: Option<url::Url>,
+        /// Required: this endpoint handles every eligible app's Ting batch, not only DM.
+        #[arg(long, required = true)]
+        all_apps: bool,
     },
     /// Submit a bug report and notify maintainers; sandbox notifications are simulated.
     #[command(
@@ -117,7 +135,7 @@ enum Command {
         #[arg(long)]
         pr: Option<String>,
     },
-    /// Detach the local callback, retaining authentication and queued events.
+    /// Detach the saved Ting hook, retaining its ID for explicit reattachment.
     Unhook,
     /// Configure the parent directory for private DM state.
     Config {
@@ -126,7 +144,7 @@ enum Command {
     },
     /// Inspect supported contracts, deprecation and compatibility.
     Contracts,
-    /// Revoke the refresh-token family and stop this local profile's connection.
+    /// Revoke the DM refresh-token family and disable outgoing work; Ting logout is separate.
     Logout,
     /// Show IAM member, organization, capabilities and session.
     Whoami,
@@ -167,7 +185,7 @@ enum Command {
         #[command(subcommand)]
         command: Bundles,
     },
-    /// Inspect availability or update transient activity over the relay socket.
+    /// Inspect availability or update transient activity through HTTP device leases.
     Presence {
         #[command(subcommand)]
         command: PresenceCommands,
@@ -183,7 +201,7 @@ enum Command {
         #[command(subcommand)]
         command: Environments,
     },
-    /// Manage the background relay at dm.localhost.
+    /// Manage the outgoing command relay at dm.localhost; incoming delivery belongs to Ting.
     Daemon {
         #[command(subcommand)]
         command: Daemon,
@@ -228,7 +246,7 @@ enum Profiles {
     List,
     /// Select a default profile; production and test logins stay independent.
     Use { name: String },
-    /// Change the selected local profile's callback mapping.
+    /// Retired: use dm webhook URL --all-apps after explicit Ting login.
     Webhook { url: String },
 }
 #[derive(Args)]
@@ -671,6 +689,7 @@ async fn main() {
     let requested_testing =
         testing.is_some() || cli.app_secret.is_some() || cli.app_secret_file.is_some();
     let selection = async {
+        validate_inputs(&cli)?;
         let secret = match (cli.app_secret.take(), cli.app_secret_file.take()) {
             (Some(secret), _) => Some(secret),
             (_, Some(path)) => Some(read_secret(&path)?),
@@ -810,6 +829,7 @@ fn relay_result_value(result: RelayResult) -> Value {
     value
 }
 async fn run(cli: Cli) -> Result<Value> {
+    validate_inputs(&cli)?;
     if let Command::Docs { options } = &cli.command {
         return docs::render(options);
     }
@@ -886,7 +906,7 @@ async fn run(cli: Cli) -> Result<Value> {
                 .await?;
             result["idempotency_key"] = json!(key);
             eprintln!(
-                "Logged in. Next: dm webhook <webhook-url>; dm login status --json; dm conversations list."
+                "Logged in to DM. For incoming delivery: dm delivery register; dm delivery login --token-file - with a Ting-bound SLT; dm webhook URL --all-apps."
             );
             Ok(result)
         }
@@ -904,20 +924,35 @@ async fn run(cli: Cli) -> Result<Value> {
             }
             Ok(serde_json::to_value(client.iam().await?)?)
         }
-        Command::Webhook { url, secret_file } => {
+        Command::Delivery { command } => {
+            delivery::run(command, &name, cli.test, &key, explicit_key).await
+        }
+        Command::Webhook {
+            url,
+            secret_file,
+            id,
+            takeover,
+            health_url,
+            all_apps,
+        } => {
             let secret = secret_file.as_deref().map(read_secret).transpose()?;
-            runtime::LocalRuntime::from_environment()?.webhook_secret(
-                &name,
-                cli.test,
-                secret.as_deref(),
-            )?;
-            let result =
-                runtime::LocalRuntime::from_environment()?.webhook(&name, cli.test, Some(&url))?;
-            daemon::start(None).await?;
-            Ok(result)
+            runtime::LocalRuntime::from_environment()?
+                .delivery_attach(&runtime::DeliveryAttachOptions {
+                    profile: &name,
+                    testing_environment_id: cli.test,
+                    webhook_url: &url,
+                    webhook_id: id.as_deref(),
+                    secret: secret.as_deref(),
+                    health_url: health_url.as_ref(),
+                    takeover,
+                    accept_all_apps: all_apps,
+                })
+                .await
         }
         Command::Unhook => {
-            runtime::LocalRuntime::from_environment()?.webhook(&name, cli.test, None)
+            runtime::LocalRuntime::from_environment()?
+                .delivery_unhook(&name, cli.test)
+                .await
         }
         Command::Logout => {
             runtime::LocalRuntime::from_environment()?
@@ -937,7 +972,7 @@ async fn run(cli: Cli) -> Result<Value> {
         }
         Command::Profiles { command } => match command {
             Profiles::List => Ok(
-                json!({"default_profile":config.default_profile,"profiles":config.profiles.values().map(|p|json!({"name":p.name,"member":p.tokens.actor,"organization_id":p.tokens.organization_id,"base_url":p.base_url,"testing_environment_id":p.testing_environment_id,"webhook_url":p.webhook_url,"enabled":p.enabled})).collect::<Vec<_>>()}),
+                json!({"default_profile":config.default_profile,"profiles":config.profiles.values().map(|p|json!({"name":p.name,"member":p.tokens.actor,"organization_id":p.tokens.organization_id,"base_url":p.base_url,"testing_environment_id":p.testing_environment_id,"delivery_provider":"ting","legacy_webhook_configured":p.webhook_url.is_some(),"enabled":p.enabled})).collect::<Vec<_>>()}),
             ),
             Profiles::Use { name } => {
                 if !config.profiles.values().any(|p| p.name == name) {
@@ -949,15 +984,9 @@ async fn run(cli: Cli) -> Result<Value> {
                 })?;
                 Ok(json!({"default_profile":name}))
             }
-            Profiles::Webhook { url } => {
-                let result = runtime::LocalRuntime::from_environment()?.webhook(
-                    &name,
-                    cli.test,
-                    Some(&url.parse()?),
-                )?;
-                daemon::start(None).await?;
-                Ok(result)
-            }
+            Profiles::Webhook { .. } => bail!(
+                "profile webhook is retired; use dm delivery login --token-file - and dm webhook URL --all-apps"
+            ),
         },
         Command::Daemon { command } => match command {
             Daemon::Start { port } => daemon::start(port).await,
@@ -967,9 +996,9 @@ async fn run(cli: Cli) -> Result<Value> {
             }
             Daemon::Status => match store::relay(&config)?.status().await {
                 Ok(status) => Ok(status),
-                Err(silicon_dm_client::Error::Transport(_)) => {
-                    Ok(json!({"running":false,"next":"dm daemon start"}))
-                }
+                Err(silicon_dm_client::Error::Transport(_)) => Ok(
+                    json!({"running":false,"next":"dm daemon start","incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false},"delivery_status_command":"dm delivery status"}),
+                ),
                 Err(error) => Err(error.into()),
             },
             Daemon::Run => {
@@ -1391,7 +1420,7 @@ fn read_json<T: DeserializeOwned>(path: &std::path::Path) -> Result<T> {
 fn read_secret(path: &std::path::Path) -> Result<String> {
     let value = if path == std::path::Path::new("-") {
         if std::io::stdin().is_terminal() {
-            rpassword::prompt_password("Short-lived token or test key (hidden): ")?
+            rpassword::prompt_password("Token, key or callback secret (hidden): ")?
         } else {
             let mut value = String::new();
             std::io::stdin().read_to_string(&mut value)?;
@@ -1407,16 +1436,144 @@ fn read_secret(path: &std::path::Path) -> Result<String> {
     Ok(value)
 }
 
+/// Validate retired actions and stdin ownership before reading any credential.
+fn validate_inputs(cli: &Cli) -> Result<()> {
+    if matches!(
+        &cli.command,
+        Command::Login {
+            webhook: Some(_),
+            ..
+        }
+    ) {
+        bail!(
+            "dm login --webhook is retired; no token was read or exchanged. Log in without --webhook, then explicitly run dm delivery register, dm delivery login --token-file -, and dm webhook URL --all-apps."
+        );
+    }
+    if matches!(
+        &cli.command,
+        Command::Profiles {
+            command: Profiles::Webhook { .. }
+        }
+    ) {
+        bail!(
+            "profiles webhook is retired; use dm delivery login --token-file - and dm webhook URL --all-apps"
+        );
+    }
+    let mut inputs = Vec::new();
+    if let Some(path) = &cli.app_secret_file {
+        inputs.push(path);
+    }
+    match &cli.command {
+        Command::Login {
+            token_file: Some(path),
+            ..
+        }
+        | Command::Webhook {
+            secret_file: Some(path),
+            ..
+        } => inputs.push(path),
+        Command::Delivery { command } => {
+            delivery::validate(
+                command,
+                cli.test.is_some() || cli.app_secret.is_some() || cli.app_secret_file.is_some(),
+            )?;
+            if matches!(command, delivery::Command::Login { .. })
+                && let Some(key) = &cli.idempotency_key
+                && (!(16..=200).contains(&key.len())
+                    || !key.bytes().all(|byte| byte.is_ascii_graphic()))
+            {
+                bail!("Ting login idempotency key must contain 16-200 visible ASCII bytes");
+            }
+            if let delivery::Command::Login {
+                token_file,
+                ting_app_secret_file,
+                ting_environment_key_file,
+                ..
+            } = command
+            {
+                inputs.push(token_file);
+                inputs.extend(ting_app_secret_file.iter());
+                inputs.extend(ting_environment_key_file.iter());
+            }
+        }
+        _ => {}
+    }
+    if inputs.iter().filter(|path| path.as_os_str() == "-").count() > 1 {
+        bail!(
+            "only one token/key/secret input may read stdin; use private files or environment variables for the others"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod command_tests {
     use super::*;
+    #[test]
+    fn delivery_commands_require_explicit_generic_endpoints_and_safe_secret_sources() -> Result<()>
+    {
+        for name in ["status", "register", "reconnect", "logout"] {
+            Cli::try_parse_from(["dm", "delivery", name])?;
+        }
+        Cli::try_parse_from(["dm", "delivery", "login", "--token-file", "-"])?;
+        assert!(
+            Cli::try_parse_from(["dm", "delivery", "login", "secret-on-command-line"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["dm", "webhook", "http://localhost:9000/tings"]).is_err());
+        let cli = Cli::try_parse_from([
+            "dm",
+            "webhook",
+            "http://localhost:9000/tings",
+            "--all-apps",
+            "--id",
+            "hook_stable",
+            "--takeover",
+            "--health-url",
+            "http://localhost:9000/health",
+            "--secret-file",
+            "/private/secret",
+        ])?;
+        assert!(matches!(
+            cli.command,
+            Command::Webhook {
+                all_apps: true,
+                takeover: true,
+                id: Some(_),
+                health_url: Some(_),
+                ..
+            }
+        ));
+        let retired = Cli::try_parse_from([
+            "dm",
+            "login",
+            "--token-file",
+            "/file-that-does-not-exist",
+            "--webhook",
+            "http://localhost/events",
+        ])?;
+        assert!(
+            validate_inputs(&retired)
+                .unwrap_err()
+                .to_string()
+                .contains("no token was read")
+        );
+        let two_stdin =
+            Cli::try_parse_from(["dm", "--app-secret-file", "-", "login", "--token-file", "-"])?;
+        assert!(
+            validate_inputs(&two_stdin)
+                .unwrap_err()
+                .to_string()
+                .contains("only one")
+        );
+        Ok(())
+    }
     #[test]
     fn onboarding_grammar_and_isi_flags() -> Result<()> {
         for args in [
             vec!["dm", "login", "OAC_TOKEN"],
             vec!["dm", "login", "status", "--json"],
             vec!["dm", "iam", "--json"],
-            vec!["dm", "webhook", "http://localhost:9000/events"],
+            vec!["dm", "webhook", "http://localhost:9000/tings", "--all-apps"],
             vec!["dm", "unhook"],
             vec!["dm", "config", "telemetry", "false"],
             vec!["dm", "config", "telemetry", "true"],

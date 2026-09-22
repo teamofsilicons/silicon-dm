@@ -90,6 +90,9 @@ impl FromRequestParts<AppState> for Authenticated {
         if context.organization_id != organization_id {
             return Err(AppError::Forbidden);
         }
+        // A verified request renews background authority for this same account.
+        // Failing before a mutation preserves its idempotent retry boundary.
+        state.ting_credentials()?.remember(&context).await?;
         // Resolve decoded addresses before exact-token authorization. The internal key
         // is passed to handlers only after tenant-scoped lookup succeeds.
         if let Ok(Path(mut parameters)) =

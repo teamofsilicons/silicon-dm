@@ -14,7 +14,7 @@ use crate::{
     infrastructure::{giphy::GiphyClient, iam::IamClient, postgres::PostgresStore},
     realtime::RealtimeHub,
     shutdown,
-    worker::DeliveryWorker,
+    worker::TingDeliveryWorker,
 };
 
 /// Constructs one fully validated application dependency graph.
@@ -81,13 +81,8 @@ pub async fn run_api(settings: Settings) -> anyhow::Result<()> {
         "DM API is ready"
     );
 
-    let worker = DeliveryWorker::new(
-        state.store.clone(),
-        state.realtime.clone(),
-        Arc::clone(&state.instance_id),
-        state.settings.worker.clone(),
-    );
     let cancellation = CancellationToken::new();
+    let worker = build_ting_worker(&state, cancellation.clone())?;
     let testing_maintenance = state
         .testing
         .clone()
@@ -168,13 +163,8 @@ pub async fn run_migrations(settings: MigrationSettings) -> AppResult<()> {
 pub async fn run_worker(settings: Settings) -> anyhow::Result<()> {
     let shutdown_timeout = settings.server.shutdown_timeout;
     let state = build_app_state(settings).await?;
-    let worker = DeliveryWorker::new(
-        state.store.clone(),
-        state.realtime.clone(),
-        Arc::clone(&state.instance_id),
-        state.settings.worker.clone(),
-    );
     let cancellation = CancellationToken::new();
+    let worker = build_ting_worker(&state, cancellation.clone())?;
     let worker_run = worker.run(cancellation.clone());
     tokio::pin!(worker_run);
     tracing::info!(instance_id = %state.instance_id, "DM delivery worker is ready");
@@ -214,6 +204,38 @@ fn graceful_deadline_elapsed(component: &str, deadline: std::time::Duration) {
         deadline_seconds = deadline.as_secs(),
         "graceful-shutdown deadline elapsed"
     );
+}
+
+/// Builds a producer with selected-plane identity, cache, and lifecycle fencing.
+/// Never creates or owns recipient-facing delivery sockets.
+pub(crate) fn build_ting_worker(
+    state: &AppState,
+    cancellation: CancellationToken,
+) -> AppResult<TingDeliveryWorker> {
+    use crate::infrastructure::{ting::TingSocket, ting_publisher::AuthenticatedTingPublisher};
+    let credentials = state.ting_credentials()?;
+    if state.testing_environment.is_some() && state.testing.is_none() {
+        return Err(crate::AppError::validation(
+            "sandbox Ting worker requires a testing registry",
+        ));
+    }
+    let socket = TingSocket::start(&state.settings.ting, cancellation);
+    let publisher = Arc::new(AuthenticatedTingPublisher::new(
+        credentials,
+        state.identity.clone(),
+        socket,
+    ));
+    let mut worker = TingDeliveryWorker::new(
+        state.store.clone(),
+        publisher,
+        state.ting_delivery_context(),
+        state.instance_id.clone(),
+        state.settings.worker.clone(),
+    );
+    if let Some(registry) = &state.testing {
+        worker = worker.with_testing_registry(registry.clone());
+    }
+    Ok(worker)
 }
 
 #[cfg(test)]

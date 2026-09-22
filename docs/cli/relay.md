@@ -1,132 +1,114 @@
-# Local relay and actor callbacks
+# Outgoing relay and Ting destinations
 
-Current 0.5 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
+DM's local relay handles outgoing typed HTTP commands. Ting's system daemon owns
+incoming delivery, reconnects, durable queues, retry/replay and acknowledgements.
+There is no DM incoming socket, callback forwarder or automatic Delivered receipt.
 
-Login starts a durable daemon. `dm daemon start`, `stop`, `status`, and `run`
-control it. `run` stays in the foreground for a service supervisor. Normal start
-detaches from the launching Unix shell/session and redirects output to the
-private daemon log. A process lock prevents duplicate daemons for one state
-directory. `start --port PORT` selects the listener port before startup.
+## Configure a Ting endpoint
 
-The default listener is `http://dm.localhost:19780`, bound only to
-`127.0.0.1:19780`. If your resolver does not resolve `dm.localhost` to loopback,
-use the equivalent numeric URL. `dm relay credentials` explicitly prints the
-local API URL and private bearer token for agent integrations. This token is
-local to the daemon; it is not an IAM credential. Every endpoint requires it.
-Requests with an Origin header are rejected; the daemon does not expose a
-cross-origin browser API.
+```sh
+dm login --token-file -
+dm delivery register
+dm delivery login --token-file -
+dm webhook http://localhost:9000/tings --all-apps --secret-file /private/callback-secret
+dm delivery status
+```
+
+The two logins consume separate IAM SLTs for DM and Ting respectively. Delivery
+registration is explicit recipient consent; neither login restores revoked grants.
+Install/start Ting's official daemon before attachment. A missing Ting service is
+an actionable error, not a reason to start a DM receiver.
+
+The endpoint URL is configured directly in Ting and stays local. It receives all
+eligible apps for the selected recipient and organization. `--all-apps` explicitly
+accepts this generic-consumer contract; no DM app filter is implied.
+
+## Incoming wire and acceptance
+
+Ting sends a raw `{"tings":[...]}` body, `Ting-Webhook-Id`, and the configured
+bearer secret. Authenticate these against the exact saved hook before interpreting
+the batch. Local items omit `for`, so recipient identity must come from that
+trusted hook binding, not arbitrary JSON.
+
+Route all apps by type. DM events use `<app_id>.sync.changed` and carry references
+including org, conversation, message code, delivery UUID and optional ISI. Fetch
+the current message from DM under normal permissions. The Rust client's
+`hydrate_ting_batch` validates and fetches references, but neither dispatches
+callbacks nor acknowledges them. See [the consumer guide](../client/README.md).
+
+Return **HTTP 204** only after the whole generic batch is durably accepted.
+Ting handles retries with stable IDs; deduplicate before repeating business work.
+A successful DM subset cannot acknowledge unrelated app items. HTTP 200 with the
+old DM `ack` JSON or Silicon `status: ok` event result is not Ting acceptance.
+No automatic adapter converts the old callback protocol.
+
+Ting's delivery/read state is distinct from DM's Delivered/Read receipts.
+Use `dm receipts delivered CONVERSATION MESSAGE` after the intended recipient
+application accepts the message, and `dm receipts read` after it reads it.
+Do not generate recipient receipts for sender copies, receipt events or tombstones.
+
+Reuse the saved hook ID across restarts. Recover uncertain registration with
+`dm webhook URL --all-apps --id HOOK_ID`; `--takeover` explicitly transfers that
+same hook from another live receiver. `--health-url` configures Ting's optional
+health check. `dm unhook` detaches the saved hook; explicit reattachment reuses its
+ID. `delivery reconnect` rebinds an attached destination; `delivery logout` ends
+this bound Ting session. DM logout remains separate.
+
+## Outgoing loopback API
+
+`dm daemon start|stop|status|run` controls only the outgoing relay. Login starts
+it; `run` stays foreground for a supervisor. Its default address is
+`http://dm.localhost:19780`, bound to `127.0.0.1`. A process lock permits one host
+per state directory. `start --port PORT` chooses the listener port.
+
+`dm relay credentials` explicitly prints its local bearer and URLs; this bearer
+is not an IAM token. Every endpoint requires it. Requests with an Origin header
+are rejected; this is not a cross-origin browser API.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /status` | Version, connected profiles, pending/failed request and callback counts |
-| `POST /requests` | Durably accept a typed `RelayRequest` and echo its exact JSON |
-| `GET /requests/{request_id}` | Recover a pending/completed/failed result |
-| `GET /requests/{request_id}/status` | Poll only the request ID and state without echoed payloads |
-| `POST /shutdown` | Stop this daemon without deleting its durable queues |
+| `GET /status` | Outgoing profile/queue state and explicit Ting migration status. |
+| `POST /requests` | Durably accept a typed request and echo its exact JSON. |
+| `GET /requests/{id}` | Read the original request and pending/completed/failed result. |
+| `GET /requests/{id}/status` | Read lightweight progress. |
+| `POST /shutdown` | Stop the outgoing relay without deleting requests. |
 
-`dm relay submit --data FILE` uses the same Rust relay client as your agent can.
-All JSON bodies follow the [wire format](../wire-format.md).
-See [the typed request example](../client/realtime.md). Arbitrary HTTP paths,
-backend administration, auth secrets and IAM internals are not exposed through
-this endpoint.
+`dm relay submit --data FILE` submits a `type: request` envelope containing a
+`RelayRequest`. Keep its request UUID and operation idempotency key unchanged when
+retrying. A local 202 ACK proves disk persistence; it does not prove backend
+success, Ting acceptance or recipient delivery. Use `dm relay result REQUEST_ID`
+to recover an uncertain outcome. Ordinary message, draft, group and receipt
+commands use this same outgoing relay; no auth secret belongs in a queued command.
 
-Configure callbacks after authentication with `dm webhook URL`. `dm unhook`
-removes the selected mapping and retains login and durable queues. Events keep
-accumulating while unhooked and resume on reconfiguration. A callback already
-in flight may still finish. ISI routing is preserved in
-`data.sender_id` and `data.recipient_id`; your endpoint can
-route those to the appropriate local silicon handler.
+Work executes in order per profile/environment, with up to 16 concurrent profile
+workers and a 128 MiB encoded-payload admission budget. A larger single request
+runs alone; this is not a total process-memory limit. Retryable mutations retain
+their original key; failed reads return structured errors for explicit retry.
+Presence uses HTTP leases and expires across relay restart.
 
-## Callback wire contract
+Before a sandbox mutation, HTTP `/iam` must confirm its saved generation. The
+original generation accompanies each retry, preventing old commands from writing
+to a cleaned environment. No socket handshake is involved.
 
-For each durable server event, the daemon posts to the endpoint stored for that
-actor profile. The callback URL never reaches the DM server. Callbacks use the complete [fixed message event](../wire-format.md#fixed-message-output), with `type`, `data`, and root `metadata`.
+## Upgrading existing state
 
-`data` has `message-id`, `conversation_id`, `recipient_id`, sender, content, reply, bundle, version and all timestamps. `recipient_id` is the receiving account. No local profile, testing selector, caller metadata or old `actor_id` is included. Configure each callback endpoint for its intended environment. Root `metadata` contains `source: "dm"`, the delivery UUID and `delivery_sequence`.
+New runtime startup stops a recognized old DM relay before launching the new
+outgoing-only host, preserving state. An unrelated local service is not stopped.
+`daemon status` reports `incoming_delivery.code: delivery_moved_to_ting` and
+`forwarding: false`; `delivery status` separately reports Ting state.
 
-Created, updated, deleted, delivered and read events use their respective `message.*` types and the same fields. The daemon sends `Idempotency-Key` equal to the delivery UUID. Your endpoint must durably accept/deduplicate the event and respond with HTTP 2xx and JSON:
+Fresh installations create no DM incoming inbox or cursor tables. Existing rows
+remain unchanged for explicit inspection/migration, counted by
+`retained_legacy_deliveries` and `retained_legacy_pending_deliveries`.
+`pending_webhooks` is zero because there is no DM incoming worker. Login or Ting
+attachment does not replay these rows or translate old callback ACKs.
 
-```json
-{"type":"ack","data":{"acknowledged":true,"delivery_id":"53968d42-d72b-4719-aa34-9c8b0c36d3bc"}}
-```
+Use DM history and the SDK's initial boundary/snapshot/sync recovery procedure to
+initialize a consumer; a new Ting hook is not a complete message-history import.
+DM messages remain available after Ting delivery records expire. See
+[initial history and recovery](../client/README.md#initial-history-and-recovery).
 
-Silicon 3.5 can be the callback endpoint directly, for example
-`dm webhook http://assistant.my-org.localhost/events`. These reserved `.localhost`
-names are accepted for callbacks and pinned to loopback, bypassing DNS and proxies.
-The Host header is retained for Silicon routing. Its HTTP 2xx response
-`{"status":"ok","event_id":"NON_NIL_UUID"}` is also accepted. This means its
-event flow accepted the event, not that inference or a DM reply has finished.
-Configure Silicon flow rules to ignore sender copies, receipts, and deletion
-tombstones, and include conversation/message IDs in the prompt for replies.
-Silicon does not deduplicate event deliveries: a timeout or lost acknowledgement
-can replay work. Use a stable delivery-derived idempotency key for reply sends.
-
-Callback acknowledgement bodies are limited to 16 KiB. An oversized response,
-an invalid acknowledgement in both supported formats, invalid JSON, non-2xx response,
-redirect or timeout leaves the callback queued. Retry uses the same delivery ID
-and exponential delay capped at five minutes. Callback delivery order is retained
-within each actor stream. Store the ID in your application before responding so
-a lost response and replay cannot duplicate business work.
-
-After valid callback acceptance of a recipient's message, the daemon commits
-callback completion and a durable delivered-receipt request in one transaction.
-That receipt retries until DM stores it. Sender copies, receipt events and
-deleted message tombstones do not generate delivered receipts. A read receipt
-is never inferred from callback delivery; submit `dm receipts read` only when
-the actor has actually read it.
-
-## Durability and recovery
-
-Incoming frames and contiguous cursor advances commit together in SQLite before
-transport ACK. Callback HTTP work runs separately from the heartbeat loop, so an
-unresponsive actor endpoint does not block pong replies. A successful transport
-ACK therefore means the relay holds a durable copy, not that the endpoint has
-already received it. Messages remain in the inbox through daemon restart and
-network interruption. Sending operations retain original idempotency keys in
-the durable outbox and execute in order for each profile/environment.
-
-Each queue has up to 16 concurrent workers and one in-flight operation per
-profile. Outbox and callback workers share a 128 MiB encoded-payload admission
-budget, selecting metadata before loading content. One oversized item can use
-the whole budget; this bounds scheduled payload concurrency, not total process
-memory. The CLI polls the lightweight request-status route and fetches the full
-result only on completion or its wait deadline, with a fallback for older daemons. A finished worker frees its slot immediately; other profiles continue
-while one backend request or callback is slow. Failed reads return their
-structured error for an explicit retry, so unavailable GIF discovery cannot
-indefinitely hold later sends. Retryable mutations stay queued.
-
-DM replays events from each stored cursor after reconnect. Duplicate delivery IDs
-must retain their kind, actor, sequence, and message identity; conflicting
-identity reuse fails closed. A replay can hydrate a newer message revision or
-status. For an already committed delivery, the relay preserves its original
-callback payload and deduplicates the replay; revisions and receipts also have
-their own durable delivery IDs. Out-of-order frames are retained without ACKing
-past a gap. The daemon automatically refreshes
-expiring tokens using a stable refresh retry key and atomic credential writes.
-
-Testing environments add a generation to stream storage. A changed ready
-generation starts new cursors at zero, retires old pending callbacks and fails
-old queued operations for explicit review. This prevents a clean environment
-from inheriting cursors or actions from its previous contents. Current events
-replay into the fresh generation. Read [the test guide](../testing-environments.md)
-before cleaning or rotating keys while agents are active.
-
-The original generation is stored with each queued mutation and sent through
-`X-Testing-Environment-Generation` on every retry. DM rejects a stale value with
-409, including an in-flight request that races with cleaning. A request queued
-before the first socket handshake waits until its first generation is known.
-
-The default encoded WebSocket frame/message bound is 128 MiB. Start the daemon
-with `DM_CLIENT_MAX_FRAME_BYTES` to change this bounded maximum, up to 3 GiB,
-when the backend allows larger encoded payloads.
-
-`daemon status` is safe to inspect: it never prints tokens or message bodies. A
-stopped daemon reports `running:false` with the next command to start it. Inspect
-`relay result` for operation details. A stopped or logged-out daemon does not
-delete pending requests. No queue cleanup happens merely because a command's
-wait deadline expires.
-
-Store the SQLite WAL queue on a filesystem with coherent local locking and
-shared-memory semantics. For a Linux Docker relay on macOS, use a native Docker
-volume for `SILICON_DM_HOME` and inspect that database inside the same Linux
-environment. Do not concurrently open its WAL database from the host kernel.
+Store the outgoing SQLite WAL on a filesystem with coherent local locking and
+shared-memory semantics. A stopped/logged-out relay retains pending requests;
+wait timeouts do not delete work. Ting and the generic consumer have separate
+service lifecycles.

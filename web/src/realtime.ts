@@ -1,32 +1,38 @@
-import { telemetryEnabled } from "./telemetry";
-import { encodeFrame, decodeFrame } from "./wire.ts";
 import type {
   Activity,
+  AppConfig,
+  Conversation,
+  IamInfo,
   Message,
   MessageStatus,
+  Page,
   ReceiptStatus,
   RealtimeState,
-  ServerFrame,
   Session,
+  SyncPage,
 } from "./models";
-import { ApiError, api, gatewayOrigin } from "./api";
+import { ApiError, api, pathSegment, queryString } from "./api";
+import { localMessageKey, wireMessageId } from "./wire.ts";
+import { watchTing, type TingStatus } from "./ting";
 import {
   adoptGeneration,
   authenticated,
-  cacheMessage,
-  commitDelivery,
-  completeReceipt,
-  getCursor,
-  getDeviceId,
-  getGeneration,
-  pendingReceipts,
-  queueReceipt,
-  StorageError,
-  scopeFor,
-  cachedMessage,
+  beginSyncSnapshot,
   broadcastSource,
   broadcastUpdate,
+  cachedMessage,
+  commitSyncPage,
+  completeReceipt,
+  getDeviceId,
+  getGeneration,
+  getSyncCheckpoint,
+  pendingReceipts,
+  queueReceipt,
+  scopeFor,
+  StorageError,
+  type HydratedSyncMessage,
   type StorageUpdate,
+  type SyncCheckpoint,
 } from "./storage";
 
 type Callback<T extends unknown[]> = (...args: T) => void | Promise<void>;
@@ -36,6 +42,9 @@ export interface RealtimeHandlers {
   onState: Callback<[state: RealtimeState]>;
   onReset: Callback<[generation: number | null]>;
   onReady?: Callback<[generation: number | null]>;
+  onTing?: Callback<[status: TingStatus]>;
+  onSnapshot?: Callback<[]>;
+  onInaccessible?: Callback<[messageId: string]>;
   onError?: Callback<[error: Error]>;
 }
 export interface RealtimeConnection {
@@ -49,145 +58,499 @@ export interface RealtimeConnection {
     actorId?: string,
   ): Promise<void>;
 }
-/** Cookie-authenticated browser transport. Message persistence precedes transport ACKs. */
+const sameContext = (
+  session: Session,
+  page: {
+    testing_environment_id: string | null;
+    testing_generation: number | null;
+  },
+  generation: number | null,
+) =>
+  (session.testing_environment_id ?? null) === page.testing_environment_id &&
+  page.testing_generation === generation;
+
+/** Ting supplies invalidation hints after checking its session context. DM HTTP authorization is
+ * required for all content. No DM socket, Ting ACK or implicit DM read exists. */
 export function connectRealtime(
   session: Session,
   handlers: RealtimeHandlers,
 ): RealtimeConnection {
   authenticated(session);
-  const actorId = session.actor.id;
-  const profileId = session.profile_id;
-  const scope = scopeFor(session);
-  let socket: WebSocket | undefined;
-  let stopped = false;
-  let terminal = false;
-  let connected = false;
-  let attempt = 0;
-  let connectionEpoch = 0;
-  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-  let generation: number | null | undefined;
-  let deviceId = "";
-  let processing = Promise.resolve();
-  let pendingBytes = 0;
-  let pendingFrames = 0;
-  let lastReceivedAt = Date.now();
-  const MAX_PENDING_BYTES = 128 * 1024 * 1024;
-  const MAX_PENDING_FRAMES = 32;
-  // The backend sends an application ping every 30s and closes after 120s
-  // without a matching pong. Give the server the first chance to reap a dead
-  // socket, and avoid tearing down healthy sockets while a background tab's
-  // timers are throttled.
-  const CLIENT_STALE_TIMEOUT_MS = 150_000;
-  const sentReceipts = new Set<string>();
-  let receiptFlush: Promise<void> | undefined;
-  let initialReplay: { cursor: number; requestedAt: number } | undefined;
-  let gapReplay:
-    | {
-        cursor: number;
-        requestedAt: number;
-        attempts: number;
-        reported: boolean;
-      }
-    | undefined;
-  function requestGapReplay(cursor: number, target = socket): void {
-    if (!gapReplay || gapReplay.cursor !== cursor) {
-      const pending =
-        initialReplay?.cursor === cursor ? initialReplay : undefined;
-      gapReplay = {
-        cursor,
-        requestedAt: pending?.requestedAt ?? 0,
-        attempts: pending ? 1 : 0,
-        reported: false,
-      };
-      initialReplay = undefined;
-    }
-    if (gapReplay.requestedAt && Date.now() - gapReplay.requestedAt < 60_000)
-      return;
-    if (gapReplay.attempts >= 3) {
-      if (!gapReplay.reported) {
-        gapReplay.reported = true;
-        report(
-          new StorageError(
-            "delivery_gap",
-            `Delivery ${cursor + 1} is still unavailable after replay. Newer events are safely stored, but are not acknowledged past this gap.`,
-          ),
-        );
-      }
-      return;
-    }
-    if (
-      send(
-        { type: "resume", actor_id: actorId, after_sequence: cursor },
-        target,
-      )
-    ) {
-      gapReplay.requestedAt = Date.now();
-      gapReplay.attempts++;
-      state("reconnecting");
-    }
-  }
-
-  function notify<T extends unknown[]>(
-    callback: Callback<T> | undefined,
-    ...args: T
-  ): void {
-    if (!callback) return;
-    try {
-      void Promise.resolve(callback(...args)).catch(report);
-    } catch (error) {
-      report(error);
-    }
-  }
-  function state(value: RealtimeState): void {
-    notify(handlers.onState, value);
-  }
-  function report(error: unknown): void {
+  const actor = session.actor,
+    organization = session.organization_id,
+    scope = scopeFor(session);
+  let stopped = false,
+    terminal = false,
+    ready = false,
+    epoch = 0,
+    dirty = false;
+  let generation: number | null | undefined,
+    deviceId = "";
+  let abort = new AbortController();
+  let running: Promise<void> | undefined,
+    receiptFlush: Promise<void> | undefined;
+  let ting: ReturnType<typeof watchTing> | undefined;
+  let retry: ReturnType<typeof setTimeout> | undefined,
+    attempts = 0;
+  let activity: Activity | null = null,
+    presenceRunning: Promise<void> | undefined;
+  const valid = (run: number) => !stopped && !terminal && epoch === run;
+  function report(error: unknown) {
     try {
       void Promise.resolve(
         handlers.onError?.(
           error instanceof Error ? error : new Error(String(error)),
         ),
-      ).catch(() => undefined);
+      ).catch(() => {});
     } catch {
-      /* A view error cannot break durable transport processing. */
+      /* View failure does not advance cursors. */
     }
   }
-  function send(frame: unknown, target = socket): boolean {
-    if (!target || target.readyState !== WebSocket.OPEN) return false;
-    target.send(JSON.stringify(encodeFrame(frame as Record<string, unknown>)));
-    return true;
+  function notify<T extends unknown[]>(
+    callback: Callback<T> | undefined,
+    ...args: T
+  ) {
+    try {
+      void Promise.resolve(callback?.(...args)).catch(report);
+    } catch (error) {
+      report(error);
+    }
   }
-  function stopWithError(error: Error, unauthorized = false): void {
+  const state = (value: RealtimeState) => notify(handlers.onState, value);
+  function stop(error: Error) {
     terminal = true;
-    connected = false;
-    connectionEpoch++;
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    socket?.close(
-      1000,
-      unauthorized ? "session-ended" : "local-storage-or-protocol-error",
+    ready = false;
+    ++epoch;
+    abort.abort();
+    ting?.close();
+    if (retry) clearTimeout(retry);
+    retry = undefined;
+    state(
+      error instanceof ApiError && error.status === 401
+        ? "unauthorized"
+        : "error",
     );
-    state(unauthorized ? "unauthorized" : "error");
     report(error);
+  }
+  function schedule() {
+    if (stopped || terminal || retry) return;
+    state(navigator.onLine ? "reconnecting" : "offline");
+    if (!navigator.onLine) return;
+    retry = setTimeout(
+      () => {
+        retry = undefined;
+        requestSync();
+      },
+      Math.min(30_000, 500 * 2 ** Math.min(attempts++, 6)),
+    );
+  }
+  function failed(error: unknown) {
+    if (
+      stopped ||
+      terminal ||
+      (error instanceof DOMException && error.name === "AbortError")
+    )
+      return;
+    if (error instanceof ApiError && error.status === 401) {
+      stop(error);
+      return;
+    }
+    ready = false;
+    if (
+      error instanceof StorageError &&
+      error.code !== "sync_conflict" &&
+      error.code !== "environment_changed"
+    ) {
+      stop(error);
+      return;
+    }
+    report(error);
+    schedule();
+  }
+  function ensure(run: number) {
+    if (!valid(run))
+      throw new DOMException(
+        "This profile operation was superseded.",
+        "AbortError",
+      );
+  }
+  async function request<T>(
+    path: string,
+    run: number,
+    options: Parameters<typeof api>[1] = {},
+  ): Promise<T> {
+    ensure(run);
+    try {
+      const result = await api<T>(path, {
+        generation,
+        ...options,
+        session,
+        signal: abort.signal,
+      });
+      ensure(run);
+      return result;
+    } catch (error) {
+      // A late rejection from an abandoned profile/connection cannot sign out
+      // the replacement connection after an explicit reconnect.
+      ensure(run);
+      throw error;
+    }
+  }
+  function validatePage(page: SyncPage, fence: number | null) {
+    if (!sameContext(session, page, fence))
+      throw new StorageError(
+        "environment_changed",
+        "DM sync returned another testing context.",
+      );
+    if (
+      typeof page.cursor !== "string" ||
+      !page.cursor ||
+      !Array.isArray(page.events) ||
+      typeof page.has_more !== "boolean" ||
+      !Number.isSafeInteger(page.upper_sequence) ||
+      page.upper_sequence < 0
+    )
+      throw new StorageError(
+        "invalid_sync",
+        "DM returned an invalid sync page.",
+      );
+    let previous = -1;
+    for (const event of page.events) {
+      if (
+        !event ||
+        typeof event.event_id !== "string" ||
+        !event.event_id ||
+        !Number.isSafeInteger(event.sequence) ||
+        event.sequence <= previous ||
+        event.sequence > page.upper_sequence ||
+        !["message", "message_status"].includes(event.type) ||
+        typeof event.conversation_id !== "string" ||
+        !event.conversation_id ||
+        typeof event.message_id !== "string" ||
+        !event.message_id
+      )
+        throw new StorageError(
+          "invalid_sync",
+          "DM returned an invalid message reference.",
+        );
+      previous = event.sequence;
+    }
+  }
+  async function committed(
+    messages: Message[],
+    run: number,
+    fence: number | null,
+  ) {
+    ensure(run);
+    for (const message of messages) {
+      notify(handlers.onMessage, message);
+      notify(handlers.onReceipt, message.id, message.status);
+      broadcastUpdate({
+        scope,
+        kind: "message",
+        message_id: message.id,
+        generation: fence,
+      });
+    }
+  }
+  async function snapshot(
+    run: number,
+    fence: number | null,
+  ): Promise<SyncCheckpoint> {
+    const anchor = await request<SyncPage>("/sync?reset=true&limit=100", run);
+    validatePage(anchor, fence);
+    if (anchor.events.length || anchor.has_more)
+      throw new StorageError(
+        "invalid_sync",
+        "DM reset returned an invalid history boundary.",
+      );
+    const checkpoint = await beginSyncSnapshot(session, fence);
+    ensure(run);
+    ready = false;
+    notify(handlers.onSnapshot);
+    broadcastUpdate({ scope, kind: "snapshot", generation: fence });
+    let cursor: string | null = null;
+    const seen = new Set<string>();
+    do {
+      const page: Page<Conversation> = await request<Page<Conversation>>(
+        `/conversations${queryString({ cursor, limit: 100 })}`,
+        run,
+      );
+      if (!Array.isArray(page.items))
+        throw new StorageError(
+          "invalid_sync",
+          "DM returned invalid conversation history.",
+        );
+      for (const conversation of page.items) {
+        let historyCursor: string | null = null;
+        const historySeen = new Set<string>();
+        do {
+          let history: Page<Message>;
+          try {
+            history = await request<Page<Message>>(
+              `/conversations/${pathSegment(conversation.id)}/messages${queryString({ cursor: historyCursor, limit: 100, include_bundled_members: true })}`,
+              run,
+            );
+          } catch (error) {
+            if (error instanceof ApiError && [403, 404].includes(error.status))
+              break;
+            throw error;
+          }
+          if (
+            !Array.isArray(history.items) ||
+            history.items.some(
+              (message) => message.conversation_id !== conversation.id,
+            )
+          )
+            throw new StorageError(
+              "invalid_sync",
+              "DM history returned another conversation.",
+            );
+          const messages = await commitSyncPage(
+            session,
+            fence,
+            checkpoint,
+            checkpoint,
+            history.items.map((message) => ({ message, deliver: true })),
+            deviceId,
+          );
+          await committed(messages, run, fence);
+          historyCursor = history.next_cursor;
+          if (historyCursor && historySeen.has(historyCursor))
+            throw new StorageError(
+              "invalid_sync",
+              "DM history pagination did not advance.",
+            );
+          if (historyCursor) historySeen.add(historyCursor);
+        } while (historyCursor);
+      }
+      cursor = page.next_cursor;
+      if (cursor && seen.has(cursor))
+        throw new StorageError(
+          "invalid_sync",
+          "DM conversation pagination did not advance.",
+        );
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    const next = { cursor: anchor.cursor };
+    await commitSyncPage(session, fence, checkpoint, next, [], deviceId);
+    ensure(run);
+    return next;
+  }
+  async function reconcile(run: number) {
+    const info = await request<IamInfo>("/iam", run, { generation: null });
+    if (
+      (session.testing_environment_id ?? null) !==
+        info.testing_environment_id ||
+      (session.testing_environment_id
+        ? !Number.isSafeInteger(info.testing_generation) ||
+          (info.testing_generation ?? 0) < 1
+        : info.testing_generation !== null)
+    )
+      throw new StorageError(
+        "invalid_generation",
+        "DM discovery did not confirm this profile’s environment.",
+      );
+    const changed = await adoptGeneration(session, info.testing_generation);
+    ensure(run);
+    const hadGeneration = generation !== undefined;
+    const firstReady =
+      generation === undefined || generation !== info.testing_generation;
+    generation = info.testing_generation;
+    const fence = generation;
+    if (firstReady && hadGeneration) {
+      ting?.close();
+      ting = undefined;
+    }
+    if (changed || (firstReady && hadGeneration))
+      notify(handlers.onReset, fence);
+    if (changed) broadcastUpdate({ scope, kind: "reset", generation: fence });
+    deviceId ||= await getDeviceId(session);
+    ensure(run);
+    let checkpoint = await getSyncCheckpoint(session, fence);
+    ensure(run);
+    if (!checkpoint?.cursor || checkpoint.snapshot_id)
+      checkpoint = await snapshot(run, fence);
+    let resetUsed = false;
+    const seen = new Set<string>();
+    while (valid(run)) {
+      let page: SyncPage;
+      try {
+        page = await request<SyncPage>(
+          `/sync${queryString({ cursor: checkpoint.cursor, limit: 100 })}`,
+          run,
+        );
+      } catch (error) {
+        if (
+          !resetUsed &&
+          error instanceof ApiError &&
+          error.code === "sync_reset_required"
+        ) {
+          resetUsed = true;
+          checkpoint = await snapshot(run, fence);
+          continue;
+        }
+        throw error;
+      }
+      validatePage(page, fence);
+      if (
+        page.has_more &&
+        (page.cursor === checkpoint.cursor || seen.has(page.cursor))
+      )
+        throw new StorageError(
+          "invalid_sync",
+          "DM sync pagination did not advance.",
+        );
+      seen.add(page.cursor);
+      const hydrated: HydratedSyncMessage[] = [],
+        inaccessible: string[] = [];
+      // Multiple immutable events can point to the same mutable message. One
+      // authorized read per page gives that message one unambiguous outcome.
+      const references = new Map<
+        string,
+        { conversation_id: string; message_id: string; deliver: boolean }
+      >();
+      for (const event of page.events) {
+        const id = JSON.stringify([event.conversation_id, event.message_id]);
+        const prior = references.get(id);
+        references.set(id, {
+          conversation_id: event.conversation_id,
+          message_id: event.message_id,
+          deliver: event.type === "message" || prior?.deliver === true,
+        });
+      }
+      for (const event of references.values()) {
+        try {
+          const message = await request<Message>(
+            `/conversations/${pathSegment(event.conversation_id)}/messages/${pathSegment(event.message_id)}`,
+            run,
+          );
+          if (
+            message.conversation_id !== event.conversation_id ||
+            message.id !==
+              localMessageKey(event.conversation_id, event.message_id)
+          )
+            throw new StorageError(
+              "invalid_sync",
+              "DM returned a message with another identity.",
+            );
+          hydrated.push({ message, deliver: event.deliver });
+        } catch (error) {
+          if (error instanceof ApiError && [403, 404].includes(error.status))
+            inaccessible.push(
+              localMessageKey(event.conversation_id, event.message_id),
+            );
+          else throw error;
+        }
+      }
+      const next = { cursor: page.cursor };
+      const messages = await commitSyncPage(
+        session,
+        fence,
+        checkpoint,
+        next,
+        hydrated,
+        deviceId,
+        inaccessible,
+      );
+      await committed(messages, run, fence);
+      for (const id of inaccessible) {
+        notify(handlers.onInaccessible, id);
+        broadcastUpdate({
+          scope,
+          kind: "inaccessible",
+          message_id: id,
+          generation: fence,
+        });
+      }
+      checkpoint = next;
+      if (!page.has_more) break;
+    }
+    ensure(run);
+    attempts = 0;
+    const becameReady = !ready || firstReady;
+    ready = true;
+    state("connected");
+    if (becameReady) notify(handlers.onReady, fence);
+    await flushReceipts();
+    void renewPresence().catch(failed);
+    if (!ting) {
+      try {
+        const config = await request<AppConfig>("/api/config", run);
+        ting = watchTing(
+          config.ting_browser_origin || "https://ting.teamofsilicons.com",
+          actor,
+          organization,
+          {
+            testing_environment_id: info.testing_environment_id,
+            testing_generation: fence,
+          },
+          () => {
+            if (valid(run) && generation === fence) requestSync();
+          },
+          (value) => {
+            if (valid(run) && generation === fence)
+              notify(handlers.onTing, value);
+          },
+        );
+      } catch (error) {
+        report(error);
+      }
+    }
+  }
+  function requestSync() {
+    if (stopped || terminal || !navigator.onLine) return;
+    dirty = true;
+    if (running) return;
+    const run = epoch;
+    running = (async () => {
+      while (dirty && valid(run)) {
+        dirty = false;
+        await reconcile(run);
+      }
+    })()
+      .catch(failed)
+      .finally(() => {
+        running = undefined;
+        if (dirty && valid(run)) requestSync();
+      });
   }
   async function flushReceipts(): Promise<void> {
     if (receiptFlush) return receiptFlush;
+    if (!ready || generation === undefined || stopped || terminal) return;
+    const run = epoch,
+      fence = generation;
     receiptFlush = (async () => {
-      if (!connected || generation === undefined) return;
       for (const receipt of await pendingReceipts(session)) {
-        if (receipt.generation !== generation) continue;
-        const marker = `${receipt.id}:${receipt.status}`;
-        if (sentReceipts.has(marker)) continue;
-        if (
-          send({
-            type: "receipt",
-            actor_id: receipt.actor_id,
-            device_id: receipt.device_id,
-            conversation_id: receipt.conversation_id,
-            message_id: receipt.message_id,
-            status: receipt.status,
-          })
-        )
-          sentReceipts.add(marker);
+        ensure(run);
+        if (receipt.generation !== fence) continue;
+        try {
+          await request(
+            `/conversations/${pathSegment(receipt.conversation_id)}/messages/${pathSegment(wireMessageId(receipt.message_id))}/receipts`,
+            run,
+            {
+              method: "POST",
+              generation: fence,
+              body: { status: receipt.status, device_id: receipt.device_id },
+            },
+          );
+        } catch (error) {
+          // Deleted or no-longer-authorized targets cannot hold unrelated
+          // receipts forever. This only removes local pending work; no receipt
+          // success/read is synthesized for the rejected target.
+          if (
+            !(error instanceof ApiError) ||
+            ![403, 404].includes(error.status)
+          )
+            throw error;
+        }
+        ensure(run);
+        await completeReceipt(
+          session,
+          fence,
+          receipt.message_id,
+          receipt.status,
+        );
       }
     })();
     try {
@@ -196,339 +559,54 @@ export function connectRealtime(
       receiptFlush = undefined;
     }
   }
-  async function processFrame(
-    frame: ServerFrame,
-    target: WebSocket,
-    epoch: number,
-  ): Promise<void> {
-    if (epoch !== connectionEpoch || stopped) return;
-    if (frame.type === "ready") {
-      if (
-        frame.protocol_version !== 5 ||
-        frame.actors.length !== 1 ||
-        frame.actors[0] !== actorId
-      )
-        throw new StorageError(
-          "protocol_mismatch",
-          "The server advertised an unexpected protocol or actor.",
-        );
-      const changed = await adoptGeneration(session, frame.testing_generation);
-      generation = frame.testing_generation;
-      if (changed) {
-        notify(handlers.onReset, generation);
-        broadcastUpdate({ scope, kind: "reset", generation });
-      }
-      if (epoch !== connectionEpoch || target.readyState !== WebSocket.OPEN)
-        return;
-      // The server's ACK is not evidence that this browser committed a message.
-      // Resume only from our own durable cursor, even when the server is ahead.
-      const cursor = await getCursor(session, actorId);
-      if (epoch !== connectionEpoch || target.readyState !== WebSocket.OPEN)
-        return;
-      send(
-        { type: "resume", actor_id: actorId, after_sequence: cursor },
-        target,
-      );
-      // Ready already starts a replay request. A queued future event must not
-      // immediately send a second Resume that resets the server's sent cursor.
-      initialReplay = { cursor, requestedAt: Date.now() };
-      connected = true;
-      attempt = 0;
-      state("connected");
-      notify(handlers.onReady, generation);
-      await flushReceipts();
-      return;
-    }
-    if (frame.type === "error") {
-      if (
-        frame.recoverable &&
-        frame.code === "validation_error" &&
-        frame.message === "cannot ACK a sequence not emitted on this connection"
-      ) {
-        // Resume and ACK travel independently of buffered server frames. An ACK
-        // for a previously emitted frame can arrive after Resume reset the
-        // server cursor. Keep our durable cursor; subsequent replay frames ACK
-        // their own positions again as the server catches up.
-        return;
-      }
-      if (frame.code === "unauthorized") {
-        // Access-token expiry uses the same authority close as revocation.
-        // Let close recovery try the saved refresh token before signing out.
-        target.close(4001, "authorization-expired");
-        return;
-      }
-      const error = new ApiError(
-        frame.code === "unauthorized" ? 401 : 0,
-        frame.code,
-        frame.message,
-      );
-      if (
-        !frame.recoverable ||
-        frame.code === "unauthorized" ||
-        frame.code === "forbidden"
-      )
-        stopWithError(error, frame.code === "unauthorized");
-      else report(error);
-      return;
-    }
-    if (generation === undefined || !connected)
-      throw new StorageError(
-        "missing_ready",
-        "The server sent a delivery before initializing the stream.",
-      );
-    if (frame.type === "message" || frame.type === "receipt") {
-      if (frame.actor_id !== actorId)
-        throw new StorageError(
-          "wrong_actor",
-          "A delivery targeted a different profile.",
-        );
-      const result = await commitDelivery(session, generation, frame, deviceId);
-      if (epoch !== connectionEpoch || stopped) return;
-      if (result.gap) requestGapReplay(result.cursor, target);
-      else {
-        initialReplay = undefined;
-        if (gapReplay) {
-          gapReplay = undefined;
-          state("connected");
-        }
-      }
-      // A Resume may have reset the server's sent cursor. Bound each ACK by
-      // this frame, rather than by the maximum seen before the replay reset.
-      if (epoch === connectionEpoch)
-        send(
-          {
-            type: "ack",
-            actor_id: actorId,
-            through_sequence: Math.min(result.cursor, frame.delivery_sequence),
-          },
-          target,
-        );
-      if (!result.duplicate) {
-        if (frame.type === "message" && result.message) {
-          notify(handlers.onMessage, result.message);
-          broadcastUpdate({
-            scope,
-            kind: "message",
-            message_id: result.message.id,
-          });
-        }
-        if (frame.type === "receipt") {
-          notify(
-            handlers.onReceipt,
-            frame.message_id,
-            result.status ?? frame.status,
-          );
-          broadcastUpdate({
-            scope,
-            kind: "receipt",
-            message_id: frame.message_id,
-            status: result.status ?? frame.status,
-          });
-        }
-      }
-      await flushReceipts();
-    } else if (frame.type === "receipt_recorded") {
-      await completeReceipt(
-        session,
-        generation,
-        frame.message_id,
-        frame.status,
-      );
-    } else if (frame.type === "message_accepted") {
-      notify(
-        handlers.onMessage,
-        await cacheMessage(session, frame.message, generation),
-      );
-    }
-  }
-  function scheduleReconnect(): void {
-    if (stopped || terminal || reconnectTimer) return;
-    if (!navigator.onLine) {
-      state("offline");
-      return;
-    }
-    state(attempt ? "reconnecting" : "connecting");
-    const backoffAttempt = Math.min(attempt++, 6);
-    const delay =
-      Math.min(30_000, 500 * 2 ** backoffAttempt) +
-      Math.floor(Math.random() * 250);
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = undefined;
-      void open();
-    }, delay);
-  }
-  async function open(): Promise<void> {
-    if (stopped || terminal) return;
-    try {
-      const epoch = ++connectionEpoch;
-      deviceId = await getDeviceId(session);
-      const previousGeneration = await getGeneration(session);
-      if (stopped || terminal || epoch !== connectionEpoch) return;
-      const url = new URL("/api/ws", gatewayOrigin());
-      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-      url.searchParams.set("telemetry", telemetryEnabled() ? "on" : "off");
-      url.searchParams.set("profile_id", profileId);
-      url.searchParams.set("device_id", deviceId);
-      if (previousGeneration != null)
-        url.searchParams.set("testing_generation", String(previousGeneration));
-      const target = new WebSocket(url);
-      socket = target;
-      generation = undefined;
-      connected = false;
-      sentReceipts.clear();
-      gapReplay = undefined;
-      initialReplay = undefined;
-      target.onopen = () => {
-        lastReceivedAt = Date.now();
-      };
-      target.onmessage = (event) => {
-        if (epoch !== connectionEpoch || stopped || terminal) return;
-        lastReceivedAt = Date.now();
-        if (typeof event.data !== "string") {
-          stopWithError(new Error("Unexpected binary WebSocket frame."));
-          return;
-        }
-        // Bound queued decoded messages while IndexedDB is committing a large
-        // payload. The durable server stream will replay anything not ACKed.
-        const bytes = event.data.length * 2;
-        let frame: ServerFrame | undefined;
-        if (event.data.length < 4096) {
-          try {
-            frame = decodeFrame(JSON.parse(event.data)) as ServerFrame;
-          } catch {
-            stopWithError(new Error("Invalid realtime JSON."));
-            return;
-          }
-          if (frame?.type === "ping") {
-            send({ type: "pong", ping_id: frame.ping_id }, target);
-            return;
-          }
-        }
-        if (
-          pendingFrames >= MAX_PENDING_FRAMES ||
-          (pendingFrames > 0 && pendingBytes + bytes > MAX_PENDING_BYTES)
-        ) {
-          target.close(1013, "local-backpressure");
-          return;
-        }
-        try {
-          frame ??= decodeFrame(JSON.parse(event.data)) as ServerFrame;
-        } catch {
-          stopWithError(new Error("Invalid realtime JSON."));
-          return;
-        }
-        if (!frame || typeof frame !== "object" || !("type" in frame)) {
-          stopWithError(new Error("Invalid realtime frame."));
-          return;
-        }
-        const parsedFrame = frame;
-        pendingFrames++;
-        pendingBytes += bytes;
-        processing = processing
-          .then(() => processFrame(parsedFrame, target, epoch))
-          .catch((error) => {
-            if (epoch === connectionEpoch && !stopped)
-              stopWithError(
-                error instanceof Error ? error : new Error(String(error)),
-              );
-          })
-          .finally(() => {
-            pendingFrames--;
-            pendingBytes -= bytes;
-          });
-      };
-      target.onerror = () => {
-        /* close carries retry policy; browsers conceal upgrade response bodies. */
-      };
-      target.onclose = (event) => {
-        if (epoch !== connectionEpoch || stopped || terminal) return;
-        const recoveryEpoch = ++connectionEpoch;
-        connected = false;
-        // Reflect the transport transition immediately. The session probe
-        // below can take a few seconds when the network is degraded; leaving
-        // the UI in "Connected" during that window makes sends look stuck.
-        state(navigator.onLine ? "reconnecting" : "offline");
-        const renew =
-          event.code === 4001 &&
-          !event.reason.includes("testing-environment-changed");
-        void api<Session>(
-          renew ? "/api/refresh" : "/api/session",
-          renew
-            ? {
-                method: "POST",
-                body: { profile_id: session.profile_id },
-                session,
-              }
-            : { session },
-        )
-          .then((current) => {
-            if (recoveryEpoch !== connectionEpoch || stopped || terminal)
-              return;
-            if (
-              !current.authenticated ||
-              !current.profiles?.some(
-                (profile) =>
-                  profile.profile_id === session.profile_id &&
-                  profile.authenticated !== false,
-              )
-            )
-              stopWithError(
-                new ApiError(
-                  401,
-                  "unauthorized",
-                  "This profile has signed out.",
-                ),
-                true,
-              );
-            else scheduleReconnect();
-          })
-          .catch((error) => {
-            if (recoveryEpoch !== connectionEpoch || stopped || terminal)
-              return;
-            if (error instanceof ApiError && error.status === 401)
-              stopWithError(error, true);
-            else scheduleReconnect();
-          });
-      };
-    } catch (error) {
-      stopWithError(error instanceof Error ? error : new Error(String(error)));
-    }
-  }
-  function online(): void {
+  async function renewPresence() {
     if (
-      !stopped &&
-      !terminal &&
-      (!socket || socket.readyState === WebSocket.CLOSED)
+      !ready ||
+      generation === undefined ||
+      stopped ||
+      terminal ||
+      presenceRunning
     )
-      scheduleReconnect();
+      return;
+    const run = epoch;
+    presenceRunning = request(
+      `/presence/devices/${pathSegment(deviceId)}`,
+      run,
+      {
+        method: "PUT",
+        body: {
+          activity: document.visibilityState === "hidden" ? null : activity,
+        },
+      },
+    ).then(() => {});
+    try {
+      await presenceRunning;
+    } finally {
+      presenceRunning = undefined;
+    }
   }
-  function offline(): void {
-    connected = false;
+  function online() {
+    requestSync();
+    ting?.reconnect();
+  }
+  function offline() {
+    ready = false;
     state("offline");
-    socket?.close(1000, "offline");
   }
-  function visibility(): void {
-    if (document.visibilityState === "visible") {
-      if (
-        socket?.readyState === WebSocket.OPEN &&
-        Date.now() - lastReceivedAt > CLIENT_STALE_TIMEOUT_MS
-      )
-        socket.close(1000, "stale-connection");
-      else online();
-    } else if (connected)
-      send({ type: "presence", actor_id: actorId, activity: null });
+  function visibility() {
+    if (document.visibilityState === "visible") requestSync();
+    void renewPresence().catch(failed);
   }
-  function unauthorized(event: Event): void {
+  function unauthorized(event: Event) {
     const profile = (event as CustomEvent<{ profile_id?: string }>).detail
       ?.profile_id;
     if (!profile || profile === session.profile_id)
-      stopWithError(
+      stop(
         new ApiError(
           401,
           "unauthorized",
           "Sign in again to resume this profile.",
         ),
-        true,
       );
   }
   const channel =
@@ -542,68 +620,82 @@ export function connectRealtime(
         !update ||
         update.scope !== scope ||
         update.source === broadcastSource ||
-        stopped
+        stopped ||
+        terminal
       )
         return;
-      if (update.kind === "message" && typeof update.message_id === "string")
-        void cachedMessage(session, update.message_id)
-          .then((message) => {
-            if (message) notify(handlers.onMessage, message);
-          })
-          .catch(report);
-      else if (update.kind === "receipt" && update.message_id && update.status)
-        notify(handlers.onReceipt, update.message_id, update.status);
-      else if (update.kind === "outbox")
+      if (["message", "inaccessible", "snapshot"].includes(update.kind)) {
+        const run = epoch,
+          fence = generation;
+        if (fence === undefined || update.generation !== fence) return;
+        const current = () => valid(run) && generation === fence;
+        void (async () => {
+          const message =
+            update.kind === "message" && update.message_id
+              ? await cachedMessage(session, update.message_id, fence)
+              : undefined;
+          // Another tab can adopt the next generation before this tab receives
+          // its reset hint. Check durable state as well as our connection epoch.
+          if (
+            !current() ||
+            (await getGeneration(session)) !== fence ||
+            !current()
+          )
+            return;
+          if (update.kind === "message" && message)
+            notify(handlers.onMessage, message);
+          else if (update.kind === "inaccessible" && update.message_id)
+            notify(handlers.onInaccessible, update.message_id);
+          else if (update.kind === "snapshot") {
+            ready = false;
+            notify(handlers.onSnapshot);
+            requestSync();
+          }
+        })().catch((error) => {
+          if (
+            current() &&
+            !(
+              error instanceof StorageError &&
+              error.code === "environment_changed"
+            )
+          )
+            report(error);
+        });
+      } else if (update.kind === "outbox")
         window.dispatchEvent(
           new CustomEvent("dm:outbox", { detail: { scope } }),
         );
-      else if (update.kind === "reset" && update.generation !== undefined) {
-        notify(handlers.onReset, update.generation);
-        connectionEpoch++;
-        connected = false;
-        terminal = false;
-        socket?.close(1000, "environment-changed");
-        void open();
+      else if (update.kind === "reset") {
+        ready = false;
+        requestSync();
       }
     };
   const watchdog = setInterval(() => {
-    if (
-      connected &&
-      document.visibilityState === "visible" &&
-      Date.now() - lastReceivedAt > CLIENT_STALE_TIMEOUT_MS
-    )
-      socket?.close(1000, "heartbeat-expired");
-    else if (connected) {
-      if (gapReplay) requestGapReplay(gapReplay.cursor);
-      sentReceipts.clear();
-      void flushReceipts().catch(stopWithError);
-    }
+    if (document.visibilityState === "visible") requestSync();
   }, 30_000);
   window.addEventListener("online", online);
   window.addEventListener("offline", offline);
   window.addEventListener("dm:unauthorized", unauthorized);
   document.addEventListener("visibilitychange", visibility);
   state(navigator.onLine ? "connecting" : "offline");
-  const telemetryChanged = () => {
-    if (stopped) return;
-    connectionEpoch++;
-    socket?.close(1000, "settings-changed");
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = undefined;
-    void open();
-  };
-  window.addEventListener("dm-telemetry-change", telemetryChanged);
-  if (navigator.onLine) void open();
+  requestSync();
   return {
     close() {
+      if (deviceId && generation !== undefined && ready)
+        void api(`/presence/devices/${pathSegment(deviceId)}`, {
+          session,
+          generation,
+          method: "DELETE",
+          keepalive: true,
+        }).catch(() => {});
       stopped = true;
-      connected = false;
-      connectionEpoch++;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      ready = false;
+      ++epoch;
+      abort.abort();
+      ting?.close();
+      if (retry) clearTimeout(retry);
       clearInterval(watchdog);
       channel?.close();
-      socket?.close(1000, "client-closed");
-      window.removeEventListener("dm-telemetry-change", telemetryChanged);
       window.removeEventListener("online", online);
       window.removeEventListener("offline", offline);
       window.removeEventListener("dm:unauthorized", unauthorized);
@@ -613,24 +705,30 @@ export function connectRealtime(
     reconnect() {
       if (stopped) return;
       terminal = false;
-      attempt = 0;
-      connectionEpoch++;
-      socket?.close(1000, "reconnect");
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      reconnectTimer = undefined;
-      void open();
+      ready = false;
+      ++epoch;
+      abort.abort();
+      abort = new AbortController();
+      if (retry) clearTimeout(retry);
+      retry = undefined;
+      attempts = 0;
+      ting?.close();
+      ting = undefined;
+      const previous = running;
+      void Promise.resolve(previous).finally(requestSync);
     },
-    presence(activity, requestedActor = actorId) {
-      if (requestedActor !== actorId)
+    presence(value, actorId = actor.id) {
+      if (actorId !== actor.id)
         throw new ApiError(
           403,
           "forbidden",
           "Presence must belong to this profile.",
         );
-      if (connected) send({ type: "presence", actor_id: actorId, activity });
+      activity = value;
+      void renewPresence().catch(failed);
     },
-    async receipt(conversationId, messageId, status, requestedActor = actorId) {
-      if (requestedActor !== actorId)
+    async receipt(conversationId, messageId, status, actorId = actor.id) {
+      if (actorId !== actor.id)
         throw new ApiError(
           403,
           "forbidden",
@@ -640,7 +738,7 @@ export function connectRealtime(
       if (fence === undefined)
         throw new StorageError(
           "generation_unknown",
-          "Connect before recording receipts for this testing environment.",
+          "Load this testing environment before recording receipts.",
         );
       await queueReceipt(
         session,

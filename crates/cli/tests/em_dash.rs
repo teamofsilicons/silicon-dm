@@ -129,7 +129,7 @@ async fn cli_normalizes_silicon_text_before_queueing_and_checks_final_length() -
             .respond_with(response(json!({"items":[{"id":conversation,"org_id":"org","participants":[{"type":"carbon","id":"reader"}],"last_message":null,"created_at":"now","updated_at":"now"}]})))
             .mount(&server).await;
         Mock::given(path("/status"))
-            .respond_with(response(json!({"running":true})))
+            .respond_with(response(json!({"running":true,"incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false}})))
             .mount(&server)
             .await;
         let submitted = Arc::new(Mutex::new(None::<Value>));

@@ -168,11 +168,27 @@ impl PostgresStore {
     ///
     /// Rejects invalid content, sender mismatch, non-participant access, and
     /// conflicting idempotency reuse.
+    pub async fn send_message(&self, command: SendMessageCommand) -> AppResult<Message> {
+        let initiator = command.sender.clone();
+        self.send_message_as(command, &initiator).await
+    }
+
+    /// Accepts a message while retaining the authenticated initiating actor when
+    /// that actor is allowed to represent a different message sender.
+    /// Authorization of representation belongs to the authenticated API boundary;
+    /// this internal provenance is never read from the public message payload.
+    ///
+    /// # Errors
+    /// Returns the same validation and storage failures as `send_message`.
     #[allow(
         clippy::too_many_lines,
         reason = "message acceptance, outbox creation, history update, draft clear, and idempotency form one transaction"
     )]
-    pub async fn send_message(&self, command: SendMessageCommand) -> AppResult<Message> {
+    pub async fn send_message_as(
+        &self,
+        command: SendMessageCommand,
+        initiator: &ActorRef,
+    ) -> AppResult<Message> {
         command.content.validate().map_err(AppError::validation)?;
         if command
             .content
@@ -194,9 +210,22 @@ impl PostgresStore {
         refresh_directory_in(
             &mut transaction,
             &command.organization_id,
-            std::slice::from_ref(&command.sender),
+            &[command.sender.clone(), initiator.clone()],
         )
         .await?;
+        // Transaction-local state cannot leak to another request on this pooled
+        // connection, and commits or rolls back with the source delivery event.
+        sqlx::query("SELECT set_config('dm.ting_originator',$1,true)")
+            .bind(
+                serde_json::json!({
+                    "organization_id": command.organization_id.as_str(),
+                    "actor_kind": initiator.actor_type.as_str(),
+                    "actor_id": initiator.id.as_str(),
+                })
+                .to_string(),
+            )
+            .execute(&mut *transaction)
+            .await?;
         require_participant_in(
             &mut transaction,
             &command.organization_id,

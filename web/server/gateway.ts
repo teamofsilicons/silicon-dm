@@ -18,7 +18,7 @@ import {
   requestJson,
   responseHeaders,
 } from "./proxy.ts";
-import { Sockets } from "./websocket.ts";
+import { rejectRetiredUpgrade } from "./websocket.ts";
 
 function requestedProfile(
   req: IncomingMessage,
@@ -47,16 +47,13 @@ const corsHeaders = new Set([
 ]);
 export class Gateway {
   readonly sessions: Sessions;
-  readonly sockets: Sockets;
   readonly auth: Auth;
   private cleanup?: NodeJS.Timeout;
   private rate = new Map<string, { window: number; count: number }>();
   constructor(readonly config: Config) {
     this.sessions = new Sessions(config);
-    this.sockets = new Sockets(config);
-    this.auth = new Auth(config, this.sessions, (browser, profile) =>
-      this.sockets.invalidate(browser, profile),
-    );
+    // Incoming browser delivery belongs to Ting. DM keeps only HTTP sessions.
+    this.auth = new Auth(config, this.sessions, () => {});
   }
   async initialize(): Promise<void> {
     await this.sessions.initialize();
@@ -70,11 +67,10 @@ export class Gateway {
   }
   async close(): Promise<void> {
     clearInterval(this.cleanup);
-    this.sockets.close();
     await this.sessions.close();
   }
   upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
-    void this.sockets.upgrade(req, socket, head, this.auth);
+    rejectRetiredUpgrade(req, socket, this.config);
   }
   private authRate(req: IncomingMessage): void {
     const now = Date.now();
@@ -189,9 +185,16 @@ export class Gateway {
           gateway_origin: this.config.origin.origin,
           frontend_origin: this.config.frontend.origin,
           max_body_bytes: this.config.maxBytes,
+          ting_browser_origin: this.config.tingBrowser.origin,
         });
         return true;
       }
+      if (path === "/api/ws")
+        throw new GatewayError(
+          410,
+          "delivery_moved_to_ting",
+          "DM browser delivery has moved to Ting. Use HTTP for messages, synchronization, presence and receipts.",
+        );
       if (path === "/auth/login" && method === "GET") {
         this.authRate(req);
         const previous = await this.sessions.read(this.sessions.cookieId(req));
@@ -270,17 +273,27 @@ export class Gateway {
         return true;
       }
       if (path === "/api/testing-environments/exit" && method === "POST") {
-        const id=this.sessions.cookieId(req);
-        if (!id) throw new GatewayError(401,"login_required","Sign in to continue.");
-        await this.sessions.locked(id, async()=>{
-          const browser=await this.sessions.read(id);
-          if (!browser) throw new GatewayError(401,"login_required","Sign in to continue.");
-          const production=browser.value.profiles.find(p=>p.profile_id===browser.value.production_profile_id&&!p.testing_environment_id)
-            || browser.value.profiles.find(p=>!p.testing_environment_id);
-          browser.value.selected=production?.profile_id;
+        const id = this.sessions.cookieId(req);
+        if (!id)
+          throw new GatewayError(401, "login_required", "Sign in to continue.");
+        await this.sessions.locked(id, async () => {
+          const browser = await this.sessions.read(id);
+          if (!browser)
+            throw new GatewayError(
+              401,
+              "login_required",
+              "Sign in to continue.",
+            );
+          const production =
+            browser.value.profiles.find(
+              (p) =>
+                p.profile_id === browser.value.production_profile_id &&
+                !p.testing_environment_id,
+            ) || browser.value.profiles.find((p) => !p.testing_environment_id);
+          browser.value.selected = production?.profile_id;
           await this.sessions.save(browser);
         });
-        json(res,await this.auth.describe(id));
+        json(res, await this.auth.describe(id));
         return true;
       }
       if (path === "/api/testing-environments/enter" && method === "POST") {

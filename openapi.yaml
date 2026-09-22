@@ -1,11 +1,10 @@
 openapi: 3.1.0
 servers:
   - url: https://backend.dm.teamofsilicons.com
-info: {title: DM API, version: 0.9.4}
+info: {title: DM API, version: 0.10.0}
 security:
   - bearerAuth: []
 tags:
-  - {name: Realtime, description: Authenticated WebSocket sessions and durable member streams}
   - {name: Conversations, description: Exact-participant-set conversations}
   - {name: Groups, description: Named organization groups with invitations and dynamic IAM tag access}
   - {name: Messages, description: 'Durable content, receipts, and attachment access'}
@@ -17,7 +16,157 @@ tags:
   - {name: Testing, description: Honeycomb owns shared test lifecycle; legacy controls require production IAM authority}
   - {name: IAM webhooks, description: 'Signed IAM callbacks, outside the /api/v1 base path'}
   - {name: Operations, description: Deployment health probes}
+  - {name: Delivery, description: Explicit Ting recipient enrollment and authoritative HTTP recovery}
 paths:
+  /api/v1/delivery/registration:
+    post:
+      operationId: registerTingDelivery
+      tags: [Delivery]
+      summary: Explicitly enroll the authenticated recipient for Ting notifications.
+      description: >-
+        Registers or reconnects the authenticated actor's tos>dm recipient grant in Ting using
+        their current IAM consent. Requires the approved external subscriptions.register scope
+        and self.identity.read. This is not a Ting login or webhook registration. Completed
+        Idempotency-Key retries return the cached public subscription without reactivating a
+        later revocation. An in-flight or uncertain previous result returns 409; a new explicit
+        registration requires a new key. No user tokens or proofs are persisted.
+      parameters:
+        - {$ref: '#/components/parameters/OrgId'}
+        - {$ref: '#/components/parameters/TestingKey'}
+        - {$ref: '#/components/parameters/TestingGeneration'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [type, data]
+              properties:
+                type: {type: string, const: delivery_registration}
+                data: {type: object, additionalProperties: false}
+            example: {type: delivery_registration, data: {}}
+      responses:
+        '200':
+          description: Confirmed recipient subscription or the original cached result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: delivery_registration}
+                  data: {$ref: '#/components/schemas/TingSubscription'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/sync:
+    get:
+      operationId: syncEvents
+      tags: [Delivery]
+      summary: Recover authoritative event references for the authenticated actor.
+      description: >-
+        Returns bounded references under current conversation and group permissions. Cursors
+        bind the actor, organization, testing environment and cleaning generation, and expire
+        after 24 hours. Continue with the returned cursor while has_more is true; filtered
+        inaccessible events can produce an empty page with more work. A Ting event sequence
+        must never replace this cursor. A 409 sync_reset_required means obtain a reset cursor,
+        refresh authorized conversations and messages, then resume from that cursor.
+      parameters:
+        - {$ref: '#/components/parameters/OrgId'}
+        - {$ref: '#/components/parameters/TestingKey'}
+        - {$ref: '#/components/parameters/TestingGeneration'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - name: reset
+          in: query
+          schema: {type: boolean, default: false}
+          description: Return an empty event page with a cursor at the current head. Cannot be combined with cursor.
+      responses:
+        '200':
+          description: Current authorized references and the next authoritative cursor.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: sync}
+                  data: {$ref: '#/components/schemas/SyncPage'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/presence/devices/{device_id}:
+    parameters:
+      - {$ref: '#/components/parameters/OrgId'}
+      - {$ref: '#/components/parameters/TestingKey'}
+      - {$ref: '#/components/parameters/TestingGeneration'}
+      - name: device_id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/DeviceId'}
+        description: Stable device identifier without control characters, scoped to the authenticated actor.
+    put:
+      operationId: renewDevicePresence
+      tags: [Presence]
+      summary: Renew the authenticated actor's HTTP device presence lease.
+      description: >-
+        Sets a bounded lease for this device independently of Ting delivery. Omitted or null
+        activity clears the device's activity. A lease never grants message access and is not
+        a delivery or read receipt. All requests revalidate IAM authority.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [type, data]
+              properties:
+                type: {type: string, const: renew_presence}
+                data:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    activity:
+                      type: [string, 'null']
+                      enum: [typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, null]
+            example: {type: renew_presence, data: {activity: typing}}
+      responses:
+        '200':
+          description: Renewed device deadline and aggregate actor presence.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: renew_presence}
+                  data: {$ref: '#/components/schemas/PresenceLease'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: closeDevicePresence
+      tags: [Presence]
+      summary: Close the authenticated actor's named HTTP presence lease.
+      description: Does not close other devices or change Ting destinations. Repeated closure is harmless.
+      responses:
+        '204': {description: The device is no longer online through this lease.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /api/v1/conversations:
     get:
       summary: List accessible DMs and groups in one organization, newest activity first.
@@ -599,782 +748,38 @@ paths:
                 required: [type, data]
                 properties:
                   type: {type: string, const: contracts}
-                  data: {type: object, additionalProperties: true}
+                  data:
+                    type: object
+                    required: [service, service_version, contracts, compatibility, delivery, retired_routes]
+                    properties:
+                      service: {type: string, const: silicon-dm}
+                      service_version: {type: string}
+                      contracts: {type: array, items: {type: object, additionalProperties: true}}
+                      compatibility:
+                        type: array
+                        items:
+                          type: object
+                          required: [http]
+                          properties: {http: {type: integer, const: 3}}
+                      delivery: {$ref: '#/components/schemas/DeliveryDiscovery'}
+                      retired_routes: {type: array, items: {type: string}}
+                    additionalProperties: true
         '401': {$ref: '#/components/responses/Unauthorized'}
         default: {$ref: '#/components/responses/Error'}
   /api/v1/ws/shared:
     get:
-      tags: [Realtime]
-      operationId: prewarmSharedConnection
-      summary: Prewarm one socket for independently authenticated subscriptions
+      tags: [Delivery]
+      operationId: retiredSharedSocket
+      summary: Retired DM socket endpoint
+      deprecated: true
       security: []
-      description: 'Open one shared transport, then send one subscribe frame per account/profile, each with its own token, organization_id, member_id, device_id,
-        and optional testing credentials. Send multiple subscribe frames to add multiple independent inputs; no query array is needed.
-
-        connection.prewarmed is not authentication. Each accepted subscription receives channel → subscribe.success; rejected subscriptions receive channel
-        → subscribe.error.
-
-        Up to 64 active subscriptions. subscription_id must be unique on the socket; unsubscribe removes just that subscription.
-
-        Every inner command/event is wrapped in channel with subscription_id and frame. Shared transport protocol is 2; inner protocol is 5.
-
-        Outer ping / ping.success and each subscription''s inner ping / ping.success must both be answered. Malformed outer frames, duplicate subscriptions,
-        unknown channels, or overflowing channels can close the whole socket.
-
-        See the WebSocket events catalogue in the local Swagger preview for two subscriptions and the exact wrappers.
-
-
-        subscribe returns channel → subscribe.success or subscribe.error. unsubscribe returns an outer unsubscribe.success or unsubscribe.error. subscription.closed
-        is an unsolicited channel closure notice.
-
-
-        Commands use <command>, <command>.success and <command>.error, except message.create returns message.create.successful. A response never needs another success response. channel is only an envelope. connection.ready,
-        connection.prewarmed, subscription.closed and message.created/updated/deleted/delivered/read/failed are unsolicited notifications, not command replies.
-        Only delivery events carrying data.metadata need delivery ACKs.'
-      parameters:
-        - in: header
-          name: X-DM-Protocol-Version
-          schema:
-            type: integer
-            enum: [2]
+      description: Returns 410 delivery_moved_to_ting without upgrading, including for old protocol headers. Enroll through DM delivery registration, receive Ting updates, and recover through DM HTTP sync. This route no longer authenticates socket subscriptions.
       responses:
-        '101': {description: Transport connection.prewarmed; authenticate each subscription before accessing data}
-        '406': {$ref: '#/components/responses/Error'}
-        '410': {$ref: '#/components/responses/Error'}
-        default: {$ref: '#/components/responses/Error'}
-      x-websocket:
-        clientFrames: {$ref: '#/components/schemas/SharedClientSocketFrame'}
-        serverFrames: {$ref: '#/components/schemas/SharedServerSocketFrame'}
-        events:
-          - name: connection.prewarmed
-            direction: server → client
-            schema: {$ref: '#/components/schemas/PrewarmedFrame'}
-            description: Transport is open; no account is authorized yet.
-            example:
-              type: connection.prewarmed
-              data: {protocol_version: 2, max_subscriptions: 64}
-          - name: 'subscribe: first account'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/SubscribeFrame'}
-            description: Authenticate the first profile.
-            example:
-              type: subscribe
-              data: {subscription_id: alice-acme, token: <alice-access-token>, organization_id: acme, member_id: alice@example.com, device_id: laptop-browser-1}
-          - name: 'subscribe: second account'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/SubscribeFrame'}
-            description: Send another subscribe on the same socket; independent credentials and organization.
-            example:
-              type: subscribe
-              data: {subscription_id: bob-studio, token: <bob-access-token>, organization_id: studio, member_id: bob@example.com, device_id: bob-phone-1}
-          - name: 'channel: subscribe.success'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: Only this subscription is now ready. Other profiles authenticate independently.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: subscribe.success
-                  data:
-                    protocol_version: 5
-                    testing_generation: null
-                    connection_id: 11111111-1111-4111-8111-111111111111
-                    members: [alice@example.com]
-                    acknowledged_through: {alice@example.com: 41}
-          - name: 'channel: message.create'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/SharedClientChannelFrame'}
-            description: Wrap any standalone client command for the selected subscription.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: message.create
-                  data:
-                    member_id: alice@example.com
-                    org_id: acme
-                    conversation_id: alice@example.com::bob@example.com
-                    idempotency_key: send-alice-bob-001
-                    message: Can you review this?
-                    attachments: []
-          - name: 'channel: message.created'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: Creation notification delivered to every participant, including the sender’s devices. Delivery metadata is mirrored at frame.metadata and frame.data.metadata; ACK after durable processing.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: message.created
-                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000001, delivery_sequence: 42}
-                  data:
-                    message-id: 00a
-                    conversation_id: alice@example.com::bob@example.com
-                    recipient_id: alice@example.com
-                    sender: {type: carbon, id: alice@example.com}
-                    message: Can you review this?
-                    attachments: []
-                    voice_transcript: null
-                    reply: null
-                    bundle: null
-                    created_at: '2026-09-17T10:00:00Z'
-                    updated_at: null
-                    deleted_at: null
-                    delivered_at: null
-                    read_at: null
-                    metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000001, delivery_sequence: 42}
-                    history: []
-          - name: 'ping: outer transport'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/PingFrame'}
-            description: Outer heartbeat; answer outside channel.
-            example:
-              type: ping
-              data: {ping_id: outer-ping-1}
-          - name: 'ping.success: outer transport'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/PongFrame'}
-            description: Answer the shared transport heartbeat.
-            example:
-              type: ping.success
-              data: {ping_id: outer-ping-1}
-          - name: 'channel: ping'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: Subscription heartbeat; it is independent of the outer heartbeat.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: ping
-                  data: {ping_id: inner-ping-1}
-          - name: 'channel: ping.success'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/SharedClientChannelFrame'}
-            description: Answer using the same subscription_id.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: ping.success
-                  data: {ping_id: inner-ping-1}
-          - name: unsubscribe
-            direction: client → server
-            schema: {$ref: '#/components/schemas/UnsubscribeFrame'}
-            description: Remove only this subscription; returns outer unsubscribe.success or unsubscribe.error. Other subscriptions stay active.
-            example:
-              type: unsubscribe
-              data: {subscription_id: alice-acme}
-          - name: 'channel: subscribe.error'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: Authentication/selection failed or timed out. Other subscriptions can remain active.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: subscribe.error
-                  data: {code: subscription_rejected, message: Refresh the profile or select a valid sandbox., recoverable: false}
-          - name: 'channel: subscription.closed'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: The inner session closed; its close reason is not forwarded by this implementation.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: subscription.closed
-                  data: {code: subscription_closed, recoverable: false}
-          - name: 'channel: bundle'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/SharedClientChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Create a bundle atomically using the HTTP bundle rules. 1–100 unique
-              existing messages from the same conversation, none already bundled; caller supplies display content. Reuse the idempotency key and identical
-              content after timeout or reconnect. Same key and content returns the same bundle; changed content conflicts. No partial bundle or display
-              message on failure.
-            example:
-              type: channel
-              data:
-                subscription_id: assistant-work
-                frame:
-                  type: bundle
-                  data:
-                    member_id: assistant:acme
-                    org_id: acme
-                    conversation_id: g:acme:engineering
-                    idempotency_key: bundle-engineering-001
-                    message_ids: ['001', '002', '003']
-                    display_message:
-                      message: 'Summary: We agreed to ship on Friday.'
-                      attachments: []
-          - name: 'channel: bundle.success'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Durable creation confirmation, also returned for an identical retry.
-              Correlate by member_id, conversation_id and idempotency_key. No delivery ACK for this frame; the display message is delivered separately as
-              message.created with data.metadata.
-            example:
-              type: channel
-              data:
-                subscription_id: assistant-work
-                frame:
-                  type: bundle.success
-                  data:
-                    id: '001'
-                    conversation_id: g:acme:engineering
-                    original_message_ids: ['001', '002', '003']
-                    display_message:
-                      message-id: '004'
-                      conversation_id: g:acme:engineering
-                      recipient_id: g:acme:engineering
-                      sender: {type: silicon, id: 'assistant:acme'}
-                      message: 'Summary: We agreed to ship on Friday.'
-                      attachments: []
-                      voice_transcript: null
-                      reply: null
-                      bundle: {id: '001', role: display}
-                      created_at: '2026-09-17T10:00:00Z'
-                      updated_at: null
-                      deleted_at: null
-                      delivered_at: null
-                      read_at: null
-                      history: []
-                    created_by: {type: silicon, id: 'assistant:acme'}
-                    created_at: '2026-09-17T10:00:00Z'
-                    member_id: assistant:acme
-                    idempotency_key: bundle-engineering-001
-          - name: 'channel: bundle.success: identical retry'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Resend the identical bundle request with the same idempotency_key.
-              Returns the original bundle and display message IDs without creating duplicates.
-            example:
-              type: channel
-              data:
-                subscription_id: assistant-work
-                frame:
-                  type: bundle.success
-                  data:
-                    id: '001'
-                    conversation_id: g:acme:engineering
-                    original_message_ids: ['001', '002', '003']
-                    display_message:
-                      message-id: '004'
-                      conversation_id: g:acme:engineering
-                      recipient_id: g:acme:engineering
-                      sender: {type: silicon, id: 'assistant:acme'}
-                      message: 'Summary: We agreed to ship on Friday.'
-                      attachments: []
-                      voice_transcript: null
-                      reply: null
-                      bundle: {id: '001', role: display}
-                      created_at: '2026-09-17T10:00:00Z'
-                      updated_at: null
-                      deleted_at: null
-                      delivered_at: null
-                      read_at: null
-                      history: []
-                    created_by: {type: silicon, id: 'assistant:acme'}
-                    created_at: '2026-09-17T10:00:00Z'
-                    member_id: assistant:acme
-                    idempotency_key: bundle-engineering-001
-          - name: 'channel: bundle.error: invalid input'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Reject invalid content, duplicate IDs, or a count outside 1–100. No
-              partial changes; socket remains open.
-            example:
-              type: channel
-              data:
-                subscription_id: assistant-work
-                frame:
-                  type: bundle.error
-                  data:
-                    code: invalid_request
-                    message: bundle message_ids must be unique
-                    recoverable: true
-                    member_id: assistant:acme
-                    conversation_id: g:acme:engineering
-                    idempotency_key: bundle-engineering-001
-          - name: 'channel: bundle.error: forbidden'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Reject a Carbon creator, unauthorized member or organization, or missing
-              conversation access. No partial changes; socket remains open.
-            example:
-              type: channel
-              data:
-                subscription_id: assistant-work
-                frame:
-                  type: bundle.error
-                  data:
-                    code: forbidden
-                    message: only a Silicon with conversation access may create bundles
-                    recoverable: true
-                    member_id: assistant:acme
-                    conversation_id: g:acme:engineering
-                    idempotency_key: bundle-engineering-001
-          - name: 'channel: bundle.error: conversation missing'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. The target conversation does not exist; no conversation is created
-              by this command. No partial changes; socket remains open.
-            example:
-              type: channel
-              data:
-                subscription_id: assistant-work
-                frame:
-                  type: bundle.error
-                  data: {code: not_found, message: conversation not found, recoverable: true, member_id: 'assistant:acme', conversation_id: 'g:acme:engineering',
-                    idempotency_key: bundle-engineering-001}
-          - name: 'channel: bundle.error: messages unavailable'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Reject missing messages, messages from another conversation, and messages
-              already in any bundle, including display messages. No partial changes; socket remains open.
-            example:
-              type: channel
-              data:
-                subscription_id: assistant-work
-                frame:
-                  type: bundle.error
-                  data:
-                    code: conflict
-                    message: one or more bundle messages are unavailable or already bundled
-                    recoverable: true
-                    member_id: assistant:acme
-                    conversation_id: g:acme:engineering
-                    idempotency_key: bundle-engineering-001
-          - name: 'channel: bundle.error: idempotency conflict'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Use a new key for a different operation; retry unchanged content with
-              the original key after a lost confirmation. No partial changes; socket remains open.
-            example:
-              type: channel
-              data:
-                subscription_id: assistant-work
-                frame:
-                  type: bundle.error
-                  data:
-                    code: conflict
-                    message: idempotency key was already used with different request content
-                    recoverable: true
-                    member_id: assistant:acme
-                    conversation_id: g:acme:engineering
-                    idempotency_key: bundle-engineering-001
-          - name: unsubscribe.success
-            direction: server → client
-            schema: {$ref: '#/components/schemas/UnsubscribeSuccessFrame'}
-            description: Confirms the subscription is removed; other subscriptions remain active. Repeating removal of an absent ID also succeeds.
-            example:
-              type: unsubscribe.success
-              data: {subscription_id: alice-acme}
-          - name: unsubscribe.error
-            direction: server → client
-            schema: {$ref: '#/components/schemas/UnsubscribeErrorFrame'}
-            description: Removal could not complete. Echo subscription_id when available; this error leaves other subscriptions active.
-            example:
-              type: unsubscribe.error
-              data: {subscription_id: alice-acme, code: internal_error, message: Unable to remove subscription., recoverable: true}
-          - name: 'channel: ack'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/SharedClientChannelFrame'}
-            description: On the indicated authenticated subscription. Cumulative ACK after durably processing every delivery through this sequence; cannot
-              ACK beyond what this connection emitted.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: ack
-                  data: {member_id: alice@example.com, through_sequence: 42}
-          - name: 'channel: resume'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/SharedClientChannelFrame'}
-            description: On the indicated authenticated subscription. Replay after the saved member-stream position; zero starts from the beginning. Not
-              a conversation message ID.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: resume
-                  data: {member_id: alice@example.com, after_sequence: 41}
-          - name: 'channel: presence'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/SharedClientChannelFrame'}
-            description: 'On the indicated authenticated subscription. activity: typing, recording_voice, transcribing_voice, uploading_file, searching_gifs,
-              or null to clear. No separate presence broadcast frame is currently emitted.'
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: presence
-                  data: {member_id: alice@example.com, activity: typing}
-          - name: 'channel: receipt'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/SharedClientChannelFrame'}
-            description: On the indicated authenticated subscription. Send from the recipient’s connection. status is delivered or read; device_id must
-              match that connection. read implies delivery.
-            example:
-              type: channel
-              data:
-                subscription_id: bob-acme
-                frame:
-                  type: receipt
-                  data: {member_id: bob@example.com, conversation_id: 'alice@example.com::bob@example.com', message_id: 00a, status: read, device_id: bob-phone-1}
-          - name: 'channel: message.create.successful'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: Direct success reply on the initiating authenticated subscription for message.create. No delivery metadata or ACK; every participant separately receives message.created.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: message.create.successful
-                  data:
-                    message-id: 00a
-                    conversation_id: alice@example.com::bob@example.com
-                    recipient_id: bob@example.com
-                    sender: {type: carbon, id: alice@example.com}
-                    message: Can you review this?
-                    attachments: []
-                    voice_transcript: null
-                    reply: null
-                    bundle: null
-                    created_at: '2026-09-17T10:00:00Z'
-                    updated_at: null
-                    deleted_at: null
-                    delivered_at: null
-                    read_at: null
-                    idempotency_key: send-alice-bob-001
-                    history: []
-          - name: 'channel: receipt.success'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Confirms a device receipt was stored. This confirmation has no delivery sequence.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: receipt.success
-                  data: {message_id: 00a, conversation_id: 'alice@example.com::bob@example.com', status: read}
-          - name: 'channel: message.updated'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Full current message snapshot with recipient delivery metadata in data.metadata. ACK
-              this delivery sequence. recipient_id identifies the receiving account, including sender copies; replay can contain a newer snapshot.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: message.updated
-                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000002, delivery_sequence: 43}
-                  data:
-                    message-id: 00a
-                    conversation_id: alice@example.com::bob@example.com
-                    recipient_id: bob@example.com
-                    sender: {type: carbon, id: alice@example.com}
-                    message: Please review the updated design.
-                    attachments: []
-                    voice_transcript: null
-                    reply: null
-                    bundle: null
-                    created_at: '2026-09-17T10:00:00Z'
-                    updated_at: '2026-09-17T10:01:00Z'
-                    deleted_at: null
-                    delivered_at: null
-                    read_at: null
-                    metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000002, delivery_sequence: 43}
-                    history:
-                      - message: Can you review this?
-                        attachments: []
-                        voice_transcript: null
-                        reply: null
-                        created_at: '2026-09-17T10:00:00Z'
-          - name: 'channel: message.deleted'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Full current message snapshot with recipient delivery metadata in data.metadata. ACK
-              this delivery sequence. recipient_id identifies the receiving account, including sender copies; replay can contain a newer snapshot.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: message.deleted
-                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000003, delivery_sequence: 44}
-                  data:
-                    message-id: 00a
-                    conversation_id: alice@example.com::bob@example.com
-                    recipient_id: bob@example.com
-                    sender: {type: carbon, id: alice@example.com}
-                    message: null
-                    attachments: []
-                    voice_transcript: null
-                    reply: null
-                    bundle: null
-                    created_at: '2026-09-17T10:00:00Z'
-                    updated_at: null
-                    deleted_at: '2026-09-17T10:01:00Z'
-                    delivered_at: null
-                    read_at: null
-                    metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000003, delivery_sequence: 44}
-                    history: []
-          - name: 'channel: message.delivered'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Full current message snapshot with recipient delivery metadata in data.metadata. ACK
-              this delivery sequence. recipient_id identifies the receiving account, including sender copies; replay can contain a newer snapshot.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: message.delivered
-                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000004, delivery_sequence: 45}
-                  data:
-                    message-id: 00a
-                    conversation_id: alice@example.com::bob@example.com
-                    recipient_id: bob@example.com
-                    sender: {type: carbon, id: alice@example.com}
-                    message: Can you review this?
-                    attachments: []
-                    voice_transcript: null
-                    reply: null
-                    bundle: null
-                    created_at: '2026-09-17T10:00:00Z'
-                    updated_at: null
-                    deleted_at: null
-                    delivered_at: '2026-09-17T10:00:02Z'
-                    read_at: null
-                    metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000004, delivery_sequence: 45}
-                    history: []
-          - name: 'channel: message.read'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Full current message snapshot with recipient delivery metadata in data.metadata. ACK
-              this delivery sequence. recipient_id identifies the receiving account, including sender copies; replay can contain a newer snapshot.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: message.read
-                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000005, delivery_sequence: 46}
-                  data:
-                    message-id: 00a
-                    conversation_id: alice@example.com::bob@example.com
-                    recipient_id: bob@example.com
-                    sender: {type: carbon, id: alice@example.com}
-                    message: Can you review this?
-                    attachments: []
-                    voice_transcript: null
-                    reply: null
-                    bundle: null
-                    created_at: '2026-09-17T10:00:00Z'
-                    updated_at: null
-                    deleted_at: null
-                    delivered_at: '2026-09-17T10:00:02Z'
-                    read_at: '2026-09-17T10:01:00Z'
-                    metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000005, delivery_sequence: 46}
-                    history: []
-          - name: 'channel: message.failed'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Full current message snapshot with recipient delivery metadata in data.metadata. ACK
-              this delivery sequence. recipient_id identifies the receiving account, including sender copies; replay can contain a newer snapshot.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: message.failed
-                  metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000006, delivery_sequence: 47}
-                  data:
-                    message-id: 00a
-                    conversation_id: alice@example.com::bob@example.com
-                    recipient_id: bob@example.com
-                    sender: {type: carbon, id: alice@example.com}
-                    message: Can you review this?
-                    attachments: []
-                    voice_transcript: null
-                    reply: null
-                    bundle: null
-                    created_at: '2026-09-17T10:00:00Z'
-                    updated_at: null
-                    deleted_at: null
-                    delivered_at: null
-                    read_at: null
-                    metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000006, delivery_sequence: 47}
-                    history: []
-          - name: 'channel: connection.error'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Recoverable protocol/command error. Examples include invalid_frame, unsupported_frame,
-              validation_error, forbidden, not_found, conflict, and dependency_unavailable. Close frames are separate from JSON errors.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: connection.error
-                  data: {code: invalid_frame, message: client frame is not valid protocol JSON, recoverable: true}
-          - name: 'channel: ack.success'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Confirms the durable cumulative ACK. through_sequence is the stored position, which
-              never decreases. Do not ACK this confirmation.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: ack.success
-                  data: {member_id: alice@example.com, through_sequence: 42}
-          - name: 'channel: resume.success'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Confirms the replay request was accepted after after_sequence, not that replay has
-              finished. Stored ACK is unchanged; ACK replayed delivery events normally.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: resume.success
-                  data: {member_id: alice@example.com, after_sequence: 41}
-          - name: 'channel: presence.success'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Confirms this member activity was stored. No delivery ACK or separate presence broadcast.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: presence.success
-                  data: {member_id: alice@example.com, activity: typing}
-          - name: 'channel: message.create.error'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Rejects this command; echoes its available identifiers. Correct the request before
-              retrying; the socket stays open.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: message.create.error
-                  data:
-                    code: invalid_request
-                    message: Can you review this?
-                    recoverable: true
-                    member_id: alice@example.com
-                    conversation_id: alice@example.com::bob@example.com
-                    idempotency_key: send-alice-bob-001
-          - name: 'channel: ack.error'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Rejects this command; echoes its available identifiers. Correct the request before
-              retrying; the socket stays open.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: ack.error
-                  data: {code: invalid_request, message: through_sequence exceeds the last emitted sequence, recoverable: true, member_id: alice@example.com,
-                    through_sequence: 999}
-          - name: 'channel: resume.error'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Rejects this command; echoes its available identifiers. Correct the request before
-              retrying; the socket stays open.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: resume.error
-                  data: {code: invalid_request, message: after_sequence is outside the available replay range, recoverable: true, member_id: alice@example.com,
-                    after_sequence: 999}
-          - name: 'channel: presence.error'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Rejects this command; echoes its available identifiers. Correct the request before
-              retrying; the socket stays open.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: presence.error
-                  data: {code: forbidden, message: member is not authorized on this connection, recoverable: true, member_id: alice@example.com}
-          - name: 'channel: receipt.error'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: On the indicated authenticated subscription. Rejects this command; echoes its available identifiers. Correct the request before
-              retrying; the socket stays open.
-            example:
-              type: channel
-              data:
-                subscription_id: bob-acme
-                frame:
-                  type: receipt.error
-                  data:
-                    code: forbidden
-                    message: device_id does not match this connection
-                    recoverable: true
-                    member_id: bob@example.com
-                    conversation_id: alice@example.com::bob@example.com
-                    message_id: 00a
-                    device_id: different-device
-          - name: 'channel: ping.error'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/SharedClientChannelFrame'}
-            description: On the indicated authenticated subscription. Client cannot complete the heartbeat. Does not count as a successful heartbeat; timeout
-              may still close the connection.
-            example:
-              type: channel
-              data:
-                subscription_id: alice-acme
-                frame:
-                  type: ping.error
-                  data: {ping_id: ping-1, code: heartbeat_failed, message: Unable to complete heartbeat., recoverable: false}
-          - name: connection.error
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SocketErrorFrame'}
-            description: Outer transport error that cannot be assigned to a valid command or subscription.
-            example:
-              type: connection.error
-              data: {code: invalid_frame, message: frame is not valid protocol JSON, recoverable: true}
-          - name: 'ping.error: outer transport'
-            direction: client → server
-            schema: {$ref: '#/components/schemas/PingErrorFrame'}
-            description: Client cannot complete the outer heartbeat. Does not satisfy the heartbeat deadline.
-            example:
-              type: ping.error
-              data: {ping_id: outer-ping-1, code: heartbeat_failed, message: Unable to complete heartbeat., recoverable: false}
-        closeCodes:
-          - {code: 4000, reason: heartbeat-timeout}
-      x-websocket-frame:
-        anyOf:
-          - {$ref: '#/components/schemas/SharedClientSocketFrame'}
-          - {$ref: '#/components/schemas/SharedServerSocketFrame'}
+        '410':
+          description: Delivery moved to Ting; use the returned discovery paths.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeliveryRetirement'}
   /api/v1/reports:
     post:
       tags: [Operations]
@@ -1496,11 +901,12 @@ paths:
                   type: {type: string, const: iam}
                   data:
                     type: object
-                    required: [app_id, iam_base_url, api_base_url]
+                    required: [app_id, iam_base_url, api_base_url, delivery]
                     properties:
                       app_id: {type: string}
                       iam_base_url: {type: string, format: uri}
                       api_base_url: {type: string, format: uri}
+                      delivery: {$ref: '#/components/schemas/DeliveryDiscovery'}
                       testing_environment_id:
                         type: [string, 'null']
                         format: uuid
@@ -1513,568 +919,18 @@ paths:
         default: {$ref: '#/components/responses/Error'}
   /api/v1/ws:
     get:
-      tags: [Realtime]
-      operationId: openRealtimeConnection
-      summary: Upgrade to the DM WebSocket protocol
-      security:
-        - bearerAuth: []
-      description: 'Authenticate with a bearer token before upgrading. Repeat members for each represented account; org_id and device_id occur once.
-
-        Example: /api/v1/ws?org_id=acme&members=alice%40example.com&device_id=laptop-browser-1.
-
-        Members are the identities represented by the connection, not recipients or group members.
-
-        Use members in connection queries and connection.ready frames, and member_id in member-scoped commands.
-
-        After HTTP 101, send JSON text frames. connection.ready reports protocol_version=5. Durable events carry delivery metadata inside data.metadata
-        for ACK/replay, mirrored at root metadata. Command replies have only type and data at the root.
-
-        Ping every 30 seconds requires ping.success with the same ping_id; 120 seconds without a valid ping.success closes the connection.
-
-        ACK confirms processed deliveries, not message reading. Send receipt for delivered/read. Resume replays after a saved delivery sequence.
-
-        See the WebSocket events catalogue in the local Swagger preview for exact frames in both directions.
-
-
-        Commands use <command>, <command>.success and <command>.error, except message.create returns message.create.successful. A response never needs another success response. channel is only an envelope. connection.ready,
-        connection.prewarmed, subscription.closed and message.created/updated/deleted/delivered/read/failed are unsolicited notifications, not command replies.
-        Only delivery events carrying data.metadata need delivery ACKs.'
-      x-websocket-frame: {$ref: '#/components/schemas/SocketFrame'}
-      parameters:
-        - name: members
-          in: query
-          required: true
-          schema:
-            type: array
-            minItems: 1
-            maxItems: 100
-            uniqueItems: true
-            items: {type: string}
-          style: form
-          explode: true
-          description: Repeat members once per represented IAM account ID; not conversation contacts. All must be authorized by this token. Current IAM
-            integration grants only its authenticated principal; use separate shared subscriptions for independent accounts.
-          examples:
-            one_member:
-              value: [alice@example.com]
-            multiple_members:
-              summary: Repeated query keys; requires a token authorized for every listed member.
-              value: [alice@example.com, 'assistant:acme']
-        - name: org_id
-          in: query
-          required: true
-          schema: {type: string}
-          description: IAM-verified organization context for every represented member
-          example: acme
-        - name: device_id
-          in: query
-          required: true
-          schema: {$ref: '#/components/schemas/DeviceId'}
-          description: Stable client ID for delivery ACK/replay state; must also match receipt.device_id.
-          example: laptop-browser-1
-        - {$ref: '#/components/parameters/TestingKey'}
-        - name: testing_generation
-          in: query
-          schema: {type: integer, minimum: 1}
-          description: Generation persisted from ready.testing_generation. Missing/mismatched testing generation resets server cursor/resume to0; production
-            does not use it.
+      tags: [Delivery]
+      operationId: retiredMemberSocket
+      summary: Retired DM socket endpoint
+      deprecated: true
+      security: []
+      description: Returns 410 delivery_moved_to_ting without upgrading, including for old protocol headers. Enroll through DM delivery registration, receive Ting updates, and recover through DM HTTP sync. This route no longer authenticates socket subscriptions.
       responses:
-        '101': {description: Switching Protocols}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-      x-websocket:
-        clientFrames: {$ref: '#/components/schemas/ClientSocketFrame'}
-        serverFrames: {$ref: '#/components/schemas/ServerSocketFrame'}
-        events:
-          - name: ping.success
-            direction: client → server
-            schema: {$ref: '#/components/schemas/PongFrame'}
-            description: Reply to the most recent application ping.
-            example:
-              type: ping.success
-              data: {ping_id: ping-1}
-          - name: ack
-            direction: client → server
-            schema: {$ref: '#/components/schemas/AckFrame'}
-            description: Cumulative ACK after durably processing every delivery through this sequence; cannot ACK beyond what this connection emitted.
-            example:
-              type: ack
-              data: {member_id: alice@example.com, through_sequence: 42}
-          - name: resume
-            direction: client → server
-            schema: {$ref: '#/components/schemas/ResumeFrame'}
-            description: Replay after the saved member-stream position; zero starts from the beginning. Not a conversation message ID.
-            example:
-              type: resume
-              data: {member_id: alice@example.com, after_sequence: 41}
-          - name: presence
-            direction: client → server
-            schema: {$ref: '#/components/schemas/PresenceFrame'}
-            description: 'activity: typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, or null to clear. No separate presence
-              broadcast frame is currently emitted.'
-            example:
-              type: presence
-              data: {member_id: alice@example.com, activity: typing}
-          - name: receipt
-            direction: client → server
-            schema: {$ref: '#/components/schemas/ReceiptCommandFrame'}
-            description: Send from the recipient’s connection. status is delivered or read; device_id must match that connection. read implies delivery.
-            example:
-              type: receipt
-              data: {member_id: bob@example.com, conversation_id: 'alice@example.com::bob@example.com', message_id: 00a, status: read, device_id: bob-phone-1}
-          - name: message.create
-            direction: client → server
-            schema: {$ref: '#/components/schemas/SendMessageFrame'}
-            description: Message content is directly in data, not nested inside another message object. Reuse idempotency_key for retries.
-            example:
-              type: message.create
-              data:
-                member_id: alice@example.com
-                org_id: acme
-                conversation_id: alice@example.com::bob@example.com
-                idempotency_key: send-alice-bob-001
-                message: Can you review this?
-                attachments: []
-          - name: bundle
-            direction: client → server
-            schema: {$ref: '#/components/schemas/CreateBundleFrame'}
-            description: Create a bundle atomically using the HTTP bundle rules. 1–100 unique existing messages from the same conversation, none already
-              bundled; caller supplies display content. Reuse the idempotency key and identical content after timeout or reconnect. Same key and content
-              returns the same bundle; changed content conflicts. No partial bundle or display message on failure.
-            example:
-              type: bundle
-              data:
-                member_id: assistant:acme
-                org_id: acme
-                conversation_id: g:acme:engineering
-                idempotency_key: bundle-engineering-001
-                message_ids: ['001', '002', '003']
-                display_message:
-                  message: 'Summary: We agreed to ship on Friday.'
-                  attachments: []
-          - name: bundle.success
-            direction: server → client
-            schema: {$ref: '#/components/schemas/BundleCreatedFrame'}
-            description: Durable creation confirmation, also returned for an identical retry. Correlate by member_id, conversation_id and idempotency_key.
-              No delivery ACK for this frame; the display message is delivered separately as message.created with data.metadata.
-            example:
-              type: bundle.success
-              data:
-                id: '001'
-                conversation_id: g:acme:engineering
-                original_message_ids: ['001', '002', '003']
-                display_message:
-                  message-id: '004'
-                  conversation_id: g:acme:engineering
-                  recipient_id: g:acme:engineering
-                  sender: {type: silicon, id: 'assistant:acme'}
-                  message: 'Summary: We agreed to ship on Friday.'
-                  attachments: []
-                  voice_transcript: null
-                  reply: null
-                  bundle: {id: '001', role: display}
-                  created_at: '2026-09-17T10:00:00Z'
-                  updated_at: null
-                  deleted_at: null
-                  delivered_at: null
-                  read_at: null
-                  history: []
-                created_by: {type: silicon, id: 'assistant:acme'}
-                created_at: '2026-09-17T10:00:00Z'
-                member_id: assistant:acme
-                idempotency_key: bundle-engineering-001
-          - name: 'bundle.success: identical retry'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/BundleCreatedFrame'}
-            description: Resend the identical bundle request with the same idempotency_key. Returns the original bundle and display message IDs without
-              creating duplicates.
-            example:
-              type: bundle.success
-              data:
-                id: '001'
-                conversation_id: g:acme:engineering
-                original_message_ids: ['001', '002', '003']
-                display_message:
-                  message-id: '004'
-                  conversation_id: g:acme:engineering
-                  recipient_id: g:acme:engineering
-                  sender: {type: silicon, id: 'assistant:acme'}
-                  message: 'Summary: We agreed to ship on Friday.'
-                  attachments: []
-                  voice_transcript: null
-                  reply: null
-                  bundle: {id: '001', role: display}
-                  created_at: '2026-09-17T10:00:00Z'
-                  updated_at: null
-                  deleted_at: null
-                  delivered_at: null
-                  read_at: null
-                  history: []
-                created_by: {type: silicon, id: 'assistant:acme'}
-                created_at: '2026-09-17T10:00:00Z'
-                member_id: assistant:acme
-                idempotency_key: bundle-engineering-001
-          - name: 'bundle.error: invalid input'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/CommandErrorFrame'}
-            description: Reject invalid content, duplicate IDs, or a count outside 1–100. No partial changes; socket remains open.
-            example:
-              type: bundle.error
-              data:
-                code: invalid_request
-                message: bundle message_ids must be unique
-                recoverable: true
-                member_id: assistant:acme
-                conversation_id: g:acme:engineering
-                idempotency_key: bundle-engineering-001
-          - name: 'bundle.error: forbidden'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/CommandErrorFrame'}
-            description: Reject a Carbon creator, unauthorized member or organization, or missing conversation access. No partial changes; socket remains
-              open.
-            example:
-              type: bundle.error
-              data:
-                code: forbidden
-                message: only a Silicon with conversation access may create bundles
-                recoverable: true
-                member_id: assistant:acme
-                conversation_id: g:acme:engineering
-                idempotency_key: bundle-engineering-001
-          - name: 'bundle.error: conversation missing'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/CommandErrorFrame'}
-            description: The target conversation does not exist; no conversation is created by this command. No partial changes; socket remains open.
-            example:
-              type: bundle.error
-              data: {code: not_found, message: conversation not found, recoverable: true, member_id: 'assistant:acme', conversation_id: 'g:acme:engineering',
-                idempotency_key: bundle-engineering-001}
-          - name: 'bundle.error: messages unavailable'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/CommandErrorFrame'}
-            description: Reject missing messages, messages from another conversation, and messages already in any bundle, including display messages. No
-              partial changes; socket remains open.
-            example:
-              type: bundle.error
-              data:
-                code: conflict
-                message: one or more bundle messages are unavailable or already bundled
-                recoverable: true
-                member_id: assistant:acme
-                conversation_id: g:acme:engineering
-                idempotency_key: bundle-engineering-001
-          - name: 'bundle.error: idempotency conflict'
-            direction: server → client
-            schema: {$ref: '#/components/schemas/CommandErrorFrame'}
-            description: Use a new key for a different operation; retry unchanged content with the original key after a lost confirmation. No partial changes;
-              socket remains open.
-            example:
-              type: bundle.error
-              data:
-                code: conflict
-                message: idempotency key was already used with different request content
-                recoverable: true
-                member_id: assistant:acme
-                conversation_id: g:acme:engineering
-                idempotency_key: bundle-engineering-001
-          - name: connection.ready
-            direction: server → client
-            schema: {$ref: '#/components/schemas/ReadyFrame'}
-            description: Sent after authorization; gives the connection ID, authorized members, and stored delivery cursors. testing_generation is null
-              in production.
-            example:
-              type: connection.ready
-              data:
-                protocol_version: 5
-                testing_generation: null
-                connection_id: 11111111-1111-4111-8111-111111111111
-                members: [alice@example.com]
-                acknowledged_through: {alice@example.com: 41}
-          - name: ping
-            direction: server → client
-            schema: {$ref: '#/components/schemas/PingFrame'}
-            description: Every 30 seconds; return ping.success with exactly the same ping_id.
-            example:
-              type: ping
-              data: {ping_id: ping-1}
-          - name: message.create.successful
-            direction: server → client
-            schema: {$ref: '#/components/schemas/MessageAcceptedFrame'}
-            description: Direct success reply to the initiating message.create command. This reply has no delivery metadata or ACK; every participant separately receives message.created.
-            example:
-              type: message.create.successful
-              data:
-                message-id: 00a
-                conversation_id: alice@example.com::bob@example.com
-                recipient_id: bob@example.com
-                sender: {type: carbon, id: alice@example.com}
-                message: Can you review this?
-                attachments: []
-                voice_transcript: null
-                reply: null
-                bundle: null
-                created_at: '2026-09-17T10:00:00Z'
-                updated_at: null
-                deleted_at: null
-                delivered_at: null
-                read_at: null
-                idempotency_key: send-alice-bob-001
-                history: []
-          - name: receipt.success
-            direction: server → client
-            schema: {$ref: '#/components/schemas/ReceiptRecordedFrame'}
-            description: Confirms a device receipt was stored. This confirmation has no delivery sequence.
-            example:
-              type: receipt.success
-              data: {message_id: 00a, conversation_id: 'alice@example.com::bob@example.com', status: read}
-          - name: message.created
-            direction: server → client
-            schema: {$ref: '#/components/schemas/MessageDeliveryFrame'}
-            description: Full current message snapshot with recipient delivery metadata in data.metadata. ACK this delivery sequence. recipient_id identifies
-              the receiving account, including sender copies; replay can contain a newer snapshot.
-            example:
-              type: message.created
-              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000001, delivery_sequence: 42}
-              data:
-                message-id: 00a
-                conversation_id: alice@example.com::bob@example.com
-                recipient_id: bob@example.com
-                sender: {type: carbon, id: alice@example.com}
-                message: Can you review this?
-                attachments: []
-                voice_transcript: null
-                reply: null
-                bundle: null
-                created_at: '2026-09-17T10:00:00Z'
-                updated_at: null
-                deleted_at: null
-                delivered_at: null
-                read_at: null
-                metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000001, delivery_sequence: 42}
-                history: []
-          - name: message.updated
-            direction: server → client
-            schema: {$ref: '#/components/schemas/MessageDeliveryFrame'}
-            description: Full current message snapshot with recipient delivery metadata in data.metadata. ACK this delivery sequence. recipient_id identifies
-              the receiving account, including sender copies; replay can contain a newer snapshot.
-            example:
-              type: message.updated
-              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000002, delivery_sequence: 43}
-              data:
-                message-id: 00a
-                conversation_id: alice@example.com::bob@example.com
-                recipient_id: bob@example.com
-                sender: {type: carbon, id: alice@example.com}
-                message: Please review the updated design.
-                attachments: []
-                voice_transcript: null
-                reply: null
-                bundle: null
-                created_at: '2026-09-17T10:00:00Z'
-                updated_at: '2026-09-17T10:01:00Z'
-                deleted_at: null
-                delivered_at: null
-                read_at: null
-                metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000002, delivery_sequence: 43}
-                history:
-                  - message: Can you review this?
-                    attachments: []
-                    voice_transcript: null
-                    reply: null
-                    created_at: '2026-09-17T10:00:00Z'
-          - name: message.deleted
-            direction: server → client
-            schema: {$ref: '#/components/schemas/MessageDeliveryFrame'}
-            description: Full current message snapshot with recipient delivery metadata in data.metadata. ACK this delivery sequence. recipient_id identifies
-              the receiving account, including sender copies; replay can contain a newer snapshot.
-            example:
-              type: message.deleted
-              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000003, delivery_sequence: 44}
-              data:
-                message-id: 00a
-                conversation_id: alice@example.com::bob@example.com
-                recipient_id: bob@example.com
-                sender: {type: carbon, id: alice@example.com}
-                message: null
-                attachments: []
-                voice_transcript: null
-                reply: null
-                bundle: null
-                created_at: '2026-09-17T10:00:00Z'
-                updated_at: null
-                deleted_at: '2026-09-17T10:01:00Z'
-                delivered_at: null
-                read_at: null
-                metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000003, delivery_sequence: 44}
-                history: []
-          - name: message.delivered
-            direction: server → client
-            schema: {$ref: '#/components/schemas/ReceiptDeliveryFrame'}
-            description: Full current message snapshot with recipient delivery metadata in data.metadata. ACK this delivery sequence. recipient_id identifies
-              the receiving account, including sender copies; replay can contain a newer snapshot.
-            example:
-              type: message.delivered
-              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000004, delivery_sequence: 45}
-              data:
-                message-id: 00a
-                conversation_id: alice@example.com::bob@example.com
-                recipient_id: bob@example.com
-                sender: {type: carbon, id: alice@example.com}
-                message: Can you review this?
-                attachments: []
-                voice_transcript: null
-                reply: null
-                bundle: null
-                created_at: '2026-09-17T10:00:00Z'
-                updated_at: null
-                deleted_at: null
-                delivered_at: '2026-09-17T10:00:02Z'
-                read_at: null
-                metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000004, delivery_sequence: 45}
-                history: []
-          - name: message.read
-            direction: server → client
-            schema: {$ref: '#/components/schemas/ReceiptDeliveryFrame'}
-            description: Full current message snapshot with recipient delivery metadata in data.metadata. ACK this delivery sequence. recipient_id identifies
-              the receiving account, including sender copies; replay can contain a newer snapshot.
-            example:
-              type: message.read
-              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000005, delivery_sequence: 46}
-              data:
-                message-id: 00a
-                conversation_id: alice@example.com::bob@example.com
-                recipient_id: bob@example.com
-                sender: {type: carbon, id: alice@example.com}
-                message: Can you review this?
-                attachments: []
-                voice_transcript: null
-                reply: null
-                bundle: null
-                created_at: '2026-09-17T10:00:00Z'
-                updated_at: null
-                deleted_at: null
-                delivered_at: '2026-09-17T10:00:02Z'
-                read_at: '2026-09-17T10:01:00Z'
-                metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000005, delivery_sequence: 46}
-                history: []
-          - name: message.failed
-            direction: server → client
-            schema: {$ref: '#/components/schemas/ReceiptDeliveryFrame'}
-            description: Full current message snapshot with recipient delivery metadata in data.metadata. ACK this delivery sequence. recipient_id identifies
-              the receiving account, including sender copies; replay can contain a newer snapshot.
-            example:
-              type: message.failed
-              metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000006, delivery_sequence: 47}
-              data:
-                message-id: 00a
-                conversation_id: alice@example.com::bob@example.com
-                recipient_id: bob@example.com
-                sender: {type: carbon, id: alice@example.com}
-                message: Can you review this?
-                attachments: []
-                voice_transcript: null
-                reply: null
-                bundle: null
-                created_at: '2026-09-17T10:00:00Z'
-                updated_at: null
-                deleted_at: null
-                delivered_at: null
-                read_at: null
-                metadata: {source: dm, delivery_id: 22222222-2222-4222-8222-000000000006, delivery_sequence: 47}
-                history: []
-          - name: connection.error
-            direction: server → client
-            schema: {$ref: '#/components/schemas/SocketErrorFrame'}
-            description: Malformed or unrecognized frame that cannot be assigned to a command. Recognized command failures use that command’s .error type.
-            example:
-              type: connection.error
-              data: {code: invalid_frame, message: client frame is not valid protocol JSON, recoverable: true}
-          - name: ack.success
-            direction: server → client
-            schema: {$ref: '#/components/schemas/AckSuccessFrame'}
-            description: Confirms the durable cumulative ACK. through_sequence is the stored position, which never decreases. Do not ACK this confirmation.
-            example:
-              type: ack.success
-              data: {member_id: alice@example.com, through_sequence: 42}
-          - name: resume.success
-            direction: server → client
-            schema: {$ref: '#/components/schemas/ResumeSuccessFrame'}
-            description: Confirms the replay request was accepted after after_sequence, not that replay has finished. Stored ACK is unchanged; ACK replayed
-              delivery events normally.
-            example:
-              type: resume.success
-              data: {member_id: alice@example.com, after_sequence: 41}
-          - name: presence.success
-            direction: server → client
-            schema: {$ref: '#/components/schemas/PresenceSuccessFrame'}
-            description: Confirms this member activity was stored. No delivery ACK or separate presence broadcast.
-            example:
-              type: presence.success
-              data: {member_id: alice@example.com, activity: typing}
-          - name: message.create.error
-            direction: server → client
-            schema: {$ref: '#/components/schemas/CommandErrorFrame'}
-            description: Rejects this command; echoes its available identifiers. Correct the request before retrying; the socket stays open.
-            example:
-              type: message.create.error
-              data:
-                code: invalid_request
-                message: Can you review this?
-                recoverable: true
-                member_id: alice@example.com
-                conversation_id: alice@example.com::bob@example.com
-                idempotency_key: send-alice-bob-001
-          - name: ack.error
-            direction: server → client
-            schema: {$ref: '#/components/schemas/CommandErrorFrame'}
-            description: Rejects this command; echoes its available identifiers. Correct the request before retrying; the socket stays open.
-            example:
-              type: ack.error
-              data: {code: invalid_request, message: through_sequence exceeds the last emitted sequence, recoverable: true, member_id: alice@example.com,
-                through_sequence: 999}
-          - name: resume.error
-            direction: server → client
-            schema: {$ref: '#/components/schemas/CommandErrorFrame'}
-            description: Rejects this command; echoes its available identifiers. Correct the request before retrying; the socket stays open.
-            example:
-              type: resume.error
-              data: {code: invalid_request, message: after_sequence is outside the available replay range, recoverable: true, member_id: alice@example.com,
-                after_sequence: 999}
-          - name: presence.error
-            direction: server → client
-            schema: {$ref: '#/components/schemas/CommandErrorFrame'}
-            description: Rejects this command; echoes its available identifiers. Correct the request before retrying; the socket stays open.
-            example:
-              type: presence.error
-              data: {code: forbidden, message: member is not authorized on this connection, recoverable: true, member_id: alice@example.com}
-          - name: receipt.error
-            direction: server → client
-            schema: {$ref: '#/components/schemas/CommandErrorFrame'}
-            description: Rejects this command; echoes its available identifiers. Correct the request before retrying; the socket stays open.
-            example:
-              type: receipt.error
-              data:
-                code: forbidden
-                message: device_id does not match this connection
-                recoverable: true
-                member_id: bob@example.com
-                conversation_id: alice@example.com::bob@example.com
-                message_id: 00a
-                device_id: different-device
-          - name: ping.error
-            direction: client → server
-            schema: {$ref: '#/components/schemas/PingErrorFrame'}
-            description: Client cannot complete the heartbeat. Does not count as a successful heartbeat; timeout may still close the connection.
-            example:
-              type: ping.error
-              data: {ping_id: ping-1, code: heartbeat_failed, message: Unable to complete heartbeat., recoverable: false}
-        closeCodes:
-          - {code: 4000, reason: heartbeat-timeout}
-          - {code: 4001, reason: authorization-revoked}
-          - {code: 1013, reason: authorization-unavailable}
-          - {code: 1011, reason: internal-error}
-          - {code: 1009, reason: frame-too-large}
-          - {code: 1000, reason: Normal client closure; client-supplied valid close codes may also be echoed.}
+        '410':
+          description: Delivery moved to Ting; use the returned discovery paths.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeliveryRetirement'}
   /api/v1/conversations/{conversation_id}/messages:
     get:
       tags: [Messages]
@@ -3034,6 +1890,12 @@ components:
       name: X-Testing-Environment-Key
       description: 32-character DM testing root key. Selects an isolated data plane; normal actions still require its IAM user session.
   parameters:
+    TestingGeneration:
+      name: X-Testing-Environment-Generation
+      in: header
+      required: false
+      schema: {type: integer, minimum: 1}
+      description: Required for writes in a Honeycomb testing environment. Obtain from /api/v1/iam; stale generations fail with 409.
     OrgId:
       name: X-Org-ID
       in: header
@@ -3104,6 +1966,71 @@ components:
               type: {type: string, const: error}
               data: {$ref: '#/components/schemas/Error'}
   schemas:
+    DeliveryDiscovery:
+      type: object
+      required: [transport, app_id, api_base_url, browser_origin, receiver_authentication, publisher_authority, registration_path, sync_path, presence_path, receipts_path, dm_websocket_supported]
+      properties:
+        transport: {type: string, const: ting}
+        app_id: {type: string, const: 'tos>ting'}
+        api_base_url: {type: string, format: uri}
+        browser_origin: {type: string, format: uri, const: 'https://ting.teamofsilicons.com'}
+        receiver_authentication: {type: string, const: ting_session}
+        publisher_authority: {type: string, const: originating_dm_session}
+        registration_path: {type: string, const: /api/v1/delivery/registration}
+        sync_path: {type: string, const: /api/v1/sync}
+        presence_path: {type: string, const: '/api/v1/presence/devices/{device_id}'}
+        receipts_path: {type: string, const: '/api/v1/conversations/{conversation_id}/messages/{message_id}/receipts'}
+        dm_websocket_supported: {type: boolean, const: false}
+    DeliveryRetirement:
+      type: object
+      required: [type, data]
+      properties:
+        type: {type: string, const: error}
+        data:
+          type: object
+          required: [error, delivery]
+          properties:
+            error:
+              type: object
+              required: [code, message]
+              properties:
+                code: {type: string, const: delivery_moved_to_ting}
+                message: {type: string}
+            delivery: {$ref: '#/components/schemas/DeliveryDiscovery'}
+    TingSubscription:
+      type: object
+      required: [id, app_id, for, active]
+      properties:
+        id: {type: string, description: Opaque Ting subscription identifier.}
+        app_id: {type: string, example: 'tos>dm'}
+        for: {type: string, description: Authenticated recipient's canonical public ID.}
+        active: {type: boolean, const: true}
+    SyncEvent:
+      type: object
+      required: [event_id, sequence, type, conversation_id, message_id]
+      properties:
+        event_id: {type: string, format: uuid, description: Stable DM event identity; deduplicate independently of Ting IDs.}
+        sequence: {type: integer, format: int64, minimum: 1}
+        type: {type: string, enum: [message, message_status]}
+        conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
+        message_id: {$ref: '#/components/schemas/MessageReference'}
+    SyncPage:
+      type: object
+      required: [events, cursor, has_more, upper_sequence, testing_environment_id, testing_generation]
+      properties:
+        events: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/SyncEvent'}}
+        cursor: {type: string, description: Opaque authenticated cursor; retain it even on an empty page.}
+        has_more: {type: boolean}
+        upper_sequence: {type: integer, format: int64, minimum: 0, description: Fixed upper boundary while paging this scan.}
+        testing_environment_id: {type: [string, 'null'], format: uuid}
+        testing_generation: {type: [integer, 'null'], minimum: 1}
+    PresenceLease:
+      type: object
+      required: [presence, lease_expires_at, activity_expires_at]
+      properties:
+        presence: {$ref: '#/components/schemas/Presence'}
+        lease_expires_at: {type: string, format: date-time}
+        activity_expires_at: {type: [string, 'null'], format: date-time}
     HoneycombOperation:
       type: object
       additionalProperties: false
@@ -3485,259 +2412,6 @@ components:
         last_seen_at:
           type: [string, 'null']
           format: date-time
-    ClientSocketFrame:
-      oneOf:
-        - {$ref: '#/components/schemas/PongFrame'}
-        - {$ref: '#/components/schemas/AckFrame'}
-        - {$ref: '#/components/schemas/ResumeFrame'}
-        - {$ref: '#/components/schemas/PresenceFrame'}
-        - {$ref: '#/components/schemas/ReceiptCommandFrame'}
-        - {$ref: '#/components/schemas/SendMessageFrame'}
-        - {$ref: '#/components/schemas/CreateBundleFrame'}
-        - {$ref: '#/components/schemas/PingErrorFrame'}
-    ServerSocketFrame:
-      oneOf:
-        - {$ref: '#/components/schemas/ReadyFrame'}
-        - {$ref: '#/components/schemas/PingFrame'}
-        - {$ref: '#/components/schemas/MessageAcceptedFrame'}
-        - {$ref: '#/components/schemas/ReceiptRecordedFrame'}
-        - {$ref: '#/components/schemas/MessageDeliveryFrame'}
-        - {$ref: '#/components/schemas/ReceiptDeliveryFrame'}
-        - {$ref: '#/components/schemas/SocketErrorFrame'}
-        - {$ref: '#/components/schemas/BundleCreatedFrame'}
-        - {$ref: '#/components/schemas/CommandErrorFrame'}
-        - {$ref: '#/components/schemas/AckSuccessFrame'}
-        - {$ref: '#/components/schemas/ResumeSuccessFrame'}
-        - {$ref: '#/components/schemas/PresenceSuccessFrame'}
-    SocketFrame:
-      description: Union of client-to-server and server-to-client application frames.
-      oneOf:
-        - {$ref: '#/components/schemas/ClientSocketFrame'}
-        - {$ref: '#/components/schemas/ServerSocketFrame'}
-    PongFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: ping.success}
-        data:
-          type: object
-          required: [ping_id]
-          properties:
-            ping_id: {type: string}
-    AckFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: ack}
-        data:
-          type: object
-          required: [member_id, through_sequence]
-          properties:
-            member_id: {type: string}
-            through_sequence: {type: integer, minimum: 0}
-    ResumeFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: resume}
-        data:
-          type: object
-          required: [member_id, after_sequence]
-          properties:
-            member_id: {type: string}
-            after_sequence: {type: integer, minimum: 0}
-    PresenceFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: presence}
-        data:
-          type: object
-          required: [member_id, activity]
-          properties:
-            member_id: {type: string}
-            activity:
-              type: [string, 'null']
-              enum: [typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, null]
-    ReceiptCommandFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: receipt}
-        data:
-          type: object
-          required: [member_id, conversation_id, message_id, status, device_id]
-          properties:
-            member_id: {type: string}
-            conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
-            message_id: {$ref: '#/components/schemas/MessageReference'}
-            status:
-              type: string
-              enum: [delivered, read]
-            device_id: {$ref: '#/components/schemas/DeviceId'}
-    SendMessageFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: message.create}
-        data:
-          allOf:
-            - type: object
-              required: [member_id, org_id, conversation_id, idempotency_key]
-              properties:
-                member_id: {type: string}
-                org_id: {type: string}
-                conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
-                idempotency_key: {type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]{8,255}$'}
-            - {$ref: '#/components/schemas/MessageCreate'}
-    ReadyFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: connection.ready}
-        data:
-          type: object
-          required: [protocol_version, connection_id, members, acknowledged_through, testing_generation]
-          properties:
-            protocol_version: {const: 5}
-            connection_id: {type: string, format: uuid}
-            members:
-              type: array
-              minItems: 1
-              maxItems: 100
-              uniqueItems: true
-              items: {type: string}
-            acknowledged_through:
-              type: object
-              additionalProperties: {type: integer, minimum: 0}
-            testing_generation:
-              type: [integer, 'null']
-              minimum: 1
-              description: Current testing data generation; null in production. Changed generation requires clearing old local cursors and archived inbox
-                before resume0.
-    PingFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: ping}
-        data:
-          type: object
-          required: [ping_id]
-          properties:
-            ping_id: {type: string}
-    MessageAcceptedFrame:
-      description: Direct success reply to the initiating message.create command, correlated by idempotency_key. No delivery metadata or ACK; every participant separately receives message.created. Failed creates never emit this reply.
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: message.create.successful}
-        data:
-          type: object
-          additionalProperties: false
-          required: [message-id, conversation_id, recipient_id, sender, message, attachments, voice_transcript, reply, bundle, created_at, updated_at, deleted_at,
-            delivered_at, read_at, idempotency_key, history]
-          properties:
-            message-id: {$ref: '#/components/schemas/MessageCode'}
-            conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
-            recipient_id: {type: string, description: 'History: the destination account or group. Callback: the receiving account, including the sender
-                copy.'}
-            sender: {$ref: '#/components/schemas/MemberRef'}
-            message:
-              type: [string, 'null']
-              maxLength: 100000000
-            attachments:
-              type: array
-              maxItems: 100
-              items: {$ref: '#/components/schemas/AttachmentLink'}
-            voice_transcript:
-              type: [string, 'null']
-              maxLength: 100000000
-            reply:
-              anyOf:
-                - {$ref: '#/components/schemas/Reply'}
-                - {type: 'null'}
-            bundle:
-              anyOf:
-                - {$ref: '#/components/schemas/BundleRef'}
-                - {type: 'null'}
-            created_at: {type: string, format: date-time}
-            updated_at:
-              type: [string, 'null']
-              format: date-time
-            deleted_at:
-              type: [string, 'null']
-              format: date-time
-            delivered_at:
-              type: [string, 'null']
-              format: date-time
-            read_at:
-              type: [string, 'null']
-              format: date-time
-            idempotency_key: {type: string}
-            history:
-              type: array
-              items: {$ref: '#/components/schemas/MessageHistoryEntry'}
-              description: Previous content, oldest first. Empty initially; deletion adds no history entry. Deleted responses hide content history.
-          description: Fixed current snapshot. All fields are present. Text is empty for attachment-only sends, null for tombstones. Upsert by conversation_id,
-            message-id and updated_at. Delivery records may hydrate the current edited or deleted snapshot on replay.
-    ReceiptRecordedFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: receipt.success}
-        data:
-          type: object
-          description: Ephemeral confirmation that a device receipt was durably recorded. It does not consume a delivery sequence and is not ACKed.
-          required: [message_id, status, conversation_id]
-          properties:
-            message_id: {$ref: '#/components/schemas/MessageReference'}
-            status:
-              type: string
-              enum: [delivered, read]
-            conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
-    MessageDeliveryFrame:
-      description: Creation notifications use message.created for every participant, including the sender's devices. Durable notifications carry delivery metadata mirrored at metadata and data.metadata and need ACKs after durable processing; command replies do not.
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type:
-          enum: [message.created, message.updated, message.deleted]
-        metadata: {$ref: '#/components/schemas/DeliveryMetadata'}
-        data: {$ref: '#/components/schemas/DeliveryMessage'}
-    ReceiptDeliveryFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type:
-          enum: [message.delivered, message.read, message.failed]
-        metadata: {$ref: '#/components/schemas/DeliveryMetadata'}
-        data: {$ref: '#/components/schemas/DeliveryMessage'}
-    SocketErrorFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: connection.error}
-        data:
-          type: object
-          additionalProperties: false
-          required: [code, message, recoverable]
-          properties:
-            code: {type: string}
-            message: {type: string}
-            recoverable: {type: boolean, description: Whether the socket can remain open; does not promise an unchanged retry will succeed.}
     Error:
       type: object
       required: [error]
@@ -3919,14 +2593,6 @@ components:
                   maxLength: 100000000
             - {type: 'null'}
           description: Server-resolved current reply content, or null after the referenced message is deleted.
-    DeliveryMetadata:
-      type: object
-      additionalProperties: false
-      required: [source, delivery_id, delivery_sequence]
-      properties:
-        source: {const: dm}
-        delivery_id: {type: string, format: uuid}
-        delivery_sequence: {type: integer, minimum: 1, description: Per receiving account transport cursor for ACK and replay; not a message sequence.}
     ConversationSummary:
       type: object
       required: [id, org_id, participants, last_message, last_message_status, created_at, updated_at]
@@ -4063,351 +2729,6 @@ components:
       description: Client-chosen stable device/consumer ID. Reuse on reconnect and receipts; independent client installations should use distinct IDs. Accepts
         1–255 UTF-8 bytes, including spaces and Unicode, but no control characters. Not a hardware ID or credential.
       examples: [laptop-browser-1, phone-app-1, f96100cd-d86e-470b-88eb-4721830e59e1]
-    SubscribeFrame:
-      type: object
-      required: [type, data]
-      properties:
-        type: {type: string, const: subscribe}
-        data:
-          type: object
-          required: [subscription_id, token, organization_id, member_id, device_id]
-          properties:
-            subscription_id: {type: string, minLength: 1, maxLength: 128, description: 'Client-assigned ID, unique among active subscriptions on this socket.'}
-            token: {type: string, writeOnly: true, description: 'Access token for this subscription, sent in the frame rather than the URL.'}
-            organization_id: {type: string}
-            member_id: {type: string, description: Must identify the authenticated account.}
-            device_id: {$ref: '#/components/schemas/DeviceId'}
-            testing_key:
-              type: [string, 'null']
-              description: Optional test app secret or testing key; omit for production.
-            testing_generation:
-              type: [integer, 'null']
-              minimum: 1
-            telemetry_enabled:
-              type: [boolean, 'null']
-              description: Optional telemetry preference; false disables it for this subscription.
-          additionalProperties: false
-      additionalProperties: false
-    UnsubscribeFrame:
-      type: object
-      required: [type, data]
-      properties:
-        type: {type: string, const: unsubscribe}
-        data:
-          type: object
-          required: [subscription_id]
-          properties:
-            subscription_id: {type: string, minLength: 1, maxLength: 128, description: 'Client-assigned ID, unique among active subscriptions on this socket.'}
-          additionalProperties: false
-      additionalProperties: false
-    PrewarmedFrame:
-      type: object
-      required: [type, data]
-      properties:
-        type: {type: string, const: connection.prewarmed}
-        data:
-          type: object
-          required: [protocol_version, max_subscriptions]
-          properties:
-            protocol_version: {type: integer, const: 2}
-            max_subscriptions: {type: integer, const: 64}
-          additionalProperties: false
-      additionalProperties: false
-    SharedClientChannelFrame:
-      type: object
-      required: [type, data]
-      properties:
-        type: {type: string, const: channel}
-        data:
-          type: object
-          required: [subscription_id, frame]
-          properties:
-            subscription_id: {type: string, minLength: 1, maxLength: 128, description: 'Client-assigned ID, unique among active subscriptions on this socket.'}
-            frame: {$ref: '#/components/schemas/ClientSocketFrame'}
-          additionalProperties: false
-      additionalProperties: false
-    SubscriptionErrorFrame:
-      type: object
-      required: [type, data]
-      properties:
-        type:
-          type: string
-          enum: [subscribe.error, subscription.closed]
-        data:
-          type: object
-          required: [code, recoverable]
-          properties:
-            code:
-              type: string
-              enum: [subscription_rejected, subscription_closed]
-            message: {type: string}
-            recoverable: {type: boolean, const: false}
-          additionalProperties: false
-      additionalProperties: false
-      allOf:
-        - if:
-            properties:
-              type: {const: subscribe.error}
-          then:
-            properties:
-              data:
-                properties:
-                  code: {const: subscription_rejected}
-        - if:
-            properties:
-              type: {const: subscription.closed}
-          then:
-            properties:
-              data:
-                properties:
-                  code: {const: subscription_closed}
-    SharedServerChannelFrame:
-      type: object
-      required: [type, data]
-      properties:
-        type: {type: string, const: channel}
-        data:
-          type: object
-          required: [subscription_id, frame]
-          properties:
-            subscription_id: {type: string, minLength: 1, maxLength: 128, description: 'Client-assigned ID, unique among active subscriptions on this socket.'}
-            frame:
-              anyOf:
-                - {$ref: '#/components/schemas/ServerSocketFrame'}
-                - {$ref: '#/components/schemas/SubscriptionErrorFrame'}
-                - {$ref: '#/components/schemas/SubscribeSuccessFrame'}
-          additionalProperties: false
-      additionalProperties: false
-    SharedClientSocketFrame:
-      oneOf:
-        - {$ref: '#/components/schemas/SubscribeFrame'}
-        - {$ref: '#/components/schemas/UnsubscribeFrame'}
-        - {$ref: '#/components/schemas/SharedClientChannelFrame'}
-        - {$ref: '#/components/schemas/PongFrame'}
-        - {$ref: '#/components/schemas/PingErrorFrame'}
-    SharedServerSocketFrame:
-      oneOf:
-        - {$ref: '#/components/schemas/PrewarmedFrame'}
-        - {$ref: '#/components/schemas/SharedServerChannelFrame'}
-        - {$ref: '#/components/schemas/PingFrame'}
-        - {$ref: '#/components/schemas/UnsubscribeSuccessFrame'}
-        - {$ref: '#/components/schemas/UnsubscribeErrorFrame'}
-        - {$ref: '#/components/schemas/SocketErrorFrame'}
-    DeliveryMessage:
-      type: object
-      additionalProperties: false
-      required: [message-id, conversation_id, recipient_id, sender, message, attachments, voice_transcript, reply, bundle, created_at, updated_at, deleted_at,
-        delivered_at, read_at, metadata, history]
-      properties:
-        message-id: {$ref: '#/components/schemas/MessageCode'}
-        conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
-        recipient_id: {type: string, description: 'History: the destination account or group. Callback: the receiving account, including the sender copy.'}
-        sender: {$ref: '#/components/schemas/MemberRef'}
-        message:
-          type: [string, 'null']
-          maxLength: 100000000
-        attachments:
-          type: array
-          maxItems: 100
-          items: {$ref: '#/components/schemas/AttachmentLink'}
-        voice_transcript:
-          type: [string, 'null']
-          maxLength: 100000000
-        reply:
-          anyOf:
-            - {$ref: '#/components/schemas/Reply'}
-            - {type: 'null'}
-        bundle:
-          anyOf:
-            - {$ref: '#/components/schemas/BundleRef'}
-            - {type: 'null'}
-        created_at: {type: string, format: date-time}
-        updated_at:
-          type: [string, 'null']
-          format: date-time
-        deleted_at:
-          type: [string, 'null']
-          format: date-time
-        delivered_at:
-          type: [string, 'null']
-          format: date-time
-        read_at:
-          type: [string, 'null']
-          format: date-time
-        metadata: {$ref: '#/components/schemas/DeliveryMetadata'}
-        history:
-          type: array
-          items: {$ref: '#/components/schemas/MessageHistoryEntry'}
-          description: Previous content, oldest first. Empty initially; deletion adds no history entry. Deleted responses hide content history.
-      description: Message snapshot with delivery metadata for WebSocket ACK/replay.
-    CreateBundleFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: bundle}
-        data:
-          allOf:
-            - type: object
-              required: [member_id, org_id, conversation_id, idempotency_key]
-              properties:
-                member_id: {type: string, description: 'Authorized Silicon creating the bundle; must have access to the conversation. On a shared socket,
-                    must match the subscription member.'}
-                org_id: {type: string, description: Must match the authorized connection or subscription organization.}
-                conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
-                idempotency_key: {type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]{8,255}$'}
-            - {$ref: '#/components/schemas/BundleCreate'}
-      description: Create a bundle atomically using the HTTP bundle rules. 1–100 unique existing messages from the same conversation, none already bundled;
-        caller supplies display content. Reuse the idempotency key and identical content after timeout or reconnect. Same key and content returns the same
-        bundle; changed content conflicts. No partial bundle or display message on failure.
-    BundleCreatedFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: bundle.success}
-        data:
-          allOf:
-            - {$ref: '#/components/schemas/Bundle'}
-            - type: object
-              required: [member_id, idempotency_key]
-              properties:
-                member_id: {type: string, description: 'Authorized Silicon creating the bundle; must have access to the conversation. On a shared socket,
-                    must match the subscription member.'}
-                idempotency_key: {type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]{8,255}$'}
-      description: Durable creation confirmation, also returned for an identical retry. Correlate by member_id, conversation_id and idempotency_key. No
-        delivery ACK for this frame; the display message is delivered separately as message.created with data.metadata.
-    CommandErrorFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type:
-          type: string
-          enum: [message.create.error, bundle.error, ack.error, resume.error, presence.error, receipt.error]
-        data:
-          type: object
-          additionalProperties: false
-          required: [code, message, recoverable]
-          properties:
-            code: {type: string}
-            message: {type: string}
-            recoverable: {type: boolean, description: Whether the socket can remain open; does not promise an unchanged retry will succeed.}
-            member_id: {type: string, description: 'Member from the request, when parseable.'}
-            conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
-            idempotency_key: {type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]{8,255}$'}
-            message_id: {$ref: '#/components/schemas/MessageReference'}
-            device_id: {$ref: '#/components/schemas/DeviceId'}
-            through_sequence: {type: integer, minimum: 0}
-            after_sequence: {type: integer, minimum: 0}
-      description: Failure of the command named by type. Echo available request identifiers in data for correlation; omit invalid or unparseable identifiers.
-        message.create.error and bundle.error echo idempotency_key when valid. Error and success frames are not delivery events and must not be ACKed.
-    SubscribeSuccessFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: subscribe.success}
-        data:
-          type: object
-          required: [protocol_version, connection_id, members, acknowledged_through, testing_generation]
-          properties:
-            protocol_version: {const: 5}
-            connection_id: {type: string, format: uuid}
-            members:
-              type: array
-              minItems: 1
-              maxItems: 100
-              uniqueItems: true
-              items: {type: string}
-            acknowledged_through:
-              type: object
-              additionalProperties: {type: integer, minimum: 0}
-            testing_generation:
-              type: [integer, 'null']
-              minimum: 1
-              description: Current testing data generation; null in production. Changed generation requires clearing old local cursors and archived inbox
-                before resume0.
-    AckSuccessFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: ack.success}
-        data:
-          type: object
-          required: [member_id, through_sequence]
-          properties:
-            member_id: {type: string}
-            through_sequence: {type: integer, minimum: 0}
-    ResumeSuccessFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: resume.success}
-        data:
-          type: object
-          required: [member_id, after_sequence]
-          properties:
-            member_id: {type: string}
-            after_sequence: {type: integer, minimum: 0}
-    PresenceSuccessFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: presence.success}
-        data:
-          type: object
-          required: [member_id, activity]
-          properties:
-            member_id: {type: string}
-            activity:
-              type: [string, 'null']
-              enum: [typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, null]
-    PingErrorFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: ping.error}
-        data:
-          type: object
-          additionalProperties: false
-          required: [ping_id, code, message, recoverable]
-          properties:
-            ping_id: {type: string}
-            code: {type: string}
-            message: {type: string}
-            recoverable: {type: boolean, description: Whether the socket can remain open; does not promise an unchanged retry will succeed.}
-    UnsubscribeSuccessFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: unsubscribe.success}
-        data:
-          type: object
-          required: [subscription_id]
-          properties:
-            subscription_id: {type: string, minLength: 1, maxLength: 128, description: 'Client-assigned ID, unique among active subscriptions on this socket.'}
-          additionalProperties: false
-    UnsubscribeErrorFrame:
-      type: object
-      additionalProperties: false
-      required: [type, data]
-      properties:
-        type: {type: string, const: unsubscribe.error}
-        data:
-          type: object
-          additionalProperties: false
-          required: [code, message, recoverable]
-          properties:
-            subscription_id: {type: string}
-            code: {type: string}
-            message: {type: string}
-            recoverable: {type: boolean, description: Whether the socket can remain open; does not promise an unchanged retry will succeed.}
     MessageHistoryEntry:
       type: object
       additionalProperties: false

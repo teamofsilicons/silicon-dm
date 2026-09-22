@@ -205,7 +205,7 @@ X-Org-Id: <test-organization-id>
 
 For test login, send the root header and `{"type":"login","data":{"slt":"..."}}` to `/auth/login`;
 no access token exists yet. Keep using the root header for refresh, logout,
-REST operations, and the WebSocket upgrade at `/api/v1/ws`. Unknown, malformed,
+HTTP operations. Former DM socket routes return HTTP 410 `delivery_moved_to_ting`. Unknown, malformed,
 rotated, or deleted keys return 401. Repeated root headers return 422. The API
 never tries production after a test key fails validation.
 
@@ -218,11 +218,11 @@ the root-key header, and malformed or repeated values return 422. Lifecycle
 control routes do not apply this generation check, so exact retries of a clean
 still return their original result.
 
-The WebSocket upgrade accepts `testing_generation` in its query string and
-the ready frame returns the current `testing_generation`. Missing or stale
-generations reset the requested resume cursor to zero. Persist the returned
-generation alongside the cursor; after a change, reset cached data and review
-old pending writes before explicitly resubmitting them.
+Discover the current generation through `/api/v1/iam` and bind HTTP sync,
+hydration and queued writes to it. A changed generation invalidates old cursors
+and cached data; review old pending writes before explicitly resubmitting them.
+Ting owns incoming delivery and requires its own verified session in the matching
+IAM environment and generation. See [consumer migration](client/realtime.md).
 
 To clean using root authority only, send the root header and an idempotency
 key to the matching lifecycle URL. No bearer or organization header is needed
@@ -327,9 +327,9 @@ migrations are installed transactionally and their checksums tracked per
 sandbox. The production migration journal remains in
 `public._sqlx_migrations` so it is stable across data-plane selection.
 
-Requests and WebSocket operations hold shared database lifecycle locks;
-clean/rotate/delete/restore/purge take the exclusive lock. Per-environment hubs,
-pools, workers, IAM clients, and lifecycle generations isolate delivery,
-authorization invalidation, and reconnection. Internal migration versions,
+HTTP requests and Ting publisher attempts hold shared database lifecycle locks;
+clean/rotate/delete/restore/purge take the exclusive lock. Per-environment pools,
+workers, IAM clients and lifecycle generations isolate delivery and authorization.
+Ting owns receiver connections and their lifecycle validation. Internal migration versions,
 authorization generations, and clean receipts survive clean as infrastructure
 metadata; all message/conversation/draft/receipt/presence/GIF state is removed.

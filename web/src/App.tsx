@@ -51,6 +51,9 @@ import {
   removeOutbox,
 } from "./storage";
 import { connectRealtime } from "./realtime";
+import type { TingStatus } from "./ting";
+import { registerDelivery } from "./delivery";
+import { wireMessageId } from "./wire.ts";
 import { GroupForm, GroupInfo } from "./Groups";
 import Composer from "./Composer";
 import { MessageView } from "./MessageView";
@@ -350,6 +353,10 @@ function Workspace(props: {
     [error, setError] = createSignal<unknown>(),
     [notice, setNotice] = createSignal(""),
     [connection, setConnection] = createSignal<RealtimeState>("connecting"),
+    [tingStatus, setTingStatus] = createSignal<TingStatus>(),
+    [deliveryBusy, setDeliveryBusy] = createSignal(false),
+    [deliveryEnabled, setDeliveryEnabled] = createSignal(false),
+    [deliveryUncertain, setDeliveryUncertain] = createSignal(false),
     [outbox, setOutbox] = createSignal<OutboxEntry[]>([]),
     [compose, setCompose] = createSignal<MessageCreate>(emptyContent()),
     [draft, setDraft] = createSignal<Draft>(),
@@ -402,7 +409,7 @@ function Workspace(props: {
   const conversationPath = (id: string) =>
     `/conversations/${encodeURIComponent(id)}`;
   const messagePath = (conversation: string, id: string) =>
-    `${conversationPath(conversation)}/messages/${encodeURIComponent(id)}`;
+    `${conversationPath(conversation)}/messages/${encodeURIComponent(wireMessageId(id))}`;
   const dm = {
     conversations: (cursor?: string | null) =>
       request<Page<Conversation>>(
@@ -1022,6 +1029,33 @@ function Workspace(props: {
           ),
         );
       },
+      onTing: (value) => {
+        if (alive) setTingStatus(value);
+      },
+      onSnapshot: () => {
+        if (!alive) return;
+        messageRequest++;
+        conversationRequest++;
+        viewRevision++;
+        setMessages([]);
+        setConversations([]);
+        setReference();
+        setBundle();
+        setSelection();
+      },
+      onInaccessible: (id) => {
+        if (!alive) return;
+        setMessages((items) => items.filter((message) => message.id !== id));
+        if (reference()?.id === id) setReference();
+        setBundle();
+        setConversations((items) =>
+          items.map((conversation) =>
+            conversation.last_message?.id === id
+              ? { ...conversation, last_message: null }
+              : conversation,
+          ),
+        );
+      },
       onState: (state) => {
         if (alive) setConnection(state);
       },
@@ -1038,6 +1072,8 @@ function Workspace(props: {
       },
       onReset: () => {
         if (!alive) return;
+        setDeliveryEnabled(false);
+        setTingStatus(undefined);
         viewRevision++;
         environmentRevision++;
         conversationRequest++;
@@ -1114,6 +1150,27 @@ function Workspace(props: {
       window.removeEventListener("beforeunload", beforeUnload);
     });
   });
+  async function enableDelivery(startNew = false) {
+    if (deliveryBusy()) return;
+    setDeliveryBusy(true);
+    try {
+      await registerDelivery(workspaceSession, startNew);
+      if (alive) {
+        setDeliveryEnabled(true);
+        setDeliveryUncertain(false);
+        setNotice(
+          "DM delivery permission registered. Sign in to Ting with this account to receive hints.",
+        );
+      }
+    } catch (error) {
+      if (alive) {
+        setError(error);
+        setDeliveryUncertain(true);
+      }
+    } finally {
+      if (alive) setDeliveryBusy(false);
+    }
+  }
   function changeContent(value: MessageCreate) {
     replaceComposition(value);
     connectionApi?.presence("typing");
@@ -1496,7 +1553,7 @@ function Workspace(props: {
           <div class={`connection connection-${connection()}`} role="status">
             <span class="status-dot" />
             {connection() === "connected"
-              ? "Connected"
+              ? "History synced"
               : connection() === "unauthorized"
                 ? "Sign-in required"
                 : connection().replace(/^./, (s) => s.toUpperCase())}
@@ -1507,6 +1564,61 @@ function Workspace(props: {
             </Show>
           </div>
         </header>
+        <div class="delivery-status" role="status">
+          <span>
+            {tingStatus()?.message ||
+              "Loading message history and checking Ting delivery…"}
+          </span>
+          <button
+            class="text-button"
+            disabled={
+              deliveryBusy() ||
+              deliveryEnabled() ||
+              connection() !== "connected"
+            }
+            onClick={() => void enableDelivery()}
+          >
+            {deliveryBusy()
+              ? "Enabling delivery…"
+              : deliveryEnabled()
+                ? "Delivery permission enabled"
+                : "Enable delivery"}
+          </button>
+          <Show when={deliveryUncertain()}>
+            <span>
+              The previous registration may have reached Ting. Retry keeps its
+              key. Starting another registration may re-enable a grant you
+              revoked.
+            </span>
+            <button
+              class="text-button"
+              disabled={deliveryBusy() || connection() !== "connected"}
+              onClick={() => void enableDelivery(true)}
+            >
+              Start new registration
+            </button>
+          </Show>
+          <Show when={tingStatus()}>
+            {(status) => (
+              <>
+                <a
+                  class="text-button"
+                  href={status().origin}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Sign in to Ting
+                </a>
+                <button
+                  class="text-button"
+                  onClick={() => connectionApi?.reconnect()}
+                >
+                  Reconnect Ting
+                </button>
+              </>
+            )}
+          </Show>
+        </div>
         <Show when={props.session.testing_environment_id}>
           <div class="testing-banner" role="status">
             <Icon name="flask" />

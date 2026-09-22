@@ -28,7 +28,6 @@ use crate::{
     config::{DatabaseSettings, TestingSettings},
     infrastructure::{iam::IamClient, postgres::PostgresStore},
     realtime::RealtimeHub,
-    worker::DeliveryWorker,
 };
 
 /// Public environment metadata. Secret values are returned only by explicit key operations.
@@ -383,12 +382,13 @@ impl TestingRegistry {
             let identity = Arc::new(identity.with_directory(store.clone()));
             let realtime = RealtimeHub::default();
             let cancellation = CancellationToken::new();
-            let worker = DeliveryWorker::new(
-                store.clone(),
-                realtime.clone(),
-                parent.instance_id.clone(),
-                parent.settings.worker.clone(),
-            );
+            let mut selected = parent.clone();
+            selected.store = store.clone();
+            selected.identity = identity.clone();
+            selected.realtime = realtime.clone();
+            selected.testing_environment = Some(environment.environment_id);
+            selected.testing_generation = Some(environment.version);
+            let worker = crate::bootstrap::build_ting_worker(&selected, cancellation.clone())?;
             let worker_cancel = cancellation.clone();
             tokio::spawn(async move {
                 if let Err(error) = worker.run(worker_cancel).await {

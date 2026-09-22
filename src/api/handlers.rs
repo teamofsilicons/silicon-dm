@@ -1,23 +1,12 @@
-//! Contracted HTTP and WebSocket-upgrade request handlers.
+//! Contracted HTTP request handlers.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    str::FromStr as _,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
-use axum::{
-    Json,
-    extract::{RawQuery, State, WebSocketUpgrade},
-    http::{HeaderMap, StatusCode},
-    response::Response,
-};
+use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
-use url::form_urlencoded;
 use uuid::Uuid;
 
-use super::extract::{
-    ApiJson, ApiPath, ApiQuery, Authenticated, Idempotency, IfMatch, realtime_bearer,
-};
+use super::extract::{ApiJson, ApiPath, ApiQuery, Authenticated, Idempotency, IfMatch};
 use crate::{
     AppError, AppResult,
     application::{
@@ -27,68 +16,14 @@ use crate::{
             RecordReceiptCommand, SendMessageCommand,
         },
         messaging::{prepare_message_content, validate_device_id},
-        ports::AuthenticationRequest,
         state::AppState,
     },
     domain::{
         ActorId, ActorRef, ActorType, Bundle, BundleCreate, BundleDetail, Conversation,
         ConversationPage, Draft, DraftInput, GifPage, MAX_CONVERSATION_PARTICIPANTS, Message,
-        MessageCreate, MessagePage, OrganizationId, PageRequest, Presence, ReceiptStatus,
+        MessageCreate, MessagePage, PageRequest, Presence, ReceiptStatus,
     },
-    realtime::serve_socket,
 };
-
-/// Authenticates and upgrades a durable realtime client connection.
-pub(super) async fn open_realtime_connection(
-    State(mut state): State<AppState>,
-    headers: HeaderMap,
-    RawQuery(raw_query): RawQuery,
-    upgrade: WebSocketUpgrade,
-) -> AppResult<Response> {
-    if headers.get("x-dm-telemetry").is_some_and(|v| v == "off") {
-        std::sync::Arc::make_mut(&mut state.settings)
-            .telemetry
-            .enabled = false;
-    }
-    let query = parse_realtime_query(raw_query.as_deref())?;
-    let token = realtime_bearer(&headers)?;
-    let authority = state
-        .identity
-        .authenticate(AuthenticationRequest::Bearer {
-            token: &token,
-            organization_id: &query.organization_id,
-        })
-        .await?;
-    if authority.organization_id != query.organization_id {
-        return Err(AppError::Forbidden);
-    }
-    if query
-        .actor_ids
-        .iter()
-        .any(|actor_id| !authority.may_represent(actor_id))
-    {
-        return Err(AppError::Forbidden);
-    }
-    let actors = state
-        .identity
-        .authorize_participants(&authority, &query.actor_ids)
-        .await?;
-    let actors = verify_resolved_actors(&query.actor_ids, actors)?;
-    let max_message_size = state.settings.server.max_body_bytes;
-    Ok(upgrade
-        .max_message_size(max_message_size)
-        .max_frame_size(max_message_size)
-        .on_upgrade(move |socket| {
-            serve_socket(
-                socket,
-                state,
-                authority,
-                actors,
-                query.device_id,
-                query.testing_generation,
-            )
-        }))
-}
 
 /// Lists conversations visible to the IAM-authenticated actor.
 pub(super) async fn list_conversations(
@@ -264,13 +199,16 @@ pub(super) async fn send_message(
     let content = prepare_message_content(&state, content)?;
     let message = state
         .store
-        .send_message(SendMessageCommand {
-            organization_id: authority.organization_id,
-            conversation_id: path.conversation_id,
-            sender,
-            content,
-            idempotency_key,
-        })
+        .send_message_as(
+            SendMessageCommand {
+                organization_id: authority.organization_id,
+                conversation_id: path.conversation_id,
+                sender,
+                content,
+                idempotency_key,
+            },
+            &authority.actor,
+        )
         .await?;
     Ok((StatusCode::ACCEPTED, Json(message)))
 }
@@ -511,14 +449,6 @@ pub(super) async fn readiness(State(state): State<AppState>) -> StatusCode {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct RealtimeConnectQuery {
-    organization_id: OrganizationId,
-    actor_ids: Vec<ActorId>,
-    device_id: String,
-    testing_generation: Option<i64>,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateConversationRequest {
@@ -565,98 +495,6 @@ pub(super) struct ReceiptRequest {
 #[derive(Debug, Deserialize)]
 pub(super) struct GifSearchQuery {
     q: String,
-}
-
-fn parse_realtime_query(raw_query: Option<&str>) -> AppResult<RealtimeConnectQuery> {
-    let raw_query = raw_query
-        .filter(|query| !query.is_empty())
-        .ok_or_else(|| AppError::validation("realtime connection query is required"))?;
-    let mut organization_id = None;
-    let mut actor_ids = Vec::new();
-    let mut device_id = None;
-    let mut testing_generation = None;
-
-    for (name, value) in form_urlencoded::parse(raw_query.as_bytes()) {
-        if name.contains('\u{fffd}') || value.contains('\u{fffd}') {
-            return Err(AppError::validation(
-                "realtime query contains invalid UTF-8",
-            ));
-        }
-        match name.as_ref() {
-            "org_id" => {
-                if organization_id.is_some() {
-                    return Err(AppError::validation("org_id must be supplied exactly once"));
-                }
-                organization_id = Some(
-                    OrganizationId::from_str(&value)
-                        .map_err(|_| AppError::validation("org_id is invalid"))?,
-                );
-            }
-            "members" => {
-                if actor_ids.len() == 100 {
-                    return Err(AppError::validation(
-                        "members must contain between 1 and 100 unique actor IDs",
-                    ));
-                }
-                actor_ids.push(
-                    ActorId::from_str(&value).map_err(|_| {
-                        AppError::validation("members contains an invalid actor ID")
-                    })?,
-                );
-            }
-            "device_id" => {
-                if device_id.is_some() {
-                    return Err(AppError::validation(
-                        "device_id must be supplied exactly once",
-                    ));
-                }
-                device_id = Some(value.into_owned());
-            }
-            "testing_generation" => {
-                if testing_generation.is_some() {
-                    return Err(AppError::validation(
-                        "testing_generation must occur at most once",
-                    ));
-                }
-                let generation = value.parse::<i64>().map_err(|_| {
-                    AppError::validation("testing_generation must be a positive integer")
-                })?;
-                if generation < 1 {
-                    return Err(AppError::validation(
-                        "testing_generation must be a positive integer",
-                    ));
-                }
-                testing_generation = Some(generation);
-            }
-            _ => {
-                return Err(AppError::validation(
-                    "realtime query contains an unknown parameter",
-                ));
-            }
-        }
-    }
-
-    if actor_ids.is_empty() {
-        return Err(AppError::validation(
-            "members must contain between 1 and 100 unique actor IDs",
-        ));
-    }
-    let unique_actors = actor_ids.iter().collect::<BTreeSet<_>>();
-    if unique_actors.len() != actor_ids.len() {
-        return Err(AppError::validation(
-            "members must contain unique actor IDs",
-        ));
-    }
-    let device_id =
-        device_id.ok_or_else(|| AppError::validation("device_id must be supplied exactly once"))?;
-    validate_device_id(&device_id)?;
-    Ok(RealtimeConnectQuery {
-        organization_id: organization_id
-            .ok_or_else(|| AppError::validation("org_id must be supplied exactly once"))?,
-        actor_ids,
-        device_id,
-        testing_generation,
-    })
 }
 
 async fn resolve_sender(
@@ -764,13 +602,16 @@ pub(super) async fn send_to_recipient(
     let content = prepare_message_content(&state, content)?;
     let message = state
         .store
-        .send_message(SendMessageCommand {
-            organization_id: authority.organization_id,
-            conversation_id,
-            sender,
-            content,
-            idempotency_key,
-        })
+        .send_message_as(
+            SendMessageCommand {
+                organization_id: authority.organization_id,
+                conversation_id,
+                sender,
+                content,
+                idempotency_key,
+            },
+            &authority.actor,
+        )
         .await?;
     Ok((StatusCode::ACCEPTED, Json(message)))
 }
@@ -779,7 +620,7 @@ pub(super) async fn send_to_recipient(
 mod tests {
     use std::str::FromStr as _;
 
-    use super::{parse_realtime_query, validate_gif_query, verify_resolved_actors};
+    use super::{validate_gif_query, verify_resolved_actors};
     use crate::domain::{ActorId, ActorRef, ActorType};
 
     #[test]
@@ -821,63 +662,5 @@ mod tests {
     fn gif_query_bounds_reject_control_characters() {
         assert!(validate_gif_query("celebration").is_ok());
         assert!(validate_gif_query("\n").is_err());
-    }
-
-    #[test]
-    fn realtime_query_accepts_repeated_unique_actor_parameters()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let query = parse_realtime_query(Some(
-            "org_id=org-1&members=carbon-1&members=silicon-1&device_id=device-1",
-        ))?;
-        assert_eq!(query.organization_id.as_str(), "org-1");
-        assert_eq!(query.actor_ids.len(), 2);
-        assert_eq!(query.device_id, "device-1");
-        Ok(())
-    }
-
-    #[test]
-    fn realtime_query_rejects_duplicate_and_excess_actor_parameters() {
-        assert!(
-            parse_realtime_query(Some(
-                "org_id=org-1&members=carbon-1&members=carbon-1&device_id=device-1"
-            ))
-            .is_err()
-        );
-
-        let actors = (0..101)
-            .map(|index| format!("members=actor-{index}"))
-            .collect::<Vec<_>>()
-            .join("&");
-        let query = format!("org_id=org-1&{actors}&device_id=device-1");
-        assert!(parse_realtime_query(Some(&query)).is_err());
-    }
-
-    #[test]
-    fn realtime_query_accepts_exactly_one_hundred_actors() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let actors = (0..100)
-            .map(|index| format!("members=actor-{index}"))
-            .collect::<Vec<_>>()
-            .join("&");
-        let query = format!("org_id=org-1&{actors}&device_id=device-1");
-        assert_eq!(parse_realtime_query(Some(&query))?.actor_ids.len(), 100);
-        Ok(())
-    }
-
-    #[test]
-    fn realtime_query_requires_single_valid_context_fields() {
-        for query in [
-            "members=carbon-1&device_id=device-1",
-            "org_id=org-1&org_id=org-2&members=carbon-1&device_id=device-1",
-            "org_id=org-1&members=carbon-1",
-            "org_id=org-1&members=carbon-1&device_id=one&device_id=two",
-            "org_id=org-1&members=carbon-1&device_id=%0A",
-            "org_id=org-1&members=carbon-1&device_id=device-1&unknown=value",
-        ] {
-            assert!(
-                parse_realtime_query(Some(query)).is_err(),
-                "accepted {query}"
-            );
-        }
     }
 }

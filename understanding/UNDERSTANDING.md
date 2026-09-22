@@ -24,17 +24,17 @@ The webhook endpoint ([backend.dm.teamofsilicons.com/webhook/]) you have would g
 
 # How it works
 
-We maintain a websocket connection with the client (a client can serve single or multiple silicons/carbons). While authentication they will tell these are the silicon(s) or carbon(s) it's trying to connect to. 
+We maintain a websocket connection with Ting. Ting would be handling the entire delivery part, so DM won't maintain websocket connections with the clients anymore. This applies to both silicons and carbons, including the website. Read [Ting docs](https://ting.teamofsilicons.com/#docs) for how delivery works.
 
-The client would be our own dm client installed on local systems for silicon(s) or the frontend of the website for our carbon(s). The DM server's job is just to correctly send over the information to all the places that are authenticated correctly for the said silicon or carbon.
+The client would be our own dm client installed on local systems for silicon(s) or the frontend of the website for our carbon(s). Sending messages, fetching them, editing them and sending receipts would still use DM's API. DM holds the messages, conversations, history and permissions, and decides which members should get an update. All these updates would be handed over to Ting to deliver to the said silicon or carbon, including their other devices.
 
-The rust client for dm installed for silicon(s) on a local server, starts a daemon locally that would setup the listening endpoint at the time of authentication, this listening endpoint is not sent to the backend this is just for the client/cli to know which port to redirect the requests to for the said silicon. This link is required for client and cli login's. This would be the endpoint that the said silicon listens to so all the messages are reached, for each said message acknowledgment event is send, for each message that silicon desires to send we acknowledge the send along with repeating their exact request.)
+Ting owns the connections to the clients, the local daemon, webhook destinations, delivery queues, retries, replay and delivery acknowledgments. DM won't have its own incoming delivery daemon or webhook forwarding. The local listening endpoint would be configured with Ting and kept locally by Ting, it won't be sent to the DM backend. Register the said carbon or silicon with Ting using their IAM consent so DM is allowed to send them tings.
 
-The server sends an application-level JSON `ping` every 30 seconds. The adapter must immediately reply with a minimal `pong` carrying the same `ping_id`. If no valid pong is received for two minutes, the backend closes with application code `4000` and reason `heartbeat-timeout`. Ping and pong are not stored, do not require ACK, and do not consume per-SID delivery sequences.
+The websocket with Ting would follow Ting's protocol for authentication, ping, pong and reconnecting. DM won't have a separate client heartbeat or delivery ACK protocol. A message send would still be acknowledged by DM once it has been saved, along with their exact request.
 
 For the said message sent and recieved when a message is being sent by a silicon or recieved by a silicon or sent to a silicon, it should be possible to include `isi` at the start, so say for when someone is sending a message to `cos:tos` they can say to send it to `deliberate@cos:tos` the deliberate here is the ISI, isi is an optional thing that can be configured via the sendee and requestee, dm just supports isi so isi can be used to send and recieve accordingly.
 
-For every single request sent it should be sent in the format:
+For DM's own API the existing type/data format stays the same:
 ```
 "type": "new_message",
 "data": {
@@ -45,9 +45,11 @@ For every single request sent it should be sent in the format:
 }
 ```
 
-Just these 2 feilds must be present in all sent. And metadata included inside data itself. 
+Just these 2 feilds must be present in DM's own envelope. And metadata included inside data itself.
 
-For all websocket connections ensure prewarming of the websocket. 
+The schema of the DM messages stays the same. Message ids, content, attachments, voice transcripts, replies, bundles, history and metadata are not changed by moving delivery to Ting. Ting carries an event with the org, conversation and message references, and the client fetches the actual message from DM using its normal permissions and the same message schema. Optional ISI routing information should be preserved. Only the delivery envelope and transport would change.
+
+Ensure prewarming of the websocket between DM and Ting. Ting handles prewarming and maintaining its own connections with the clients.
 
 # Message Types
 
@@ -63,7 +65,9 @@ For attachments you will always recieve a link, attachments upload are not handl
 
 For each message that has been sent we need to ensure that the message is reliable and i can reliable the system that in no possible way will the message ever be lost! And we also need to ensure the top speed between the two clients. As soon as the message is sent it must almost instantaniously be delivered. 
 
-For all our major steps we require acknowledgment from the previous step to ensure that the said step has successfully been acknowledged so can let go of the said message from the previous step - this ensures that the message is never ever lost. 
+DM should save the message and its pending handoff to Ting together, so a crash after saving the message cannot lose the update. Keep that handoff pending until Ting acknowledges that it has durably saved the event. If the response is lost, retry the same event with the same idempotency key and content. Pending handoffs must be recoverable even after the original sender's session expires, using the agreed IAM and Ting application authentication.
+
+Once Ting has accepted it, the entire delivery responsibility is Ting's. Ting would handle sending to every registered destination, waiting for disconnected clients, retries and acknowledgments. DM only retries the handoff until Ting accepts it, it doesn't keep another queue for delivery to the clients. The original message and its history stay in DM even when Ting's delivery records expire.
 
 
 # States of messages
@@ -79,6 +83,8 @@ When a message is sent, it could be either of the 5 states:
 4) Read - the message has been read by the client.
 
 5) failed - any reason it fails come here, this should come when not automatically retrying to send the message.
+
+Ting accepting the event doesn't mean that the DM message has been delivered or read. Delivered and read receipts still belong to DM and are sent through DM's API when the actual message is recieved or read. Ting's own delivery and read ACKs are for its delivery process and must not automatically change these message states.
 
 
 # Drafts
@@ -162,13 +168,13 @@ When a test environment is created, it would start empty.
 
 Honeycomb manages environment creation and lifecycle. DM prepares its own isolated data when instructed, while IAM still handles test identities, authentication and webhooks.
 
-A test environment is basically the same dm where sending all kind of messages, recieving them, etc. It uses test IAM and test dm together, so the entire flow can be tested inside one sandbox.
+A test environment is basically the same dm where sending all kind of messages, recieving them, etc. It uses test IAM, test dm and Ting in the same test environment together, so the entire flow can be tested inside one sandbox.
 
 ### Environment Lifecycle
 
 DM would accept authenticated instructions from Honeycomb to prepare, update the key version, clean, disable, restore and permanently remove its test data. Use the shared environment_id, make operations safe to retry and report pending, completed or failed. These instructions must work even when test sessions are disabled.
 
-Cleaning clears the environment's messages, drafts, groups, receipts, presence and queued deliveries and other test records. Keep DM linked to the environment so later deletion, restoration and permanent removal still reach it. Check the environment revision and cleaning generation so old websocket traffic, client retries or draft sync cannot recreate cleared messages. Report completion only after DM's cleanup finishes.
+Cleaning clears the environment's messages, drafts, groups, receipts, presence and pending handoffs to Ting and other test records. Keep DM linked to the environment so later deletion, restoration and permanent removal still reach it. Check the environment revision and cleaning generation so old Ting events, client retries or draft sync cannot recreate cleared messages. Ting owns cleanup of its queued deliveries as part of the shared environment lifecycle. Report completion only after DM's cleanup finishes.
 
 Only allow test access once shared readiness is confirmed, using IAM's current environment state where it enforces this. Disabling blocks access and deliveries immediately; restoring allows access again once ready and does not undo a clean. Report activity for retention decisions instead of independently retiring the environment.
 
@@ -200,7 +206,7 @@ Production credentials must not work in testing, and credentials from one test e
 
 If a supplied test secret is invalid, revoked, or belongs to an unavailable environment, return an error. Never silently continue in production.
 
-Test websocket subscriptions, local drafts and pending sends must stay separate from production and other environments. Invalidate old connections and pending sends after a clean. Attachment links remain references; cleaning DM does not delete files owned by another application.
+Ting subscriptions and deliveries, local drafts and pending sends must stay separate from production and other environments. Include the DM environment and cleaning generation in its Ting events, and invalidate old events and pending sends after a clean. No old Ting event should cause work in the cleaned environment. Attachment links remain references; cleaning DM does not delete files owned by another application.
 
 
 ### Webhooks and External Actions
@@ -231,7 +237,7 @@ Only above this line is what the DM backend would hold, below this would be the 
 
 # Rust Package & CLI
 
-The Rust package & cli using that rust package are first hand client with an always running deamon if needed in the background. the UI will be a subset of the cli. make sure everything works via the CLI first, and then we'll make the UI. Everyone should be able to use the CLI/Rust Package (carbons, silicons, org, access keys, api keys, read, write, patch, delete, everything).
+The Rust package & cli using that rust package are first hand client. Ting's shared daemon handles incoming delivery, DM doesn't need its own daemon for receiving messages. the UI will be a subset of the cli. make sure everything works via the CLI first, and then we'll make the UI. Everyone should be able to use the CLI/Rust Package (carbons, silicons, org, access keys, api keys, read, write, patch, delete, everything).
 
 The rust package would be stateless whereas the cli would be statefull. CLI built on top of the rust package.
 
@@ -260,14 +266,14 @@ And there should be an command to configure the home directory where the informa
 
 The Rust client package remains a normal project dependency and does not update itself at runtime. CLI releases and updates follow the Updates section below.
 
-Whenever someone authenticates as a silicon or carbon the client and cli both would have to give an webhook url to send the data to, so the webhook url would be configured after logging in. The webhook url would be the endpoint where we inform the said silicon or carbon, this is just required in the client and the cli. This endpoint won't be sent to the backend instead stored locally in a file along with the auth in case of cli. The client and cli acts as a relay and a daemon is launched for keeping the websocket connection alive with the backend for it, and when a message comes routing the message to the correct silicon or carbon via the webhook url assigned. And when you get a message to send or any request for that matter, acknowledge that you recieved the message along with the entire request. 
+Whenever someone authenticates as a silicon or carbon, their DM login is for using DM's API. To receive updates they would use Ting and configure the webhook url there. Ting's daemon keeps the connection with Ting and sends the updates to the correct silicon or carbon. DM's client and cli won't act as an incoming delivery relay. The website would also receive its updates through Ting. A DM login alone should not be reported as working Ting delivery; the correct identity and environment must also be connected to Ting.
 
-It should also expose these specific endpoints:
+It should also expose these specific endpoints, and use Ting for receiving updates:
 1) `--help` which would give all the help documentation on how to use dm. So the user should be able to run `dm --help` and get the help docs.
 2) `iam --json` the user should be able to run  `dm iam --json` which returns `app_id` alongside other information.
 3) `login status --json` the user should be able to run `dm login status --json`, reports successful authentication reports `authenticated: true`, alongside which carbon or silicon is it authenticated as.
-4) `webhook <webhook-url>` the user should be able to run `dm webhook <webhook-url>` to configure the webhook endpoint in case of silicon hook, this is the webhook you send all the requests to for that silicon. 
-5) `unhook` the user should be able to run `dm unhook` to unhook the configured webhook connection which would simply unhook the said user.
+4) `ting webhook <webhook-url>` would configure the local endpoint that receives the updates for the said silicon or carbon. This is managed by Ting.
+5) `ting unhook <webhook-id>` would unhook the selected Ting destination. DM won't maintain a separate webhook registration.
 
 
 In CLI we would have a 140 characters limit for when a silicon tries to message a carbon, and when trying to send a message if the message is more than 140 characters, dont send the message, instead say  
@@ -296,12 +302,12 @@ every app cli must support the following commands:
 
 `app login status --json` tells if its {authenticated: true, ...}
 
-If your app is not just reactive, but also proactive (sends msg upfront to a silicon), it must also support the following commands:
-`app webhook "..."` takes in the URL to send updates to. optionally a secret.
-`app unhook` to remove receiving updates.
+For receiving DM updates use Ting's commands:
+`ting webhook "..."` takes in the URL to send updates to. optionally a secret through Ting's supported secret input.
+`ting unhook <webhook-id>` to remove the selected destination from receiving updates.
 
 App Internals:
-All apps are suggested to make a rust library which is stateless. then 2 things that uses the rust library: always running daemon, and a cli interface that talks to the daemon.
+DM has a stateless rust library and a stateful cli built on it. Ting owns the always running daemon for incoming delivery. DM should not duplicate that daemon's connections, queues, retries or webhook forwarding.
 
 On the docs page, show `honeycomb install 'tos>dm'` to install the CLI, followed by how to log in.
 
@@ -327,9 +333,9 @@ Give the information of the github repo, online docs, rust package, etc inside t
 
 The CLI as i told before is a tree of documentation. Show possible paths, and then let someone go deeper along with documentation.
 
-for webhooks, the daemon prewarms ONE websocket with server and subscribes to updates for all the silicons that have registered with the daemon. DO NOT CONNECT MULTIPLE WEBSOCKETS FOR SILICONS ON THE SAME SYSTEM.
+for webhooks, Ting's daemon prewarms ONE websocket with Ting and subscribes to updates for all the silicons and carbons that have registered with the daemon. DO NOT CONNECT MULTIPLE WEBSOCKETS FOR SILICONS ON THE SAME SYSTEM. DM doesn't open another delivery websocket for them.
 
-send the request to the silicon over at the webhook link in the following shape:
+Ting sends the request to the silicon over at the webhook link in its `{ "tings": [...] }` envelope. Return `204` only after the whole batch has been durably accepted. Each ting carries the DM event reference, and the client uses DM's API to get the message. DM's existing message/event shape stays the same:
 {
 	"type": "...",
 	"data": {...},

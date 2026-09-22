@@ -29,3 +29,31 @@ pub struct AppState {
     /// Process-local realtime connection registry.
     pub realtime: RealtimeHub,
 }
+
+impl AppState {
+    /// Immutable application/environment binding for delivery and credential storage.
+    #[must_use]
+    pub fn ting_delivery_context(&self) -> crate::infrastructure::postgres::TingDeliveryContext {
+        crate::infrastructure::postgres::TingDeliveryContext {
+            app_id: self.settings.iam.app_id.clone(),
+            testing_environment_id: self.testing_environment,
+            testing_generation: self.testing_generation,
+        }
+    }
+
+    /// Opens an encrypted access-token cache in the selected data plane.
+    /// The configured secret is encryption key material only; authorization is
+    /// always supplied by the selected identity adapter and reverified by IAM.
+    ///
+    /// # Errors
+    /// Rejects invalid encryption material or environment binding.
+    pub fn ting_credentials(
+        &self,
+    ) -> crate::AppResult<crate::infrastructure::ting_credentials::TingCredentialCache> {
+        crate::infrastructure::ting_credentials::TingCredentialCache::new(
+            self.store.clone(),
+            &self.settings.iam.app_secret,
+            self.ting_delivery_context(),
+        )
+    }
+}

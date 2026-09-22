@@ -1,0 +1,92 @@
+{
+  "checked_at": "2026-09-23 IST",
+  "scope": "Local candidate DM backend with real deployed IAM and Ting 0.1.3 in the task-owned original sandbox",
+  "environment_id": "d70c8674-6d2e-41d4-bf8d-96ddd882edbd",
+  "passed": true,
+  "runs": [
+    {
+      "scope": "Local candidate DM with real sandbox IAM and Ting; HTTP and WebSocket integration",
+      "environment_id": "d70c8674-6d2e-41d4-bf8d-96ddd882edbd",
+      "checks": [
+        "dm-ting-tester real cookie session attests sandbox generation",
+        "https://dm.teamofsilicons.com authenticated response has credentialed CORS",
+        "https://dm.teamofsilicons.com authenticated cookie WebSocket watches test inbox",
+        "dm-ting-bot-tos real cookie session attests sandbox generation",
+        "https://interface.teamofsilicons.com authenticated response has credentialed CORS",
+        "https://interface.teamofsilicons.com authenticated cookie WebSocket watches test inbox",
+        "Real Carbon send produces a Ting hint for Silicon recipient",
+        "Silicon hydrates exact sent message using its own DM authority",
+        "Retried Silicon send retains one DM message",
+        "Carbon hydrates Silicon reply using its own authority"
+      ],
+      "messages": [
+        {
+          "id": "001",
+          "conversation_id": "dm-ting-tester::dm-ting-bot:tos"
+        },
+        {
+          "id": "002",
+          "conversation_id": "dm-ting-tester::dm-ting-bot:tos"
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scope": "Real IAM revocation and Ting acceptance with local candidate DM restart",
+      "checks": [
+        "Message durable while Ting unavailable",
+        "Originator access token revoked and DM rejects it",
+        "After publisher restart and different actor activity, both handoffs remain pending",
+        "Fresh same-originator login releases both original handoffs to real Ting",
+        "Recipient hydrates the unchanged saved message"
+      ],
+      "pending": [
+        {
+          "target_id": "dm-ting-bot:tos",
+          "accepted": false,
+          "last_error_code": "ting_originator_authentication_required",
+          "attempt_count": 9
+        },
+        {
+          "target_id": "dm-ting-tester",
+          "accepted": false,
+          "last_error_code": "ting_originator_authentication_required",
+          "attempt_count": 9
+        }
+      ],
+      "accepted": [
+        {
+          "target_id": "dm-ting-bot:tos",
+          "accepted": true,
+          "last_error_code": null,
+          "attempt_count": 12
+        },
+        {
+          "target_id": "dm-ting-tester",
+          "accepted": true,
+          "last_error_code": null,
+          "attempt_count": 12
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scope": "Local candidate DM with real IAM test identity and real Ting acceptance",
+      "passed": true,
+      "checks": [
+        "Real Ting acceptance does not create DM delivered/read receipts",
+        "Explicit recipient delivered receipt persists through DM HTTP",
+        "Explicit recipient read receipt persists through DM HTTP",
+        "Real sync cursor rejects another authenticated actor",
+        "Stale or future testing generation rejected before sync",
+        "HTTP presence lease opens and closes without a DM socket"
+      ]
+    }
+  ],
+  "limitations": [
+    "No production DM deployment or configuration changes",
+    "Cookie HTTP/WebSocket probes are real network checks, separate from the local Chrome UI fixture",
+    "Original sandbox has the documented pending Honeycomb credential-rotation operation; no lifecycle fence was bypassed",
+    "Rotated Ting test credentials remain affected by the separately documented IAM OBO audience credential issue"
+  ]
+}

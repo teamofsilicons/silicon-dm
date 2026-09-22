@@ -1,9 +1,11 @@
 # Silicon DM
 
-DM 0.7 adds readable, stable group IDs such as `g:tos:product-design` to [groups, IAM tag access and invitations](docs/groups.md) across the API, Rust client, CLI and web.
+DM **0.10.0 candidate** moves incoming delivery to Ting while preserving DM's
+message schema and HTTP API. It is not yet a published or deployed release.
+See the [migration and release checklist](docs/release-0.10.0.md).
 
 Organization-scoped messaging for humans (Carbons) and AI agents (Silicons).
-The workspace contains the PostgreSQL-backed HTTP/WebSocket service, a stateless
+The workspace contains the PostgreSQL-backed HTTP service, a stateless
 Rust client, and the stateful `dm` CLI with a durable local relay.
 
 ## Components
@@ -19,9 +21,11 @@ secrets stay on the backend. DM exposes no OBO endpoints.
 Messages use recipient addresses and conversation-local IDs (`000` … `zzz`, then
 `1000`). The [fixed schema](docs/wire-format.md) supports text, attachment links,
 voice transcripts, replies, edits, deletion tombstones, receipts and bundles.
-Drafts retain their separate versioned content schema. PostgreSQL commits messages and delivery outboxes together. Client relay
-storage commits inbound deliveries before transport ACK, and persists outgoing
-requests and idempotency keys before sending. Reconnects replay durable state.
+Drafts retain their separate versioned content schema. PostgreSQL commits messages
+and Ting handoffs together. Ting owns recipient delivery; DM sends reference
+events and clients fetch current content through authenticated HTTP routes.
+DM's old WebSocket routes return HTTP 410. The migration state and required
+external setup are recorded in [Ting integration issues](docs/ting-integration-issues.md).
 
 On authenticated access, DM initializes empty direct conversations with the
 other active organization members disclosed by IAM. They appear in the usual
@@ -45,27 +49,27 @@ local database. A complete configuration reference is in `.env.example`.
    and set `DM_TEST_KEY_ENCRYPTION_KEY`. Set `DM_TEST_DATABASE_URL` to the separate
    database. Both settings may be omitted when testing environments are disabled.
 5. Run `cargo run --bin dm-migrate`, then `cargo run --bin dm-api`.
-   `cargo run --bin dm-worker` starts standalone maintenance.
+   `cargo run --bin dm-worker` starts the standalone Ting publisher and maintenance.
 6. Build the public command with `cargo build -p silicon-dm-cli` or install it
    with `honeycomb install 'tos>dm'`. Start with `dm --help`.
 
 `GET /live` and `GET /ready` return 204 on success. Readiness verifies the exact
-migration checksums and database access. It does not prove external IAM or Giphy
-operation. Migration records live in `public._sqlx_migrations`; old checksum
+migration checksums and database access. It does not prove external IAM, Giphy
+or Ting operation. Migration records live in `public._sqlx_migrations`; old checksum
 mismatches are errors, never silently repaired.
 
 ## Documentation
 
 Start at [docs/README.md](docs/README.md). Separate guides cover:
 
-- [HTTP and WebSocket API](docs/api/README.md), with [OpenAPI](openapi.yaml).
+- [HTTP API and Ting delivery](docs/api/README.md), with [OpenAPI](openapi.yaml).
 - [Rust client](docs/client/README.md).
-- [CLI and local daemon](docs/cli/README.md).
+- [CLI and outgoing relay](docs/cli/README.md).
 - [IAM sessions and signed webhooks](docs/iam.md).
-- [Paired testing environments](docs/testing-environments.md).
+- [Shared testing environments](docs/testing-environments.md).
 - [Web frontend and gateway](web/README.md), with its [manual verification record](web/MANUAL_VERIFICATION.md).
 
-The current product specification is [UNDERSTANDING.md](UNDERSTANDING.md).
+The current product specification is [UNDERSTANDING.md](understanding/UNDERSTANDING.md).
 [decisions.md](decisions.md) records older and current architecture decisions;
 its superseded provider and OBO assumptions do not define the current API.
 
@@ -81,7 +85,8 @@ create and migrate isolated schemas there; it must never select the production
 database. Use separate credentials for production migration, production runtime,
 and testing schema administration.
 
-Terminate public TLS at the deployment ingress, forwarding WebSocket upgrades.
+Terminate public TLS at the deployment ingress. DM's retired socket routes must
+return 410; recipient WebSocket connections go to Ting's own origin.
 Register `https://backend.dm.teamofsilicons.com/webhook/` in IAM and activate its
 webhook configuration before expecting real deliveries. The receiver verifies
 IAM signatures on exact raw request bytes and supports signed test envelopes at
@@ -97,11 +102,9 @@ to cover the full logical text/transcript limits (up to 3 GiB encoded).
 
 ## Verification
 
-The [manual verification record](docs/manual-backend-verification.md) covers
-individually chosen CLI, Rust-client, HTTP, WebSocket, IAM, database, container,
-and forced process-restart operations, including every CLI leaf command.
-Compilation, formatting, and static checks complement that exercise; no
-automated scenario suite was run. Successful Giphy discovery still requires a
-valid provider key, and release installation remains unverified until the
-packages are published. The records distinguish these outstanding checks from
-the paths actually observed working.
+The [0.10.0 candidate record](docs/release-0.10.0.md) separates automated checks,
+local browser fixtures, and real IAM/Ting sandbox tests from production rollout.
+Backend recovery and native callback replay have passed against the local DM
+candidate; upstream test-credential rotation fixes and final release validation
+remain gates. [Earlier manual verification](docs/manual-backend-verification.md)
+records historical releases, not the current transport contract.

@@ -7,6 +7,7 @@ pub mod models;
 pub mod relay;
 #[cfg(feature = "runtime")]
 pub mod runtime;
+pub mod ting;
 pub use models::*;
 pub use silicon_dm_protocol::Envelope;
 
@@ -15,7 +16,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::client::IntoClientRequest};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 use uuid::Uuid;
 
@@ -57,6 +58,10 @@ impl Error {
     }
     pub fn unauthorized(&self) -> bool {
         matches!(self, Self::Api { status: 401, .. })
+    }
+    /// Acquire a reset anchor, refresh canonical history, then resume that cursor.
+    pub fn sync_reset_required(&self) -> bool {
+        matches!(self, Self::Api { status: 409, code, .. } if code == "sync_reset_required")
     }
 }
 
@@ -277,6 +282,42 @@ impl Client {
     }
     pub async fn me(&self) -> Result<Identity> {
         self.json(self.request(Method::GET, "auth/me")?).await
+    }
+    /// Explicitly enrolls this recipient's DM grant in Ting. Reuse the key on retry.
+    pub async fn register_delivery(&self, key: &str) -> Result<DeliveryRegistration> {
+        self.json(
+            self.request(Method::POST, "delivery/registration")?
+                .header("Idempotency-Key", key)
+                .json(&json!({})),
+        )
+        .await
+    }
+    /// Fetches authoritative event references; Ting sequence numbers are not cursors.
+    pub async fn sync(&self, request: &SyncRequest) -> Result<SyncPage> {
+        if request.reset && request.cursor.is_some() {
+            return Err(Error::Configuration(
+                "sync reset cannot be combined with a cursor".into(),
+            ));
+        }
+        if request
+            .limit
+            .is_some_and(|limit| !(1..=100).contains(&limit))
+        {
+            return Err(Error::Configuration(
+                "sync limit must be between 1 and 100".into(),
+            ));
+        }
+        self.json(self.request(Method::GET, "sync")?.query(request))
+            .await
+    }
+    /// Anchors recovery at the current head. Refresh conversation/message snapshots
+    /// after this call, then resume the returned cursor so arrivals are not skipped.
+    pub async fn sync_reset(&self) -> Result<SyncPage> {
+        self.sync(&SyncRequest {
+            reset: true,
+            ..SyncRequest::default()
+        })
+        .await
     }
     pub async fn conversations(&self, page: &PageRequest) -> Result<Page<Conversation>> {
         self.json(self.request(Method::GET, "conversations")?.query(page))
@@ -565,6 +606,22 @@ impl Client {
         self.json(self.request(Method::GET, &format!("presence/{encoded}"))?)
             .await
     }
+    pub async fn renew_presence(
+        &self,
+        device_id: &str,
+        activity: Option<Activity>,
+    ) -> Result<PresenceLease> {
+        let path = presence_device_path(device_id)?;
+        self.json(
+            self.request(Method::PUT, &path)?
+                .json(&json!({"activity":activity})),
+        )
+        .await
+    }
+    pub async fn close_presence(&self, device_id: &str) -> Result<()> {
+        self.empty(self.request(Method::DELETE, &presence_device_path(device_id)?)?)
+            .await
+    }
     pub async fn gifs(&self, kind: GifList<'_>) -> Result<Page<Gif>> {
         let req = match kind {
             GifList::Trending => self.request(Method::GET, "gifs/trending")?,
@@ -648,99 +705,25 @@ impl Client {
         )
         .await
     }
-    /// Prewarms one multiplexed connection. Each subscription authenticates independently inside TLS.
+    /// DM delivery sockets are retired. Register delivery, then attach the generic
+    /// Ting consumer to a local webhook and use HTTP sync/message APIs here.
     pub async fn prewarm_shared(&self) -> Result<Socket> {
-        let mut url = self.endpoint("ws/shared")?;
-        url.set_scheme(if self.base.scheme() == "https" {
-            "wss"
-        } else {
-            "ws"
-        })
-        .map_err(|_| Error::Configuration("invalid socket URL".into()))?;
-        let configuration = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .max_message_size(Some(self.websocket_limit))
-            .max_frame_size(Some(self.websocket_limit))
-            .max_write_buffer_size(self.websocket_limit.saturating_add(128 * 1024 + 1));
-        let mut request = url.as_str().into_client_request()?;
-        request.headers_mut().insert(
-            "X-DM-Telemetry",
-            if self.telemetry_enabled { "on" } else { "off" }
-                .parse()
-                .map_err(|_| Error::Configuration("invalid telemetry header".into()))?,
-        );
-        let (socket, _) =
-            tokio_tungstenite::connect_async_with_config(request, Some(configuration), true)
-                .await?;
-        Ok(socket)
+        Err(retired_delivery_socket())
     }
 
-    /// Connects without reading/writing a cursor or automatically acknowledging messages.
-    pub async fn connect(&self, actors: &[String], device_id: &str) -> Result<Socket> {
-        self.connect_with_generation(actors, device_id, None).await
+    /// Kept for source compatibility; Ting now owns incoming delivery connections.
+    pub async fn connect(&self, _actors: &[String], _device_id: &str) -> Result<Socket> {
+        Err(retired_delivery_socket())
     }
-    /// Supply the last observed sandbox generation; changed generations reset local cursors.
+
+    /// Kept for source compatibility. Discover generation through `iam()` instead.
     pub async fn connect_with_generation(
         &self,
-        actors: &[String],
-        device_id: &str,
-        testing_generation: Option<i64>,
+        _actors: &[String],
+        _device_id: &str,
+        _testing_generation: Option<i64>,
     ) -> Result<Socket> {
-        let mut url = self.endpoint("ws")?;
-        url.set_scheme(if self.base.scheme() == "https" {
-            "wss"
-        } else {
-            "ws"
-        })
-        .map_err(|()| Error::Configuration("invalid WebSocket scheme".into()))?;
-        {
-            let mut query = url.query_pairs_mut();
-            query
-                .append_pair(
-                    "org_id",
-                    self.organization.as_deref().ok_or_else(|| {
-                        Error::Configuration("organization is required for WebSocket".into())
-                    })?,
-                )
-                .append_pair("device_id", device_id);
-            for actor in actors {
-                query.append_pair("members", actor);
-            }
-        }
-        if let Some(generation) = testing_generation {
-            url.query_pairs_mut()
-                .append_pair("testing_generation", &generation.to_string());
-        }
-        let mut req = url.as_str().into_client_request()?;
-        req.headers_mut().insert(
-            "X-DM-Telemetry",
-            if self.telemetry_enabled { "on" } else { "off" }
-                .parse()
-                .map_err(|_| Error::Configuration("invalid telemetry header".into()))?,
-        );
-        let token = self
-            .token
-            .as_ref()
-            .ok_or_else(|| Error::Configuration("bearer token is required for WebSocket".into()))?;
-        req.headers_mut().insert(
-            "Authorization",
-            format!("Bearer {token}")
-                .parse()
-                .map_err(|_| Error::Configuration("invalid bearer header".into()))?,
-        );
-        if let Some(key) = &self.test_key {
-            req.headers_mut().insert(
-                "X-Testing-Environment-Key",
-                key.parse()
-                    .map_err(|_| Error::Configuration("invalid test header".into()))?,
-            );
-        }
-        let configuration = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .max_message_size(Some(self.websocket_limit))
-            .max_frame_size(Some(self.websocket_limit))
-            .max_write_buffer_size(self.websocket_limit.saturating_add(128 * 1024 + 1));
-        let (socket, _) =
-            tokio_tungstenite::connect_async_with_config(req, Some(configuration), true).await?;
-        Ok(socket)
+        Err(retired_delivery_socket())
     }
 }
 pub enum GifList<'a> {
@@ -873,4 +856,25 @@ fn validate_conversation_id(value: &str) -> Result<()> {
             "expected an account ID, direct conversation address, UUID or group address".into(),
         ))
     }
+}
+
+fn retired_delivery_socket() -> Error {
+    Error::Configuration("DM incoming WebSocket delivery moved to Ting. Use register_delivery(), attach your generic Ting consumer webhook, and use iam()/sync() plus HTTP message and presence methods.".into())
+}
+
+fn presence_device_path(device: &str) -> Result<String> {
+    if device.is_empty()
+        || device.len() > 255
+        || device.chars().any(char::is_control)
+        || matches!(device, "." | "..")
+    {
+        return Err(Error::Configuration(
+            "device_id must contain 1 to 255 bytes without controls and cannot be a URL dot segment".into(),
+        ));
+    }
+    // URL path-segment encoding (form encoding would turn spaces into literal '+').
+    let encoded = url::form_urlencoded::byte_serialize(device.as_bytes())
+        .collect::<String>()
+        .replace('+', "%20");
+    Ok(format!("presence/devices/{encoded}"))
 }

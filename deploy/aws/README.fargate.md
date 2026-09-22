@@ -108,10 +108,17 @@ rejects replacement resources when an update uses `--disable-rollback`; reserve
 that preservation option for initial provisioning or a reviewed recovery that
 does not replace resources.
 
-For upgrades, run the new bootstrap/migrator task and inspect its successful
-completion before deploying new API/worker task definitions. Verify migration
-compatibility with the old running version beforehand. Secret rotations need
-new tasks to consume the new values; running tasks do not reread Secrets Manager.
+For the 0.10.0 Ting cutover, stop both old API and worker tasks and wait for
+both services to drain before running the new bootstrap/migrator task. Apply
+migrations through 0034 and runtime grants, inspect successful completion, then
+start the new API and worker together. Do not overlap the old and new delivery
+workers or publish automatic CLI updates ahead of this backend cutover. See
+[the deployment guide](../../docs/deployment.md) for the coordinated procedure.
+
+For compatible upgrades, run the new bootstrap/migrator task and inspect its
+successful completion before deploying new API/worker task definitions. Verify
+migration compatibility with the old running version beforehand. Secret rotations
+need new tasks to consume the new values; running tasks do not reread Secrets Manager.
 
 ## Shutdown and large requests
 
@@ -124,9 +131,10 @@ inspection rules or sampled request capture.
 Fargate allows at most 120 seconds for `StopTimeout`, so DM's graceful-shutdown
 deadline is 110 seconds and the task stop timeout is 120 seconds. A request
 that uses the entire REST allowance can still be interrupted during shutdown;
-clients must retry using the same durable idempotency key. WebSockets reconnect
-and replay committed deliveries. These containers do not need a writable root
-filesystem or a Fargate-unsupported `tmpfs` option.
+clients must retry using the same durable idempotency key. Ting owns incoming
+connection recovery and delivery replay; DM consumers reconcile through HTTP sync.
+These containers do not need a writable root filesystem or a Fargate-unsupported
+`tmpfs` option.
 
 ## Recovering an incomplete EC2 stack without recreating RDS
 

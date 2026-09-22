@@ -27,6 +27,8 @@ pub struct Settings {
     pub database: DatabaseSettings,
     /// IAM integration settings.
     pub iam: IamSettings,
+    /// Ting owns all recipient delivery after accepting a DM event.
+    pub ting: TingSettings,
     /// Optional shared testing-plane configuration.
     pub testing: Option<TestingSettings>,
     /// Giphy settings.
@@ -142,6 +144,15 @@ pub struct IamSettings {
     /// IAM webhook secret version.
     pub webhook_key_version: i64,
     /// Outbound IAM deadline.
+    pub request_timeout: Duration,
+}
+
+/// Outbound Ting delivery transport. Credentials are obtained from IAM per operation.
+#[derive(Clone, Debug)]
+pub struct TingSettings {
+    /// Ting API origin, without a path prefix or credentials.
+    pub base_url: Url,
+    /// Maximum wait for a connection greeting or send acceptance.
     pub request_timeout: Duration,
 }
 
@@ -271,6 +282,13 @@ impl Settings {
             server,
             database,
             iam,
+            ting: TingSettings {
+                base_url: parse_or(
+                    "DM_TING_BASE_URL",
+                    "https://backend.ting.teamofsilicons.com",
+                )?,
+                request_timeout: duration_seconds("DM_TING_REQUEST_TIMEOUT_SECONDS", 15)?,
+            },
             testing,
             providers,
             realtime,
@@ -311,6 +329,18 @@ impl Settings {
             self.environment,
         )?;
         validate_url("DM_IAM_BASE_URL", &self.iam.base_url, self.environment)?;
+        validate_url("DM_TING_BASE_URL", &self.ting.base_url, self.environment)?;
+        if !self.ting.base_url.username().is_empty()
+            || self.ting.base_url.password().is_some()
+            || self.ting.base_url.path() != "/"
+            || self.ting.base_url.query().is_some()
+            || self.ting.base_url.fragment().is_some()
+        {
+            return Err(invalid(
+                "DM_TING_BASE_URL",
+                "must be an origin without credentials, path, query or fragment",
+            ));
+        }
         validate_app_id("DM_IAM_APP_ID", &self.iam.app_id)?;
         validate_url(
             "DM_GIPHY_API_BASE_URL",

@@ -178,6 +178,7 @@ export interface Session {
 export type AuthenticatedSession = Session & Profile & { authenticated: true };
 export interface AppConfig {
   iam_login_url: string;
+  ting_browser_origin?: string;
   app_id: string;
   api_origin?: string;
   gateway_origin?: string;
@@ -242,4 +243,26 @@ export interface OutboxEntry {
   updated_at: number;
   error?: string;
   error_code?: string;
+}
+
+/** References only. Message content always comes from DM authorization. */
+export interface SyncEvent {
+  event_id: string;
+  sequence: number;
+  type: "message" | "message_status";
+  conversation_id: string;
+  message_id: string;
+}
+export interface SyncPage {
+  events: SyncEvent[];
+  cursor: string;
+  has_more: boolean;
+  upper_sequence: number;
+  testing_environment_id: string | null;
+  testing_generation: number | null;
+}
+export interface IamInfo {
+  app_id: string;
+  testing_environment_id: string | null;
+  testing_generation: number | null;
 }

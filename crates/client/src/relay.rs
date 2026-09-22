@@ -101,7 +101,7 @@ pub enum Operation {
     GetPresence {
         actor_id: String,
     },
-    /// Transient activity can only be sent by an active daemon WebSocket.
+    /// Transient activity renews the local daemon's actor-owned HTTP device lease.
     SetPresence {
         activity: Option<Activity>,
     },
@@ -131,7 +131,16 @@ impl Operation {
                 | Self::SetPresence { .. }
         )
     }
-    /// Calls only the public DM client. Presence writes require a live socket.
+    /// Executes a command with the caller's stable HTTP presence device identity.
+    pub async fn execute_with_device(&self, client: &Client, device_id: &str) -> Result<Value> {
+        if let Self::SetPresence { activity } = self {
+            return Ok(serde_json::to_value(
+                client.renew_presence(device_id, *activity).await?,
+            )?);
+        }
+        self.execute(client).await
+    }
+    /// Calls only the public DM client. Presence writes additionally need a device ID.
     pub async fn execute(&self, client: &Client) -> Result<Value> {
         Ok(match self {
             Self::ListGroups { page } => serde_json::to_value(client.groups(page).await?)?,
@@ -261,7 +270,7 @@ impl Operation {
             }
             Self::SetPresence { .. } => {
                 return Err(crate::Error::Configuration(
-                    "presence changes require the local relay daemon".into(),
+                    "presence changes require execute_with_device() or Client::renew_presence() with a stable device ID".into(),
                 ));
             }
             Self::TrendingGifs => serde_json::to_value(client.gifs(GifList::Trending).await?)?,

@@ -1,10 +1,10 @@
 [package]
 name = "silicon-dm-cli"
-version = "0.9.6"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.98"
 license = "LicenseRef-Proprietary"
-description = "Silicon DM command line client and durable local relay"
+description = "Silicon DM command line client with Ting delivery"
 readme = "README.md"
 repository = "https://github.com/teamofsilicons/silicon-dm"
 
@@ -13,7 +13,7 @@ name = "dm"
 path = "src/main.rs"
 
 [dependencies]
-silicon-dm-client = { path = "../client", version = "0.9.6", features = ["runtime"] }
+silicon-dm-client = { path = "../client", version = "0.10.0", features = ["runtime"] }
 anyhow = "1.0.100"
 blake3 = "1.8.2"
 clap = { version = "4.5", features = ["derive", "env"] }

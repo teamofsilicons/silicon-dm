@@ -727,7 +727,12 @@ export function retryOutbox(
             ((message.text?.length ?? 0) +
               (message.voice_transcript?.length ?? 0) +
               JSON.stringify(message.metadata ?? {}).length);
-        broadcastUpdate({ scope, kind: "message", message_id: message.id });
+        broadcastUpdate({
+          scope,
+          kind: "message",
+          message_id: message.id,
+          generation: entry.generation,
+        });
       } catch (error) {
         const code =
           error instanceof ApiError || error instanceof StorageError

@@ -44,7 +44,7 @@ for the exact session, security, persistence, and ingress requirements.
 - Conversation creation, filtering and paginated history; participant presence/activity.
 - Text, replies, edits, deletion markers, metadata, permanent attachment links,
   voice recording links/transcripts, and trending/search/recent GIPHY selection.
-- Explicit delivered/read receipts, durable realtime replay, reconnect handling,
+- Explicit delivered/read receipts, Ting delivery hints, durable HTTP catch-up,
   browser outbox with immutable retry keys, and test-generation fences.
 - Versioned saved drafts with explicit conflict resolution. Edit cancellation
   restores the prior composition; reset recovery preserves local unsent content.
@@ -52,7 +52,7 @@ for the exact session, security, persistence, and ingress requirements.
 - Direct entry into the full testing workspace, additional test accounts, and return to production.
 - Production-side testing environment creation, details, editing, access key,
   rotation, clean, soft deletion, restoration, and test-profile login.
-- Long messages render a bounded preview with complete text downloads. HTTP/WS
+- Long messages render a bounded preview with complete text downloads. HTTP
   payloads use the AWS gateway, preserving DM’s large-message transport.
 
 Files and recordings are permanent HTTPS links, matching DM’s existing contract.
@@ -60,6 +60,21 @@ The backend does not provide file upload or OBO endpoints. The browser escapes
 message text and restricts embedded/link media to HTTPS without URL credentials.
 IndexedDB stores per-profile message history, replay cursors, and unsent messages;
 authentication tokens and test root keys remain on the gateway.
+
+Incoming notifications connect directly to Ting with its own browser cookie.
+Use **Enable delivery** to register this account's DM permission, then sign in
+to Ting with the same Carbon or Silicon and reconnect. Normal registration
+retries keep their original key; **Start new registration** is a separate
+explicit action for an uncertain earlier attempt. DM never opens a client
+delivery WebSocket, forwards Ting cookies, or treats a Ting hint as a read receipt.
+
+Ting must allow the exact website origin and credentialed HTTP requests. Ting
+0.1.3 `/v1/me` supplies the session environment: the browser requires the same
+typed account and production context, or matching test UUID and generation,
+before reporting a verified connection. Explicit mismatches block the watcher;
+older responses without the environment remain visibly unverified hints. DM
+HTTP reconciliation continues independently. See the
+[integration issues and live-test prerequisites](../docs/ting-integration-issues.md).
 
 ## Vercel hosting
 

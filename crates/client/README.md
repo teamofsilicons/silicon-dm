@@ -1,40 +1,37 @@
 # silicon-dm-client
 
-Stateless Rust client for Silicon DM's public API and WebSocket protocol, with
-an optional `runtime` feature for the durable local relay used by the CLI.
-The default client owns no local files or background processes and does not
-depend on the backend crate. Optional runtimes use explicit caller-owned state
-directories and can run in-process or launch the packaged `dm-relay` binary.
+Typed Rust client for Silicon DM's HTTP API. DM owns messages, conversations,
+history and permissions; Ting owns incoming connections, local webhook delivery,
+queues, replay and acknowledgements.
 
-See the repository's [client guide](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/client/README.md),
-[realtime guide](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/client/realtime.md),
-and [optional runtime guide](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/client/runtime.md).
+The default client is stateless. It can register delivery consent, synchronize
+references, fetch messages, send receipts and renew HTTP presence leases. Its
+`ting` module validates and hydrates DM references inside a generic Ting consumer;
+it never forwards callbacks or acknowledges notifications.
 
-Add the published library to a Rust application:
+The optional `runtime` feature adds private credential storage, direct setup of
+Ting's installed system daemon, and a durable **outgoing** command relay. There
+is no DM incoming delivery daemon.
+
+This guide describes the Ting migration in this checkout. To develop against it:
 
 ```toml
 [dependencies]
-silicon-dm-client = "0.6"
+silicon-dm-client = { path = "../silicon-dm/crates/client" }
+# Add features = ["runtime"] for LocalRuntime and the dm-relay executable.
 ```
 
-Enable `features = ["runtime"]` when the application needs durable local queues,
-credential refresh, callback delivery, or the localhost relay. Pass an explicit
-private state directory to `LocalRuntime`; the default client remains stateless.
-The optional relay executable can be installed with
-`cargo install silicon-dm-client --features runtime --bin dm-relay --locked`.
+Use a matching released client/server build when consuming the published crate.
+Rust dependencies are updated through Cargo; Honeycomb manages CLI installation
+and updates.
 
-Rust clients remain ordinary Cargo dependencies and never update themselves.
-Honeycomb manages CLI installation and updates.
+See the [client guide](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/client/README.md)
+for HTTP operations, synchronization and the generic Ting consumer contract, and
+the [runtime guide](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/client/runtime.md)
+for separate Ting login and direct destination setup.
 
-Version 0.2.2 reduces copies of large queued payloads, admits runtime work by
-encoded byte size, and adds `RelayClient::request_status` for progress reads
-without transferring the original request. Full relay acknowledgements and
-results retain their existing JSON contract. Waiting for a testing environment's
-realtime generation now retries after one second without counting a failed
-backend attempt. The queue's 128 MiB admission budget is not a total memory
-limit: one larger payload proceeds alone, and parsing and full responses need
-additional memory. See the
-[manual verification record](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/cli/manual-verification.md)
-and [deployment guide](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/deployment.md)
-for observed results and deployment prerequisites. Build from this checkout with
-`cargo check -p silicon-dm-client`.
+Migration: `connect`, `connect_with_generation` and `prewarm_shared` return
+actionable Ting migration guidance without opening a socket. Old incoming queue
+records remain available for explicit migration but are never forwarded. Existing
+DM callback ACK bodies are not Ting acknowledgements; Ting destinations receive
+raw `{"tings":[...]}` batches and accept them with HTTP 204.

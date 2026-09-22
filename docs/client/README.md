@@ -1,158 +1,192 @@
 # Rust client guide
 
-DM 0.6 adds [groups, IAM tag access and invitations](../groups.md) across the API, Rust client, CLI and web.
+`silicon-dm-client` provides typed HTTP operations for messages, conversations,
+history, permissions, receipts and presence. Ting owns incoming delivery. The
+stateless client opens no incoming connection, saves no credentials and starts no
+process. The optional [runtime](runtime.md) stores profiles, configures Ting's
+installed daemon directly, and runs the outgoing command relay used by the CLI.
 
-Current 0.6 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
+This guide describes the Ting migration in this checkout. Use a matching released
+client/server build, or a path dependency on `crates/client` while developing.
+The [HTTP contract](../api/README.md) and [contract discovery](../contracts.md)
+describe the server endpoints.
 
-`silicon-dm-client` is a stateless, typed client for public Silicon DM operations.
-Its default HTTP/WebSocket client does not call IAM directly, hold IAM
-application secrets, persist credentials, or start a daemon. Its protocol types
-are independent of the backend crate. Enable the optional `runtime` feature for
-the [durable relay and updater](runtime.md), using a caller-selected private
-state directory. The stateful `dm` CLI uses that same SDK runtime.
+## HTTP login and sending
 
-## Installation and configuration
-
-Add `silicon-dm-client = "0.6"` to your application's Cargo manifest to use the
-published package. For development against this checkout, depend on
-`crates/client` by path.
-
-`Client::new` accepts a DM origin such as
-`https://backend.dm.teamofsilicons.com`, or its `/api/v1` base. It appends
-`/api/v1/` for an origin. HTTPS is required except on loopback hosts, where HTTP
-supports local development. URLs containing credentials, a query or a fragment
-are rejected. Redirects are disabled. Ordinary HTTP calls time out after 45
-seconds. Credentials never appear in a `Client` debug representation.
+`Client::new` accepts a DM origin or `/api/v1` base. HTTPS is required except on
+loopback; credentials, query strings and fragments in base URLs are rejected.
+Redirects are disabled. Ordinary HTTP calls time out after 45 seconds.
 
 ```rust
 use silicon_dm_client::{Client, MessageCreate, PageRequest};
 use uuid::Uuid;
 
-let dm = Client::new("https://backend.dm.teamofsilicons.com")?;
-// Obtain the short-lived token from the actor, not their password.
-let tokens = dm.login(&short_lived_token, &Uuid::new_v4().to_string()).await?;
-// Persist tokens privately if your application needs persistence. Configure
-// callbacks after login through LocalRuntime, or own the WebSocket directly.
-let dm = dm.with_auth(&tokens.access_token, &tokens.organization_id);
+let public = Client::new("https://backend.dm.teamofsilicons.com")?;
+let login_key = Uuid::new_v4().to_string(); // Persist before sending.
+let tokens = public.login(&dm_slt, &login_key).await?;
+let dm = public.with_auth(&tokens.access_token, &tokens.organization_id);
 let identity = dm.me().await?;
-let mut content = MessageCreate::default();
-content.text = Some("Hello".into());
-let retry_key = Uuid::new_v4().to_string();
-let message = dm.send_message(&other_actor_public_id, &content, &retry_key).await?;
+
+let content = MessageCreate {
+    text: Some("Hello".into()),
+    ..MessageCreate::default()
+};
+let send_key = Uuid::new_v4().to_string(); // A new operation gets a fresh key.
+let message = dm.send_message(&conversation_id, &content, &send_key).await?;
 let history = dm.messages(&message.conversation_id, &PageRequest::default(), false).await?;
 ```
 
-The example's `short_lived_token` and `other_actor_public_id` come from your
-application; no token is embedded in documentation. For production deployments,
-use IAM-issued credentials authorized for the selected organization. Organization
-and actor authorization remain enforced by the backend. There is no OBO flow.
+The SLT and conversation address come from your application. After an uncertain
+response, retry the **same** operation with its original key and identical input.
+Do not generate another key inside a retry loop. Save replacement tokens atomically
+when using `refresh(refresh_token, key)`; `logout(refresh_token, key)` revokes that
+family. `Tokens` deliberately has no `Debug` implementation.
 
-## Authentication and credential lifecycle
+## Explicit delivery consent
 
-`login(slt, idempotency_key)` sends only `{slt}` to DM's login
-endpoint. The backend performs the official IAM client exchange with its own
-application credentials. The returned `Tokens` contains `access_token`,
-`refresh_token`, `token_type`, `expires_in`, `scope`, `actor`, and
-`organization_id`. The actor shape is `{type, id}`. Tokens deliberately do not
-implement `Debug`.
-
-`with_auth(token, organization_id)` builds an authenticated client without disk
-I/O. `refresh(refresh_token, key)` returns the replacement token pair; save it
-atomically before using it. `logout(token, key)` revokes the supplied token;
-passing the refresh token revokes its family. Login, refresh and logout require
-retry-safe idempotency keys. Reuse the same key and identical payload after an
-uncertain response. Credentials may not authorize every operation: the server
-returns its actual authorization decision; a client never invents permissions.
-
-`me()` returns the current actor, organization, principal and session identifiers,
-organization role and disclosed capabilities. A client can represent a list of
-actors on a WebSocket only if the backend authorizes every actor.
-
-`iam()` returns the backend's public `IamInfo` (`app_id`, `iam_base_url`,
-`api_base_url`) without an authenticated session. The optional runtime's
-`login_status(profile, test).await` verifies and refreshes a persisted login;
-`webhook(profile, test, Some(&url))` configures a callback after login and
-`webhook(profile, test, None)` unhooks it. See [runtime](runtime.md).
-
-## ISI message routing
-
-Set `MessageCreate.sender_id = Some("compose@writer:tos".into())` to send with
-an ISI, or `recipient_id = Some("deliberate@cos:tos".into())` to address one.
-The sender must be the authorized silicon account and the recipient must be a
-conversation participant. Create conversations using canonical IDs (`cos:tos`).
-The returned `Message.sender.id` stays canonical; `Message.content.sender_id`
-and `Message.content.recipient_id` preserve the routing addresses. They survive
-history, WebSocket and callback delivery, replies when supplied, bundles and
-edits. Edits cannot change routing. Use a new idempotency key for a new route.
-ISI does not change conversation visibility or create another IAM principal;
-your receiving application dispatches the optional ISI. A socket's `member_id`
-and subscription IDs remain canonical, with the prefixed sender in its message.
-
-## Operations
-
-| Area | Methods | Important inputs |
-| --- | --- | --- |
-| Identity | `login`, `refresh`, `logout`, `me` | SLT/token and original retry key |
-| Conversations | `conversations`, `create_conversation` | Page request; participant public IDs and retry key |
-| Messages | `messages`, `message`, `send_message`, `edit_message`, `delete_message` | Conversation address and message code, content and retry key; history preserves prior edits |
-| Receipts | `record_receipt` | Delivered/read state and stable device ID |
-| Drafts | `draft`, `put_draft`, `delete_draft` | Full content; version zero for create or observed version for replacement; versions are retained across deletion |
-| Bundles | `create_bundle`, `bundle` | 1–100 conversation-local message codes and a display message; Silicon authority |
-| Presence | `presence`; `ClientFrame::Presence` over a socket | Actor public ID; activity or null |
-| GIFs | `gifs` with `GifList` | Trending, search query, or recent |
-| Sandbox management | `create_test_environment`, `test_environments`, `test_environment`, `update_test_environment`, `test_environment_key`, `rotate_test_environment_key`, `clean_test_environment`, `delete_test_environment`, `restore_test_environment` | Production owner/creator authority and stable mutation keys; clean may use the root key |
-| Realtime | `connect`, `connect_with_generation` | Authorized actor IDs, stable device ID, last known sandbox generation |
-| Local relay | `relay::RelayClient` | Local relay URL and its private local bearer |
-| Optional runtime | `runtime::LocalRuntime::{login,start,start_with,run,client,store}` | Explicit state directory, local callback, and daemon executable; feature `runtime` |
-
-Messages use the [fixed schema](../wire-format.md). `Message.id` is the conversation-local code and serializes as `message-id`; always scope it by conversation. `MessageCreate.text` serializes as `message`, attachments serialize as HTTPS URL strings, and `reply_to_message_id` serializes as `reply: {"message-id":"..."}`. New JSON input accepts that reply object directly. Reply sender/content are server-owned.
-
-Audio goes in `attachments`; `voice_transcript` is optional. An attachment-only message uses empty text. Message metadata is no longer returned. Drafts retain their separate editable content schema. Legacy UUID aliases and old attachment objects remain accepted by the backend.
-
-## Errors, pagination and retries
-
-`Error::Api` preserves status, stable code, human-readable message, full response
-body, `X-Request-ID`, and `Retry-After` when present. On a draft conflict the full
-body can contain the current server draft. Do not replace that draft silently:
-read it, merge intentionally, and resubmit its new observed version.
-
-`Error::retryable()` identifies transport failures, HTTP 408/429 and server
-failures. It does **not** retry automatically. For a retry-safe mutation, persist
-its payload and key before sending, then retry both unchanged. If an operation
-has only optimistic concurrency, an uncertain successful write may later return
-a conflict; inspect current server state before deciding what to do. Idempotency
-does not mean a new key can be substituted after a timeout.
-
-`PageRequest` accepts `cursor` and a limit from 1 to 100. Copy `next_cursor` from
-one response into the next request. A null cursor ends traversal. Message pages
-are newest-first. `include_bundled_members=true` expands original members in
-history; bundle details separately include the originals.
-
-## Test environments
-
-Manage environments with the production login. `TestEnvironmentCreate` contains
-name, optional description, IAM test environment ID/key and the imported IAM
-test application's ID/secret. The DM backend requires test IAM credentials and
-cannot fall back to production IAM. Creation yields a fresh DM environment and
-root key; store the root key privately.
+An authenticated recipient explicitly enrolls its own DM grant in Ting:
 
 ```rust
-let sandbox = Client::new(dm_base)?.with_test_key(dm_test_root_key)?;
-let tokens = sandbox.login(&iam_test_slt, &login_key).await?;
-let sandbox = sandbox.with_auth(tokens.access_token, tokens.organization_id);
-let page = sandbox.conversations(&PageRequest::default()).await?;
+let registration_key = Uuid::new_v4().to_string();
+let subscription = dm.register_delivery(&registration_key).await?;
 ```
 
-The key is carried in `X-Testing-Environment-Key` on every selected HTTP request
-and WebSocket upgrade. A key does not turn a production actor into a test actor:
-the selected IAM sandbox still authenticates the actor. Use `without_test()`
-with a production-authenticated client for management. Clean, rotate and restore
-change the environment generation. See [realtime](realtime.md) for cursor reset
-requirements and [the test guide](../testing-environments.md) for lifecycle rules.
+DM performs the IAM OBO exchange for this recipient. This call neither logs the
+recipient into Ting nor configures a destination. Retry a known registration with
+its original key. An uncertain upstream outcome is reported rather than silently
+re-enrolling; follow the returned recovery guidance. Signing in or reconnecting
+must not automatically restore a revoked grant.
 
-## Updates
+## Receiving raw Ting batches
 
-`check_update()` reads the latest published stable client version from crates.io
-and returns `UpdateInfo`. It stores no timestamp and changes no application
-files. Rust clients remain ordinary project dependencies; update the manifest
-and lockfile in the consuming project. Honeycomb manages CLI updates.
+Configure the consumer's local endpoint directly with Ting; see
+[runtime setup](runtime.md). Ting hooks cover every eligible app for the selected
+recipient and organization. They are not filtered to DM. Your endpoint receives
+raw `{"tings":[...]}`, not a DM `type`/`data` envelope.
+
+Authenticate the configured callback secret and `Ting-Webhook-Id` first. Load the
+hook's trusted recipient binding from local configuration; never build it from
+untrusted callback JSON. The local Ting payload omits `for`. Route all applications
+by type and deduplicate durably by Ting ID and DM `delivery_id` where applicable.
+
+```rust
+use silicon_dm_client::ting::{HydratedTingItem, TingReceiverContext};
+
+// trusted_hook_binding is persisted when this exact hook is configured.
+let receiver: TingReceiverContext = trusted_hook_binding;
+let outcomes = dm.hydrate_ting_batch(&raw_callback_body, &receiver).await?;
+```
+
+The helper verifies fresh DM identity and discovery, validates recognized
+`<app_id>.sync.changed` references, and fetches current messages through normal
+DM permissions. Its outcomes require explicit handling:
+
+| Outcome | Consumer responsibility |
+| --- | --- |
+| `Message { reference, message }` | Apply the current message or deletion tombstone; preserve `reference.isi` when routing. |
+| `Inaccessible { reference }` | Handle DM's 403/404 without exposing cached content as newly authorized. |
+| `Failed { reference, error }` | Keep the failure visible and retry appropriate transient failures. |
+| `Skipped(TingItem::Unrelated { .. })` | Dispatch to the appropriate app handler; DM has not accepted it. |
+| Other `Skipped` outcomes | Handle rejected or stale-generation input explicitly. |
+
+`ting::validate_batch(raw, receiver, identity)` performs validation without I/O;
+its identity argument must come from authenticated DM `me()`. Neither helper
+persists work, transforms the message schema, dispatches another callback, nor
+sends Ting or DM acknowledgements.
+
+Ting accepts **the entire batch** only when the endpoint returns HTTP 204. Persist
+acceptance according to the generic consumer's contract before responding; do not
+return 204 merely because the DM subset succeeded. An old DM
+`{"type":"ack","data":...}` response, or Silicon event-result JSON, is not a
+Ting ACK. Ting manages delivery retries and replay.
+
+## Initial history and recovery
+
+Ting notifications are references, not a complete initial history. Initialize a
+new consumer with `sync_reset()` to capture a boundary, load accessible
+`conversations()` and `messages()` snapshots, then resume `sync()` from that
+boundary. Capturing the boundary first preserves updates that arrive while the
+snapshot is loading.
+
+```rust
+use silicon_dm_client::SyncRequest;
+
+let anchor = dm.sync_reset().await?;
+// Load and persist all accessible conversation/message snapshot pages here.
+let request = SyncRequest {
+    cursor: Some(anchor.cursor),
+    limit: Some(100),
+    reset: false,
+};
+let page = dm.sync(&request).await?;
+// Fetch current messages for page.events; commit applied work and page.cursor
+// together. Continue with that cursor while page.has_more is true.
+```
+
+Retain the returned cursor even on an empty final page. Resume the stored cursor
+after reconnect or recovery; never substitute a Ting sequence or the largest
+sequence observed in a batch. Cursors bind actor, org, environment and generation
+and expire after 24 hours. On `Error::sync_reset_required()`, repeat the
+boundary/snapshot/resume procedure. The SDK performs no background polling or
+automatic snapshot reset. Consumers must scope their own state and deduplication
+to the same identity and environment.
+
+## DM receipts and presence
+
+Ting's transport acceptance/read state is separate from DM message state. Send
+Delivered only after the intended recipient application accepts the message, and
+Read only when that recipient actually reads it. Fetching a reference, receiving
+a sender copy, or applying a deletion tombstone does not itself justify a receipt.
+
+```rust
+use silicon_dm_client::ReceiptStatus;
+
+// Run only after this recipient has accepted the non-deleted message.
+dm.record_receipt(&message.conversation_id, &message.id,
+    ReceiptStatus::Delivered, &stable_device_id).await?;
+let lease = dm.renew_presence(&stable_device_id, None).await?;
+// Renew according to lease.lease_expires_at while the device remains active.
+dm.close_presence(&stable_device_id).await?;
+```
+
+`presence(actor_id)` reads presence; `renew_presence(device_id, activity)` and
+`close_presence(device_id)` use HTTP. Presence leases are independent of Ting
+connectivity. Keep the device ID stable across restarts.
+
+## Other operations and message shape
+
+Messages retain their DM schema, content, attachments, transcripts, replies,
+bundles, history and identifiers. A message code is scoped by conversation.
+Groups, drafts, GIFs, sandbox management and normal send/edit/delete operations
+continue through HTTP; see the [API guide](../api/README.md).
+
+Optional ISI addresses belong in `MessageCreate.sender_id` and `recipient_id`,
+for example `deliberate@cos:tos`. They do not create another IAM principal or
+change conversation permissions. Canonical identity stays in `Message.sender`;
+route the validated Ting reference's optional `isi` in the receiving application.
+Edits cannot change the original route.
+
+`PageRequest` takes the server's opaque `next_cursor` and a limit of 1–100. A null
+`next_cursor` ends ordinary listing; do not infer completion from page length.
+`Error::Api` retains status, code, body, request ID and retry guidance.
+`Error::retryable()` classifies failures but performs no retry. Inspect current
+state after uncertain optimistic-concurrency writes before resubmitting.
+
+## Sandboxes and retired sockets
+
+Use `with_test_key` with the DM audience's IAM test app secret and verify the
+selected environment through `iam()`. Bind sandbox writes and hydration with
+`with_testing_generation(generation)` after validating a positive generation
+from discovery. A production token is not a test credential. The receiver
+binding must match the environment and generation exactly; a clean or restore
+requires explicit setup for the new generation. Ting login uses its own verified
+test credentials, described in [runtime setup](runtime.md).
+
+`connect`, `connect_with_generation` and `prewarm_shared` remain callable for
+source compatibility but immediately return `Error::Configuration` with actionable
+Ting migration guidance. They never open a socket. Backend DM WebSocket routes return HTTP 410.
+There is no DM receive fallback; Ting owns connections and delivery ACKs.
+
+Rust clients remain ordinary Cargo dependencies. `check_update()` only reports
+release information; it never changes the consuming project. Honeycomb manages
+CLI installation and updates.

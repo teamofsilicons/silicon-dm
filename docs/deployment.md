@@ -7,7 +7,7 @@ and operating details in [the Fargate guide](../deploy/aws/README.fargate.md).
 The general Docker commands below explain the underlying migration/runtime
 steps. Fargate uses an explicitly invoked one-off bootstrap task before the
 services are activated. See [manual verification](manual-backend-verification.md)
-for observed results and remaining checks.
+for historical results. The [0.10.0 candidate release record](release-0.10.0.md) separates current test evidence from pending production rollout gates.
 
 ## AWS deployment
 
@@ -36,6 +36,14 @@ then set the count to 1. The migration task rejects changes to existing database
 credentials or the testing encryption key; credential rotation requires a
 separate coordinated procedure.
 
+For the 0.10.0 Ting cutover, set both API and worker desired counts to zero
+and wait for their old tasks to stop before running the bootstrap migration.
+Migration 0033 sunsets the old delivery contracts; old and new delivery workers
+must not overlap. Apply all migrations through 0034 and the runtime grants, then
+start the 0.10.0 API and worker together. Hold public CLI updates until this
+backend cutover is ready. This transition requires a coordinated interruption;
+the ordinary rolling replacement procedure below applies to compatible updates.
+
 Use ordinary rollback for updates that replace ECS task definitions;
 `--disable-rollback` rejects replacement resources.
 
@@ -50,7 +58,12 @@ restricted secret values through their execution role and have no AWS task role.
 
 The public origin is `https://backend.dm.teamofsilicons.com`. Register the exact
 callback `https://backend.dm.teamofsilicons.com/webhook/` in IAM. The canonical
-application ID is `tos>dm`; there is no OBO endpoint registration.
+application ID is `tos>dm`; there is no DM OBO endpoint registration. Before
+cutover, approve its external Ting scopes `subscriptions.register` and `tings.send`
+through Honeycomb/IAM. Each recipient explicitly grants delivery registration;
+the initiating DM account supplies current, consented publisher authority. Register
+`tos>dm.sync.changed` in Ting for each intended organization and environment.
+Receiver login is a separate Ting login for the same typed account and context.
 
 Keep runtime configuration in Secrets Manager. Fargate task definitions refer to
 individual secret keys. For a host-managed Docker deployment, use private
@@ -68,6 +81,8 @@ Use separate configuration for the migrator and runtime:
 | `DM_PUBLIC_BASE_URL` | Not needed | `https://backend.dm.teamofsilicons.com/api/v1` |
 | `DM_IAM_BASE_URL` | Not needed | `https://backend.iam.teamofsilicons.com` |
 | `DM_IAM_APP_ID` | Not needed | `tos>dm` |
+| `DM_TING_BASE_URL` | Not needed | `https://backend.ting.teamofsilicons.com` |
+| `DM_TING_REQUEST_TIMEOUT_SECONDS` | Not needed | Ting request budget; default 15 |
 | `DM_IAM_APP_SECRET` | Not needed | Registered application secret |
 | `DM_IAM_WEBHOOK_SECRET` | Not needed | Registered callback signing secret |
 | `DM_IAM_WEBHOOK_KEY_VERSION` | Not needed | Exact signing version returned by IAM |
@@ -94,8 +109,8 @@ Replacing it does not re-encrypt existing environment credentials.
 Build the release image from the reviewed checkout:
 
 ```sh
-docker build --tag silicon-dm:0.2.0 .
-docker image inspect silicon-dm:0.2.0 --format '{{.Id}}'
+docker build --tag silicon-dm:candidate .
+docker image inspect silicon-dm:candidate --format '{{.Id}}'
 ```
 
 Record the resulting image ID or registry digest for the deployment. The image
@@ -109,7 +124,7 @@ The following file paths are examples to replace with the host's private files:
 ```sh
 docker run --rm \
   --env-file /secure/silicon-dm/migration.env \
-  silicon-dm:0.2.0 dm-migrate
+  silicon-dm:candidate dm-migrate
 ```
 
 Run [the runtime grants](../deploy/runtime-grants.sql) as the migration role,
@@ -139,37 +154,38 @@ can express these same settings through its service manager:
 docker run --detach --name silicon-dm-api --restart unless-stopped \
   --env-file /secure/silicon-dm/runtime.env \
   --publish 127.0.0.1:8080:8080 \
-  silicon-dm:0.2.0 dm-api
+  silicon-dm:candidate dm-api
 
 docker run --detach --name silicon-dm-worker --restart unless-stopped \
   --env-file /secure/silicon-dm/runtime.env \
-  silicon-dm:0.2.0 dm-worker
+  silicon-dm:candidate dm-worker
 ```
 
-The API also runs its own delivery pump for sockets connected to that process.
-The standalone worker performs durable delivery maintenance; it does not own
-another API process's WebSocket connections. Multiple replicas share the same
-production database and testing configuration. Account for every replica's
-connection pools when sizing PostgreSQL.
+The API and standalone worker claim durable Ting handoffs using database leases.
+They maintain outbound Ting connections and share the production database and
+testing configuration; neither serves incoming DM delivery sockets. Account for
+every replica's connection pools when sizing PostgreSQL.
 
 Configure the ingress to route these paths unchanged:
 
 | Path | Required handling |
 | --- | --- |
 | `/api/v1/*` | HTTPS REST requests; preserve authorization, organization, idempotency, version, and testing headers |
-| `/api/v1/ws` | WebSocket upgrade, query parameters, and negotiated subprotocol; no response buffering |
+| `/api/v1/ws`, `/api/v1/ws/shared` | Preserve HTTP 410 migration responses; these routes are retired |
 | `/webhook/` | POST with exact original body bytes and IAM signature headers; preserve the trailing slash |
 | `/live`, `/ready` | HTTP probes; successful result is 204 |
 
 Do not parse and re-encode webhook JSON at the proxy. Do not cache authenticated
-responses or strip `Cache-Control: no-store`. WebSocket inactivity limits must
-allow the application's 30-second pings and 120-second heartbeat policy; use an
-ingress timeout above 120 seconds. Redact credentials, WebSocket authentication
-subprotocols, testing root headers, and raw IAM test webhook bodies from logs.
+responses or strip `Cache-Control: no-store`. Permit backend outbound HTTPS and
+WebSocket traffic to Ting. Browser receivers connect to Ting’s own origin with
+its cookie; configure Ting’s exact browser-origin allowlist and credentialed CORS
+for DM and Interface. Verify same-site cookie behavior and session environment
+attestation before claiming delivery readiness. Redact credentials, cookies,
+testing headers and raw IAM test webhook bodies from logs.
 
 Align ingress body limits with `DM_MAX_HTTP_BODY_BYTES` (128 MiB by default).
 The logical text limit is 100 million Unicode characters; UTF-8 and JSON encoding
-can require more bytes. Increase the explicit body/frame limits only with
+can require more bytes. Increase the explicit HTTP body limits only with
 adequate process memory and request timeouts. The backend separately limits
 auth bodies to 16 KiB and IAM webhooks to 1 MiB.
 
@@ -185,18 +201,23 @@ Perform these actions individually after ingress and the runtime are ready:
 1. Read `/live` and `/ready` through the public HTTPS origin and verify 204.
    Readiness covers DM database/schema access; it does not prove IAM or Giphy.
 2. Use the installed IAM CLI to obtain a fresh SLT with explicit IAM organization selection for the
-   registered app. Log in through the DM CLI with a reachable local callback,
-   and check `whoami`. Keep production and testing profiles separate.
-3. Pair a new DM sandbox with an IAM testing environment. Sign in both intended
-   recipients, send a message, observe the callback ACK and Delivered receipt,
-   then explicitly mark it Read. Reconnect and inspect durable replay behavior.
+   registered app. Check DM `login status`, explicitly `delivery register`, then
+   use a separate Ting-bound SLT with `delivery login`. Attach the generic local
+   destination with `webhook URL --all-apps`. Keep production and testing profiles
+   separate and verify the same actor, organization and environment generation.
+3. Create a shared Honeycomb sandbox including DM and Ting, wait for readiness,
+   and verify fresh credentials after rotation. Send in both directions, hydrate
+   references through DM HTTP, and exercise callback failure/replay followed by
+   HTTP 204. Confirm Ting acceptance alone creates no DM Delivered/Read receipt;
+   send those explicitly. Verify stable hook IDs on reconnect, HTTP sync recovery,
+   and pending handoff recovery only after the initiating account signs in again.
 4. Request Giphy trending and search with the configured real key. Inspect
    provider results and the null next cursor; discovery currently returns up to
    25 results without pagination.
 5. Activate the registered production webhook in IAM. Trigger an authorized
    change on a designated test account, inspect DM receipt and IAM delivery
    status, and verify session revalidation. Exercise the signed test envelope
-   separately against the paired sandbox. See [IAM integration](iam.md) for
+   separately against the selected shared sandbox. See [IAM integration](iam.md) for
    signer versions and environment binding.
 6. Confirm the tested deployment image, migration version, probe results, and
    manually observed outcomes in a deployment record. Keep secret values and
@@ -208,7 +229,8 @@ expecting further test callbacks. Production uses the registered public URL.
 
 ## Rust package and CLI release
 
-The client and CLI are published on crates.io. For each new release, publish
+Prior client and CLI releases are on crates.io; 0.10.0 remains a candidate until
+its release gates pass. For each new release, publish
 `silicon-dm-protocol`, then `silicon-dm-client`, then `silicon-dm-cli`, whose manifest depends on that
 client version. Use the appropriate crates.io owner account and review the
 package contents and release version before publication.

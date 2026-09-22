@@ -6,6 +6,7 @@ export type Config = {
   frontend: URL;
   api: URL;
   iam: URL;
+  tingBrowser: URL;
   appId: string;
   directory: string;
   maxBytes: number;
@@ -75,6 +76,9 @@ export function configuration(env: NodeJS.ProcessEnv = process.env): Config {
     ),
     iam: configuredOrigin(
       env.IAM_LOGIN_ORIGIN || "https://auth.iam.teamofsilicons.com",
+    ),
+    tingBrowser: configuredOrigin(
+      env.DM_TING_BROWSER_ORIGIN || "https://ting.teamofsilicons.com",
     ),
     appId,
     directory: resolve(directory),

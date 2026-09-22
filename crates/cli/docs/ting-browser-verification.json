@@ -1,0 +1,755 @@
+{
+  "report": {
+    "passed": true,
+    "scope": "local browser fixture only",
+    "checks": [
+      "Initial DM cookie session authenticated",
+      "Legacy numeric ACK cursor never becomes an HTTP sync cursor",
+      "IndexedDB rolls back page messages, receipts and cursor together",
+      "Successful page commits messages, delivered receipts and opaque cursor together",
+      "A stale tab cannot overwrite a committed HTTP cursor",
+      "Sandbox clean fences old pages and clears cached messages and receipts",
+      "Late discovery cannot lower the generation or erase current committed data",
+      "Separate Ting origin establishes an HttpOnly cookie",
+      "Ting uses its cookie and watch_inbox on its own origin",
+      "Ting 0.1.3 production context matches DM before the watch is verified",
+      "Matching account in the wrong Ting environment cannot open a new socket",
+      "An older Ting response never implies verified production",
+      "Explicit reconnect revalidates Ting context before reporting connected",
+      "DM WebSocket endpoint is retired",
+      "Starting a watch never silently registers delivery",
+      "Ting hint hydrates both messages through authorized DM HTTP",
+      "Opaque sync checkpoint persists after multiple pages",
+      "Hydrated content is committed to IndexedDB",
+      "Ting reconnect catches up using the persisted opaque cursor",
+      "Expired cursor anchors sync before canonical snapshot recovery",
+      "Transient Ting pause automatically resumes its watch and catches missed arrivals",
+      "Presence uses the DM HTTP lease",
+      "Hints and hydration never ACK or mark Ting read",
+      "Expired DM HTTP token refreshes without logging out",
+      "Rejected send retries exactly once with identical body and key",
+      "Refresh outage retains the session without accepting the send",
+      "HTTP session recovers after outage without sign-in",
+      "Revoked refresh requires sign-in and never accepts the action",
+      "No DM WebSocket upgrades or external endpoint calls occurred"
+    ],
+    "ready": 5,
+    "states": [
+      "connecting",
+      "connected",
+      "connected",
+      "connected",
+      "connected",
+      "connected",
+      "connected",
+      "connected",
+      "connected",
+      "connected",
+      "connected",
+      "connected",
+      "closed"
+    ],
+    "tingStates": [
+      {
+        "state": "connecting",
+        "message": "Checking your Ting sign-in…",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "connected",
+        "message": "Ting connected with the matching DM account and environment.",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "connecting",
+        "message": "Checking your Ting sign-in…",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "blocked",
+        "message": "Ting and DM are using different testing environments or generations. Sign in to Ting with this DM environment, then reconnect.",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "connecting",
+        "message": "Checking your Ting sign-in…",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "unverified",
+        "message": "Ting hints connected. This Ting server did not disclose its session environment, so delivery context remains unverified.",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "connecting",
+        "message": "Checking your Ting sign-in…",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "connected",
+        "message": "Ting connected with the matching DM account and environment.",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "blocked",
+        "message": "Ting hints disconnected. DM is reconciling through its authorized history API.",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "connecting",
+        "message": "Checking your Ting sign-in…",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "connected",
+        "message": "Ting connected with the matching DM account and environment.",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "paused",
+        "message": "Ting paused these hints. DM history remains available; reconnect after checking your Ting permissions.",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "connecting",
+        "message": "Checking your Ting sign-in…",
+        "origin": "http://127.0.0.1:53791"
+      },
+      {
+        "state": "connected",
+        "message": "Ting connected with the matching DM account and environment.",
+        "origin": "http://127.0.0.1:53791"
+      }
+    ],
+    "received": [
+      "session-test-carbon::peer#001",
+      "session-test-carbon::peer#002",
+      "session-test-carbon::peer#003",
+      "session-test-carbon::peer#001",
+      "session-test-carbon::peer#002",
+      "session-test-carbon::peer#003",
+      "session-test-carbon::peer#004",
+      "session-test-carbon::peer#005"
+    ],
+    "errors": [],
+    "unauthorized": 1,
+    "refreshAttempts": 4,
+    "acceptedMessages": 2,
+    "liveVerification": "Deployed Ting authorization and testing lifecycle are verified separately."
+  },
+  "evidence": {
+    "refreshAttempts": 4,
+    "messageAttempts": 5,
+    "dmUpgrades": 0,
+    "tokenVersion": 2,
+    "tingConnections": 5,
+    "tingWatches": 5,
+    "tingMe": 6,
+    "tingReads": 0,
+    "tingFrames": [
+      {
+        "op": "watch_inbox",
+        "request_id": "c7f683c1-c7e8-45e1-8a03-a86c16b83bd1",
+        "org_id": "session-test"
+      },
+      {
+        "op": "watch_inbox",
+        "request_id": "7cbcedd3-dda3-4c90-9e63-5388901df53c",
+        "org_id": "session-test"
+      },
+      {
+        "op": "watch_inbox",
+        "request_id": "9404f0c1-9bc6-4135-819d-ae9679aa6a90",
+        "org_id": "session-test"
+      },
+      {
+        "op": "watch_inbox",
+        "request_id": "cce0bd57-ac2a-4ccd-9ca4-474bcfb66b2e",
+        "org_id": "session-test"
+      },
+      {
+        "op": "watch_inbox",
+        "request_id": "e237e693-a0f3-452a-bb0a-176218e652a7",
+        "org_id": "session-test"
+      }
+    ],
+    "registrations": 0,
+    "presenceWrites": 12,
+    "presenceDeletes": 1,
+    "receipts": 8,
+    "syncRequests": [
+      {
+        "cursor": null,
+        "reset": true,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_263b8157-5f7d-46ed-b05f-f518923e8c8a",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_27ae518a-53be-4f5c-bdf2-2e07b6ebfbf3",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_7396d507-96ba-4283-b09b-6ebe7c5a7232",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_85cb1dc0-1f6c-48a8-8613-b4db1f1b0f68",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_62229226-1788-4c11-9c96-db72c9d960d6",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_bc98a327-e504-409e-a067-3d5293b8c6f0",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_fb8edfa9-184e-4b68-9ce8-a56209d5a2c6",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_5cf258af-fe74-44d7-bcd9-ffc91c840109",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_ba5f561b-a4c2-44bd-b81a-4ec6c9a0e8f4",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_74ccc25b-6c79-4982-8f82-704355a0ffe1",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_2a5325a7-445e-4177-874e-072073d1dce1",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": null,
+        "reset": true,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_55d76694-ccf1-4e46-ab0a-fda0a0cb8418",
+        "reset": false,
+        "authorized": true
+      },
+      {
+        "cursor": "fixture_cursor_a0648582-448b-499c-b238-27fda9a0c742",
+        "reset": false,
+        "authorized": true
+      }
+    ],
+    "hydration": [
+      {
+        "id": "001",
+        "authorized": true
+      },
+      {
+        "id": "002",
+        "authorized": true
+      },
+      {
+        "id": "003",
+        "authorized": true
+      },
+      {
+        "id": "005",
+        "authorized": true
+      }
+    ],
+    "dmRequests": [
+      {
+        "method": "GET",
+        "path": "/api/v1/auth/me",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/iam",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?reset=true&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/conversations?limit=100",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages?limit=100&include_bundled_members=true",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_263b8157-5f7d-46ed-b05f-f518923e8c8a&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/iam",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_27ae518a-53be-4f5c-bdf2-2e07b6ebfbf3&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/iam",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_7396d507-96ba-4283-b09b-6ebe7c5a7232&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/iam",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_85cb1dc0-1f6c-48a8-8613-b4db1f1b0f68&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/iam",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_62229226-1788-4c11-9c96-db72c9d960d6&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/iam",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_bc98a327-e504-409e-a067-3d5293b8c6f0&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/iam",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_fb8edfa9-184e-4b68-9ce8-a56209d5a2c6&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/iam",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_5cf258af-fe74-44d7-bcd9-ffc91c840109&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/001",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_ba5f561b-a4c2-44bd-b81a-4ec6c9a0e8f4&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/002",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/001/receipts",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/002/receipts",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/iam",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_74ccc25b-6c79-4982-8f82-704355a0ffe1&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/003",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/003/receipts",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/iam",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_2a5325a7-445e-4177-874e-072073d1dce1&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?reset=true&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/conversations?limit=100",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages?limit=100&include_bundled_members=true",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_55d76694-ccf1-4e46-ab0a-fda0a0cb8418&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/001/receipts",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/002/receipts",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/003/receipts",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/004/receipts",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/iam",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/sync?cursor=fixture_cursor_a0648582-448b-499c-b238-27fda9a0c742&limit=100",
+        "authorized": true
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/005",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages/005/receipts",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/v1/presence/devices/browser-a979f102-dc23-414a-9f94-e72c7f49ffe4",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages",
+        "authorized": false
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/auth/me",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages",
+        "authorized": false
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages",
+        "authorized": true
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/conversations/session-test-carbon::peer/messages",
+        "authorized": false
+      }
+    ],
+    "acceptedCount": 2,
+    "attempts": [
+      {
+        "key": "browser-http-expiry",
+        "body": "{\"type\":\"message.create\",\"data\":{\"message\":\"Controlled local test message\",\"attachments\":[]}}",
+        "authorized": false
+      },
+      {
+        "key": "browser-http-expiry",
+        "body": "{\"type\":\"message.create\",\"data\":{\"message\":\"Controlled local test message\",\"attachments\":[]}}",
+        "authorized": true
+      },
+      {
+        "key": "browser-outage-retry",
+        "body": "{\"type\":\"message.create\",\"data\":{\"message\":\"Controlled local test message\",\"attachments\":[]}}",
+        "authorized": false
+      },
+      {
+        "key": "browser-outage-retry",
+        "body": "{\"type\":\"message.create\",\"data\":{\"message\":\"Controlled local test message\",\"attachments\":[]}}",
+        "authorized": true
+      },
+      {
+        "key": "browser-revoked-send",
+        "body": "{\"type\":\"message.create\",\"data\":{\"message\":\"Controlled local test message\",\"attachments\":[]}}",
+        "authorized": false
+      }
+    ],
+    "authenticated": false,
+    "report": {
+      "passed": true,
+      "scope": "local browser fixture only",
+      "checks": [
+        "Initial DM cookie session authenticated",
+        "Legacy numeric ACK cursor never becomes an HTTP sync cursor",
+        "IndexedDB rolls back page messages, receipts and cursor together",
+        "Successful page commits messages, delivered receipts and opaque cursor together",
+        "A stale tab cannot overwrite a committed HTTP cursor",
+        "Sandbox clean fences old pages and clears cached messages and receipts",
+        "Late discovery cannot lower the generation or erase current committed data",
+        "Separate Ting origin establishes an HttpOnly cookie",
+        "Ting uses its cookie and watch_inbox on its own origin",
+        "Ting 0.1.3 production context matches DM before the watch is verified",
+        "Matching account in the wrong Ting environment cannot open a new socket",
+        "An older Ting response never implies verified production",
+        "Explicit reconnect revalidates Ting context before reporting connected",
+        "DM WebSocket endpoint is retired",
+        "Starting a watch never silently registers delivery",
+        "Ting hint hydrates both messages through authorized DM HTTP",
+        "Opaque sync checkpoint persists after multiple pages",
+        "Hydrated content is committed to IndexedDB",
+        "Ting reconnect catches up using the persisted opaque cursor",
+        "Expired cursor anchors sync before canonical snapshot recovery",
+        "Transient Ting pause automatically resumes its watch and catches missed arrivals",
+        "Presence uses the DM HTTP lease",
+        "Hints and hydration never ACK or mark Ting read",
+        "Expired DM HTTP token refreshes without logging out",
+        "Rejected send retries exactly once with identical body and key",
+        "Refresh outage retains the session without accepting the send",
+        "HTTP session recovers after outage without sign-in",
+        "Revoked refresh requires sign-in and never accepts the action",
+        "No DM WebSocket upgrades or external endpoint calls occurred"
+      ],
+      "ready": 5,
+      "states": [
+        "connecting",
+        "connected",
+        "connected",
+        "connected",
+        "connected",
+        "connected",
+        "connected",
+        "connected",
+        "connected",
+        "connected",
+        "connected",
+        "connected",
+        "closed"
+      ],
+      "tingStates": [
+        {
+          "state": "connecting",
+          "message": "Checking your Ting sign-in…",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "connected",
+          "message": "Ting connected with the matching DM account and environment.",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "connecting",
+          "message": "Checking your Ting sign-in…",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "blocked",
+          "message": "Ting and DM are using different testing environments or generations. Sign in to Ting with this DM environment, then reconnect.",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "connecting",
+          "message": "Checking your Ting sign-in…",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "unverified",
+          "message": "Ting hints connected. This Ting server did not disclose its session environment, so delivery context remains unverified.",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "connecting",
+          "message": "Checking your Ting sign-in…",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "connected",
+          "message": "Ting connected with the matching DM account and environment.",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "blocked",
+          "message": "Ting hints disconnected. DM is reconciling through its authorized history API.",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "connecting",
+          "message": "Checking your Ting sign-in…",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "connected",
+          "message": "Ting connected with the matching DM account and environment.",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "paused",
+          "message": "Ting paused these hints. DM history remains available; reconnect after checking your Ting permissions.",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "connecting",
+          "message": "Checking your Ting sign-in…",
+          "origin": "http://127.0.0.1:53791"
+        },
+        {
+          "state": "connected",
+          "message": "Ting connected with the matching DM account and environment.",
+          "origin": "http://127.0.0.1:53791"
+        }
+      ],
+      "received": [
+        "session-test-carbon::peer#001",
+        "session-test-carbon::peer#002",
+        "session-test-carbon::peer#003",
+        "session-test-carbon::peer#001",
+        "session-test-carbon::peer#002",
+        "session-test-carbon::peer#003",
+        "session-test-carbon::peer#004",
+        "session-test-carbon::peer#005"
+      ],
+      "errors": [],
+      "unauthorized": 1,
+      "refreshAttempts": 4,
+      "acceptedMessages": 2,
+      "liveVerification": "Deployed Ting authorization and testing lifecycle are verified separately."
+    }
+  }
+}

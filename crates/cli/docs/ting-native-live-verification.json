@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "verified_at": "2026-09-22T20:42:29.909361+00:00",
+  "result": "passed",
+  "scope": "Actual candidate DM CLI, real IAM and Ting sandbox, existing shared Ting system daemon, task-owned loopback consumer.",
+  "versions": {
+    "candidate_dm_cli": "0.9.6",
+    "candidate_published": false,
+    "installed_ting_cli": "0.1.3",
+    "running_shared_ting_daemon": "0.1.2",
+    "running_daemon_version_evidence": "Original process executable resolved to the Ting 0.1.2 package; it was not restarted or upgraded."
+  },
+  "environment": {
+    "kind": "testing",
+    "id": "d70c8674-6d2e-41d4-bf8d-96ddd882edbd",
+    "generation": 1,
+    "organization_id": "tos",
+    "dm_api": "http://127.0.0.1:18086/api/v1",
+    "ting_api": "https://backend.ting.teamofsilicons.com"
+  },
+  "actors": {
+    "sender": {
+      "kind": "silicon",
+      "id": "dm-ting-bot:tos"
+    },
+    "receiver": {
+      "kind": "carbon",
+      "id": "dm-ting-tester"
+    }
+  },
+  "preconditions": [
+    "Task-owned shared test environment and current audience credentials verified by official IAM.",
+    "Both recipients had explicit DM delivery registration from the accompanying backend test. Native delivery register was not repeated.",
+    "Isolated DM profiles and outgoing relay port; only the task-owned Ting destination was modified.",
+    "Documented IAM test-only actor shortcuts used only with verified testing credentials; no production login or send."
+  ],
+  "checks": [
+    {
+      "name": "native_dm_actor_logins",
+      "passed": true,
+      "detail": "Separate Carbon receiver and Silicon sender DM profiles authenticated using current sandbox app discovery."
+    },
+    {
+      "name": "separate_ting_login",
+      "passed": true,
+      "detail": "Native delivery login validated the Ting audience, same Carbon actor and kind, live testing environment/generation, and tos organization before retaining the session."
+    },
+    {
+      "name": "direct_all_apps_webhook",
+      "passed": true,
+      "webhook_id": "hook_8b85c136af634929bb6300c07a2310fa",
+      "detail": "Explicit --all-apps attachment directly to the installed shared Ting daemon; task-owned consumer enforces secret, hook, app type, org, environment, generation, and reference identity."
+    },
+    {
+      "name": "native_send_and_authorized_hydration",
+      "passed": true,
+      "conversation_id": "dm-ting-tester::dm-ting-bot:tos",
+      "message_id": "004",
+      "ting_id": "msg_cc5128ff8e5f4197aeeffc72b0dc76aa",
+      "delivery_id": "01a0cad4-2fa9-7b31-b820-0a906cd5e795",
+      "message_sha256": "14e50b92ef58f99c2713d455f3e8c4ed93134d75c4773b44e9e4f9579f10bb2f",
+      "detail": "Candidate CLI sent via DM; authentic Ting callback carried only the reference, and the consumer fetched matching canonical message content through authorized DM HTTP."
+    },
+    {
+      "name": "callback_failure_and_replay",
+      "passed": true,
+      "successful_hydration_callbacks_returning_503": 3,
+      "accepted_batch_size": 7,
+      "detail": "Initial four-item batch replayed with identical delivery IDs after HTTP 503. Scoped reconnect retained the hook ID; its subsequent failed seven-item batch included message 004. A later automatic retry was durably committed and returned 204."
+    },
+    {
+      "name": "stable_hook_reconnect",
+      "passed": true,
+      "webhook_id": "hook_8b85c136af634929bb6300c07a2310fa",
+      "detail": "delivery reconnect retained the exact saved hook and resumed the retained pending batch."
+    },
+    {
+      "name": "consumer_duplicate_handling",
+      "passed": true,
+      "scope": "local consumer replay of authentic Ting batch",
+      "replayed_count": 7,
+      "new_effects": 0,
+      "before_count": 7,
+      "after_count": 7,
+      "detail": "Separate local fixture check replayed an authentic seven-item Ting batch after acceptance; unique delivery IDs prevented any additional durable effects. This check does not claim exactly-once transport."
+    },
+    {
+      "name": "ting_acceptance_does_not_set_dm_receipts",
+      "passed": true,
+      "delivered_at_after_ting_204": null,
+      "read_at_after_ting_204": null
+    },
+    {
+      "name": "explicit_native_dm_receipts",
+      "passed": true,
+      "delivered_at": "2026-09-22T20:39:05.216359Z",
+      "read_at_before_explicit_read": null,
+      "read_at_after_explicit_read": "2026-09-22T20:39:48.296433Z"
+    },
+    {
+      "name": "task_hook_queue_drained",
+      "passed": true,
+      "task_hook_remaining_rows": 0,
+      "detail": "Read-only queue verification was restricted to this hook; global pending counts were not used as evidence."
+    }
+  ],
+  "cleanup": {
+    "task_hook_detached": true,
+    "retained_hook_record_state": "auth_paused",
+    "separate_ting_session_logged_out": true,
+    "isolated_dm_receiver_and_sender_logged_out": true,
+    "task_owned_outgoing_dm_relay_stopped": true,
+    "task_owned_callback_stopped": true,
+    "shared_ting_daemon_original_pid_still_alive": 97706,
+    "other_ting_bindings_modified": false,
+    "private_evidence_retained": true
+  },
+  "not_covered": [
+    "Full shared Ting daemon restart was deliberately not attempted.",
+    "Explicit delivery registration and backend-originator recovery were covered by the separate parent backend run, not repeated here.",
+    "No new isolated-environment clean or app-secret rotation was attempted in this native run.",
+    "No production release, deployment, message, or notification."
+  ],
+  "notes": [
+    "The first callback arrived before its newly created hook ID file was saved and returned 503 without processing; all replay assertions use subsequent successfully validated and hydrated attempts.",
+    "Private fixture data and credentials are retained outside the repository. This report contains no tokens, app secrets, session material, or message body."
+  ]
+}

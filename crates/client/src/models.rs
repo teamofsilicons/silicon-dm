@@ -412,6 +412,62 @@ pub struct Presence {
     pub activity: Option<Activity>,
     pub last_seen_at: Option<String>,
 }
+/// Device presence is an HTTP lease, independent of Ting delivery transport.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresenceLease {
+    pub presence: Presence,
+    pub lease_expires_at: String,
+    pub activity_expires_at: Option<String>,
+}
+
+/// Explicit Ting grant for the authenticated recipient. It does not log in to Ting.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeliveryRegistration {
+    pub id: String,
+    pub app_id: String,
+    #[serde(rename = "for")]
+    pub recipient: String,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SyncRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u16>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reset: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncEventKind {
+    Message,
+    MessageStatus,
+}
+
+/// Authoritative reference; fetch the current message under current permissions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SyncEvent {
+    pub event_id: Uuid,
+    pub sequence: i64,
+    #[serde(rename = "type")]
+    pub kind: SyncEventKind,
+    pub conversation_id: String,
+    pub message_id: String,
+}
+
+/// `cursor` remains durable on the last page; `has_more` binds a fixed scan boundary.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SyncPage {
+    pub events: Vec<SyncEvent>,
+    pub cursor: String,
+    pub has_more: bool,
+    pub upper_sequence: i64,
+    pub testing_environment_id: Option<Uuid>,
+    pub testing_generation: Option<i64>,
+}
 /// Tokens are deliberately not Debug; callers explicitly own their persistence.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Tokens {

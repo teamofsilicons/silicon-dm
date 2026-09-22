@@ -23,7 +23,6 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
     stopping = true;
     const timeout = setTimeout(() => process.exit(1), 10000);
     timeout.unref();
-    gateway.sockets.close();
     server.close(() => {
       void gateway.close().finally(() => process.exit(0));
     });

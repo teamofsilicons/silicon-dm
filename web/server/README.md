@@ -8,28 +8,30 @@ values and testing keys are absent from public session responses.
 
 Run `npm run dev` for the Vite frontend and gateway on port 4315. The Node bundle
 uses `npm run build`, then `NODE_ENV=production npm start`. It can serve the built
-frontend locally and streams authenticated HTTP and WebSocket traffic.
+frontend locally and streams authenticated HTTP traffic. Incoming delivery connects directly to Ting.
 
 The hosted frontend is static SolidJS on Vercel, with this persistent
 Node gateway behind the API load balancer. The separate deployment is defined in
 [the gateway stack](../../deploy/aws/README.gateway.md). REST requests go directly from the frontend to the
-gateway using `credentials: "include"`; WebSockets connect directly to the same
-gateway host. Access tokens, refresh tokens, and testing root keys stay on the
+gateway using `credentials: "include"`. Delivery hints use a separate,
+cookie-authenticated connection to Ting’s browser host. Access tokens, refresh tokens, and testing root keys stay on the
 gateway. Vercel receives static frontend requests only, so its Functions request
 body limit does not restrict DM's large-message transport.
 
-| Variable                 | Default / purpose                                                                                                                                                |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DM_WEB_ORIGIN`          | `http://127.0.0.1:4315` in development; required in production. Exact external HTTPS origin, or HTTP loopback.                                                   |
-| `DM_FRONTEND_ORIGIN`     | Defaults to `DM_WEB_ORIGIN`; exact public frontend origin allowed by CORS and WebSocket Origin checks.                                                           |
-| `VITE_DM_GATEWAY_ORIGIN` | Public frontend build setting; defaults to its own origin locally. Set to the separate gateway HTTPS origin for Vercel. Never put credentials in VITE variables. |
-| `DM_API_ORIGIN`          | `https://backend.dm.teamofsilicons.com`; exact DM backend origin.                                                                                                |
-| `IAM_LOGIN_ORIGIN`       | `https://auth.iam.teamofsilicons.com`; IAM browser authentication origin.                                                                                        |
-| `DM_WEB_APP_ID`          | `tos>dm`; canonical IAM application ID.                                                                                                                          |
-| `DM_WEB_STATE_DIR`       | `~/.silicon-dm/web`; absolute private directory outside the application checkout and assets.                                                                     |
-| `DM_WEB_MAX_BODY_BYTES`  | 134217728 bytes (128 MiB); configurable up to 3 GiB. This also bounds a proxied WebSocket message. Authentication JSON is separately limited to 16 KiB.          |
-| `HOST`, `PORT`           | `127.0.0.1`, `4315`; use a suitable bind address behind the hosting ingress.                                                                                     |
-| `ASSET_DIR`              | `dist/client`; production asset directory.                                                                                                                       |
+| Variable                      | Default / purpose                                                                                                                                                |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DM_WEB_ORIGIN`               | `http://127.0.0.1:4315` in development; required in production. Exact external HTTPS origin, or HTTP loopback.                                                   |
+| `DM_FRONTEND_ORIGIN`          | Defaults to `DM_WEB_ORIGIN`; exact public frontend origin allowed by CORS and request Origin checks.                                                             |
+| `VITE_DM_GATEWAY_ORIGIN`      | Public frontend build setting; defaults to its own origin locally. Set to the separate gateway HTTPS origin for Vercel. Never put credentials in VITE variables. |
+| `DM_API_ORIGIN`               | `https://backend.dm.teamofsilicons.com`; exact DM backend origin.                                                                                                |
+| `DM_TING_BROWSER_ORIGIN`      | `https://ting.teamofsilicons.com`; exact cookie-issuing Ting browser origin. HTTP loopback is allowed for local fixtures.                                        |
+| `VITE_DM_TING_BROWSER_ORIGIN` | Static Vercel CSP setting, same default; keep it equal to the gateway’s Ting browser origin. Public origin only.                                                 |
+| `IAM_LOGIN_ORIGIN`            | `https://auth.iam.teamofsilicons.com`; IAM browser authentication origin.                                                                                        |
+| `DM_WEB_APP_ID`               | `tos>dm`; canonical IAM application ID.                                                                                                                          |
+| `DM_WEB_STATE_DIR`            | `~/.silicon-dm/web`; absolute private directory outside the application checkout and assets.                                                                     |
+| `DM_WEB_MAX_BODY_BYTES`       | 134217728 bytes (128 MiB); configurable up to 3 GiB. Authentication JSON is separately limited to 16 KiB.                                                        |
+| `HOST`, `PORT`                | `127.0.0.1`, `4315`; use a suitable bind address behind the hosting ingress.                                                                                     |
+| `ASSET_DIR`                   | `dist/client`; production asset directory.                                                                                                                       |
 
 Use persistent local storage and one gateway process per state directory. The
 gateway enforces that ownership at startup; this file-backed store is not a
@@ -63,22 +65,27 @@ encoded body, idempotency key, version, testing generation, and cancellation
 signal. A rejected refresh or second 401 requires sign-in; temporary network
 or authentication-service failures retain the session.
 
-Run `npm test` from `web` for HTTP/WebSocket renewal and durable-session
-regressions. For the browser integration check, run `npm run test:session-browser`
-and open the printed URL. It uses the actual client, gateway, cookies, IndexedDB,
-and WebSockets with a loopback backend and fake credentials. It forces HTTP and
-WebSocket expiry, a temporary refresh outage, and refresh revocation, checking
-that rejected writes preserve their body and idempotency key on retry. The page
-and printed JSON report show the result. Stop the process with Ctrl+C; restart
-it for another run. This check does not contact deployed DM or IAM services.
+Run `npm test` from `web` for HTTP renewal, durable sessions, synchronization,
+and the retired socket boundary. The local browser fixture is available through
+`npm run test:session-browser`; its loopback services and fake credentials do
+not prove deployed Ting delivery.
 
-`/api/ws` authenticates the same cookie, accepts `profile_id`, `device_id`, and
-optional `testing_generation`, and supplies the selected actor and organization
-to DM. Optional `actors` and `org_id` must match that profile. Resume cursors are
-sent in protocol frames after `ready`. Socket buffers are bounded; logout or
-replacement login closes the affected profile's sockets. Browser writes and
-WebSocket upgrades require the exact configured Origin. REST and WebSocket
-credentials are never exposed in browser URLs or logged by the gateway.
+`/api/ws` now returns HTTP 410 `delivery_moved_to_ting`, including upgrade
+requests. The gateway creates no upstream delivery socket. The selected DM
+session authorizes `/api/dm/iam`, `/api/dm/sync`, explicit delivery registration,
+message reads/writes, presence leases and receipts. Ting credentials never pass
+through this gateway.
+
+The browser uses Ting’s cookie-issuing host for `/v1/me` and `watch_inbox`.
+Ting must permit the exact frontend Origin and return credentialed CORS headers
+on actual HTTP responses. Ting 0.1.3 `/v1/me` must match the selected DM typed
+account and explicit environment before a watch is verified; test UUID and
+generation must both match DM discovery. Explicit mismatches block the watch.
+Older responses without an environment remain visibly unverified. Every hint
+only triggers independently authorized DM HTTP synchronization; it never
+acknowledges Ting inbox items or creates a DM read receipt. See
+[the integration verification record](../../docs/ting-integration-issues.md)
+for deployed origin and testing lifecycle evidence.
 
 ## Static Vercel hosting
 
@@ -86,7 +93,7 @@ Set the Vercel project root to `web` and its public build environment variable
 `VITE_DM_GATEWAY_ORIGIN` to the separately hosted gateway's exact HTTPS origin.
 `web/vercel.json` builds `.vercel/output/static` using the Build Output API;
 `scripts/build-vercel.mjs` emits static routes and a CSP restricted to the
-configured gateway for HTTP and WebSocket connections. It creates no Functions
+configured gateway for HTTP and the configured Ting host for HTTP and WebSocket connections. It creates no Functions
 and copies only `dist/client`. `.vercel` and local environment files are ignored.
 
 Use same-site custom HTTPS hosts, for example `dm.teamofsilicons.com` for the
@@ -98,7 +105,7 @@ preview domain and a separate gateway/session directory, or use local developmen
 Origins are single exact values; there is no wildcard credentialed CORS.
 
 The gateway host needs TLS, a load-balancer route preserving its Host
-header, WebSocket upgrades, suitable request/idle timeouts, and persistent
+header, suitable HTTP request timeouts, and persistent
 writable storage for `DM_WEB_STATE_DIR`. Set `DM_WEB_ORIGIN` to the gateway host,
 `DM_FRONTEND_ORIGIN` to the Vercel custom frontend host, and `HOST=0.0.0.0` behind
 the ingress. `/healthz` remains an unauthenticated readiness probe. Run one
@@ -113,7 +120,7 @@ ASCII message fits the default transport cap; worst-case encoded Unicode may
 require matching higher caps and adequate memory in both gateway and backend.
 Large payloads never traverse a Vercel Function's
 [4.5 MB request limit](https://vercel.com/kb/guide/how-to-bypass-vercel-body-size-limit-serverless-functions).
-The persistent gateway also avoids depending on Vercel's beta WebSocket runtime.
+Ting owns browser WebSocket delivery; it does not traverse a Vercel Function or DM’s gateway.
 
 For a local split-origin check, build the Node bundle, run the gateway with
 `DM_WEB_ORIGIN=http://127.0.0.1:4316`,
@@ -124,11 +131,11 @@ is present, Vite serves only the frontend and does not start another embedded
 gateway. Use the same hostname on both ports; `localhost` and `127.0.0.1` are
 different browser sites.
 
-Manual gateway verification on the local split: credentialed frontend preflight
+Historical verification before the Ting cutover, on the local split: credentialed frontend preflight
 returned 204, config returned 200 with an absolute gateway IAM login URL, invalid
 login input returned 400 with readable CORS headers, foreign-origin preflight
 returned 403, a trusted-origin WebSocket without a session returned 401, and an
 untrusted-origin WebSocket returned 403. These checks made no IAM or backend
-mutations; successful live sign-in and conversation checks are recorded separately.
+mutations. Its WebSocket expectations are historical: current trusted upgrades return 410, as verified by `tests/ting-gateway.test.ts`.
 
 IAM consent may return multiple organizations. DM creates an account-menu workspace for each authorized organization. These views share a token family: refresh updates all sibling credentials atomically, and logout signs out every workspace in that family. No organization is inferred from the app ID.

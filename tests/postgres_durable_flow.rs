@@ -1443,6 +1443,7 @@ async fn groups_apply_current_iam_access_without_rewriting_history() -> TestResu
         represented_actor_ids: BTreeSet::new(),
         capabilities: BTreeSet::new(),
         credential: PresentedCredential::Bearer(SecretString::from("test-token")),
+        credential_expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
     };
     let owner = authority(actors[0].clone(), true, None);
     let reader = authority(actors[1].clone(), false, Some(BTreeSet::from([tag])));

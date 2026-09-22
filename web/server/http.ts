@@ -71,7 +71,7 @@ export function handler(gateway: Gateway, assetDirectory: string) {
       if (extname(path) === ".html")
         res.setHeader(
           "Content-Security-Policy",
-          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; font-src 'self'; connect-src 'self' ${gateway.config.tingBrowser.origin} ${gateway.config.tingBrowser.origin.replace(/^http/, "ws")}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`,
         );
       else if (path.includes(`${sep}assets${sep}`))
         res.setHeader("Cache-Control", "public, max-age=31536000, immutable");

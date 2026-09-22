@@ -47,6 +47,15 @@ fn build_plane_router(state: AppState) -> Router {
             post(crate::telemetry::receive).layer(DefaultBodyLimit::max(2048)),
         )
         .route("/contracts", get(super::contracts::describe))
+        .route("/sync", get(super::sync::events))
+        .route(
+            "/delivery/registration",
+            post(super::ting::register_delivery),
+        )
+        .route(
+            "/presence/devices/{device_id}",
+            put(super::sync::renew_presence).delete(super::sync::close_presence),
+        )
         .route(
             "/conversations",
             get(handlers::list_conversations).post(handlers::create_conversation),
@@ -140,14 +149,14 @@ fn build_plane_router(state: AppState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             state.settings.server.request_timeout,
         ));
-    let realtime_route = Router::new()
-        .route("/api/v1/ws", get(handlers::open_realtime_connection))
-        .route("/api/v1/ws/shared", get(crate::realtime::shared::open));
+    let retired_routes = Router::new()
+        .route("/api/v1/ws", get(super::contracts::retired))
+        .route("/api/v1/ws/shared", get(super::contracts::retired));
 
     Router::new()
         .merge(participant_routes)
         .merge(timed_routes)
-        .merge(realtime_route)
+        .merge(retired_routes)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             super::group_ids::responses,
@@ -213,6 +222,11 @@ pub fn build_router(state: AppState) -> Router {
 
 async fn dispatch(state: AppState, production: Router, request: Request) -> Response {
     let path = request.uri().path();
+    // Retirement is public and final; old credentials, versions, or test keys
+    // cannot revive these routes or hide their actionable migration response.
+    if super::contracts::is_retired_socket(path) {
+        return super::contracts::retired(axum::extract::State(state)).await;
+    }
     // Lifecycle authority always comes from production IAM; only clean explicitly
     // accepts a testing root key. Webhooks authenticate their own environment binding.
     let control = path.starts_with("/internal/honeycomb/")

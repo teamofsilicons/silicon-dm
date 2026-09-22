@@ -7,6 +7,7 @@ mod directory;
 mod drafts;
 mod group_ids;
 pub(crate) mod groups;
+mod http_presence;
 mod iam_directory;
 mod idempotency;
 mod messages;
@@ -14,6 +15,8 @@ mod presence;
 mod public_messages;
 mod revisions;
 mod rows;
+mod sync;
+mod ting;
 
 use std::time::Duration;
 
@@ -26,6 +29,10 @@ use crate::{
 };
 
 pub use delivery::DeliveryClaim;
+pub use http_presence::PresenceLease;
+pub(crate) use sync::sync_reset_required;
+pub use sync::{SyncEvent, SyncScan};
+pub use ting::{TingDeliveryClaim, TingDeliveryContext};
 
 pub(crate) static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 

@@ -1,9 +1,6 @@
 use super::store;
-use crate::{
-    ServerFrame,
-    relay::{RelayRequest, RelayRequestStatus, RelayResult},
-};
-use anyhow::{Context, Result, bail};
+use crate::relay::{RelayRequest, RelayRequestStatus, RelayResult};
+use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -31,12 +28,6 @@ pub(crate) struct RequestCandidate {
     pub payload_bytes: u32,
 }
 
-pub(crate) struct WebhookCandidate {
-    pub session: String,
-    pub delivery_id: String,
-    pub payload_bytes: u32,
-}
-
 #[derive(Clone)]
 pub struct Queue {
     connection: Arc<Mutex<Connection>>,
@@ -59,11 +50,8 @@ fn open_database(state: &store::Store) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
-      CREATE TABLE IF NOT EXISTS cursors(session TEXT NOT NULL, actor TEXT NOT NULL, sequence INTEGER NOT NULL, PRIMARY KEY(session,actor));
       CREATE TABLE IF NOT EXISTS generations(session TEXT PRIMARY KEY,generation INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS inbox(session TEXT NOT NULL, delivery_id TEXT NOT NULL, actor TEXT NOT NULL, sequence INTEGER NOT NULL, frame TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(session,delivery_id), UNIQUE(session,actor,sequence));
       CREATE TABLE IF NOT EXISTS outbox(request_id TEXT PRIMARY KEY,session TEXT NOT NULL,request TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',result TEXT,error TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL,expected_generation INTEGER);
-      CREATE INDEX IF NOT EXISTS inbox_pending ON inbox(delivered,next_attempt);
       CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(state,next_attempt);")?;
     let generation_column: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('outbox') WHERE name='expected_generation'",
@@ -79,19 +67,6 @@ fn open_database(state: &store::Store) -> Result<Connection> {
     Ok(conn)
 }
 impl Queue {
-    pub fn cursor(&self, session: &str, actor: &str) -> Result<i64> {
-        Ok(self
-            .database()?
-            .query_row(
-                "SELECT sequence FROM cursors WHERE session=?1 AND actor=?2",
-                params![session, actor],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0))
-    }
-}
-impl Queue {
     pub fn generation(&self, session: &str) -> Result<Option<i64>> {
         Ok(self
             .database()?
@@ -102,9 +77,6 @@ impl Queue {
             )
             .optional()?)
     }
-}
-pub fn stream_session(session: &str, generation: Option<i64>) -> String {
-    generation.map_or_else(|| session.to_owned(), |n| format!("{session}#{n}"))
 }
 impl Queue {
     pub fn adopt_generation(&self, session: &str, next: Option<i64>) -> Result<()> {
@@ -119,172 +91,11 @@ impl Queue {
             )
             .optional()?;
         if previous != Some(next) {
-            let stream = stream_session(session, previous);
-            tx.execute(
-                "UPDATE inbox SET delivered=-1 WHERE session=?1 AND delivered=0",
-                params![stream],
-            )?;
             tx.execute("UPDATE outbox SET state='failed',error=?2 WHERE session=?1 AND state='pending' AND (expected_generation IS NULL OR expected_generation<>?3)",params![session,json!({"code":"testing_generation_changed","message":"test environment changed; inspect then explicitly resubmit this request"}).to_string(),next])?;
         }
         tx.execute("INSERT INTO generations(session,generation) VALUES(?1,?2) ON CONFLICT(session) DO UPDATE SET generation=excluded.generation",params![session,next])?;
         tx.commit()?;
         Ok(())
-    }
-}
-/// Commits the exact frame and contiguous cursor in one FULL-synchronous transaction.
-impl Queue {
-    pub fn receive(&self, session: &str, frame: &ServerFrame, raw: &str) -> Result<i64> {
-        let (id, actor, sequence) = frame
-            .delivery_position()
-            .context("frame has no delivery sequence")?;
-        let mut conn = self.database()?;
-        let tx = conn.transaction()?;
-        let old: Option<(String, i64, StoredDeliveryIdentity)> = tx
-            .query_row(
-                "SELECT actor,sequence,frame FROM inbox WHERE session=?1 AND delivery_id=?2",
-                params![session, id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?, json_column(r, 2)?)),
-            )
-            .optional()?;
-        if let Some((old_actor, old_sequence, old_frame)) = old {
-            if old_actor != actor
-                || old_sequence != sequence
-                || !same_delivery_identity(&old_frame, frame)
-            {
-                bail!("server reused a delivery ID with a different immutable identity")
-            }
-            // Replays may hydrate newer message versions/status. Keep the
-            // already committed callback payload stable for this delivery ID;
-            // revisions and receipts also have their own durable delivery IDs.
-        } else {
-            tx.execute(
-            "INSERT INTO inbox(session,delivery_id,actor,sequence,frame) VALUES(?1,?2,?3,?4,?5)",
-            params![session, id.to_string(), actor, sequence, raw],
-        )?;
-        }
-        let mut through: i64 = tx
-            .query_row(
-                "SELECT sequence FROM cursors WHERE session=?1 AND actor=?2",
-                params![session, actor],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        loop {
-            let next: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM inbox WHERE session=?1 AND actor=?2 AND sequence=?3)",
-                params![session, actor, through + 1],
-                |r| r.get(0),
-            )?;
-            if !next {
-                break;
-            }
-            through += 1;
-        }
-        tx.execute("INSERT INTO cursors(session,actor,sequence) VALUES(?1,?2,?3) ON CONFLICT(session,actor) DO UPDATE SET sequence=excluded.sequence",params![session,actor,through])?;
-        tx.commit()?;
-        Ok(through)
-    }
-}
-
-// Struct deserialization skips unknown content fields in-place. An internally
-// tagged enum would buffer the entire message before choosing its variant.
-#[derive(serde::Deserialize)]
-struct StoredDeliveryIdentity {
-    #[serde(rename = "type")]
-    kind: String,
-    message: Option<StoredMessageIdentity>,
-    message_id: Option<String>,
-    data: Option<StoredDeliveryData>,
-}
-#[derive(serde::Deserialize)]
-struct StoredDeliveryData {
-    #[serde(rename = "message-id", alias = "id")]
-    id: Option<String>,
-    conversation_id: Option<String>,
-    sender: Option<crate::Actor>,
-    sequence: Option<i64>,
-    created_at: Option<String>,
-    message_id: Option<String>,
-}
-#[derive(serde::Deserialize)]
-struct StoredMessageIdentity {
-    id: String,
-    conversation_id: String,
-    sender: crate::Actor,
-    sequence: i64,
-    created_at: String,
-}
-// Existing queues may replay the same immutable message with its new public address.
-// The caller also verifies message UUID, sender, sequence, and creation timestamp.
-fn same_conversation_identity(old: &str, new: &str) -> bool {
-    old == new
-        || (Uuid::parse_str(old).is_ok()
-            && (silicon_dm_protocol::valid_group_id(new) || new.contains("::")))
-}
-fn same_delivery_identity(old: &StoredDeliveryIdentity, new: &ServerFrame) -> bool {
-    match new {
-        ServerFrame::Message { message: new, .. }
-            if matches!(
-                old.kind.as_str(),
-                "message"
-                    | "new_message"
-                    | "message.created"
-                    | "message.create"
-                    | "message.create.successful"
-                    | "message.updated"
-                    | "message.deleted"
-            ) =>
-        {
-            if let Some(data) = &old.data {
-                return (data.id.as_ref() == Some(&new.id)
-                    || data
-                        .sequence
-                        .and_then(silicon_dm_protocol::message_code)
-                        .as_ref()
-                        == Some(&new.id))
-                    && data
-                        .conversation_id
-                        .as_ref()
-                        .is_some_and(|old| same_conversation_identity(old, &new.conversation_id))
-                    && data.sender.as_ref() == Some(&new.sender)
-                    && data.sequence.is_none_or(|n| {
-                        n == new.sequence
-                            || silicon_dm_protocol::message_code(n).as_ref() == Some(&new.id)
-                    })
-                    && data.created_at.as_ref() == Some(&new.created_at);
-            }
-            let Some(old) = &old.message else {
-                return false;
-            };
-            (old.id == new.id
-                || silicon_dm_protocol::message_code(old.sequence).as_ref() == Some(&new.id))
-                && same_conversation_identity(&old.conversation_id, &new.conversation_id)
-                && old.sender == new.sender
-                && old.sequence == new.sequence
-                && old.created_at == new.created_at
-        }
-        ServerFrame::Receipt {
-            message_id: new, ..
-        } if matches!(
-            old.kind.as_str(),
-            "receipt" | "message.delivered" | "message.read" | "message.failed"
-        ) =>
-        {
-            old.message_id
-                .as_ref()
-                .or_else(|| {
-                    old.data
-                        .as_ref()
-                        .and_then(|data| data.message_id.as_ref().or(data.id.as_ref()))
-                })
-                .is_some_and(|id| {
-                    id == new
-                        || (Uuid::parse_str(id).is_ok()
-                            && silicon_dm_protocol::message_sequence(new).is_some())
-                })
-        }
-        _ => false,
     }
 }
 impl Queue {
@@ -317,7 +128,7 @@ impl Queue {
             && request.testing_generation.or(known).is_none()
         {
             bail!(
-                "connect to the test environment before queuing mutations; its generation is unknown"
+                "discover the test environment over HTTP before queuing mutations; its generation is unknown"
             );
         }
         conn.execute(
@@ -382,9 +193,6 @@ impl Queue {
     /// reserves its byte budget before loading any payload.
     pub(crate) fn request_candidates(&self) -> Result<Vec<RequestCandidate>> {
         let conn = self.database()?;
-        // Requests accepted before the first socket handshake bind once the epoch
-        // is known. Never replace an already captured epoch during a later retry.
-        conn.execute("UPDATE outbox SET expected_generation=(SELECT generation FROM generations WHERE generations.session=outbox.session) WHERE state='pending' AND expected_generation IS NULL AND EXISTS (SELECT 1 FROM generations WHERE generations.session=outbox.session)", [])?;
         let mut stmt=conn.prepare("SELECT request_id,session,octet_length(request) FROM outbox o WHERE state='pending' AND next_attempt<=?1 AND NOT EXISTS (SELECT 1 FROM outbox previous WHERE previous.session=o.session AND previous.state='pending' AND previous.rowid<o.rowid) ORDER BY rowid LIMIT 50")?;
         let rows = stmt
             .query_map(params![(store::now() as i64)], |r| {
@@ -457,84 +265,6 @@ impl Queue {
         Ok(())
     }
 }
-pub struct WebhookWork {
-    pub session: String,
-    pub delivery_id: String,
-    pub frame: Value,
-}
-impl Queue {
-    pub(crate) fn webhook_candidates(&self, profiles: &[String]) -> Result<Vec<WebhookCandidate>> {
-        let conn = self.database()?;
-        let mut stmt=conn.prepare("SELECT session,delivery_id,octet_length(frame) FROM inbox i WHERE delivered=0 AND next_attempt<=?1 AND (CASE WHEN instr(session,'#')>0 THEN substr(session,1,instr(session,'#')-1) ELSE session END) IN (SELECT value FROM json_each(?2)) AND NOT EXISTS (SELECT 1 FROM inbox prior WHERE prior.session=i.session AND prior.actor=i.actor AND prior.delivered=0 AND prior.sequence<i.sequence) ORDER BY rowid LIMIT 50")?;
-        let rows = stmt
-            .query_map(
-                params![(store::now() as i64), serde_json::to_string(profiles)?],
-                |r| {
-                    Ok(WebhookCandidate {
-                        session: r.get(0)?,
-                        delivery_id: r.get(1)?,
-                        payload_bytes: r.get(2)?,
-                    })
-                },
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    pub(crate) fn load_webhook(&self, session: &str, id: &str) -> Result<Option<WebhookWork>> {
-        Ok(self.database()?.query_row(
-            "SELECT frame FROM inbox WHERE session=?1 AND delivery_id=?2 AND delivered=0 AND next_attempt<=?3",
-            params![session, id, store::now() as i64],
-            |row| Ok(WebhookWork {
-                session: session.to_owned(), delivery_id: id.to_owned(), frame: json_column(row, 0)?,
-            }),
-        ).optional()?)
-    }
-}
-impl Queue {
-    pub fn webhook_is_pending(&self, session: &str, id: &str) -> Result<bool> {
-        Ok(self.database()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM inbox WHERE session=?1 AND delivery_id=?2 AND delivered=0)",
-            params![session, id],
-            |row| row.get(0),
-        )?)
-    }
-
-    pub fn webhook_done(
-        &self,
-        session: &str,
-        id: &str,
-        success: bool,
-        receipt: Option<&RelayRequest>,
-    ) -> Result<()> {
-        let mut conn = self.database()?;
-        let tx = conn.transaction()?;
-        // A generation change can archive this row while the callback is in
-        // flight. Completion must neither revive it nor queue an old receipt.
-        let changed = tx.execute(
-            "UPDATE inbox SET delivered=?3,attempts=attempts+1,next_attempt=?4+MIN(300,1 << MIN(attempts,9)) WHERE session=?1 AND delivery_id=?2 AND delivered=0",
-            params![session, id, success, store::now() as i64],
-        )?;
-        if changed == 0 {
-            tx.commit()?;
-            return Ok(());
-        }
-        if success && let Some(request) = receipt {
-            tx.execute(
-            "INSERT OR IGNORE INTO outbox(request_id,session,request,created,expected_generation) VALUES(?1,?2,?3,?4,?5)",
-            params![
-                request.request_id.to_string(),
-                store::session_key(&request.profile, request.testing_environment_id),
-                serde_json::to_string(request)?,
-                store::now() as i64,
-                request.testing_generation
-            ],
-        )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-}
 impl Queue {
     pub fn stats(&self) -> Result<Value> {
         let conn = self.database()?;
@@ -543,17 +273,32 @@ impl Queue {
             [],
             |r| r.get(0),
         )?;
-        let callbacks: i64 =
-            conn.query_row("SELECT count(*) FROM inbox WHERE delivered=0", [], |r| {
-                r.get(0)
-            })?;
+        // Preserve the old inbox verbatim for explicit inspection or migration.
+        // Nothing in this runtime consumes or acknowledges these records.
+        // New installations do not create an incoming queue at all.
+        let legacy_inbox: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox')",
+            [],
+            |r| r.get(0),
+        )?;
+        let (retained, retained_pending): (i64, i64) = if legacy_inbox {
+            conn.query_row(
+                "SELECT count(*),count(CASE WHEN delivered=0 THEN 1 END) FROM inbox",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+        } else {
+            (0, 0)
+        };
         let failed: i64 = conn.query_row(
             "SELECT count(*) FROM outbox WHERE state='failed'",
             [],
             |r| r.get(0),
         )?;
         Ok(
-            json!({"pending_requests":pending,"pending_webhooks":callbacks,"failed_requests":failed}),
+            json!({"pending_requests":pending,"pending_webhooks":0,"failed_requests":failed,
+                "retained_legacy_deliveries":retained,"retained_legacy_pending_deliveries":retained_pending,
+                "incoming_delivery":"delivery_moved_to_ting"}),
         )
     }
 }
@@ -565,63 +310,98 @@ impl Queue {
 }
 
 #[cfg(test)]
-mod webhook_tests {
+mod outgoing_tests {
     use super::*;
+
     #[test]
-    fn unhooked_profiles_do_not_starve_hooked_profiles_or_lose_events() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("dm-hook-queue-{}", Uuid::new_v4()));
-        let store = store::Store::new(&root)?;
-        let queue = Queue::open(&store)?;
-        for i in 0..60 {
-            queue.database()?.execute("INSERT INTO inbox(session,delivery_id,actor,sequence,frame) VALUES(?1,?2,'cos:tos',1,'{}')",
-                params![format!("unhooked-{i}:production"), i.to_string()])?;
-        }
-        queue.database()?.execute("INSERT INTO inbox(session,delivery_id,actor,sequence,frame) VALUES('hooked:test#3','last','cos:tos',1,'{}')", [])?;
-        assert!(queue.webhook_candidates(&[])?.is_empty());
-        let work = queue.webhook_candidates(&["hooked:test".into()])?;
-        assert_eq!(work.len(), 1);
-        assert_eq!(work[0].delivery_id, "last");
+    fn outgoing_retry_survives_restart_without_changing_the_original_request() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("dm-outgoing-{}", Uuid::new_v4()));
+        let state = store::Store::new(&root)?;
+        let request = RelayRequest {
+            request_id: Uuid::new_v4(),
+            profile: "default".into(),
+            testing_environment_id: None,
+            testing_generation: None,
+            request: crate::relay::Operation::CreateConversation {
+                participant_ids: vec!["alice".into(), "bob".into()],
+                idempotency_key: "original-retry-key".into(),
+            },
+        };
+        let mut original = serde_json::to_value(&request)?;
+        original["caller_metadata"] = json!({"retained":"verbatim"});
+        let queue = Queue::open(&state)?;
+        queue.enqueue(&request, &original)?;
+        queue.retry(request.request_id, &json!({"code":"transport_error"}))?;
+        drop(queue);
+        let queue = Queue::open(&state)?;
+        let stored = queue.result(request.request_id)?.unwrap();
+        assert_eq!(stored.state, "pending");
+        assert_eq!(stored.request, original);
+        queue.enqueue(&request, &original)?;
+        let mut conflicting = original.clone();
+        conflicting["request"]["idempotency_key"] = json!("different");
+        assert!(queue.enqueue(&request, &conflicting).is_err());
+        queue
+            .database()?
+            .execute("UPDATE outbox SET next_attempt=0", [])?;
+        let candidates = queue.request_candidates()?;
+        assert_eq!(candidates.len(), 1);
+        let replay = queue.load_request(candidates[0].request_id)?.unwrap();
         assert_eq!(
-            queue
-                .webhook_candidates(&["unhooked-0:production".into()])?
-                .len(),
-            1
+            serde_json::to_value(replay)?["request"],
+            original["request"]
         );
-        assert_eq!(
-            queue.database()?.query_row(
-                "SELECT count(*) FROM inbox WHERE delivered=0",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?,
-            61
-        );
+        queue.finish(request.request_id, Some(&json!({"saved":true})), None)?;
+        drop(queue);
+        let queue = Queue::open(&state)?;
+        assert!(queue.request_candidates()?.is_empty());
+        assert_eq!(queue.result(request.request_id)?.unwrap().request, original);
         drop(queue);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
-}
 
-#[cfg(test)]
-mod group_address_tests {
     #[test]
-    fn legacy_conversation_identity_can_upgrade_once() {
-        let old = uuid::Uuid::nil().to_string();
-        assert!(super::same_conversation_identity(
-            &old,
-            "g:tos:product-design"
-        ));
-        assert!(super::same_conversation_identity(
-            "g:tos:product-design",
-            "g:tos:product-design"
-        ));
-        assert!(!super::same_conversation_identity(
-            "g:tos:product-design",
-            "g:tos:another"
-        ));
-        assert!(!super::same_conversation_identity(
-            "g:tos:product-design",
-            &old
-        ));
+    fn legacy_incoming_records_are_retained_without_an_active_delivery_queue() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("dm-retired-inbox-{}", Uuid::new_v4()));
+        let state = store::Store::new(&root)?;
+        let queue = Queue::open(&state)?;
+        assert_eq!(queue.stats()?["retained_legacy_deliveries"], 0);
+        assert!(!queue.database()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='inbox')",
+            [],
+            |r| r.get::<_, bool>(0)
+        )?);
+        queue.database()?.execute_batch("CREATE TABLE inbox(session TEXT,delivery_id TEXT,actor TEXT,sequence INTEGER,frame TEXT,delivered INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0); CREATE TABLE cursors(session TEXT,actor TEXT,sequence INTEGER);")?;
+        queue.database()?.execute(
+            "INSERT INTO inbox(session,delivery_id,actor,sequence,frame,attempts) VALUES('default:test#1','old','alice',1,'{\"preserved\":true}',7)", [],
+        )?;
+        queue
+            .database()?
+            .execute("INSERT INTO cursors VALUES('default:test#1','alice',1)", [])?;
+        queue.adopt_generation("default:test", Some(2))?;
+        drop(queue);
+        let queue = Queue::open(&state)?;
+        let stats = queue.stats()?;
+        assert_eq!(stats["pending_webhooks"], 0);
+        assert_eq!(stats["retained_legacy_pending_deliveries"], 1);
+        assert_eq!(stats["incoming_delivery"], "delivery_moved_to_ting");
+        let legacy: (String, i64, i64) = queue.database()?.query_row(
+            "SELECT frame,attempts,delivered FROM inbox WHERE delivery_id='old'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(legacy, ("{\"preserved\":true}".into(), 7, 0));
+        assert_eq!(
+            queue
+                .database()?
+                .query_row("SELECT sequence FROM cursors", [], |r| r.get::<_, i64>(0))?,
+            1
+        );
+        assert!(queue.request_candidates()?.is_empty());
+        drop(queue);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
 

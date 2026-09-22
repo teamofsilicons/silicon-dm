@@ -1,11 +1,14 @@
-//! Optional durable relay owned by an explicitly selected local state directory.
+//! Optional durable outgoing command relay and explicit Ting delivery setup.
 //!
 //! The default `Client` remains stateless. Enable the `runtime` feature to host
-//! the same relay used by the CLI or launch the packaged `dm-relay` executable.
+//! the same outgoing relay used by the CLI or launch `dm-relay`. Ting's installed
+//! system daemon exclusively owns incoming sockets, callbacks, queues and ACKs.
 mod daemon;
 mod queue;
 pub mod store;
+mod ting_delivery;
 pub mod updates;
+pub use ting_delivery::{DeliveryAttachOptions, DeliveryLoginOptions, DeliveryTestCredentials};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -42,11 +45,13 @@ impl Default for DaemonCommand {
     }
 }
 
-/// A login's local mapping. The SLT is sent only to DM; the callback stays local.
+/// A DM login's local mapping. Incoming delivery is configured separately with Ting.
 pub struct LoginOptions<'a> {
     pub profile: &'a str,
     pub base_url: &'a str,
     pub short_lived_token: &'a str,
+    /// Retired: any supplied URL fails before the SLT is exchanged. Use
+    /// `delivery_login` and `delivery_attach` for an incoming destination.
     pub webhook_url: Option<&'a Url>,
     pub testing_environment_id: Option<Uuid>,
     pub idempotency_key: &'a str,
@@ -167,8 +172,10 @@ impl LocalRuntime {
         {
             bail!("profile names must use 1-64 letters, digits, underscores or hyphens");
         }
-        if let Some(url) = options.webhook_url {
-            validate_callback_endpoint(url)?;
+        if options.webhook_url.is_some() {
+            bail!(
+                "incoming delivery moved to Ting: log in to DM without webhook_url, then call delivery_login and delivery_attach; explicitly register DM delivery consent separately"
+            );
         }
         let session = store::session_key(options.profile, options.testing_environment_id);
         let lock = self.store.profile_lock(&session).await?;
@@ -197,7 +204,7 @@ impl LocalRuntime {
             let device_id = config.profiles.get(&session).map_or_else(|| Uuid::new_v4().to_string(), |p| p.device_id.clone());
             config.profiles.insert(session.clone(), store::Profile {
                 name: options.profile.into(), base_url: options.base_url.into(), tokens: tokens.clone(),
-                webhook_url: options.webhook_url.map(ToString::to_string), device_id,
+                webhook_url: config.profiles.get(&session).and_then(|p| p.webhook_url.clone()), device_id,
                 expires_at: store::now().saturating_add(tokens.expires_in.max(0) as u64),
                 refresh_started_at: None,
                 testing_environment_id: options.testing_environment_id, enabled: true,
@@ -259,7 +266,7 @@ impl LocalRuntime {
             other => other,
         }
     }
-    /// Sets or removes a local callback without changing the IAM login or deleting queued events.
+    /// Sets the legacy outgoing command-response callback secret only.
     pub fn webhook_secret(
         &self,
         name: &str,
@@ -282,16 +289,11 @@ impl LocalRuntime {
             Ok(())
         })
     }
-    pub fn webhook(&self, name: &str, test: Option<Uuid>, url: Option<&Url>) -> Result<Value> {
-        if let Some(url) = url {
-            validate_callback_endpoint(url)?;
-        }
-        self.store.update(|config| {
-            let profile = config.profiles.get_mut(&store::session_key(name, test))
-                .filter(|p| p.enabled).context("log in first with dm login <slt>")?;
-            profile.webhook_url = url.map(ToString::to_string);
-            Ok(serde_json::json!({"profile":name,"testing_environment_id":test,"webhook_url":profile.webhook_url,"hooked":url.is_some()}))
-        })
+    /// Incoming webhooks require the asynchronous Ting attachment workflow.
+    pub fn webhook(&self, _name: &str, _test: Option<Uuid>, _url: Option<&Url>) -> Result<Value> {
+        bail!(
+            "incoming delivery moved to Ting: use delivery_login and delivery_attach, or delivery_unhook; the local endpoint must accept Ting batches for all applications"
+        )
     }
     /// Revokes the selected family and disables its local mapping, retaining
     /// queued work. Serializes with login and refresh for the same profile.
@@ -381,7 +383,7 @@ mod tests {
             }))
             .route("/api/v1/iam", get(|| async { Json(json!({"app_id":"tos>dm","iam_base_url":"https://iam.example",
                 "api_base_url":"https://dm.example/api/v1"})) }))
-            .route("/status", get(|| async { Json(json!({"running":true})) }))
+            .route("/status", get(|| async { Json(json!({"running":true,"incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false}})) }))
             .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -398,6 +400,27 @@ mod tests {
         );
         let base = format!("http://127.0.0.1:{port}");
         assert_eq!(crate::Client::new(&base)?.iam().await?.app_id, "tos>dm");
+        let old_callback: Url = "http://localhost:9000/events".parse()?;
+        assert!(
+            runtime
+                .login(
+                    &LoginOptions {
+                        profile: "default",
+                        base_url: &base,
+                        short_lived_token: "must-not-consume-this-slt",
+                        webhook_url: Some(&old_callback),
+                        testing_environment_id: None,
+                        idempotency_key: "rejected-login-key",
+                    },
+                    &DaemonCommand {
+                        executable: root.join("must-not-launch"),
+                        arguments: vec![]
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert!(runtime.store.load()?.profiles.is_empty());
         let result = runtime
             .login(
                 &LoginOptions {
@@ -421,16 +444,12 @@ mod tests {
                 .is_none()
         );
         let url: Url = "http://localhost:9000/events".parse()?;
-        assert_eq!(
-            runtime.webhook("default", None, Some(&url))?["hooked"],
-            true
-        );
+        assert!(runtime.webhook("default", None, Some(&url)).is_err());
         let reopened = LocalRuntime::new(&root)?;
-        assert_eq!(
+        assert!(
             reopened.store.load()?.profiles["default:production"]
                 .webhook_url
-                .as_deref(),
-            Some(url.as_str())
+                .is_none()
         );
         let status = reopened.login_status("default", None).await?;
         assert_eq!(status["authenticated"], true);
@@ -450,7 +469,7 @@ mod tests {
                 .webhook("default", Some(Uuid::new_v4()), None)
                 .is_err()
         );
-        assert_eq!(runtime.webhook("default", None, None)?["hooked"], false);
+        assert!(runtime.webhook("default", None, None).is_err());
         assert_eq!(
             runtime.login_status("default", None).await?["authenticated"],
             true

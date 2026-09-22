@@ -10,6 +10,9 @@ export function httpType(method: string, path: string): string {
   if (p[0] === "reports") return "report";
   if (p[0] === "messages" && method === "POST") return "message.create";
   if (p[0] === "iam") return "iam";
+  if (p[0] === "sync") return "sync";
+  if (p[0] === "delivery" && p[1] === "registration")
+    return "delivery_registration";
   if (p[0] === "auth") return p[1];
   if (p[0] === "api") return p[1];
   if (p[0] === "groups") {
@@ -41,6 +44,8 @@ export function httpType(method: string, path: string): string {
           ? "delete_draft"
           : "draft";
   }
+  if (p[0] === "presence" && p[1] === "devices")
+    return method === "DELETE" ? "close_presence" : "renew_presence";
   if (p[0] === "presence") return "presence";
   if (p[0] === "gifs") return "gifs";
   if (p[0] === "testing-environments") {

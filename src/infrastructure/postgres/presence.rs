@@ -316,6 +316,15 @@ impl PostgresStore {
                 JOIN realtime_sessions AS session ON session.id = actor.session_id
                 WHERE session.disconnected_at IS NULL
                   AND session.lease_expires_at > clock_timestamp()
+                UNION ALL
+                SELECT lease.activity, lease.activity_expires_at, lease.heartbeat_at AS updated_at
+                FROM target
+                JOIN client_presence_leases AS lease
+                  ON lease.organization_id = $1
+                 AND lease.actor_kind = target.actor_kind
+                 AND lease.actor_id = target.actor_id
+                WHERE lease.disconnected_at IS NULL
+                  AND lease.lease_expires_at > clock_timestamp()
             )
             SELECT
                 (SELECT count(*) FROM target) AS target_count,
@@ -328,14 +337,24 @@ impl PostgresStore {
                     ORDER BY updated_at DESC
                     LIMIT 1
                 ) AS activity,
-                (
+                GREATEST((
                     SELECT max(state.last_seen_at)
                     FROM target
                     LEFT JOIN actor_presence_state AS state
                       ON state.organization_id = $1
                      AND state.actor_kind = target.actor_kind
                      AND state.actor_id = target.actor_id
-                ) AS last_seen_at
+                ), (
+                    SELECT max(CASE WHEN lease.disconnected_at IS NOT NULL THEN lease.disconnected_at
+                             WHEN lease.lease_expires_at <= clock_timestamp()
+                             THEN lease.lease_expires_at END)
+                    FROM target
+                    JOIN client_presence_leases AS lease
+                      ON lease.organization_id = $1
+                     AND lease.actor_kind = target.actor_kind
+                     AND lease.actor_id = target.actor_id
+                    WHERE NOT EXISTS (SELECT 1 FROM active_sessions)
+                )) AS last_seen_at
             "#,
         )
         .bind(organization_id.as_str())
@@ -397,6 +416,12 @@ impl PostgresStore {
                       AND other_actor.actor_id = actor.actor_id
                       AND other_session.disconnected_at IS NULL
                       AND other_session.lease_expires_at > clock_timestamp()
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM client_presence_leases lease
+                    WHERE lease.organization_id=actor.organization_id
+                      AND lease.actor_kind=actor.actor_kind AND lease.actor_id=actor.actor_id
+                      AND lease.disconnected_at IS NULL AND lease.lease_expires_at>clock_timestamp()
                 )
                 GROUP BY actor.organization_id, actor.actor_kind, actor.actor_id
             ),
@@ -525,6 +550,12 @@ async fn record_offline_actors(
                 AND other_actor.actor_id = actor.actor_id
                 AND other_session.disconnected_at IS NULL
                 AND other_session.lease_expires_at > clock_timestamp()
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM client_presence_leases lease
+              WHERE lease.organization_id=actor.organization_id
+                AND lease.actor_kind=actor.actor_kind AND lease.actor_id=actor.actor_id
+                AND lease.disconnected_at IS NULL AND lease.lease_expires_at>clock_timestamp()
           )
         ON CONFLICT (organization_id, actor_kind, actor_id)
         DO UPDATE SET last_seen_at = GREATEST(

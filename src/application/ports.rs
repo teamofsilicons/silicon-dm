@@ -43,6 +43,28 @@ pub trait IdentityProvider: Send + Sync {
     /// Revokes an application access token or an entire refresh-token family.
     async fn logout(&self, token: &SecretString, idempotency_key: &str) -> AppResult<()>;
 
+    /// Explicitly enrolls this recipient's consented DM identity with Ting.
+    /// The attempt key identifies a fresh OBO exchange; it is not a delivery proof.
+    async fn register_ting_delivery(
+        &self,
+        _context: &AuthContext,
+        _settings: &crate::config::TingSettings,
+        _exchange_attempt_key: &str,
+    ) -> AppResult<serde_json::Value> {
+        Err(crate::AppError::DependencyUnavailable { dependency: "ting" })
+    }
+
+    /// Issues a fresh Ting send proof using this originator's active DM session.
+    /// The caller supplies a new exchange attempt key and exact persisted bytes.
+    async fn issue_ting_send_proof(
+        &self,
+        _context: &AuthContext,
+        _request_body: &str,
+        _attempt_key: &str,
+    ) -> AppResult<crate::infrastructure::ting::TingSendAuthority> {
+        Err(crate::AppError::DependencyUnavailable { dependency: "ting" })
+    }
+
     /// Authenticates exact webhook bytes and binds the event to this IAM plane.
     ///
     /// # Errors

@@ -41,15 +41,15 @@ enum Topic {
     Index,
     /// Command grammar, profiles, messaging, drafts and updates.
     Cli,
-    /// Local daemon, callback acknowledgements and durable queues.
+    /// Outgoing command relay and generic Ting destination contract.
     Relay,
     /// Stateless typed Rust client and public API methods.
     Client,
-    /// WebSocket frames, transport ACKs and reconnect cursors.
+    /// Ting delivery migration and retired DM socket guidance.
     Realtime,
     /// Optional caller-owned SDK runtime and update policy.
     Runtime,
-    /// Complete HTTP and WebSocket protocol guide.
+    /// Complete HTTP API and Ting delivery migration guide.
     Api,
     /// IAM sessions, token boundaries and signed webhooks.
     Iam,
@@ -58,7 +58,7 @@ enum Topic {
     Testing,
     /// Backend deployment, configuration and runtime grants.
     Deployment,
-    /// Machine-readable OpenAPI HTTP and realtime contract.
+    /// Machine-readable HTTP contract and retired WebSocket responses.
     Openapi,
     /// Observed manual backend and realtime results.
     Verification,
@@ -111,11 +111,15 @@ const GUIDES: &[Guide] = &[
     guide!("telemetry", "Diagnostics and analytics", "telemetry.md"),
     guide!("wire-format", "DM JSON wire format", "wire-format.md"),
     guide!("cli", "DM CLI guide", "cli/README.md"),
-    guide!("relay", "Local relay and actor callbacks", "cli/relay.md"),
+    guide!(
+        "relay",
+        "Outgoing relay and Ting destinations",
+        "cli/relay.md"
+    ),
     guide!("client", "Rust client guide", "client/README.md"),
     guide!(
         "realtime",
-        "Realtime and local relay integration",
+        "Ting delivery and retired DM sockets",
         "client/realtime.md"
     ),
     guide!(
@@ -123,7 +127,7 @@ const GUIDES: &[Guide] = &[
         "Optional Rust client runtime",
         "client/runtime.md"
     ),
-    guide!("api", "DM HTTP and WebSocket API", "api/README.md"),
+    guide!("api", "DM HTTP API and Ting delivery", "api/README.md"),
     guide!("iam", "Silicon IAM integration", "iam.md"),
     guide!("testing", "Testing environments", "testing-environments.md"),
     guide!("deployment", "Deploying Silicon DM", "deployment.md"),
@@ -215,8 +219,8 @@ pub fn render(options: &DocsArgs) -> Result<Value> {
         "repository":"https://github.com/teamofsilicons/silicon-dm",
         "topics":GUIDES.iter().map(entry).collect::<Vec<_>>(),
         "metadata":"Every message/draft includes metadata as a JSON object, including {}.",
-        "callback_ack":{"acknowledged":true,"delivery_id":"UUID from callback"},
-        "transport_ack":"Daemon ACKs after durable local commit, separately from callback ACK; callback ACK queues Delivered for recipient messages, while Read stays explicit.",
+        "delivery":{"provider":"ting","callback_payload":"raw tings array","callback_acceptance":"HTTP 204 after accepting the complete generic batch"},
+        "transport_ack":"Ting owns incoming queues, retries and ACKs. DM Delivered and Read receipts are explicit HTTP operations; its local relay queues only outgoing commands.",
         "help":"dm docs TOPIC; dm docs --search TEXT; dm docs --all; dm --help; dm COMMAND --help",
         "read_as_markdown":"dm docs cli | jq -r .content",
         "index_content":include_str!("../docs/README.md")

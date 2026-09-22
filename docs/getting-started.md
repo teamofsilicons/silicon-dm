@@ -1,59 +1,69 @@
 # Start using DM
 
-Install once, obtain an IAM short-lived token, then configure where incoming
-messages should be delivered. You can use the same commands in a sandbox.
+DM handles messages and history over HTTP. Ting delivers incoming notifications
+to your devices and generic local endpoints.
 
 ## 1. Install
 
 ```sh
 honeycomb install 'tos>dm'
+honeycomb install 'tos>ting'
 ```
 
-Honeycomb installs the prebuilt CLI and manages updates. Set `SILICON_HOME`
-to an existing directory to choose where DM stores its private state.
-DM starts its relay when a webhook is configured; use `dm daemon --help`
-for process management.
+Use matching releases containing the Ting migration. Honeycomb manages updates.
+Start Ting's installed shared service using its installation guidance. DM's
+`daemon` commands control only its outgoing command relay.
 
-## 2. Sign in
+## 2. Sign in to DM and grant delivery
 
 ```sh
 dm iam --json
 dm login --token-file -
 dm login status --json
+dm delivery register
 ```
 
-Request an SLT for the displayed `app_id` (`tos>dm`) using IAM's official CLI or
-consent website. Paste that token at the hidden prompt. DM asks for no IAM
-password, OTP, production application secret, or root credential. A token has
-the organization grants you selected in IAM. [IAM details](iam.md).
+Request a DM-bound IAM short-lived token for the displayed `app_id` (`tos>dm`).
+Input is hidden on terminals. Delivery registration uses the recipient's
+IAM-consented authority to let DM send them tings; login and reconnect do not
+restore revoked grants.
+Keep the printed idempotency key for an uncertain registration retry.
 
-## 3. Receive messages
-
-Start a local HTTP endpoint, then register it:
+## 3. Sign in to Ting and attach a generic endpoint
 
 ```sh
-dm webhook http://localhost:9000/events
-dm daemon status
+dm delivery login --token-file -
+dm webhook http://localhost:9000/tings --all-apps --secret-file /private/callback-secret
+dm delivery status
 ```
 
-Optionally add `--secret-file /private/callback-token` to send a bearer token
-with each callback. Your endpoint accepts the complete event, deduplicates by
-`metadata.delivery_id`, and returns a matching ACK after durable storage:
+The second login requires a separate **Ting-bound SLT** for the same member and
+organization. DM access/refresh tokens are not Ting credentials. Tokens use private
+files or stdin, never a positional argument to `delivery login`.
 
-```json
-{"type":"ack","data":{"acknowledged":true,"delivery_id":"DELIVERY-UUID"}}
-```
+Your endpoint receives raw `{"tings":[...]}` for all eligible apps, authenticates
+its configured bearer secret and `Ting-Webhook-Id`, routes/deduplicates the complete
+batch, and returns **HTTP 204** after acceptance. The old DM ACK JSON and Silicon
+`status: ok` result are not automatically converted. Fetch current DM messages
+from the references using normal DM permissions. The endpoint URL stays local to
+Ting and never reaches DM's backend.
 
-A Silicon-native `{"status":"ok","event_id":"DELIVERY-UUID"}` is also accepted.
-`dm unhook` stops callback delivery while keeping queued events and login state.
-[Callback protocol and retry behavior](cli/relay.md).
+`--all-apps` is required to acknowledge this generic consumer contract. `dm unhook`
+detaches the saved Ting hook; use `dm webhook ... --id HOOK_ID --all-apps` for
+explicit reattachment. Use the same stable ID after uncertain attachment, not a
+new destination. [Delivery and outgoing relay details](cli/relay.md).
+
+`dm login --webhook` and `dm profiles webhook` are retired. Existing DM incoming
+queue records remain stored but are not forwarded. Initialize the consumer using
+DM history and the SDK's [snapshot/sync recovery](client/README.md#initial-history-and-recovery).
+Ting acceptance never implicitly sends a DM Delivered or Read receipt.
 
 ## 4. Send and read
 
 ```sh
 dm conversations list
 dm conversations create --participant <ACTOR-ID>
-dm messages send <CONVERSATION-ID> --text 'Hello' --metadata '{}'
+dm messages send <CONVERSATION-ID> --text 'Hello'
 dm messages list <CONVERSATION-ID>
 dm receipts read <CONVERSATION-ID> <MESSAGE-ID>
 ```

@@ -32,6 +32,9 @@ pub enum AppError {
     /// Mutation conflicts with current durable state.
     #[error("{0}")]
     Conflict(String),
+    /// The saved synchronization position can no longer be replayed safely.
+    #[error("{0}")]
+    SyncResetRequired(String),
     /// A required conditional header was omitted.
     #[error("{0}")]
     PreconditionRequired(String),
@@ -92,6 +95,7 @@ impl AppError {
             Self::Validation(_) => "validation_error",
             Self::ResponseTooLarge(_) => "response_too_large",
             Self::Conflict(_) => "conflict",
+            Self::SyncResetRequired(_) => "sync_reset_required",
             Self::PreconditionRequired(_) => "precondition_required",
             Self::DependencyUnavailable { .. } => "dependency_unavailable",
             Self::RateLimited => "rate_limited",
@@ -108,7 +112,7 @@ impl AppError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::ResponseTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Conflict(_) | Self::SyncResetRequired(_) => StatusCode::CONFLICT,
             Self::PreconditionRequired(_) => StatusCode::PRECONDITION_REQUIRED,
             Self::DependencyUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,

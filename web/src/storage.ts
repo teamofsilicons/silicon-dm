@@ -216,6 +216,15 @@ export async function adoptGeneration(
     );
   return transaction([...STORES], "readwrite", async (tx) => {
     const old = await metadata<number | null>(tx, key(scope, "generation"));
+    if (
+      typeof old === "number" &&
+      typeof generation === "number" &&
+      generation < old
+    )
+      throw new StorageError(
+        "environment_changed",
+        "An older discovery response cannot replace the current testing generation.",
+      );
     const changed = old !== undefined && old !== generation;
     if (changed) {
       await removeScope(tx, "events", scope);
@@ -748,7 +757,13 @@ export async function completeReceipt(
 /** Cross-tab hints carry identifiers only; large payloads remain in IndexedDB. */
 export interface StorageUpdate {
   scope: string;
-  kind: "message" | "receipt" | "reset" | "outbox";
+  kind:
+    | "message"
+    | "receipt"
+    | "reset"
+    | "outbox"
+    | "snapshot"
+    | "inaccessible";
   message_id?: string;
   status?: MessageStatus;
   generation?: number | null;
@@ -764,17 +779,17 @@ export function broadcastUpdate(update: StorageUpdate): void {
 export async function cachedMessage(
   session: Session,
   messageId: string,
+  generation?: number | null,
 ): Promise<Message | undefined> {
-  return transaction(
-    ["messages"],
-    "readonly",
-    async (tx) =>
-      (
-        await request(
-          tx.objectStore("messages").get(key(scopeFor(session), messageId)),
-        )
-      )?.message,
-  );
+  return transaction(["metadata", "messages"], "readonly", async (tx) => {
+    if (generation !== undefined)
+      await requireGeneration(tx, session, generation);
+    return (
+      await request(
+        tx.objectStore("messages").get(key(scopeFor(session), messageId)),
+      )
+    )?.message;
+  });
 }
 
 /** Remove a locally-created optimistic message after its durable request is acknowledged. */
@@ -784,5 +799,161 @@ export async function removeCachedMessage(
 ): Promise<void> {
   return transaction(["messages"], "readwrite", async (tx) => {
     tx.objectStore("messages").delete(key(scopeFor(session), messageId));
+  });
+}
+
+/** HTTP cursors have a separate namespace; legacy numeric ACK cursors are never read. */
+export interface SyncCheckpoint {
+  cursor: string | null;
+  snapshot_id?: string;
+  snapshot_owner?: string;
+  updated_at?: number;
+}
+function syncKey(session: Session, generation: number | null): string {
+  return key(scopeFor(session), `http-sync:${generation ?? "production"}`);
+}
+export async function getSyncCheckpoint(
+  session: Session,
+  generation: number | null,
+): Promise<SyncCheckpoint | undefined> {
+  return transaction(["metadata"], "readonly", async (tx) => {
+    await requireGeneration(tx, session, generation);
+    return metadata<SyncCheckpoint>(tx, syncKey(session, generation));
+  });
+}
+export async function beginSyncSnapshot(
+  session: Session,
+  generation: number | null,
+): Promise<SyncCheckpoint> {
+  return transaction(["metadata", "messages"], "readwrite", async (tx) => {
+    await requireGeneration(tx, session, generation);
+    const previous = await metadata<SyncCheckpoint>(
+      tx,
+      syncKey(session, generation),
+    );
+    if (
+      previous?.snapshot_id &&
+      previous.snapshot_owner !== broadcastSource &&
+      Date.now() - (previous.updated_at ?? 0) < 30_000
+    )
+      throw new StorageError(
+        "sync_conflict",
+        "Another tab is loading authorized history; wait for its snapshot.",
+      );
+    const checkpoint: SyncCheckpoint = {
+      cursor: null,
+      snapshot_id: crypto.randomUUID(),
+      snapshot_owner: broadcastSource,
+      updated_at: Date.now(),
+    };
+    // Interrupted snapshots have no usable cursor and start from a new boundary.
+    await removeScope(tx, "messages", scopeFor(session));
+    setMetadata(tx, syncKey(session, generation), checkpoint);
+    return checkpoint;
+  });
+}
+export interface HydratedSyncMessage {
+  message: Message;
+  deliver: boolean;
+}
+export async function commitSyncPage(
+  session: Session,
+  generation: number | null,
+  expected: SyncCheckpoint,
+  next: SyncCheckpoint,
+  messages: HydratedSyncMessage[],
+  deviceId: string,
+  inaccessible: string[] = [],
+): Promise<Message[]> {
+  const rejected = new Set(inaccessible);
+  if (messages.some((item) => rejected.has(item.message.id)))
+    throw new StorageError(
+      "invalid_sync",
+      "A sync page cannot both hydrate and reject one message.",
+    );
+  return transaction(
+    ["metadata", "messages", "receipts"],
+    "readwrite",
+    async (tx) => {
+      await requireGeneration(tx, session, generation);
+      const id = syncKey(session, generation);
+      const current = await metadata<SyncCheckpoint>(tx, id);
+      if (
+        current?.cursor !== expected.cursor ||
+        current?.snapshot_id !== expected.snapshot_id
+      )
+        throw new StorageError(
+          "sync_conflict",
+          "Another tab advanced history; reload its committed cursor.",
+        );
+      const scope = scopeFor(session);
+      for (const messageId of inaccessible) {
+        tx.objectStore("messages").delete(key(scope, messageId));
+        tx.objectStore("receipts").delete(
+          key(scope, `pending-receipt:${messageId}`),
+        );
+      }
+      const result: Message[] = [];
+      for (const item of messages) {
+        const message = await putMessage(tx, scope, item.message);
+        result.push(message);
+        // Explicit application acceptance of authorized, persisted content. A Ting
+        // hint or transport ACK alone never queues a DM receipt.
+        if (
+          item.deliver &&
+          !message.deleted_at &&
+          (message.sender.id !== session.actor?.id ||
+            message.sender.type !== session.actor?.type)
+        )
+          await putReceipt(
+            tx,
+            session,
+            generation,
+            deviceId,
+            message.conversation_id,
+            message.id,
+            "delivered",
+          );
+      }
+      setMetadata(
+        tx,
+        id,
+        next.snapshot_id ? { ...next, updated_at: Date.now() } : next,
+      );
+      return result;
+    },
+  );
+}
+/** Retain uncertain explicit grant attempts across reloads; never auto-submit. */
+export async function deliveryRegistrationKey(
+  session: Session,
+  generation: number | null,
+): Promise<string> {
+  return transaction(["metadata"], "readwrite", async (tx) => {
+    await requireGeneration(tx, session, generation);
+    const id = key(
+      scopeFor(session),
+      `ting-registration:${generation ?? "production"}`,
+    );
+    const previous = await metadata<string>(tx, id);
+    if (previous) return previous;
+    const attempt = crypto.randomUUID();
+    setMetadata(tx, id, attempt);
+    return attempt;
+  });
+}
+export async function completeDeliveryRegistration(
+  session: Session,
+  generation: number | null,
+  attempt: string,
+): Promise<void> {
+  return transaction(["metadata"], "readwrite", async (tx) => {
+    await requireGeneration(tx, session, generation);
+    const id = key(
+      scopeFor(session),
+      `ting-registration:${generation ?? "production"}`,
+    );
+    if ((await metadata<string>(tx, id)) === attempt)
+      tx.objectStore("metadata").delete(id);
   });
 }

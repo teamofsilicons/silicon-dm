@@ -19,6 +19,7 @@ pub struct Profile {
     pub base_url: String,
     pub tokens: Tokens,
     #[serde(default)]
+    /// Legacy outgoing command-response callback only; never incoming DM delivery.
     pub webhook_url: Option<String>,
     pub device_id: String,
     pub expires_at: u64,
@@ -372,5 +373,22 @@ impl Store {
     }
     pub fn directory(&self) -> PathBuf {
         self.root.clone()
+    }
+
+    /// A Ting-owned private profile tied to the selected DM profile and generation.
+    /// Ting stores its opaque session here; its daemon owns webhook queues and URLs.
+    pub(crate) fn ting_profile(
+        &self,
+        session: &str,
+        generation: Option<i64>,
+    ) -> Result<ting_client::Profile> {
+        let scope = blake3::hash(format!("{session}:{generation:?}").as_bytes());
+        let directory = self.directory().join("ting");
+        ting_client::private_dir(&directory)?;
+        let directory = directory.join(scope.to_hex().as_str());
+        ting_client::private_dir(&directory)?;
+        Ok(ting_client::Profile {
+            dir: fs::canonicalize(directory)?,
+        })
     }
 }

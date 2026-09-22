@@ -1,5 +1,10 @@
 # Manual verification record
 
+This is a historical record from before the Ting delivery migration. Its incoming
+DM socket, callback and automatic receipt observations do not describe the current
+runtime. Use [the current relay guide](relay.md) for Ting setup and the outgoing
+command relay; this record is not evidence of a completed Ting end-to-end test.
+
 These are individual command checks performed during implementation on
 2026-09-06. No automated scenario test or test harness was added. The build was
 validated with `cargo check -p silicon-dm-client`,

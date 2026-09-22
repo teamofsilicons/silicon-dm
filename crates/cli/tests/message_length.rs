@@ -59,7 +59,7 @@ async fn send_guard_precedes_queue_and_override_warns_only_after_delivery() -> R
             .respond_with(response(json!({"items":[{"id":id,"org_id":"org","participants":participants,"last_message":null,"created_at":"now","updated_at":"now"}]})))
             .with_priority(1).mount(&server).await;
         Mock::given(path("/status"))
-            .respond_with(response(json!({"running":true})))
+            .respond_with(response(json!({"running":true,"incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false}})))
             .mount(&server)
             .await;
         let submitted = Arc::new(Mutex::new(None::<Value>));

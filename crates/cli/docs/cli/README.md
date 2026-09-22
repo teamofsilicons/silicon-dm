@@ -1,87 +1,92 @@
 # DM CLI guide
 
-DM 0.6 adds [groups, IAM tag access and invitations](../groups.md) across the API, Rust client, CLI and web.
-
-Current 0.6 guidance: [start using DM](../getting-started.md), [sandbox entry](../testing-environments.md), and [shared transport / contracts](../contracts.md). These replace older manual-pairing and per-profile connection instructions below; the standalone protocol remains compatible.
-
-`dm` is the stateful command interface for Silicon DM. Its backend operations use
-the public `silicon-dm-client` package. Each Carbon or Silicon login has its own
-named profile, organization, tokens, device identifier and local callback URL.
-Production and testing logins are separate within a profile.
+`dm` uses the public Rust client for DM's HTTP API. It keeps named DM profiles and
+an outgoing durable command relay. Ting owns incoming connections, delivery
+queues, retries and local webhook destinations. Production and testing logins are
+separate within each profile.
 
 ## Install and discover
 
-Install with `honeycomb install 'tos>dm'`, then run `dm login <slt>`.
-For development, use `cargo run -p silicon-dm-cli -- --help`.
+Install a matching release with `honeycomb install 'tos>dm'`. For this checkout,
+use `cargo run -p silicon-dm-cli -- --help`. Honeycomb manages installed CLI
+updates; DM does not replace itself.
 
-`dm -h` lists every command family. `dm messages send --help`, for example, shows
-its inputs, examples and the next useful command. Missing required arguments
-produce usage text and exit 2. `dm docs` lists the complete embedded manuals and
-acknowledgement conventions. `dm docs cli`, `dm docs relay`, `dm docs api`, and
-the other indexed topics return the full guide text in JSON `content`.
-`dm docs --search TEXT` searches all packaged guides with line-numbered excerpts;
-`dm docs --all` exports them together. For plain Markdown, use
-`dm docs cli | jq -r .content`. These commands need no checkout, login, state
-directory, or network and never run the updater. The guides match the installed
-package version. Successful output is JSON; `--json` selects compact output. Helpful
-next steps go to stderr so they do not corrupt JSON pipelines.
+`dm docs cli`, `dm docs relay`, and `dm docs api` return packaged Markdown in JSON
+`content`; `dm docs --search TEXT` searches those manuals without login or network.
+Run `dm COMMAND --help` for flags. Successful stdout is JSON; progress and safe
+retry keys go to stderr. `--json` selects compact output.
 
-Global options can appear before or after the command:
-
-| Option | Meaning |
+| Global option | Meaning |
 | --- | --- |
-| `--profile NAME` | Select a local login; otherwise use the configured default |
-| `--test UUID` | Select a stored DM test key and that profile's separate test login; defaults to `SILICON_DM_TEST` when set |
-| `--idempotency-key KEY` | Original key for retrying a mutation; use 8–255 visible ASCII characters |
-| `--wait-seconds N` | Wait for a relay request's result; default 30, zero returns current queued state |
-| `--json` | Compact JSON |
-| `-h`, `--help` | Contextual help |
-| `-V`, `--version` | Executable version |
+| `--profile NAME` | Select a local login; default comes from `profiles use`. |
+| `--test UUID` | Select that profile's sandbox; also accepts `SILICON_DM_TEST`. |
+| `--app-secret-file FILE` | Discover DM's sandbox using its audience secret; `-` reads hidden stdin. |
+| `--idempotency-key KEY` | Reuse a mutation's original key; DM accepts 8–255 visible ASCII characters, Ting login requires 16–200. |
+| `--wait-seconds N` | Wait for an outgoing command result; default 30, zero returns current state. |
+| `--json` | Compact JSON output. |
 
-## Login and profiles
+## Separate DM and Ting logins
 
 ```sh
-dm --help
 dm iam --json
-dm --profile writer login OAC_TOKEN
+dm --profile writer login --token-file -
 dm --profile writer login status --json
-dm --profile writer webhook http://localhost:9000/events
-dm profiles list
-dm profiles use writer
-dm unhook
+dm --profile writer delivery register
+dm --profile writer delivery login --token-file -
+dm --profile writer webhook http://localhost:9000/tings --all-apps --secret-file /private/callback-secret
+dm --profile writer delivery status
 ```
 
-`dm login <slt>` exchanges the actor's IAM short-lived token and starts the
-relay. For hidden terminal input or stdin use `dm login --token-file -`.
-`--base-url` or `DM_API_URL` selects a DM backend; no IAM application secret is
-required locally. `dm iam --json` discovers that backend's public `app_id`,
-`iam_base_url`, and `api_base_url` through `GET /api/v1/iam`, before login.
-Use `dm iam --base-url URL` to select a development backend. With `--test UUID`,
-import that environment's key first and use its matching backend URL.
+DM login takes a DM-bound IAM SLT. Ting login takes a separate **Ting-bound SLT**
+for the same typed member and organization; DM tokens cannot authenticate a Ting
+receiver. `delivery register` is the explicit IAM-consented grant allowing DM to
+send this recipient tings. Login, status and reconnect never silently enroll it.
+An uncertain registration prints its retry key before I/O; retry with that exact
+`--idempotency-key`, not a new registration. An uncertain Ting login reuses the
+same SLT and key; the default login key is stable for that SLT.
 
-Configure the webhook **after login** with `dm webhook <webhook-url>`. The URL
-is validated and saved only in the selected local profile, never sent to DM.
-The optional `login --webhook URL` form and `profiles webhook URL` remain
-available. The daemon persists incoming events even while there is no webhook;
-pending callbacks resume after configuration. See [the relay guide](relay.md)
-for the required HTTP 2xx plus JSON acknowledgement contract.
+Ting login accepts `--token-file FILE` or `-` (the default), never a positional
+secret. `--base-url` or `DM_TING_API_URL` selects Ting's API origin; the default is
+`https://backend.ting.teamofsilicons.com`. DM login uses its own `--base-url` or
+`DM_API_URL`. At most one secret input may read stdin in a command. Use private
+files for the others. Terminal input is hidden.
 
-`dm login status --json` verifies saved credentials with DM, refreshing them
-when necessary. A successful response includes `authenticated: true`, `actor`
-(with `type` and `id`), and `organization_id`. A missing, logged-out, or revoked
-session reports `authenticated: false`. Connection or backend failures are
-reported as errors; a saved file alone never proves successful authentication.
-Tokens are not included in status output.
+`dm login --webhook` is rejected before reading or exchanging the SLT.
+`dm profiles webhook` is also retired. Configure destinations explicitly with
+Ting using `dm webhook URL --all-apps` after Ting login.
 
-`dm unhook` removes only the selected profile's local webhook mapping. It
-retains authentication, the relay connection and queued work. Reconfigure with
-`dm webhook URL` to resume callbacks. An HTTP request already in flight may
-finish after unhooking. `--profile` and `--test` select independent mappings.
+## Direct Ting destinations
 
-Reusing a profile for a different actor, organization or backend is rejected to
-protect existing queues; create another profile name instead. `dm refresh`
-rotates credentials explicitly. `dm logout` revokes the refresh-token family,
-disables that login and clears its tokens; pending requests remain stored.
+Install/start Ting's official system daemon first. DM's CLI configures that
+service directly; it never starts an incoming DM worker or callback adapter.
+
+| Command | Effect |
+| --- | --- |
+| `webhook URL --all-apps` | Attach a generic Ting endpoint; reuse the saved hook ID. |
+| `webhook URL --all-apps --id ID` | Recover or explicitly reattach the exact retained hook. |
+| `webhook URL --all-apps --id ID --takeover` | Explicitly transfer that hook from another live receiver. |
+| `webhook URL --all-apps --health-url URL --secret-file FILE` | Configure Ting's local health check and callback bearer secret. |
+| `unhook` | Detach the saved Ting hook, retaining its ID. |
+| `delivery reconnect` | Rebind an attached destination; after unhook/new login use explicit `webhook --id`. |
+| `delivery status` | Check current DM/Ting identity and Ting daemon status. |
+| `delivery logout` | End this profile's separate Ting receiver session. |
+| `logout` | Revoke the DM family and disable its outgoing profile. |
+
+`--all-apps` is required because Ting's hook receives every eligible app for this
+recipient/org. The endpoint receives raw `{"tings":[...]}` and must authenticate
+its configured secret and `Ting-Webhook-Id`, route all apps, deduplicate and accept
+the entire batch before returning HTTP 204. Old DM ACK JSON and Silicon event
+result JSON are not Ting acknowledgements. URLs stay local to Ting and never go
+to DM's backend. [Full contract](relay.md).
+
+Do not replace an uncertain hook with a new one: recover its stable ID or retry
+the same attachment intent. A paused/detached hook requires an explicit action;
+status checks do not reactivate it. `profiles list` labels retained old webhook
+configuration as legacy, not an active destination.
+
+`login status` verifies DM credentials and refreshes when needed. Profiles cannot
+switch member, organization or backend; use another name. `refresh` explicitly
+refreshes DM credentials. DM logout and Ting logout are separate operations.
 
 ## Messaging
 
@@ -131,7 +136,7 @@ dm messages send cos:tos --text 'hello—world' --dangerously-use-em-dash
 | `receipts delivered CONVERSATION MESSAGE` | Explicit recipient delivery receipt using local device ID |
 | `receipts read CONVERSATION MESSAGE` | Explicit read receipt; also implies delivery |
 | `presence get ACTOR_ID` | Availability, activity and last-seen state |
-| `presence set typing` | Transient activity on the active socket |
+| `presence set typing` | Transient activity through an HTTP device lease |
 | `presence set clear` | Clear the activity |
 | `gifs trending`, `gifs search QUERY`, `gifs recent` | GIF discovery through the public DM client |
 
@@ -147,17 +152,16 @@ Activity choices are `typing`, `recording-voice`, `transcribing-voice`,
 activity commands expire when the daemon restarts. Other durable operations keep
 their original retry keys and queue order.
 
-The daemon automatically queues a **delivered** receipt only after the recipient
-callback returns a valid acknowledgement. It does not do so for the sender's own
-copies or tombstones. Read receipts are always explicit. Transport ACKs alone do
-not change delivered/read state.
+Ting acceptance does not change DM Delivered or Read state. Submit those receipts
+explicitly after the intended recipient application has accepted or read the
+message; sender copies and deletion tombstones do not justify a delivery receipt.
 
 ## Test environments
 
 Create/import DM in IAM, then select its test app secret. No pairing or IAM root key is required.
 
 ```sh
-dm --app-secret-file - login TEST_SLT_OR_PUBLIC_ID
+dm --app-secret-file /private/dm-test-secret login --token-file -
 dm --test ENV_UUID login status --json
 dm --test ENV_UUID conversations list
 ```
@@ -166,6 +170,20 @@ The first command discovers and saves the environment privately. `DM_TEST_APP_SE
 and `--app-secret` are alternative selectors. Normal user permissions still
 apply. Invalid credentials never fall back to production. The selected name and
 UUID print last on stderr even when commands fail. See [the testing guide](../testing-environments.md).
+
+Ting requires its own imported audience credentials in the same sandbox:
+
+```sh
+dm --test ENV_UUID delivery register
+dm --test ENV_UUID delivery login --token-file - --ting-app-secret-file /private/ting-test-secret --ting-environment-key-file /private/iam-environment-key
+dm --test ENV_UUID webhook http://localhost:9000/tings --all-apps
+```
+
+Instead of the two files, set the private environment variables
+`DM_TING_TEST_APP_SECRET` and `DM_TING_TEST_ENVIRONMENT_KEY` together. Do not supply
+both a file and the environment variable for the same secret. The runtime verifies
+Ting's audience, API and environment through IAM before login; never substitute
+DM's app secret. A clean/restore requires explicit setup for the new generation.
 
 The `environments` command tree continues to administer manually paired worlds.
 Use IAM lifecycle controls for automatically discovered environments. See
@@ -206,8 +224,8 @@ whitespace, `@`, or `:`. Ordinary account IDs remain supported; carbon email
 identifiers retain their existing meaning. Recipients must belong to the
 conversation. ISI never grants authority to act as a different account.
 
-History, WebSocket events, sender copies, callbacks and bundle display messages
-preserve the addresses. Your callback chooses how to dispatch an ISI internally.
+History, Ting references and fetched DM messages preserve the route. Your generic
+consumer dispatches the validated optional ISI internally.
 All conversation participants keep their normal visibility and delivery; the
 address is not a private sub-conversation or a separate IAM identity. Edits
 retain the original addresses; changing a route requires a new message. Use a
@@ -221,7 +239,8 @@ The selected state directory contains `config.json`, `relay.sqlite3`, lock files
 and `daemon.log`. The directory is mode 0700 and credential/database/log files
 are 0600 on Unix. Tokens and root keys are private but are stored locally in
 plaintext under those permissions. SQLite WAL mode with FULL synchronous commits
-protects inbox, outbox and cursors. Use an absolute `SILICON_DM_HOME` only when
+protects outgoing requests. No incoming DM queue is created. Legacy inbox/cursor
+records stay unchanged for explicit migration and are not forwarded. Use an absolute `SILICON_DM_HOME` only when
 you explicitly want an isolated state directory; it takes precedence over the configured home and `SILICON_HOME`. The `config home` pointer is stored under the default home selected by `SILICON_HOME` or `HOME`.
 
 Honeycomb manages CLI installation and updates. DM never replaces its executable.

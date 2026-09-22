@@ -33,6 +33,13 @@ pub struct IamClient {
     testing_key_digest: Option<String>,
 }
 
+fn access_expiry(expires_at: Option<i64>) -> AppResult<OffsetDateTime> {
+    expires_at
+        .and_then(|expires| OffsetDateTime::from_unix_timestamp(expires).ok())
+        .filter(|expires| *expires > OffsetDateTime::now_utc())
+        .ok_or(AppError::Unauthorized)
+}
+
 impl IamClient {
     /// Builds a production IAM adapter from validated backend settings.
     ///
@@ -206,6 +213,7 @@ impl IamClient {
         if !inspected.active {
             return Err(AppError::Unauthorized);
         }
+        let credential_expires_at = access_expiry(inspected.expires_at)?;
         let snapshot = inspected.authorization.ok_or_else(dependency_unavailable)?;
         let actor_type = match snapshot.actor_type.as_ref().ok_or(AppError::Unauthorized)? {
             models::ApplicationAuthorizationActorType::Carbon => ActorType::Carbon,
@@ -236,9 +244,6 @@ impl IamClient {
             || inspected.actor_type != Some(expected_type)
             || inspected.membership_id.as_ref() != Some(&snapshot.membership_id)
             || inspected.authorization_epoch != Some(snapshot.authorization_epoch)
-            || inspected
-                .expires_at
-                .is_none_or(|expires| expires <= OffsetDateTime::now_utc().unix_timestamp())
             || snapshot.org_id != organization_id.as_str()
             || snapshot.audience != self.app_id
             || snapshot.testing_environment_id != self.environment_id
@@ -283,6 +288,7 @@ impl IamClient {
             represented_actor_ids: BTreeSet::new(),
             capabilities: snapshot_scopes,
             credential: PresentedCredential::Bearer(token.clone()),
+            credential_expires_at,
         })
     }
 
@@ -383,6 +389,40 @@ impl IamClient {
 
 #[async_trait]
 impl IdentityProvider for IamClient {
+    async fn issue_ting_send_proof(
+        &self,
+        context: &AuthContext,
+        request_body: &str,
+        attempt_key: &str,
+    ) -> AppResult<super::ting::TingSendAuthority> {
+        super::ting_proof::issue(
+            &self.client,
+            &self.app_id,
+            self.environment_id,
+            context,
+            request_body,
+            attempt_key,
+        )
+        .await
+    }
+
+    async fn register_ting_delivery(
+        &self,
+        context: &AuthContext,
+        settings: &crate::config::TingSettings,
+        exchange_attempt_key: &str,
+    ) -> AppResult<serde_json::Value> {
+        super::ting_enrollment::register(
+            &self.client,
+            settings,
+            &self.app_id,
+            self.environment_id,
+            context,
+            exchange_attempt_key,
+        )
+        .await
+    }
+
     async fn authenticate(&self, request: AuthenticationRequest<'_>) -> AppResult<AuthContext> {
         let AuthenticationRequest::Bearer {
             token,

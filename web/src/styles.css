@@ -1863,7 +1863,34 @@ dialog::backdrop {
   }
 }
 
-.test-signin { margin-top: 1rem; }
-.test-signin summary { cursor: pointer; margin-bottom: 1rem; }
-.test-signin label { display: grid; gap: .5rem; }
-.test-signin input { width: 100%; }
+.test-signin {
+  margin-top: 1rem;
+}
+.test-signin summary {
+  cursor: pointer;
+  margin-bottom: 1rem;
+}
+.test-signin label {
+  display: grid;
+  gap: 0.5rem;
+}
+.test-signin input {
+  width: 100%;
+}
+
+.delivery-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 10px 22px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.delivery-status > span {
+  flex: 1 1 320px;
+}
+.delivery-status a {
+  text-decoration: underline;
+}

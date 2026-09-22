@@ -1,7 +1,7 @@
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-// Vercel serves files only. DM's authenticated HTTP/WS gateway is a separate
+// Vercel serves files only. DM's authenticated HTTP gateway is a separate
 // persistent Node process; no requests or credentials pass through Functions.
 const raw = process.env.VITE_DM_GATEWAY_ORIGIN;
 if (!raw)
@@ -20,7 +20,21 @@ if (
   throw new Error(
     "VITE_DM_GATEWAY_ORIGIN must be an exact HTTPS gateway origin.",
   );
-const websocket = new URL(gateway);
+const ting = new URL(
+  process.env.VITE_DM_TING_BROWSER_ORIGIN || "https://ting.teamofsilicons.com",
+);
+if (
+  ting.protocol !== "https:" ||
+  ting.pathname !== "/" ||
+  ting.search ||
+  ting.hash ||
+  ting.username ||
+  ting.password
+)
+  throw new Error(
+    "VITE_DM_TING_BROWSER_ORIGIN must be an exact HTTPS Ting browser origin.",
+  );
+const websocket = new URL(ting);
 websocket.protocol = "wss:";
 const output = resolve(".vercel/output");
 await rm(output, { recursive: true, force: true });
@@ -38,7 +52,7 @@ await writeFile(
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "no-referrer",
             "X-Frame-Options": "DENY",
-            "Content-Security-Policy": `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; font-src 'self'; connect-src 'self' ${gateway.origin} ${websocket.origin}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' ${gateway.origin}`,
+            "Content-Security-Policy": `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; font-src 'self'; connect-src 'self' ${gateway.origin} ${ting.origin} ${websocket.origin}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' ${gateway.origin}`,
           },
           continue: true,
         },

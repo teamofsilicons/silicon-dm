@@ -15,3 +15,5 @@ mod contracts;
 
 mod group_ids;
 mod groups;
+mod sync;
+mod ting;

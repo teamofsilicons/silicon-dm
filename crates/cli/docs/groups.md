@@ -114,7 +114,7 @@ let history = client.messages(&group.id, &PageRequest::default(), false).await?;
 ```
 
 `groups`, `group`, `create_group`, `update_group`, `invite_group_members` and
-`remove_group_members` are typed methods in `silicon-dm-client` 0.7.
+`remove_group_members` are typed methods in `silicon-dm-client`.
 The optional runtime also exposes matching `Operation` variants. Group metadata
 is the optional `Conversation.group` field; direct conversations omit it.
 
@@ -122,7 +122,7 @@ is the optional `Conversation.group` field; direct conversations omit it.
 
 | Method and path | Envelope type | Result |
 | --- | --- | --- |
-| `GET /groups` | `groups` | Paginated accessible conversations |
+| `GET /conversations` | `conversations` | Paginated accessible conversations; filter items with group metadata |
 | `POST /groups` | `create_group` | Group conversation (201) |
 | `GET /groups/{id}` | `group` | Accessible group conversation |
 | `PATCH /groups/{id}` | `update_group` | Group settings and invitation metadata |
@@ -135,9 +135,10 @@ with the observed group version. Member mutations use `{"member_ids":["cos:tos"]
 as `data`. Creation uses `name`, `description`, `is_public`, `tag_ids` and optional
 `member_ids`. Every JSON body is inside the normal two-field `type`/`data` envelope.
 
-Normal conversation listing includes accessible groups. Existing message routes,
-HTTP v1, WebSocket v3 and shared transport v1 remain compatible. Delivery uses
-current membership and the individual authenticated token's access. Joining
+Normal conversation listing includes accessible groups; there is no separate
+`GET /groups` route. HTTP contract 3 serves messages and receipts. Ting delivers
+change references, and hydration checks current membership and the individual
+authenticated token’s access. Former DM socket routes return HTTP 410. Joining
 does not backfill old transport deliveries: retrieve full earlier history using
 the message API, including normal pagination and bundle-original access. New
 members do not delay read/delivered aggregation for messages sent before they joined.

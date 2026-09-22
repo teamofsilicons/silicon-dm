@@ -62,6 +62,7 @@ async fn upgrade_keeps_existing_groups_and_assigns_unique_stable_addresses() -> 
         represented_actor_ids: BTreeSet::new(),
         capabilities: BTreeSet::new(),
         credential: PresentedCredential::Bearer(SecretString::from("fixture")),
+        credential_expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
     };
     let mut ids = Vec::new();
     for (i, name) in [

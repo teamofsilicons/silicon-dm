@@ -32,8 +32,10 @@ pub struct AuthContext {
     pub represented_actor_ids: BTreeSet<ActorId>,
     /// Effective IAM scopes; undisclosed authority is never inferred.
     pub capabilities: BTreeSet<String>,
-    /// Request-scoped token, never persisted by the backend.
+    /// Verified DM access token; never a refresh credential.
     pub credential: PresentedCredential,
+    /// Absolute access-token expiry verified by IAM introspection.
+    pub credential_expires_at: time::OffsetDateTime,
 }
 
 impl AuthContext {
