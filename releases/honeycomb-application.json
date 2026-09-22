@@ -18,7 +18,16 @@
       "self.membership.read",
       "self.tags.read"
     ],
-    "external": []
+    "external": [
+      {
+        "app_id": "tos>ting",
+        "endpoint_id": "subscriptions.register"
+      },
+      {
+        "app_id": "tos>ting",
+        "endpoint_id": "tings.send"
+      }
+    ]
   },
   "obo_endpoints": [],
   "testing_idle_days": 30
