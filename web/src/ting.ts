@@ -48,6 +48,32 @@ function verifyEnvironment(value: unknown, expected: TingEnvironment): boolean {
     );
   return true;
 }
+
+/** Resolve the selected DM handle through this authenticated Ting session. */
+function tingOrganization(value: unknown, selected: string): string {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Ting returned an invalid organization list.");
+  const items = (value as { items?: unknown }).items;
+  if (!Array.isArray(items) || items.length > 1000)
+    throw new Error("Ting returned an invalid organization list.");
+  const matches = items.filter(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      !Array.isArray(item) &&
+      (item.id === selected || item.handle === selected),
+  );
+  if (
+    matches.length !== 1 ||
+    typeof matches[0].id !== "string" ||
+    !matches[0].id.trim() ||
+    matches[0].id.length > 255 ||
+    /[\x00-\x20\x7f]/.test(matches[0].id)
+  )
+    throw new Error("Ting did not identify this organization uniquely.");
+  return matches[0].id;
+}
+
 const transient = (reason: unknown) =>
   [
     "authorization_unavailable",
@@ -146,6 +172,30 @@ export function watchTing(
         );
         return;
       }
+      deadline = setTimeout(() => abort?.abort(), 10_000);
+      const organizations = await fetch(new URL("/v1/orgs", base), {
+        credentials: "include",
+        cache: "no-store",
+        redirect: "error",
+        signal: abort.signal,
+      });
+      if (run !== epoch || stopped) return;
+      if (!organizations.ok)
+        throw new Error("Ting could not verify organization access.");
+      const listed = await organizations.json();
+      if (run !== epoch || stopped) return;
+      let tingOrg: string;
+      try {
+        tingOrg = tingOrganization(listed, organization);
+      } catch {
+        if (deadline) clearTimeout(deadline);
+        emit(
+          "blocked",
+          "Ting could not verify this organization. Check your Ting organization access and reconnect.",
+        );
+        return;
+      }
+      if (deadline) clearTimeout(deadline);
       const url = new URL("/v1/ws?protocol=v1", base);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       const target = new WebSocket(url);
@@ -187,12 +237,12 @@ export function watchTing(
             JSON.stringify({
               op: "watch_inbox",
               request_id: requestId,
-              org_id: organization,
+              org_id: tingOrg,
             }),
           );
         } else if (
           frame.op === "watching_inbox" &&
-          frame.org_id === organization &&
+          frame.org_id === tingOrg &&
           frame.request_id === requestId
         ) {
           if (deadline) clearTimeout(deadline);
@@ -208,10 +258,10 @@ export function watchTing(
         } else if (
           frame.op === "inbox_changed" &&
           watching &&
-          frame.org_id === organization
+          frame.org_id === tingOrg
         )
           changed();
-        else if (frame.op === "paused" && frame.org_id === organization) {
+        else if (frame.op === "paused" && frame.org_id === tingOrg) {
           watching = false;
           emit(
             "paused",

@@ -22,10 +22,69 @@ const identityFor = (environment: unknown) => ({
   environment,
 });
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+test("Ting resolves an authorized handle to the canonical organization and fences hints", async () => {
+  const canonical = "00000000-0000-4000-8000-000000000099";
+  const f = await fixture(undefined, false, production, {
+    items: [{ id: canonical, handle: "tos" }],
+  });
+  try {
+    const socket = f.sockets[0];
+    socket.frame({ op: "ready", protocol: "v1" });
+    assert.equal(socket.sent[0].org_id, canonical);
+    assert.equal(f.requests[1].url.pathname, "/v1/orgs");
+    assert.equal(f.requests[1].options.credentials, "include");
+    socket.frame({
+      op: "watching_inbox",
+      org_id: "foreign",
+      request_id: "request-uuid",
+    });
+    assert.equal(f.hints(), 0);
+    socket.frame({
+      op: "watching_inbox",
+      org_id: canonical,
+      request_id: "request-uuid",
+    });
+    assert.equal(f.states.at(-1).state, "connected");
+    socket.frame({ op: "inbox_changed", org_id: "tos" });
+    assert.equal(f.hints(), 1);
+    socket.frame({ op: "inbox_changed", org_id: canonical });
+    assert.equal(f.hints(), 2);
+    socket.frame({
+      op: "paused",
+      org_id: canonical,
+      reason: "permission_changed",
+    });
+    assert.equal(socket.readyState, 3);
+  } finally {
+    f.connection.close();
+  }
+});
+for (const organizations of [
+  { items: [] },
+  {
+    items: [
+      { id: "a", handle: "tos" },
+      { id: "b", handle: "tos" },
+    ],
+  },
+  { items: [{ id: "", handle: "tos" }] },
+  { items: [{ id: "other", handle: "another" }] },
+]) {
+  test(`Ting refuses absent or ambiguous organization mapping ${JSON.stringify(organizations)}`, async () => {
+    const f = await fixture(undefined, false, production, organizations);
+    try {
+      assert.equal(f.sockets.length, 0);
+      assert.equal(f.states.at(-1).state, "blocked");
+    } finally {
+      f.connection.close();
+    }
+  });
+}
 async function fixture(
   identity: any = identityFor({ kind: "production" }),
   fail = false,
   environment: any = production,
+  organizations: any = { items: [{ id: "tos", handle: "tos" }] },
 ) {
   const sockets: any[] = [],
     states: any[] = [],
@@ -66,7 +125,11 @@ async function fixture(
         ok: true,
         status: 200,
         json: async () =>
-          typeof identity === "function" ? identity() : identity,
+          url.pathname === "/v1/orgs"
+            ? organizations
+            : typeof identity === "function"
+              ? identity()
+              : identity,
       };
     },
     setTimeout: (f: () => void, ms: number) => {
@@ -168,7 +231,7 @@ for (const [op, reason] of [
       f.timers.clear();
       retry.f();
       await tick();
-      assert.equal(f.requests.length, 2);
+      assert.equal(f.requests.length, 4);
       assert.equal(f.sockets.length, 2);
     } finally {
       f.connection.close();
@@ -191,7 +254,7 @@ for (const reason of [
       assert.equal(f.hints(), hints);
       f.connection.reconnect();
       await tick();
-      assert.equal(f.requests.length, 2);
+      assert.equal(f.requests.length, 4);
     } finally {
       f.connection.close();
     }
@@ -213,7 +276,7 @@ test("a socket that never acknowledges watch expires and retries", async () => {
     f.timers.clear();
     retry.f();
     await tick();
-    assert.equal(f.requests.length, 2);
+    assert.equal(f.requests.length, 4);
     assert.equal(f.sockets.length, 2);
   } finally {
     f.connection.close();
@@ -338,7 +401,7 @@ test("reconnect rechecks environment and discards late frames from the previous 
     });
     f.connection.reconnect();
     await tick();
-    assert.equal(f.requests.length, 2);
+    assert.equal(f.requests.length, 3);
     assert.equal(f.sockets.length, 1);
     assert.equal(f.states.at(-1).state, "blocked");
     old.frame({ op: "inbox_changed", org_id: "tos" });
