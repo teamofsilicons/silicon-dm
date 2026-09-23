@@ -1,8 +1,31 @@
-# DM 0.10.0 candidate
+# DM 0.10 delivery migration
 
-This is a breaking transport migration. The candidate is not yet published or
-deployed to DM production. Existing message content and HTTP contract 3 remain
-unchanged; incoming delivery moves to Ting.
+This is a breaking transport migration. Existing message content and HTTP
+contract 3 remain unchanged; incoming delivery moves to Ting.
+
+## Release status: 2026-09-23
+
+DM backend and gateway 0.10.0 are deployed, and the DM and Interface websites
+use Ting for incoming delivery. Deployed acceptance exposed follow-up fixes:
+backend 0.10.1 separates the shared testing generation from its private cache
+revision and keeps queued handoffs retryable during temporary IAM failures;
+client/CLI 0.10.1 resolves canonical Ting organization IDs. These patches pass
+their regression tests. The final backend image, deployed message/receipt
+acceptance, native publication and fresh-install checks are still pending.
+Protocol crate 0.10.0 and HTTP message schema 3 remain unchanged.
+
+IAM 3.0.3 and Honeycomb 0.3.3 are deployed. Both a fresh rotated environment
+and the original stuck rotation now pass official IAM SDK audience-credential
+validation. The original operation recovered a definitive rejection through
+the supported API, followed by successful reconciliation and a new rotation.
+
+Production DM configuration revision 2 includes both required Ting scopes, and
+`tos>dm.sync.changed` is registered in `tos`. Ting currently denies managing
+that type in `bricks` because its application list omits the app owned by `tos`.
+Cross-organization type registration remains an outstanding dependency.
+Interface retains its existing login/history and confirms a real Ting connection
+in Bricks; this is not proof of recipient enrollment or message delivery there.
+See the [integration record](ting-integration-issues.md) for the current boundary.
 
 ## What changes
 
@@ -43,7 +66,7 @@ See [wire format](wire-format.md), [consumer migration](client/realtime.md),
    CORS and cookie behavior. Verify fresh test credentials after rotation and
    shared lifecycle readiness before using a sandbox as release evidence.
 3. Back up the databases and stop both old API and worker tasks before applying
-   candidate migrations through 0034 and the runtime grants. Start the new API
+   migrations through 0035 and the runtime grants. Start the new API
    and worker together; this cutover must not overlap old and new delivery workers. Configure the backend Ting origin and timeout. Coordinate
    consumer, SDK, CLI and website upgrades with backend cutover: old DM socket
    consumers cannot receive after retirement. Rust publication order is protocol,
@@ -54,10 +77,10 @@ See [wire format](wire-format.md), [consumer migration](client/realtime.md),
    stable hook IDs and recover through HTTP sync. Browsers use Ting’s own cookie
    and inbox watch plus authorized DM HTTP reconciliation. Login/status never
    silently enroll a recipient.
-5. Complete the final candidate suite and package checks, then record publication,
-   deployment, production readiness and authorized live send/recovery verification
-   separately. These release steps remain pending; passing sandbox tests does not
-   establish production readiness.
+5. Record publication, deployment, readiness and authorized live send/recovery
+   verification separately. The status above distinguishes completed deployments
+   from the pending patch acceptance and distribution checks; passing sandbox
+   tests alone does not establish message delivery in every production organization.
 
 ## Configuration publication
 
@@ -70,11 +93,12 @@ request was reused; no duplicate configuration request was created.
 - Honeycomb decision operation: `33438fd9-6df5-43fd-ab21-5bf03fd89d8d`.
 - Accepted activation: `a4debe2e-74e1-4e67-9c7c-010b38885d32`.
 
-This establishes application configuration approval. Per-account consent,
-production event-type verification, backend cutover, client publication and live
-production delivery verification remain separate gates.
+This establishes application configuration approval. Per-account consent and
+recipient enrollment remain explicit. Production type registration is verified
+in `tos`; the Bricks registration limitation and remaining patch/distribution
+gates are recorded above.
 
-## Candidate validation
+## Historical 0.10.0 candidate validation
 
 The isolated 0.10.0 release worktree passes the full Rust CI test command:
 138 tests across 27 targets, with none ignored. The suite covers retired-route
@@ -120,20 +144,15 @@ daemon remained 0.1.2. A full shared-daemon restart was not tested. See
 [native evidence](ting-native-live-verification.json). Only task-owned profiles,
 processes and the task hook were cleaned up; other Ting bindings were preserved.
 
-## Remaining upstream verification and production gates
+## Upstream fixes and remaining delivery checks
 
-A fresh sandbox exposed an IAM OBO audience-credential mismatch after Ting
-credential rotation: newly issued proofs supplied a credential rejected by IAM’s
-Ting context check. Successful original-sandbox runs used a newly issued proof
-and IAM-verified audience context, not a cached-secret fallback. They do not prove
-rotation recovery. The original sandbox also retains a separately documented
-pending Honeycomb credential-rotation operation; no lifecycle fence was bypassed.
+The stale rotated Ting audience credential and original stuck Honeycomb rotation
+are fixed and verified on deployed IAM 3.0.3 and Honeycomb 0.3.3. No lifecycle
+fence or saved request was bypassed. See [IAM issue evidence](iam-ting-e2e-issues.md)
+and [Honeycomb issue evidence](honeycomb-ting-e2e-issues.md).
 
-Verify the upstream fix in a newly rotated sandbox before closing that gate.
-The observations, safe request IDs and source/deployment uncertainty are in
-[IAM issue evidence](iam-ting-e2e-issues.md) and
-[Honeycomb issue evidence](honeycomb-ting-e2e-issues.md).
-[The integration record](ting-integration-issues.md) distinguishes historical Ting
-issues from subsequent 0.1.3 verification. DM scope configuration is published
-as recorded above. Release publication, deployment and live production checks
-remain pending.
+The [integration record](ting-integration-issues.md) retains the historical Ting
+findings and current verification. Final backend 0.10.1 deployment/acceptance,
+client and CLI publication, fresh installation, and native delivery verification
+remain pending at this record's publication. Production Bricks type registration
+is a separate Ting dependency; a connected browser does not close that gate.
