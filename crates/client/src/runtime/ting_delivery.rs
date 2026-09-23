@@ -159,14 +159,7 @@ async fn verify_identity(
             &TestHeaders::default(),
         )
         .await?;
-    ensure!(
-        orgs["items"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|org| {
-                org["id"] == identity.organization_id || org["handle"] == identity.organization_id
-            })),
-        "Ting session does not grant the selected DM organization"
-    );
+    crate::ting::resolve_ting_organization(&identity.organization_id, &orgs)?;
     Ok(())
 }
 

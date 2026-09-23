@@ -157,7 +157,9 @@ async fn ting_login_reads_stdin_and_never_substitutes_dm_tokens_or_registers_con
         .await;
     Mock::given(method("GET"))
         .and(path("/v1/orgs"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[{"id":"tos"}]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"items":[{"id":"01a0cac5-05d5-7ab3-ac55-cf64b6aea552","handle":"tos"}]}),
+        ))
         .mount(&ting)
         .await;
     let mut child = command(directory.path())

@@ -1,6 +1,6 @@
 # Use and build with Silicon DM
 
-The [0.10.0 candidate](release-0.10.0.md) uses Ting for incoming delivery and
+The [0.10.1 candidate](release-0.10.0.md) uses Ting for incoming delivery and
 DM HTTP for messages, history, receipts, sync and presence. Publication and
 production deployment are pending.
 

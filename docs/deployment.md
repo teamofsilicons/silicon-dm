@@ -7,7 +7,7 @@ and operating details in [the Fargate guide](../deploy/aws/README.fargate.md).
 The general Docker commands below explain the underlying migration/runtime
 steps. Fargate uses an explicitly invoked one-off bootstrap task before the
 services are activated. See [manual verification](manual-backend-verification.md)
-for historical results. The [0.10.0 candidate release record](release-0.10.0.md) separates current test evidence from pending production rollout gates.
+for historical results. The [0.10.1 candidate release record](release-0.10.0.md) separates current test evidence from pending production rollout gates.
 
 ## AWS deployment
 
@@ -36,11 +36,11 @@ then set the count to 1. The migration task rejects changes to existing database
 credentials or the testing encryption key; credential rotation requires a
 separate coordinated procedure.
 
-For the 0.10.0 Ting cutover, set both API and worker desired counts to zero
+For the 0.10.1 Ting cutover, set both API and worker desired counts to zero
 and wait for their old tasks to stop before running the bootstrap migration.
 Migration 0033 sunsets the old delivery contracts; old and new delivery workers
-must not overlap. Apply all migrations through 0034 and the runtime grants, then
-start the 0.10.0 API and worker together. Hold public CLI updates until this
+must not overlap. Apply all migrations through 0035 and the runtime grants, then
+start the 0.10.1 API and worker together. Hold public CLI updates until this
 backend cutover is ready. This transition requires a coordinated interruption;
 the ordinary rolling replacement procedure below applies to compatible updates.
 
@@ -229,7 +229,7 @@ expecting further test callbacks. Production uses the registered public URL.
 
 ## Rust package and CLI release
 
-Prior client and CLI releases are on crates.io; 0.10.0 remains a candidate until
+Prior client and CLI releases are on crates.io; 0.10.1 remains a candidate until
 its release gates pass. For each new release, publish
 `silicon-dm-protocol`, then `silicon-dm-client`, then `silicon-dm-cli`, whose manifest depends on that
 client version. Use the appropriate crates.io owner account and review the

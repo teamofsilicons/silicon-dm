@@ -195,6 +195,7 @@ fn reference(message: &str) -> Value {
 
 fn receiver() -> TingReceiverContext {
     TingReceiverContext {
+        ting_organization_id: None,
         app_id: "tos>dm".into(),
         organization_id: "tos".into(),
         actor: Actor {
@@ -242,6 +243,37 @@ async fn hydration_rechecks_identity_and_fetches_only_valid_dm_references_withou
         seen.len(),
         5,
         "only fresh me, iam and three authorized message GETs"
+    );
+    assert!(seen.iter().all(|request| request.method == "GET"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_inbox_org_hydrates_only_the_mapped_dm_organization() -> Result {
+    let fixture = Fixture::new().await?;
+    let canonical = Uuid::new_v4().to_string();
+    let receiver =
+        receiver().with_ting_organizations(&json!({"items":[{"id":canonical,"handle":"tos"}]}))?;
+    let mut allowed = reference("000");
+    allowed["org_id"] = json!(canonical);
+    allowed["for"] = json!("alice");
+    let mut wrong = allowed.clone();
+    wrong["org_id"] = json!(Uuid::new_v4());
+    let raw = serde_json::to_vec(&json!({"tings":[allowed,wrong]}))?;
+    let items = fixture.client.hydrate_ting_batch(&raw, &receiver).await?;
+    assert!(matches!(&items[0], HydratedTingItem::Message { .. }));
+    assert!(matches!(
+        &items[1],
+        HydratedTingItem::Skipped(TingItem::Rejected {
+            reason: TingRejection::WrongOrganization,
+            ..
+        })
+    ));
+    let seen = fixture.requests.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        3,
+        "fresh identity/discovery and only the mapped message GET"
     );
     assert!(seen.iter().all(|request| request.method == "GET"));
     Ok(())

@@ -94,6 +94,16 @@ its identity argument must come from authenticated DM `me()`. Neither helper
 persists work, transforms the message schema, dispatches another callback, nor
 sends Ting or DM acknowledgements.
 
+DM references retain DM's organization handle, while full Ting inbox objects
+carry Ting's canonical organization ID in their outer `org_id`. Before validating
+those objects, bind the trusted receiver with
+`receiver.with_ting_organizations(&authenticated_ting_orgs)?`, using the same
+recipient's authenticated `/v1/orgs` response. The helper resolves exactly one
+matching ID or handle and rejects missing, ambiguous or malformed mappings.
+Never supply organizations from callback JSON. Full inbox objects require this
+canonical binding; local webhook items omit the outer organization and continue
+to use the authenticated hook binding and exact DM reference organization.
+
 Ting accepts **the entire batch** only when the endpoint returns HTTP 204. Persist
 acceptance according to the generic consumer's contract before responding; do not
 return 204 merely because the DM subset succeeded. An old DM

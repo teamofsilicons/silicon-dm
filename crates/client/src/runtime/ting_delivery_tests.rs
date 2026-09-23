@@ -26,6 +26,7 @@ struct ServerState {
     kind: String,
     actor: String,
     org: String,
+    duplicate_org: bool,
     fail_login: bool,
     logins: Vec<(String, String)>,
     iam_calls: usize,
@@ -74,6 +75,7 @@ impl Fixture {
         let origin = format!("http://{}", listener.local_addr()?);
         let state = Arc::new(Mutex::new(ServerState {
             origin: origin.clone(),
+            duplicate_org: false,
             environment: test,
             generation: test.map(|_| 1),
             ting_environment: Some(test.map_or_else(
@@ -106,7 +108,10 @@ impl Fixture {
             .route("/v1/me",get(me))
             .route("/v1/orgs",get(|State(state):State<Arc<Mutex<ServerState>>>,headers:HeaderMap|async move {
                 assert_eq!(headers["authorization"],"Bearer fixture-ting-session");
-                let state=state.lock().unwrap();Json(json!({"items":[{"id":state.org,"handle":state.org}]}))
+                let state=state.lock().unwrap();
+                let mut items=vec![json!({"id":"01a0cac5-05d5-7ab3-ac55-cf64b6aea552","handle":state.org})];
+                if state.duplicate_org {items.push(json!({"id":"01a0cac5-05d5-7ab3-ac55-cf64b6aea553","handle":state.org}));}
+                Json(json!({"items":items}))
             }))
             .route("/api/v1/application/testing-context",get(|State(state):State<Arc<Mutex<ServerState>>>,headers:HeaderMap|async move {
                 assert_eq!(headers["authorization"],"Basic dG9zPnRpbmc6Zml4dHVyZS10aW5nLWFwcC1zZWNyZXQ=");
@@ -426,13 +431,14 @@ async fn direct_ting_attachment_keeps_ids_and_never_gives_daemon_dm_credentials(
 
 #[tokio::test]
 async fn member_kind_organization_and_unverified_session_cannot_cross_bindings() -> Result<()> {
-    for mismatch in ["member", "kind", "organization"] {
+    for mismatch in ["member", "kind", "organization", "ambiguous organization"] {
         let fixture = Fixture::new(None).await?;
         {
             let mut state = fixture.state.lock().unwrap();
             match mismatch {
                 "member" => state.actor = "other:tos".into(),
                 "kind" => state.kind = "carbon".into(),
+                "ambiguous organization" => state.duplicate_org = true,
                 _ => state.org = "other".into(),
             }
         }

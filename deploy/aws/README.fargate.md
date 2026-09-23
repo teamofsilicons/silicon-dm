@@ -108,7 +108,7 @@ rejects replacement resources when an update uses `--disable-rollback`; reserve
 that preservation option for initial provisioning or a reviewed recovery that
 does not replace resources.
 
-For the 0.10.0 Ting cutover, stop both old API and worker tasks and wait for
+For the 0.10.1 Ting cutover, stop both old API and worker tasks and wait for
 both services to drain before running the new bootstrap/migrator task. Apply
 migrations through 0034 and runtime grants, inspect successful completion, then
 start the new API and worker together. Do not overlap the old and new delivery

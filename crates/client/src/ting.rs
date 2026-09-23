@@ -21,10 +21,62 @@ const MAX_BATCH_ITEMS: usize = 100;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TingReceiverContext {
     pub app_id: String,
+    /// DM's organization selector, retained in DM reference data and HTTP calls.
     pub organization_id: String,
+    /// Canonical Ting organization from this recipient's authenticated `/v1/orgs`.
+    /// Required for full inbox objects; local webhook items omit their outer org.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ting_organization_id: Option<String>,
     pub actor: Actor,
     pub testing_environment_id: Option<Uuid>,
     pub testing_generation: Option<i64>,
+}
+
+impl TingReceiverContext {
+    /// Binds the canonical Ting organization using this recipient's authenticated
+    /// `/v1/orgs` response. Never pass organizations taken from callback JSON.
+    pub fn with_ting_organizations(
+        mut self,
+        authenticated_orgs: &Value,
+    ) -> std::result::Result<Self, TingBatchError> {
+        self.ting_organization_id = Some(resolve_ting_organization(
+            &self.organization_id,
+            authenticated_orgs,
+        )?);
+        Ok(self)
+    }
+}
+
+/// Resolves a DM organization ID or handle against an authenticated Ting org
+/// list. Missing or ambiguous mappings fail; a display name is never authority.
+pub fn resolve_ting_organization(
+    organization: &str,
+    authenticated_orgs: &Value,
+) -> std::result::Result<String, TingBatchError> {
+    if !bounded_text(organization, 255) {
+        return Err(TingBatchError::InvalidOrganization);
+    }
+    let items = authenticated_orgs["items"]
+        .as_array()
+        .ok_or(TingBatchError::InvalidOrganization)?;
+    let mut selected = None;
+    for item in items {
+        let id = item["id"]
+            .as_str()
+            .filter(|id| bounded_text(id, 255))
+            .ok_or(TingBatchError::InvalidOrganization)?;
+        let handle = item["handle"]
+            .as_str()
+            .filter(|handle| bounded_text(handle, 255))
+            .ok_or(TingBatchError::InvalidOrganization)?;
+        if id == organization || handle == organization {
+            if selected.is_some() {
+                return Err(TingBatchError::InvalidOrganization);
+            }
+            selected = Some(id.to_owned());
+        }
+    }
+    selected.ok_or(TingBatchError::InvalidOrganization)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +158,8 @@ pub enum TingBatchError {
     InvalidBatch,
     #[error("trusted Ting hook binding does not match the authenticated DM identity")]
     InvalidReceiver,
+    #[error("authenticated Ting organizations do not uniquely identify the DM organization")]
+    InvalidOrganization,
 }
 
 /// Validates references without I/O. `identity` must come from authenticated DM
@@ -153,6 +207,10 @@ fn validate_receiver(
     if !paired
         || !bounded_text(&receiver.app_id, 255)
         || !bounded_text(&receiver.organization_id, 255)
+        || receiver
+            .ting_organization_id
+            .as_ref()
+            .is_some_and(|id| !bounded_text(id, 255))
         || !bounded_text(&receiver.actor.id, 255)
         || receiver.actor != identity.actor
         || receiver.organization_id != identity.organization_id
@@ -182,10 +240,10 @@ fn validate_item(index: usize, item: &Value, receiver: &TingReceiverContext) -> 
     {
         return rejected(TingRejection::WrongRecipient);
     }
-    if item
-        .get("org_id")
-        .is_some_and(|org| org.as_str() != Some(receiver.organization_id.as_str()))
-    {
+    if item.get("org_id").is_some_and(|org| {
+        receiver.ting_organization_id.is_none()
+            || org.as_str() != receiver.ting_organization_id.as_deref()
+    }) {
         return rejected(TingRejection::WrongOrganization);
     }
     let Ok(data) =
@@ -366,6 +424,7 @@ mod tests {
             TingReceiverContext {
                 app_id: "tos>dm".into(),
                 organization_id: "tos".into(),
+                ting_organization_id: None,
                 actor: actor.clone(),
                 testing_environment_id: None,
                 testing_generation: None,
@@ -476,6 +535,75 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn inbox_outer_org_uses_authenticated_canonical_mapping_and_keeps_dm_reference_scope() {
+        let (receiver, identity) = context();
+        let canonical = Uuid::new_v4().to_string();
+        let organizations =
+            json!({"items":[{"id":canonical,"handle":"tos","name":"Display name"}]});
+        let mut inbox = event();
+        inbox["org_id"] = json!(canonical);
+        inbox["for"] = json!(identity.actor.id);
+        assert!(matches!(
+            validate(inbox.clone(), &receiver, &identity),
+            TingItem::Rejected {
+                reason: TingRejection::WrongOrganization,
+                ..
+            }
+        ));
+        let receiver = receiver.with_ting_organizations(&organizations).unwrap();
+        assert!(matches!(
+            validate(inbox.clone(), &receiver, &identity),
+            TingItem::Reference(_)
+        ));
+        // Local webhook items remain valid without their stripped outer org.
+        assert!(matches!(
+            validate(event(), &receiver, &identity),
+            TingItem::Reference(_)
+        ));
+        for wrong in [json!("tos"), json!(Uuid::new_v4()), Value::Null] {
+            inbox["org_id"] = wrong;
+            assert!(matches!(
+                validate(inbox.clone(), &receiver, &identity),
+                TingItem::Rejected {
+                    reason: TingRejection::WrongOrganization,
+                    ..
+                }
+            ));
+        }
+        inbox["org_id"] = json!(canonical);
+        inbox["data"]["org_id"] = json!(canonical);
+        assert!(matches!(
+            validate(inbox, &receiver, &identity),
+            TingItem::Rejected {
+                reason: TingRejection::WrongOrganization,
+                ..
+            }
+        ));
+        assert_eq!(
+            resolve_ting_organization(&canonical, &organizations).unwrap(),
+            canonical
+        );
+    }
+
+    #[test]
+    fn organization_binding_rejects_missing_ambiguous_and_malformed_authority() {
+        let canonical = Uuid::new_v4().to_string();
+        for organizations in [
+            json!({}),
+            json!({"items":[]}),
+            json!({"items":[{"id":canonical,"name":"tos","handle":"other"}]}),
+            json!({"items":[{"id":"","handle":"tos"}]}),
+            json!({"items":[{"id":canonical,"handle":"tos"},{"id":"other","handle":"tos"}]}),
+            json!({"items":[{"id":canonical,"handle":"tos"},{"id":"tos","handle":"other"}]}),
+        ] {
+            assert!(matches!(
+                resolve_ting_organization("tos", &organizations),
+                Err(TingBatchError::InvalidOrganization)
+            ));
+        }
     }
 
     #[test]

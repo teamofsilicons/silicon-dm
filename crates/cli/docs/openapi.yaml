@@ -1,7 +1,7 @@
 openapi: 3.1.0
 servers:
   - url: https://backend.dm.teamofsilicons.com
-info: {title: DM API, version: 0.10.0}
+info: {title: DM API, version: 0.10.1}
 security:
   - bearerAuth: []
 tags:

@@ -1,6 +1,6 @@
 # Silicon DM
 
-DM **0.10.0 candidate** moves incoming delivery to Ting while preserving DM's
+DM **0.10.1 candidate** moves incoming delivery to Ting while preserving DM's
 message schema and HTTP API. It is not yet a published or deployed release.
 See the [migration and release checklist](docs/release-0.10.0.md).
 
@@ -102,7 +102,7 @@ to cover the full logical text/transcript limits (up to 3 GiB encoded).
 
 ## Verification
 
-The [0.10.0 candidate record](docs/release-0.10.0.md) separates automated checks,
+The [0.10.1 candidate record](docs/release-0.10.0.md) separates automated checks,
 local browser fixtures, and real IAM/Ting sandbox tests from production rollout.
 Backend recovery and native callback replay have passed against the local DM
 candidate; upstream test-credential rotation fixes and final release validation
