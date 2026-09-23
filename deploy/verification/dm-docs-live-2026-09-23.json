@@ -1,0 +1,64 @@
+{
+  "passed": true,
+  "deployment": "https://silicon-dm-docs-2vkgcfckf-saketdev12-5675s-projects.vercel.app",
+  "source": "ba8b455",
+  "public_origin": "https://docs.dm.teamofsilicons.com",
+  "checks": [
+    {
+      "path": "/",
+      "status": 200,
+      "sha256": "2682e06b0f92c9e1a4fe5634b9c9ca0aad0551c9019efa6faaf903a04a11b189",
+      "bytes": 6654,
+      "content_type": "text/html; charset=utf-8",
+      "csp_verified": true
+    },
+    {
+      "path": "/release-0.10.0/",
+      "status": 200,
+      "sha256": "ebbaed2e11bb9de7de5bbe7cfc06022f32f65fbe20f6f45afb8af775b5fee19b",
+      "bytes": 14895,
+      "content_type": "text/html; charset=utf-8",
+      "csp_verified": true
+    },
+    {
+      "path": "/ting-integration-issues/",
+      "status": 200,
+      "sha256": "711b75f530b7eda286a4403a98a6a29a2949644aad74df0d7a1dc7e6e3823509",
+      "bytes": 39439,
+      "content_type": "text/html; charset=utf-8",
+      "csp_verified": true
+    },
+    {
+      "path": "/iam-ting-e2e-issues/",
+      "status": 200,
+      "sha256": "5c135b6b1bc59e1d2fe1bcc914b8ed377752204139ede6bb3fa4277c30291d1b",
+      "bytes": 11741,
+      "content_type": "text/html; charset=utf-8",
+      "csp_verified": true
+    },
+    {
+      "path": "/honeycomb-ting-e2e-issues/",
+      "status": 200,
+      "sha256": "bfd1bb0f68ada7f85adfe8ef9d5b4bc7dddbeee6c724cb425e057f46d7e07e52",
+      "bytes": 12559,
+      "content_type": "text/html; charset=utf-8",
+      "csp_verified": true
+    },
+    {
+      "path": "/openapi.yaml",
+      "status": 200,
+      "sha256": "4dbd00ff9a0b49f984c34f500c7563e92f3ac6b3498008bd53e9abe8aaeebac9",
+      "bytes": 117207,
+      "content_type": "text/yaml; charset=utf-8",
+      "csp_verified": true
+    },
+    {
+      "path": "/llms-full.txt",
+      "status": 200,
+      "sha256": "e5f5f1d2ff908fd87270bf8ef38c3a87478ae6052ce493a08ed6878c8531417e",
+      "bytes": 322007,
+      "content_type": "text/plain; charset=utf-8",
+      "csp_verified": true
+    }
+  ]
+}

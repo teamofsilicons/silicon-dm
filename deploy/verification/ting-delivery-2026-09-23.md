@@ -58,6 +58,48 @@ CloudFormation `silicon-dm-production` reached `UPDATE_COMPLETE`. Its backend an
 
 These definitions have no ECS container healthcheck, so ECS `UNKNOWN` is expected. Readiness is demonstrated by public `/live` and `/ready` returning 204, discovery/contracts returning 200 with service version 0.10.1 and HTTP contract 3, and the exact new API's healthy ALB target. Both old websocket routes continue returning 410. The gateway remains on its verified 0.10.0 image; this backend patch does not replace it.
 
-Actual deployed DM/Ting acceptance passed with exit 0 using real Carbon and Silicon test identities at the shared generation 1. It verified bidirectional Ting websocket/inbox delivery and authorized DM hydration, message/enrollment idempotency, explicit read receipts without automatic DM reads, HTTP synchronization, cross-actor 409 rejection, presence, and retired websocket 410 responses. This is separate live delivery evidence beyond the health checks. Native/public publication proceeds through its separately verified artifact and installation gates. Opaque cursors and credentials from the private test report are not reproduced here.
+Actual deployed DM/Ting acceptance passed with exit 0 using real Carbon and Silicon test identities at the shared generation 1. It verified bidirectional Ting websocket/inbox delivery and authorized DM hydration, message/enrollment idempotency, explicit read receipts without automatic DM reads, HTTP synchronization, cross-actor 409 rejection, presence, and retired websocket 410 responses. This is separate live delivery evidence beyond the health checks. Native publication and installed verification subsequently passed as recorded below. Opaque cursors and credentials from the private test report are not reproduced here.
 
 Machine-readable image, task, database, gateway, and protected-setting proofs are retained under `/tmp/ting-rotation-release-20260923/dm-artifacts`; no secret values were logged or committed.
+
+
+## Publication, native acceptance and final documentation
+
+Protocol 0.10.0 and client/CLI 0.10.1 are published on crates.io. The immutable
+[v0.10.1 release](https://github.com/teamofsilicons/silicon-dm/releases/tag/v0.10.1)
+uses source `85eaf145a961462e5931e1040a267e32a17fa59f` (the backend source above
+plus documentation updates). All six platform builds and tagged CI passed.
+Honeycomb accepted release `8d00c1ea-ca5f-45cd-9d7a-c3456ae679bf`, archive SHA-256
+`2320374cf8352ede719a3fe57cace81bf1a899062c0622ff51c10259c0cb7b77`.
+All public crate and GitHub assets were independently hash-verified.
+
+The fresh Honeycomb installation and existing global DM installation both run
+0.10.1 with the expected binary hash. Supported global update reports current;
+existing DM profiles, logical queue/cursor/inbox/generation rows and relay PID
+were preserved. The published binary passed 17 native checks, including a
+503-to-204 callback retry with identical Ting item/key, one durable consumer
+effect, stable hook reconnect, and separate delivered/read receipts. The two
+existing Ting bindings and daemon were unchanged. Running Ting daemon 0.1.2 is
+distinct from installed Ting CLI 0.1.4; no shared-daemon restart was performed.
+See the committed [32-check backend evidence](../../docs/ting-deployed-live-verification.json)
+and [17-check native evidence](../../docs/ting-native-release-verification.json).
+Both sanitized reports are also public GitHub release assets.
+
+Task-owned callbacks, relays and hook processes were stopped; task profiles and
+sessions were logged out. Root's two additional DM refresh-family revocations
+returned 204 and its two Ting session revocations returned 200. Existing user
+profiles and processes were retained.
+
+The existing Vercel project `silicon-dm-docs` published all 40 documentation pages
+from documentation source `ba8b455` at
+[docs.dm.teamofsilicons.com](https://docs.dm.teamofsilicons.com/), deployment
+`silicon-dm-docs-2vkgcfckf-saketdev12-5675s-projects.vercel.app`. Build/link checks
+passed; seven public documents/assets match local bytes, including the release
+record, integration issues, IAM/Honeycomb issue records, OpenAPI and full text.
+The static-site CSP was verified. See [documentation proof](dm-docs-live-2026-09-23.json).
+
+DM and Interface websites are deployed with canonical Ting organization
+resolution. The remaining production Bricks dependency is Ting's cross-organization
+type lookup during sends. The current release proves live delivery in the
+explicit task-owned test environment, not production Bricks delivery. No Ting
+code or management-authorization change was made in this release.
