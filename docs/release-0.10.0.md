@@ -5,13 +5,15 @@ contract 3 remain unchanged; incoming delivery moves to Ting.
 
 ## Release status: 2026-09-23
 
-DM backend and gateway 0.10.0 are deployed, and the DM and Interface websites
-use Ting for incoming delivery. Deployed acceptance exposed follow-up fixes:
-backend 0.10.1 separates the shared testing generation from its private cache
-revision and keeps queued handoffs retryable during temporary IAM failures;
-client/CLI 0.10.1 resolves canonical Ting organization IDs. These patches pass
-their regression tests. The final backend image, deployed message/receipt
-acceptance, native publication and fresh-install checks are still pending.
+DM backend 0.10.1 and gateway 0.10.0 are deployed, and the DM and Interface
+websites use Ting for incoming delivery. Backend 0.10.1 separates the shared
+testing generation from its private cache revision and keeps queued handoffs
+retryable during temporary IAM failures. Deployed bidirectional Carbon/Silicon
+delivery passed with real IAM and Ting, including exact hydration, idempotent
+sends, explicit receipts, HTTP sync and presence. See
+[the deployed evidence](ting-deployed-live-verification.json) for the exact scope.
+Client/CLI 0.10.1 resolves canonical Ting organization IDs and passes its
+regressions; publication and installed-native verification are in progress.
 Protocol crate 0.10.0 and HTTP message schema 3 remain unchanged.
 
 IAM 3.0.3 and Honeycomb 0.3.3 are deployed. Both a fresh rotated environment
@@ -151,7 +153,9 @@ are fixed and verified on deployed IAM 3.0.3 and Honeycomb 0.3.3. No lifecycle
 fence or saved request was bypassed. See [IAM issue evidence](iam-ting-e2e-issues.md)
 and [Honeycomb issue evidence](honeycomb-ting-e2e-issues.md).
 
-The [integration record](ting-integration-issues.md) retains the historical Ting
-findings and current verification. Final backend 0.10.1 deployment/acceptance,
-client and CLI publication, fresh installation, and native delivery verification
-remain pending at this record's publication. Production Bricks delivery requires a separate Ting type-lookup correction; a connected browser does not close that gate.
+The [integration record](ting-integration-issues.md) retains historical Ting
+findings and current verification. Backend 0.10.1 deployment and bidirectional
+acceptance are complete in the task-owned testing environment. Client and CLI
+publication, fresh installation and native verification are in progress. Production
+Bricks delivery requires a separate Ting type-lookup correction; a connected
+browser does not close that gate.

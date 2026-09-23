@@ -1,0 +1,54 @@
+{
+  "scope": "Deployed DM0.10.1 and real IAM/Ting, task-owned testing environment only",
+  "started_at": "2026-09-23T08:57:07.217Z",
+  "environment_id": "1d32b4c6-dc84-4c44-b7b7-a16be7a31d06",
+  "checks": [
+    "Deployed DM reports backend 0.10.1",
+    "Deployed DM selects intended testing environment",
+    "dm-ting-tester DM login is authorized",
+    "dm-ting-tester fresh real-SLT Ting session remains authorized",
+    "dm-ting-tester explicit delivery enrollment replays safely",
+    "dm-ting-bot:tos DM login is authorized",
+    "dm-ting-bot:tos fresh real-SLT Ting session remains authorized",
+    "dm-ting-bot:tos explicit delivery enrollment replays safely",
+    "dm-ting-tester Ting cookie verifies exact identity and generation",
+    "https://dm.teamofsilicons.com credentialed CORS",
+    "Ting uniquely resolves tos",
+    "https://dm.teamofsilicons.com real cookie WebSocket watches inbox",
+    "dm-ting-bot:tos Ting cookie verifies exact identity and generation",
+    "https://interface.teamofsilicons.com credentialed CORS",
+    "Ting uniquely resolves tos",
+    "https://interface.teamofsilicons.com real cookie WebSocket watches inbox",
+    "Carbon send retry retains one DM message",
+    "Ting reference is bound to exact test context",
+    "Ting delivery contains a reference; DM message content remains in DM",
+    "Ting notifies Silicon after Carbon send",
+    "Silicon hydrates unchanged message schema and exact content through DM",
+    "Ting notification does not mark DM message read",
+    "HTTP sync catches up the delivered message",
+    "A sync cursor cannot be reused by another actor (409)",
+    "Explicit DM read receipt updates read state",
+    "Ting reference is bound to exact test context",
+    "Ting delivery contains a reference; DM message content remains in DM",
+    "Ting notifies Carbon after Silicon reply",
+    "Carbon hydrates Silicon reply",
+    "HTTP presence lease works",
+    "/presence/devices/ting-release-test returns 204",
+    "/ws returns 410"
+  ],
+  "messages": [
+    {
+      "id": "000",
+      "conversation_id": "dm-ting-tester::dm-ting-bot:tos"
+    },
+    {
+      "id": "001",
+      "conversation_id": "dm-ting-tester::dm-ting-bot:tos"
+    }
+  ],
+  "backend_version": "0.10.1",
+  "passed": true,
+  "finished_at": "2026-09-23T08:58:09.860Z",
+  "verification_scope": "Real deployed DM, IAM and Ting in the task-owned testing environment. This does not establish production Bricks delivery or recipient enrollment.",
+  "backend_source": "82412e9a21ae6f1ee52f02ba9efbe9ddb14d77d5"
+}

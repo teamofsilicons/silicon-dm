@@ -10,10 +10,12 @@ the original failure evidence is retained for context.
 
 Production DM configuration revision 2 (IAM revision 23) now includes both Ting
 external scopes, and `tos>dm.sync.changed` is registered in production `tos`.
-DM's Ting delivery backend, gateway and website are deployed; a backend patch is
-undergoing verification to separate the shared sandbox generation from internal
-credential-cache invalidation. Client/CLI 0.10.1 publication is held until the
-patched deployed backend passes the full message/receipt acceptance run.
+DM backend 0.10.1, gateway and website are deployed. The backend now separates
+the shared sandbox generation from internal credential-cache invalidation, and
+idle workers no longer poll IAM. Deployed bidirectional message/receipt acceptance
+passed with real IAM and Ting in the task-owned testing environment; see
+[the deployed evidence](ting-deployed-live-verification.json). Client/CLI 0.10.1
+publication and installed-native verification are in progress.
 
 The live Interface browser retained its production login and message history.
 Both websites now resolve their selected organization through authenticated Ting
