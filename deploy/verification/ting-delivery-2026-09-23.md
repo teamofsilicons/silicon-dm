@@ -58,6 +58,6 @@ CloudFormation `silicon-dm-production` reached `UPDATE_COMPLETE`. Its backend an
 
 These definitions have no ECS container healthcheck, so ECS `UNKNOWN` is expected. Readiness is demonstrated by public `/live` and `/ready` returning 204, discovery/contracts returning 200 with service version 0.10.1 and HTTP contract 3, and the exact new API's healthy ALB target. Both old websocket routes continue returning 410. The gateway remains on its verified 0.10.0 image; this backend patch does not replace it.
 
-Actual deployed DM/Ting acceptance is coordinated separately before native/public publication. Its outcome is not inferred from the health checks above.
+Actual deployed DM/Ting acceptance passed with exit 0 using real Carbon and Silicon test identities at the shared generation 1. It verified bidirectional Ting websocket/inbox delivery and authorized DM hydration, message/enrollment idempotency, explicit read receipts without automatic DM reads, HTTP synchronization, cross-actor 409 rejection, presence, and retired websocket 410 responses. This is separate live delivery evidence beyond the health checks. Native/public publication proceeds through its separately verified artifact and installation gates. Opaque cursors and credentials from the private test report are not reproduced here.
 
 Machine-readable image, task, database, gateway, and protected-setting proofs are retained under `/tmp/ting-rotation-release-20260923/dm-artifacts`; no secret values were logged or committed.
