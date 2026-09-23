@@ -22,7 +22,7 @@ the supported API, followed by successful reconciliation and a new rotation.
 Production DM configuration revision 2 includes both required Ting scopes, and
 `tos>dm.sync.changed` is registered in `tos`. Ting currently denies managing
 that type in `bricks` because its application list omits the app owned by `tos`.
-Cross-organization type registration remains an outstanding dependency.
+Cross-organization type lookup during sends remains an outstanding dependency.
 Interface retains its existing login/history and confirms a real Ting connection
 in Bricks; this is not proof of recipient enrollment or message delivery there.
 See the [integration record](ting-integration-issues.md) for the current boundary.
@@ -154,5 +154,4 @@ and [Honeycomb issue evidence](honeycomb-ting-e2e-issues.md).
 The [integration record](ting-integration-issues.md) retains the historical Ting
 findings and current verification. Final backend 0.10.1 deployment/acceptance,
 client and CLI publication, fresh installation, and native delivery verification
-remain pending at this record's publication. Production Bricks type registration
-is a separate Ting dependency; a connected browser does not close that gate.
+remain pending at this record's publication. Production Bricks delivery requires a separate Ting type-lookup correction; a connected browser does not close that gate.
