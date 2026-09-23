@@ -28,6 +28,7 @@ pub struct TingDeliveryWorker {
     owner: Arc<str>,
     settings: WorkerSettings,
     testing: Option<Arc<TestingRegistry>>,
+    runtime_revision: Option<i64>,
 }
 
 impl TingDeliveryWorker {
@@ -47,6 +48,7 @@ impl TingDeliveryWorker {
             owner,
             settings,
             testing: None,
+            runtime_revision: None,
         }
     }
 
@@ -55,6 +57,13 @@ impl TingDeliveryWorker {
     #[must_use]
     pub fn with_testing_registry(mut self, registry: Arc<TestingRegistry>) -> Self {
         self.testing = Some(registry);
+        self
+    }
+
+    /// Captures the credential/lifecycle epoch independently of the shared generation.
+    #[must_use]
+    pub fn with_runtime_revision(mut self, revision: i64) -> Self {
+        self.runtime_revision = Some(revision);
         self
     }
 
@@ -176,7 +185,15 @@ impl TingDeliveryWorker {
                         "sandbox Ting publisher requires a live testing lifecycle registry",
                     )
                 })?;
-                Ok(Some(registry.request_fence(id, generation).await?))
+                Ok(Some(
+                    registry
+                        .request_runtime_fence(
+                            id,
+                            generation,
+                            self.runtime_revision.ok_or(AppError::Unauthorized)?,
+                        )
+                        .await?,
+                ))
             }
             _ => Err(AppError::validation(
                 "Ting environment and generation must be paired",

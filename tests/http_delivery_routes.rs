@@ -256,6 +256,7 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
         testing: None,
         testing_environment: None,
         testing_generation: None,
+        testing_runtime_revision: None,
         realtime: RealtimeHub::default(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

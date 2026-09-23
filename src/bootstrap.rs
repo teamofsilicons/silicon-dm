@@ -50,6 +50,7 @@ pub async fn build_app_state(settings: Settings) -> AppResult<AppState> {
         testing,
         testing_environment: None,
         testing_generation: None,
+        testing_runtime_revision: None,
         gifs,
         realtime: RealtimeHub::default(),
     })
@@ -234,6 +235,9 @@ pub(crate) fn build_ting_worker(
     );
     if let Some(registry) = &state.testing {
         worker = worker.with_testing_registry(registry.clone());
+        if let Some(revision) = state.testing_runtime_revision {
+            worker = worker.with_runtime_revision(revision);
+        }
     }
     Ok(worker)
 }

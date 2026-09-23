@@ -321,7 +321,7 @@ impl TestingRegistry {
         sqlx::raw_sql(AssertSqlSafe(format!("CREATE TABLE IF NOT EXISTS {schema}.__dm_clean_receipts (mutation_id uuid PRIMARY KEY, completed_at timestamptz NOT NULL DEFAULT clock_timestamp(), testing_environment_id uuid NOT NULL DEFAULT '{id}' CHECK(testing_environment_id='{id}'))"))).execute(&mut *transaction).await?;
         for migration in MIGRATOR
             .iter()
-            .filter(|migration| !matches!(migration.version, 6 | 8 | 11 | 16 | 22))
+            .filter(|migration| !matches!(migration.version, 6 | 8 | 11 | 16 | 22 | 35))
         {
             let existing: Option<Vec<u8>> = sqlx::query_scalar(AssertSqlSafe(format!(
                 "SELECT checksum FROM {schema}.__dm_migrations WHERE version=$1"

@@ -69,7 +69,7 @@ impl TestingRegistry {
                 });
                 let root = self.encrypt(id, "root", secret)?;
                 let app = self.encrypt(id, "iam-app", secret)?;
-                sqlx::query("INSERT INTO dm.testing_environments(environment_id,organization_id,creator_actor_id,creator_actor_kind,name,description,iam_environment_id,iam_app_id,iam_environment_key_ciphertext,iam_app_secret_ciphertext,root_key_digest,root_key_ciphertext,status,iam_control_version,iam_cleaned_at,iam_sync_pending) VALUES($1,$2,$3,$4,$5,$6,$1,$7,'',$8,$9,$10,'active',$11,$12,$13) ON CONFLICT(environment_id) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,iam_app_secret_ciphertext=EXCLUDED.iam_app_secret_ciphertext,root_key_digest=EXCLUDED.root_key_digest,root_key_ciphertext=EXCLUDED.root_key_ciphertext,iam_control_version=EXCLUDED.iam_control_version,iam_cleaned_at=EXCLUDED.iam_cleaned_at,iam_sync_pending=EXCLUDED.iam_sync_pending,version=dm.testing_environments.version+CASE WHEN EXCLUDED.iam_sync_pending THEN 1 ELSE 0 END,last_activity_at=clock_timestamp()")
+                sqlx::query("INSERT INTO dm.testing_environments(environment_id,organization_id,creator_actor_id,creator_actor_kind,name,description,iam_environment_id,iam_app_id,iam_environment_key_ciphertext,iam_app_secret_ciphertext,root_key_digest,root_key_ciphertext,status,iam_control_version,iam_cleaned_at,iam_sync_pending) VALUES($1,$2,$3,$4,$5,$6,$1,$7,'',$8,$9,$10,'active',$11,$12,$13) ON CONFLICT(environment_id) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,iam_app_secret_ciphertext=EXCLUDED.iam_app_secret_ciphertext,root_key_digest=EXCLUDED.root_key_digest,root_key_ciphertext=EXCLUDED.root_key_ciphertext,iam_control_version=EXCLUDED.iam_control_version,iam_cleaned_at=EXCLUDED.iam_cleaned_at,iam_sync_pending=EXCLUDED.iam_sync_pending,version=dm.testing_environments.version+CASE WHEN EXCLUDED.iam_sync_pending THEN 1 ELSE 0 END,runtime_revision=dm.testing_environments.runtime_revision+1,last_activity_at=clock_timestamp()")
                 .bind(id).bind(&meta.org_id).bind(&meta.creator_id).bind(&meta.creator_type).bind(&meta.name).bind(&meta.description).bind(&current.application.app_id)
                 .bind(app).bind(digest.as_bytes().as_slice()).bind(root).bind(meta.version).bind(meta.cleaned_at).bind(reset).execute(&mut *tx).await?;
                 let generation: i64 = sqlx::query_scalar(
@@ -109,22 +109,28 @@ impl TestingRegistry {
         exclusive_lock(&mut fence, id).await?;
         let row: TestingEnvironment = sqlx::query_as("SELECT e.* FROM dm.testing_environments e JOIN dm.honeycomb_environments h USING(environment_id) WHERE e.environment_id=$1 AND e.organization_id=$2 AND h.app_id=$3 AND h.state='active' AND NOT e.iam_sync_pending")
             .bind(id).bind(&meta.org_id).bind(&current.application.app_id).fetch_optional(self.production.pool()).await?.ok_or(AppError::Unauthorized)?;
+        let generation: i64 = sqlx::query_scalar("SELECT generation FROM dm.honeycomb_environments WHERE environment_id=$1 AND state='active'")
+            .bind(id).fetch_one(self.production.pool()).await?;
         let stored: String = sqlx::query_scalar(
             "SELECT iam_app_secret_ciphertext FROM dm.testing_environments WHERE environment_id=$1",
         )
         .bind(id)
         .fetch_one(self.production.pool())
         .await?;
-        let changed = !stored.is_empty()
-            && self.decrypt(id, "iam-app", &stored)?.expose_secret() != secret.expose_secret();
-        sqlx::query("UPDATE dm.testing_environments SET iam_app_secret_ciphertext=$2,iam_control_version=$3,iam_cleaned_at=$4,version=version+$5 WHERE environment_id=$1")
-            .bind(id).bind(self.encrypt(id,"iam-app",secret)?).bind(meta.version).bind(meta.cleaned_at).bind(i64::from(changed)).execute(self.production.pool()).await?;
+        let credential_changed = stored.is_empty()
+            || self.decrypt(id, "iam-app", &stored)?.expose_secret() != secret.expose_secret();
+        let changed = credential_changed || row.version != generation;
+        let cipher = if credential_changed {
+            self.encrypt(id, "iam-app", secret)?
+        } else {
+            stored
+        };
+        let row: TestingEnvironment = sqlx::query_as("UPDATE dm.testing_environments SET iam_app_secret_ciphertext=$2,iam_control_version=$3,iam_cleaned_at=$4,version=$5,runtime_revision=runtime_revision+$6 WHERE environment_id=$1 RETURNING *")
+            .bind(id).bind(cipher).bind(meta.version).bind(meta.cleaned_at).bind(generation).bind(i64::from(changed)).fetch_one(self.production.pool()).await?;
         if changed {
             self.invalidate(id).await;
         }
         fence.commit().await?;
-        let mut row = row;
-        row.version += i64::from(changed);
         let mut selected = self.state_for_environment(parent, &row).await?;
         selected.identity = Arc::new(identity.with_directory(selected.store.clone()));
         Ok(selected)

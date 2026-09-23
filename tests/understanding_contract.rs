@@ -184,6 +184,7 @@ async fn state(settings: Settings) -> Result<AppState> {
         testing,
         testing_environment: None,
         testing_generation: None,
+        testing_runtime_revision: None,
         realtime: RealtimeHub::default(),
     })
 }
@@ -1702,6 +1703,177 @@ async fn bundle_commands_and_history_are_atomic_and_retry_safe() -> Result {
         page.items[0].last_message_status,
         Some(silicon_dm_client::MessageStatus::Sent)
     ));
+    server.abort();
+    Ok(())
+}
+
+struct UnusedTingPublisher;
+#[async_trait]
+impl silicon_dm::infrastructure::ting::TingPublisher for UnusedTingPublisher {
+    async fn publish(
+        &self,
+        _: &silicon_dm::infrastructure::postgres::TingDeliveryClaim,
+    ) -> std::result::Result<
+        silicon_dm::infrastructure::ting::TingAcceptance,
+        silicon_dm::infrastructure::ting::TingFailure,
+    > {
+        panic!("stale runtime must be rejected before any Ting publication")
+    }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one retained sandbox covers generation, epoch and recovery across lifecycle transitions"
+)]
+async fn managed_generation_is_independent_of_credential_and_lifecycle_revisions() -> Result {
+    let fixture = support::TestDatabase::start().await?;
+    let iam = MockServer::start().await;
+    let mut config = settings(fixture.url.clone(), &iam.uri())?;
+    let admin = PostgresStore::connect(&config.database).await?;
+    sqlx::query("CREATE DATABASE managed_generation_sandbox")
+        .execute(admin.pool())
+        .await?;
+    let mut testing_db = config.database.clone();
+    testing_db.url = SecretString::from(format!(
+        "{}/managed_generation_sandbox",
+        fixture.url.rsplit_once('/').ok_or("url")?.0
+    ));
+    let testing = TestingSettings {
+        database: testing_db,
+        encryption_key: SecretString::from(STANDARD.encode([9u8; 32])),
+        honeycomb_service_token: Some(SecretString::from(
+            "coordinator-service-token-32-characters",
+        )),
+        honeycomb_base_url: None,
+    };
+    config.testing = Some(testing.clone());
+    let app = state(config).await?;
+    let registry = app.testing.as_ref().ok_or("registry")?;
+    let peer = Arc::new(
+        silicon_dm::testing::TestingRegistry::new(app.store.clone(), &testing, &app.settings.iam)
+            .await?,
+    );
+    let id = Uuid::new_v4();
+    let old_secret = format!("ask_{}", "a".repeat(43));
+    let new_secret = format!("ask_{}", "b".repeat(43));
+    mock_context(&iam, id, &old_secret, 1, None).await;
+    let mut op: silicon_dm::testing::honeycomb::Operation = serde_json::from_value(json!({
+        "operation_id":Uuid::new_v4(),"environment_id":id,"org_id":"tos","app_id":"tos>dm",
+        "environment_revision":1,"generation":1,"key_version":1,"action":"prepare",
+        "testing_key":"K".repeat(32),"snapshot":{},"reason":"fixture","retired_apps":[]
+    }))?;
+    registry.honeycomb_operation(&op, "tos>dm").await?;
+    let original = peer.state_for_key(&app, &old_secret).await?;
+    assert_eq!(original.testing_generation, Some(1));
+    let old_revision = original.testing_runtime_revision.ok_or("epoch")?;
+    let stale_worker = silicon_dm::worker::TingDeliveryWorker::new(
+        original.store.clone(),
+        Arc::new(UnusedTingPublisher),
+        original.ting_delivery_context(),
+        "stale-peer-worker".into(),
+        app.settings.worker.clone(),
+    )
+    .with_testing_registry(peer.clone())
+    .with_runtime_revision(old_revision);
+    iam.reset().await;
+    mock_context(&iam, id, &new_secret, 2, None).await;
+    let rotated = registry.state_for_key(&app, &new_secret).await?;
+    assert_eq!(
+        rotated.testing_generation,
+        Some(1),
+        "app credential rotation cannot clean the shared generation"
+    );
+    let mut revision = rotated.testing_runtime_revision.ok_or("epoch")?;
+    assert!(revision > old_revision);
+    assert!(matches!(
+        peer.request_runtime_fence(id, 1, old_revision).await,
+        Err(AppError::Unauthorized)
+    ));
+    assert!(matches!(
+        stale_worker.process_once().await,
+        Err(AppError::Unauthorized)
+    ));
+    let refreshed = peer.state_for_key(&app, &new_secret).await?;
+    assert_eq!(refreshed.testing_generation, Some(1));
+    assert_eq!(refreshed.testing_runtime_revision, Some(revision));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let router = silicon_dm::api::build_router(app.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let response = reqwest::Client::new()
+        .get(format!("{origin}/api/v1/iam"))
+        .header("X-Testing-Environment-Key", &new_secret)
+        .header("X-Testing-Environment-Generation", "1")
+        .send()
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await?;
+    assert_eq!(body["data"]["testing_generation"], 1);
+    assert!(
+        body["data"]["testing_environment"]
+            .get("runtime_revision")
+            .is_none()
+    );
+    for action in ["refresh-import", "rotate-key", "disable", "restore"] {
+        op.operation_id = Uuid::new_v4();
+        op.environment_revision += 1;
+        op.action = action.into();
+        if action == "rotate-key" {
+            op.key_version += 1;
+            op.testing_key = "N".repeat(32);
+        }
+        registry.honeycomb_operation(&op, "tos>dm").await?;
+        assert!(matches!(
+            registry.request_runtime_fence(id, 1, revision).await,
+            Err(AppError::Unauthorized)
+        ));
+        if action == "disable" {
+            assert!(registry.state_for_key(&app, &new_secret).await.is_err());
+        } else {
+            let current = registry.state_for_key(&app, &new_secret).await?;
+            assert_eq!(
+                current.testing_generation,
+                Some(1),
+                "{action} retains generation"
+            );
+            assert!(current.testing_runtime_revision.ok_or("epoch")? > revision);
+            revision = current.testing_runtime_revision.ok_or("epoch")?;
+        }
+    }
+    let actor = ActorRef {
+        actor_type: ActorType::Carbon,
+        id: "alice".parse()?,
+    };
+    let retained = registry.state_for_key(&app, &new_secret).await?;
+    retained
+        .store
+        .refresh_directory(&"tos".parse()?, &[actor])
+        .await?;
+    // Model the incorrect metadata left by backend0.10.0; supported discovery repairs it.
+    sqlx::query("UPDATE dm.testing_environments SET version=9 WHERE environment_id=$1")
+        .bind(id)
+        .execute(app.store.pool())
+        .await?;
+    let repaired = registry.state_for_key(&app, &new_secret).await?;
+    assert_eq!(repaired.testing_generation, Some(1));
+    assert!(repaired.testing_runtime_revision.ok_or("epoch")? > revision);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM actor_snapshots")
+        .fetch_one(repaired.store.pool())
+        .await?;
+    assert_eq!(count, 1, "metadata repair preserves sandbox data");
+    op.operation_id = Uuid::new_v4();
+    op.environment_revision += 1;
+    op.action = "clean".into();
+    op.generation = 2;
+    registry.honeycomb_operation(&op, "tos>dm").await?;
+    assert!(registry.ensure_active(id, 1).await.is_err());
+    let cleaned = registry.state_for_key(&app, &new_secret).await?;
+    assert_eq!(cleaned.testing_generation, Some(2));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM actor_snapshots")
+        .fetch_one(cleaned.store.pool())
+        .await?;
+    assert_eq!(count, 0);
     server.abort();
     Ok(())
 }

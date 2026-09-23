@@ -95,7 +95,13 @@ pub fn record(state: &AppState, source: &str, event: &str, fields: Value) {
             ) else {
                 return;
             };
-            let Ok(_fence) = registry.request_fence(id, generation).await else {
+            let Some(revision) = selected.testing_runtime_revision else {
+                return;
+            };
+            let Ok(_fence) = registry
+                .request_runtime_fence(id, generation, revision)
+                .await
+            else {
                 return;
             };
             let _ = sqlx::query("INSERT INTO telemetry_events(event) VALUES($1)")

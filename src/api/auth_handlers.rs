@@ -155,7 +155,13 @@ fn remember_session(state: &AppState, session: &crate::application::auth::Applic
                         .testing
                         .as_ref()
                         .ok_or(crate::AppError::Unauthorized)?
-                        .request_fence(id, generation)
+                        .request_runtime_fence(
+                            id,
+                            generation,
+                            state
+                                .testing_runtime_revision
+                                .ok_or(crate::AppError::Unauthorized)?,
+                        )
                         .await?,
                 ),
                 _ => return Err(crate::AppError::Unauthorized),

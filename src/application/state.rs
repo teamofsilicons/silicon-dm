@@ -24,6 +24,8 @@ pub struct AppState {
     pub testing_environment: Option<uuid::Uuid>,
     /// Lifecycle generation captured when a request or connection was admitted.
     pub testing_generation: Option<i64>,
+    /// Internal epoch of the selected credential-backed runtime; never serialized.
+    pub testing_runtime_revision: Option<i64>,
     /// Giphy adapter.
     pub gifs: Arc<dyn GifProvider>,
     /// Process-local realtime connection registry.

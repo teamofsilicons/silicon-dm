@@ -53,8 +53,11 @@ pub struct TestingEnvironment {
     pub iam_app_id: String,
     /// Active, deleted, creating, or purging lifecycle state.
     pub status: String,
-    /// Generation changes invalidate cached state and open sessions.
+    /// Shared Honeycomb generation, or the generation of a legacy local sandbox.
     pub version: i64,
+    /// Internal credential/lifecycle epoch, never part of the public contract.
+    #[serde(skip)]
+    pub runtime_revision: i64,
     /// Creation time.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -71,6 +74,7 @@ pub struct TestingEnvironment {
 
 struct EnvironmentRuntime {
     version: i64,
+    runtime_revision: i64,
     store: PostgresStore,
     identity: Arc<IamClient>,
     realtime: RealtimeHub,
@@ -317,6 +321,10 @@ impl TestingRegistry {
         Ok(states)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep cache replacement and the associated worker authority in one lifecycle"
+    )]
     async fn state_for_environment(
         &self,
         parent: &AppState,
@@ -328,7 +336,10 @@ impl TestingRegistry {
         let mut runtimes = self.runtimes.lock().await;
         if runtimes
             .get(&environment.environment_id)
-            .is_some_and(|runtime| runtime.version != environment.version)
+            .is_some_and(|runtime| {
+                runtime.version != environment.version
+                    || runtime.runtime_revision != environment.runtime_revision
+            })
         {
             let old = runtimes.remove(&environment.environment_id);
             drop(runtimes);
@@ -342,8 +353,8 @@ impl TestingRegistry {
         if !runtimes.contains_key(&environment.environment_id) {
             drop(runtimes);
             let (iam_key, iam_secret, webhook_secret, webhook_version): (String, String, Option<String>, Option<i64>) = sqlx::query_as(
-                "SELECT iam_environment_key_ciphertext, iam_app_secret_ciphertext, iam_webhook_secret_ciphertext, iam_webhook_key_version FROM dm.testing_environments WHERE environment_id = $1 AND status = 'active' AND version = $2")
-                .bind(environment.environment_id).bind(environment.version).fetch_optional(self.production.pool()).await?.ok_or(AppError::Unauthorized)?;
+                "SELECT iam_environment_key_ciphertext, iam_app_secret_ciphertext, iam_webhook_secret_ciphertext, iam_webhook_key_version FROM dm.testing_environments WHERE environment_id = $1 AND status = 'active' AND version = $2 AND runtime_revision = $3")
+                .bind(environment.environment_id).bind(environment.version).bind(environment.runtime_revision).fetch_optional(self.production.pool()).await?.ok_or(AppError::Unauthorized)?;
             let mut iam_settings = parent.settings.iam.clone();
             if let (Some(secret), Some(version)) = (webhook_secret, webhook_version) {
                 iam_settings.webhook_secret =
@@ -373,7 +384,11 @@ impl TestingRegistry {
             )
             .await?;
             if let Err(error) = self
-                .ensure_active(environment.environment_id, environment.version)
+                .ensure_runtime_active(
+                    environment.environment_id,
+                    environment.version,
+                    environment.runtime_revision,
+                )
                 .await
             {
                 store.pool().close().await;
@@ -388,6 +403,7 @@ impl TestingRegistry {
             selected.realtime = realtime.clone();
             selected.testing_environment = Some(environment.environment_id);
             selected.testing_generation = Some(environment.version);
+            selected.testing_runtime_revision = Some(environment.runtime_revision);
             let worker = crate::bootstrap::build_ting_worker(&selected, cancellation.clone())?;
             let worker_cancel = cancellation.clone();
             tokio::spawn(async move {
@@ -400,6 +416,7 @@ impl TestingRegistry {
                 environment.environment_id,
                 EnvironmentRuntime {
                     version: environment.version,
+                    runtime_revision: environment.runtime_revision,
                     store,
                     identity,
                     realtime,
@@ -416,6 +433,7 @@ impl TestingRegistry {
         selected.realtime = runtime.realtime.clone();
         selected.testing_environment = Some(environment.environment_id);
         selected.testing_generation = Some(environment.version);
+        selected.testing_runtime_revision = Some(environment.runtime_revision);
         Ok(selected)
     }
 
@@ -439,6 +457,41 @@ impl TestingRegistry {
         } else {
             Err(AppError::Unauthorized)
         }
+    }
+
+    /// Rejects cached authority from an earlier credential/lifecycle epoch.
+    /// # Errors
+    /// Returns unauthorized for a changed epoch or generation, or an upstream error.
+    pub async fn ensure_runtime_active(
+        &self,
+        id: Uuid,
+        generation: i64,
+        revision: i64,
+    ) -> AppResult<()> {
+        let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dm.testing_environments WHERE environment_id=$1 AND version=$2 AND runtime_revision=$3 AND status='active' AND NOT iam_sync_pending)")
+            .bind(id).bind(generation).bind(revision).fetch_one(self.production.pool()).await?;
+        if !current {
+            return Err(AppError::Unauthorized);
+        }
+        self.ensure_active(id, generation).await
+    }
+
+    /// Holds the lifecycle fence for the exact cached authority admitted earlier.
+    /// # Errors
+    /// Rejects a changed internal epoch even if the shared generation is unchanged.
+    pub async fn request_runtime_fence(
+        &self,
+        id: Uuid,
+        generation: i64,
+        revision: i64,
+    ) -> AppResult<Transaction<'static, Postgres>> {
+        let mut fence = self.admin.pool().begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(lock_id(id))
+            .execute(&mut *fence)
+            .await?;
+        self.ensure_runtime_active(id, generation, revision).await?;
+        Ok(fence)
     }
 
     /// Marks validated ongoing realtime activity as use of the environment.

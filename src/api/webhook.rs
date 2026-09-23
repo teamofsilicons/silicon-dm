@@ -74,9 +74,17 @@ async fn accept(state: &AppState, event: &WebhookEvent) -> AppResult<StatusCode>
         state.testing_environment,
         state.testing_generation,
     ) {
-        (Some(registry), Some(id), Some(generation)) => {
-            Some(registry.request_fence(id, generation).await?)
-        }
+        (Some(registry), Some(id), Some(generation)) => Some(
+            registry
+                .request_runtime_fence(
+                    id,
+                    generation,
+                    state
+                        .testing_runtime_revision
+                        .ok_or(crate::AppError::Unauthorized)?,
+                )
+                .await?,
+        ),
         _ => None,
     };
     let mut tx = state.store.pool().begin().await?;

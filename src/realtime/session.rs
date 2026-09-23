@@ -338,7 +338,15 @@ impl SessionRuntime {
             self.state.testing_environment,
             self.state.testing_generation,
         ) {
-            registry.ensure_active(id, generation).await?;
+            registry
+                .ensure_runtime_active(
+                    id,
+                    generation,
+                    self.state
+                        .testing_runtime_revision
+                        .ok_or(AppError::Unauthorized)?,
+                )
+                .await?;
         }
         Ok(())
     }
@@ -896,9 +904,16 @@ async fn environment_fence(
         state.testing_environment,
         state.testing_generation,
     ) {
-        (Some(registry), Some(id), Some(generation)) => {
-            registry.request_fence(id, generation).await.map(Some)
-        }
+        (Some(registry), Some(id), Some(generation)) => registry
+            .request_runtime_fence(
+                id,
+                generation,
+                state
+                    .testing_runtime_revision
+                    .ok_or(crate::AppError::Unauthorized)?,
+            )
+            .await
+            .map(Some),
         _ => Ok(None),
     }
 }

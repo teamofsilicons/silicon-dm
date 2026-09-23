@@ -297,7 +297,13 @@ async fn dispatch(state: AppState, production: Router, request: Request) -> Resp
         )
         .into_response();
     }
-    let fence = match registry.request_fence(id, generation).await {
+    let Some(revision) = selected.testing_runtime_revision else {
+        return AppError::Unauthorized.into_response();
+    };
+    let fence = match registry
+        .request_runtime_fence(id, generation, revision)
+        .await
+    {
         Ok(fence) => fence,
         Err(error) => return error.into_response(),
     };
