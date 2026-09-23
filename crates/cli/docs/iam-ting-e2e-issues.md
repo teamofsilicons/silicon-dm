@@ -18,10 +18,17 @@ credential then authenticated IAM's testing-context endpoint for this environmen
 and `tos>ting`. No alternate secret was substituted; the diagnostic proof was
 neither consumed nor persisted.
 
-The older pending operation in the original environment is a separate recovery
-case. IAM 3.0.3 adds receipt-first recovery while preserving current lifecycle
-fences for unexecuted mutations. Its deployment and the original operation's
-supported retry remain pending; see [the recovery status](honeycomb-ting-e2e-issues.md).
+IAM 3.0.3 is now verified live on the main and scoped APIs with a healthy
+worker. In original environment `d70c8674-6d2e-41d4-bf8d-96ddd882edbd`, supported
+recovery definitively rejected old rotation
+`a2b700ff-90dd-4795-b6c1-27e98871ba9c` before any credential mutation. After
+reconciliation, new rotation `344d03bc-1d3d-45f7-a363-42b1464088ce` was accepted
+as credential version 2. A fresh official SDK 3.1.0 signed OBO exchange returned
+that exact credential and the matching IAM key; the returned credential passed
+IAM testing-context validation for the original environment and `tos>ting`.
+The saved old request was not edited, and no lifecycle fence was bypassed.
+See [the supported recovery sequence](honeycomb-ting-e2e-issues.md).
+
 These credential checks alone do not establish message delivery. Current release
 and deployed delivery evidence are recorded in [the release record](release-0.10.0.md).
 

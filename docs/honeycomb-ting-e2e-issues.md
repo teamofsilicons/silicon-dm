@@ -14,16 +14,28 @@ A fresh authorized Ting rotation in environment
 and fresh official SDK OBO validation passed with the returned audience credential.
 See [the credential repair evidence](iam-ting-e2e-issues.md).
 
-Original operation `a2b700ff-90dd-4795-b6c1-27e98871ba9c` remains pending as of
-this update. Supported recovery under the original test actor still encounters
-an earlier IAM environment-revision check: its saved revision is 19 while the
-current revision is 21, with generation and key version still 1. IAM 3.0.3 adds
-receipt-first recovery and permits authoritative terminal configuration rejection
-without authorizing a new mutation under stale lifecycle state. Its source and
-regression checks are complete, but deployment verification and the subsequent
-supported retry are still pending. No saved request or database state was
-manually changed. The original operation must be recovered before claiming this
-case resolved; fresh-environment success does not repair it.
+IAM 3.0.3 is now verified live on the main and scoped APIs with a healthy
+worker. The original operation was recovered through supported Honeycomb commands
+under its original `dm-ting-tester` actor:
+
+1. Exact operation `a2b700ff-90dd-4795-b6c1-27e98871ba9c` recovery returned
+   `rejected` with `testing_configuration_revision_conflict`; a fresh operation
+   read confirmed that terminal state. IAM confirmed rejection before changing
+   the credential, despite the old request's environment revision 19 and the
+   current revision 21.
+2. Application reconciliation was accepted. The imported local configuration
+   revision remained 1; IAM's accepted import mapping was preserved.
+3. A new rotation with a new saved idempotency key,
+   `344d03bc-1d3d-45f7-a363-42b1464088ce`, was accepted as credential version 2.
+4. A fresh official SDK 3.1.0 signed OBO exchange returned that exact new Ting
+   credential and the matching IAM key. The returned credential authenticated
+   IAM's testing-context endpoint for `d70c8674-6d2e-41d4-bf8d-96ddd882edbd`
+   and `tos>ting`.
+
+No saved request or database state was manually changed. The diagnostic OBO
+proof was neither consumed nor persisted, and no alternate secret was supplied.
+Both the original pending-operation recovery and the fresh-environment audience
+credential mismatch are resolved. Message delivery is validated separately.
 
 Current release and delivery status are in [the release record](release-0.10.0.md).
 The historical observations below explain the original fault and are not claims
