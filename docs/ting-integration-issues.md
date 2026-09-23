@@ -1,4 +1,4 @@
-# Ting integration: verified contracts and outstanding dependencies
+# Ting integration: release status and historical diagnostics
 
 Initial findings: 2026-09-22. Ting fixes rechecked on 2026-09-23 IST
 (2026-09-22 after 20:09 UTC).
@@ -6,9 +6,37 @@ This record separates supported Ting behavior from changes still needed for
 DM's delivery migration. The latest verified outcomes are recorded below;
 the original failure evidence is retained for context.
 
-## Update: Ting 0.1.3 fixes verified
+## Release follow-up: 2026-09-23
 
-The live service now reports 0.1.3. Both DM and Interface origins receive
+Production DM configuration revision 2 (IAM revision 23) now includes both Ting
+external scopes, and `tos>dm.sync.changed` is registered in production `tos`.
+DM's Ting delivery backend, gateway and website are deployed; a backend patch is
+undergoing verification to separate the shared sandbox generation from internal
+credential-cache invalidation. Client/CLI 0.10.1 publication is held until the
+patched deployed backend passes the full message/receipt acceptance run.
+
+The live Interface browser retained its production login and message history.
+Both websites now resolve their selected organization through authenticated Ting
+`/v1/orgs` before comparing watch acknowledgements and hints with its canonical
+organization ID. Interface's real browser confirms the matching account and
+workspace connection. Fresh real IAM SLTs also passed Carbon/Silicon Ting cookie,
+CORS and WebSocket checks from both website origins in the exact test generation.
+These checks do not by themselves claim message delivery or recipient enrollment.
+
+Ting's production app list is empty for `bricks`, and listing/registering DM's
+notification type there is denied, although the same app/type is visible in
+`tos`. Cross-organization type management is a separate outstanding dependency;
+a connected browser is not proof that a DM message can be handed off in Bricks.
+
+IAM 3.0.2 and Honeycomb 0.3.3 are deployed. The rotated fresh-environment credential
+now passes a new official-SDK OBO audience validation. IAM 3.0.3 is being deployed
+to let the original pending Honeycomb operation recover its definitive outcome
+when the environment revision has advanced. Its supported recovery remains a
+separate gate; see the two linked issue reports for the dated result.
+
+## Historical check: Ting 0.1.3 fixes verified
+
+At that earlier check, the live service reported 0.1.3. Both DM and Interface origins receive
 credentialed CORS on successful and error responses; an unrelated origin still
 returns 403. Authenticated test Carbon and Silicon sessions return the correct
 `environment: {kind: "testing", id, generation: 1}`. Cookie-authenticated
@@ -35,8 +63,10 @@ environment, `1d32b4c6-dc84-4c44-b7b7-a16be7a31d06`, accepted both app
 configurations before credential rotation and avoided that setup failure.
 
 In both task-owned environments, DM declares `subscriptions.register` and
-`tings.send`, and Ting's `tos>dm.sync.changed` type is registered. Production DM scope changes
-have not been published. Current validation includes 27 native client unit tests
+`tings.send`, and Ting's `tos>dm.sync.changed` type is registered. Production
+configuration revision 2 (IAM revision 23) was subsequently accepted, including
+both Ting scopes; the production `tos>dm.sync.changed` type is registered in
+`tos`. The historical candidate validation below includes 27 native client unit tests
 plus three HTTP fixtures, 83 DM web tests and 29 local Chrome checks, and 359
 Interface tests; both website builds pass. The candidate backend passed 21
 real-service checks covering bidirectional
@@ -57,7 +87,7 @@ The candidate backend, tunnel and task PostgreSQL
 instance were stopped after verification.
 The sections below preserve the original 0.1.2 observations and remaining operational constraints.
 
-A separate IAM problem remains after rotating Ting test credentials: newly
+The historical failed run also exposed a separate IAM problem after rotating Ting test credentials: newly
 issued OBO proofs supplied an old audience credential that IAM rejected.
 The exact failure and successful unrotated-context comparison are documented in
 [iam-ting-e2e-issues.md](iam-ting-e2e-issues.md). This failed run was not
@@ -134,11 +164,12 @@ obtain recipient consent. Existing login tokens do not automatically gain a new
 scope. The checked-in `releases/honeycomb-application.json` now declares
 `tos>ting` / `subscriptions.register` and `tings.send`, and already declares
 `self.identity.read`.
-The live Honeycomb lookup during this migration still reports DM revision 1
-with `external: []`; neither requested Ting scope is currently accepted.
-This configuration has not been submitted for live approval in this task. Both apps and the exact consent must disclose
-`self.identity.read`, because
-Ting checks the verified nested public identity against the proof actor.
+Production configuration revision 2 is now accepted at IAM revision 23, with
+both external Ting scopes active. Publication request
+`e13529a1-ee3d-451a-82e8-4391e74408ec` and activation operation
+`a4debe2e-74e1-4e67-9c7c-010b38885d32` record the approved configuration. Both apps
+and the exact consent disclose `self.identity.read`, because Ting checks the
+verified nested public identity against the proof actor.
 
 **One-time type setup is also required in each organization and environment.**
 Ting stores notification types by environment, organization and application;
@@ -155,8 +186,9 @@ Use a deliberately selected session for the intended environment; this example
 does not configure test credentials. Recipient enrollment cannot replace type
 registration, and ordinary senders must not need type-management authority.
 A shared test clean removes types as well as grants/hooks, so this setup must
-be repeated explicitly after a clean. No production type has been registered
-by this task.
+be repeated explicitly after a clean. Production `tos>dm.sync.changed` was
+registered in `tos` using the verified production Carbon session; this does not
+register it in other organizations or testing environments.
 
 Enrollment does not log the recipient into Ting or create a destination. A
 receiver separately needs a Ting-bound IAM SLT, Ting session, and authenticated

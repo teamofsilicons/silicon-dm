@@ -1,8 +1,35 @@
 # IAM/Ting test credential mismatch observed during DM E2E
 
-Observed 2026-09-23 IST (2026-09-22 UTC). This records a live test-environment
-failure, not a confirmed IAM root cause or a completed DM delivery E2E test.
-No production configuration or credentials were changed.
+## Current status — 2026-09-23
+
+IAM 3.0.2 and Honeycomb 0.3.3 are deployed. The stale audience credential
+was traced to the encrypted import snapshot update running under a context that
+could rotate the authentication digest but could not update that snapshot. IAM
+now updates both atomically through a narrowly scoped database function; an
+unavailable or malformed snapshot fails the rotation instead of leaving two
+credentials out of sync. Restricted-role PostgreSQL regression tests cover the
+successful update and rejected cross-environment or unauthorized writes.
+
+In environment `1d32b4c6-dc84-4c44-b7b7-a16be7a31d06`, supported rotation
+`3b01b022-ca4b-4610-92e2-abdd49f8b81f` was accepted as credential version 3.
+A fresh official `silicon-iam-client = 3.1.0` signed OBO exchange returned that
+exact new Ting credential and the matching IAM environment key. The returned
+credential then authenticated IAM's testing-context endpoint for this environment
+and `tos>ting`. No alternate secret was substituted; the diagnostic proof was
+neither consumed nor persisted.
+
+The older pending operation in the original environment is a separate recovery
+case. IAM 3.0.3 adds receipt-first recovery while preserving current lifecycle
+fences for unexecuted mutations. Its deployment and the original operation's
+supported retry remain pending; see [the recovery status](honeycomb-ting-e2e-issues.md).
+These credential checks alone do not establish message delivery. Current release
+and deployed delivery evidence are recorded in [the release record](release-0.10.0.md).
+
+## Historical investigation
+
+Observed 2026-09-23 IST (2026-09-22 UTC). The sections below preserve the original
+failure, evidence and then-unverified hypotheses. That investigation itself did
+not change production configuration or credentials.
 
 ## Fresh environment: proof succeeds, audience credential fails
 
@@ -84,8 +111,8 @@ actual Ting Carbon and Silicon logins succeeded. Both authenticated `/v1/me`
 responses returned the exact typed actor, environment UUID and generation 1.
 This was **not a cached-secret fallback** and did not consume the diagnostic proof.
 
-The original environment's Honeycomb credential-rotation operation remains a
-separate known pending issue documented in
+At the time of this control, the original environment's Honeycomb
+credential-rotation operation remained a separate pending issue documented in
 [honeycomb-ting-e2e-issues.md](honeycomb-ting-e2e-issues.md). No pending operation
 was manually cleared and no IAM or Ting lifecycle fence was bypassed. Successful
 login/context checks establish usable authority for further testing; they do not

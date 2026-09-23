@@ -1,9 +1,40 @@
 # Honeycomb issues found during DM–Ting E2E setup
 
-Checked 2026-09-23. These are Honeycomb/IAM test-application administration
-issues, not evidence of a failed Ting message delivery. No credentials are
-included. The investigation below used source inspection and read-only checks;
-it did not retry rotations, change lifecycle state, or deploy a repair.
+## Current status — 2026-09-23
+
+Honeycomb 0.3.3 and IAM 3.0.2 are deployed. Honeycomb now preserves the distinction
+between its positive local configuration revision and IAM's accepted imported
+revision 0. New rotations bind the accepted IAM revision before saving the exact
+request; reconciliation recognizes the proven import mapping. A definitive
+configuration-revision rejection can terminate an old pending rotation without
+rewriting its immutable saved request or fabricating a success receipt.
+
+A fresh authorized Ting rotation in environment
+`1d32b4c6-dc84-4c44-b7b7-a16be7a31d06` was accepted as credential version 3,
+and fresh official SDK OBO validation passed with the returned audience credential.
+See [the credential repair evidence](iam-ting-e2e-issues.md).
+
+Original operation `a2b700ff-90dd-4795-b6c1-27e98871ba9c` remains pending as of
+this update. Supported recovery under the original test actor still encounters
+an earlier IAM environment-revision check: its saved revision is 19 while the
+current revision is 21, with generation and key version still 1. IAM 3.0.3 adds
+receipt-first recovery and permits authoritative terminal configuration rejection
+without authorizing a new mutation under stale lifecycle state. Its source and
+regression checks are complete, but deployment verification and the subsequent
+supported retry are still pending. No saved request or database state was
+manually changed. The original operation must be recovered before claiming this
+case resolved; fresh-environment success does not repair it.
+
+Current release and delivery status are in [the release record](release-0.10.0.md).
+The historical observations below explain the original fault and are not claims
+that every described limitation remains in the deployed versions.
+
+## Historical investigation
+
+Checked 2026-09-23. These Honeycomb/IAM test-application administration issues
+were observed independently of Ting message delivery. The investigation below
+used source inspection and read-only checks; it did not itself retry rotations,
+change lifecycle state, or deploy a repair. No credentials are included.
 
 ## Affected operation and observed state
 
@@ -20,7 +51,7 @@ it did not retry rotations, change lifecycle state, or deploy a repair.
 - The earlier reconciliation attempt returned `state: pending` with
   `error: IAM omitted a positive lifecycle version`.
 
-Safe read-only reproduction of the current projection and operation:
+Safe read-only reproduction of the projection and operation:
 
 ```sh
 honeycomb --test d70c8674-6d2e-41d4-bf8d-96ddd882edbd --json apps get 'tos>ting'
@@ -103,7 +134,7 @@ rotate against the current accepted revision. Apply the same order to other
 imported applications whose credentials need rotation. This establishes a
 positive accepted configuration revision through the normal APIs.
 
-The original environment is retained, and its rotation operation remains pending
-and documented. Testing in a fresh environment does not repair that operation or
+At the end of the historical investigation, the original environment was
+retained and its rotation operation remained pending and documented. Testing in a fresh environment does not repair that operation or
 establish that the underlying Honeycomb issue is resolved. Real message E2E results must be reported
 separately after the delivery flow is exercised.
