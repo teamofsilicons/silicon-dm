@@ -468,12 +468,24 @@ impl TestingRegistry {
         generation: i64,
         revision: i64,
     ) -> AppResult<()> {
+        self.ensure_runtime_current(id, generation, revision)
+            .await?;
+        self.ensure_active(id, generation).await
+    }
+
+    async fn ensure_runtime_current(
+        &self,
+        id: Uuid,
+        generation: i64,
+        revision: i64,
+    ) -> AppResult<()> {
         let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dm.testing_environments WHERE environment_id=$1 AND version=$2 AND runtime_revision=$3 AND status='active' AND NOT iam_sync_pending)")
             .bind(id).bind(generation).bind(revision).fetch_one(self.production.pool()).await?;
-        if !current {
-            return Err(AppError::Unauthorized);
+        if current {
+            Ok(())
+        } else {
+            Err(AppError::Unauthorized)
         }
-        self.ensure_active(id, generation).await
     }
 
     /// Holds the lifecycle fence for the exact cached authority admitted earlier.
@@ -485,12 +497,25 @@ impl TestingRegistry {
         generation: i64,
         revision: i64,
     ) -> AppResult<Transaction<'static, Postgres>> {
+        let fence = self.local_runtime_fence(id, generation, revision).await?;
+        self.ensure_active(id, generation).await?;
+        Ok(fence)
+    }
+
+    /// Idle worker polls use only local authority; actual sends separately verify IAM.
+    pub(crate) async fn local_runtime_fence(
+        &self,
+        id: Uuid,
+        generation: i64,
+        revision: i64,
+    ) -> AppResult<Transaction<'static, Postgres>> {
         let mut fence = self.admin.pool().begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
             .bind(lock_id(id))
             .execute(&mut *fence)
             .await?;
-        self.ensure_runtime_active(id, generation, revision).await?;
+        self.ensure_runtime_current(id, generation, revision)
+            .await?;
         Ok(fence)
     }
 

@@ -1875,5 +1875,202 @@ async fn managed_generation_is_independent_of_credential_and_lifecycle_revisions
         .await?;
     assert_eq!(count, 0);
     server.abort();
+    sandbox_worker_retries_shared_readiness(&app, registry, &iam, &new_secret, op).await?;
+    Ok(())
+}
+
+#[derive(Default)]
+struct RecoveredTingPublisher(std::sync::Mutex<Vec<String>>);
+
+#[async_trait]
+impl silicon_dm::infrastructure::ting::TingPublisher for RecoveredTingPublisher {
+    async fn publish(
+        &self,
+        claim: &silicon_dm::infrastructure::postgres::TingDeliveryClaim,
+    ) -> std::result::Result<
+        silicon_dm::infrastructure::ting::TingAcceptance,
+        silicon_dm::infrastructure::ting::TingFailure,
+    > {
+        self.0
+            .lock()
+            .map_err(|_| silicon_dm::infrastructure::ting::TingFailure::Protocol)?
+            .push(claim.request_body.clone());
+        Ok(silicon_dm::infrastructure::ting::TingAcceptance {
+            id: format!("recovered-{}", claim.delivery_id),
+            created_at: time::OffsetDateTime::now_utc(),
+            silent: false,
+        })
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "follow the same sandbox worker through idle, outages, recovery and revocation"
+)]
+async fn sandbox_worker_retries_shared_readiness(
+    app: &AppState,
+    registry: &Arc<silicon_dm::testing::TestingRegistry>,
+    iam: &MockServer,
+    secret: &str,
+    mut op: silicon_dm::testing::honeycomb::Operation,
+) -> Result {
+    use silicon_dm::{
+        application::commands::{CreateConversationCommand, SendMessageCommand},
+        domain::MessageCreate,
+        infrastructure::postgres::TingDeliveryContext,
+        worker::TingDeliveryWorker,
+    };
+    // Stop the automatically constructed worker through a supported lifecycle operation.
+    // The retained test credentials remain usable by this independently opened runtime.
+    op.operation_id = Uuid::new_v4();
+    op.environment_revision += 1;
+    op.action = "refresh-import".into();
+    registry.honeycomb_operation(&op, "tos>dm").await?;
+    let revision: i64 = sqlx::query_scalar(
+        "SELECT runtime_revision FROM dm.testing_environments WHERE environment_id=$1",
+    )
+    .bind(op.environment_id)
+    .fetch_one(app.store.pool())
+    .await?;
+    let store = PostgresStore::connect_schema(
+        &app.settings.testing.as_ref().ok_or("testing")?.database,
+        &format!("dm_test_{}", op.environment_id.simple()),
+    )
+    .await?;
+    let mut settings = app.settings.worker.clone();
+    settings.poll_interval = Duration::from_millis(10);
+    settings.max_retry_delay = Duration::from_secs(1);
+    let publisher = Arc::new(RecoveredTingPublisher::default());
+    let worker = Arc::new(
+        TingDeliveryWorker::new(
+            store.clone(),
+            publisher.clone(),
+            TingDeliveryContext {
+                app_id: "tos>dm".into(),
+                testing_environment_id: Some(op.environment_id),
+                testing_generation: Some(op.generation),
+            },
+            "sandbox-recovery".into(),
+            settings,
+        )
+        .with_testing_registry(registry.clone())
+        .with_runtime_revision(revision),
+    );
+    iam.reset().await;
+    for _ in 0..3 {
+        assert_eq!(worker.process_once().await?, 0);
+    }
+    worker.maintain_once().await?;
+    assert!(
+        iam.received_requests().await.ok_or("requests")?.is_empty(),
+        "idle and maintenance must not query IAM"
+    );
+    let alice = ActorRef {
+        actor_type: ActorType::Carbon,
+        id: "alice".parse()?,
+    };
+    let bob = ActorRef {
+        actor_type: ActorType::Carbon,
+        id: "bob".parse()?,
+    };
+    let organization: OrganizationId = "tos".parse()?;
+    let chat = store
+        .create_conversation(CreateConversationCommand {
+            organization_id: organization.clone(),
+            creator: alice.clone(),
+            participants: vec![alice.clone(), bob],
+            idempotency_key: "readiness-chat".parse()?,
+        })
+        .await?;
+    store
+        .send_message(SendMessageCommand {
+            organization_id: organization,
+            conversation_id: chat.id,
+            sender: alice,
+            content: MessageCreate {
+                text: Some("retained readiness retry".into()),
+                ..MessageCreate::default()
+            },
+            idempotency_key: "readiness-message".parse()?,
+        })
+        .await?;
+    Mock::given(path("/api/v1/application/testing-context"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .set_body_json(json!({"error":{"code":"unavailable","message":"fixture"}})),
+        )
+        .mount(iam)
+        .await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let running = {
+        let worker = worker.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move { worker.run(cancel).await })
+    };
+    wait_readiness_attempts(&store, 1, false).await?;
+    assert!(
+        !running.is_finished(),
+        "503 must not kill the cached worker"
+    );
+    assert!(publisher.0.lock().map_err(|_| "publisher")?.is_empty());
+    iam.reset().await;
+    Mock::given(path("/api/v1/application/testing-context"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .set_body_json(json!({"error":{"code":"rate_limited","message":"fixture"}})),
+        )
+        .mount(iam)
+        .await;
+    sqlx::query("UPDATE ting_handoffs SET next_attempt_at=clock_timestamp()")
+        .execute(store.pool())
+        .await?;
+    wait_readiness_attempts(&store, 2, false)
+        .await
+        .map_err(|e| format!("429 recovery: {e}"))?;
+    assert!(
+        !running.is_finished(),
+        "429 must not kill the cached worker"
+    );
+    assert!(publisher.0.lock().map_err(|_| "publisher")?.is_empty());
+    let original: Vec<String> =
+        sqlx::query_scalar("SELECT request_body FROM ting_handoffs ORDER BY request_body")
+            .fetch_all(store.pool())
+            .await?;
+    iam.reset().await;
+    mock_context(iam, op.environment_id, secret, 2, None).await;
+    sqlx::query("UPDATE ting_handoffs SET next_attempt_at=clock_timestamp()")
+        .execute(store.pool())
+        .await?;
+    wait_readiness_attempts(&store, 2, true).await?;
+    let mut delivered_bodies = publisher.0.lock().map_err(|_| "publisher")?.clone();
+    delivered_bodies.sort();
+    assert_eq!(
+        delivered_bodies, original,
+        "recovery must publish the unchanged body and idempotency key"
+    );
+    assert!(!running.is_finished());
+    op.operation_id = Uuid::new_v4();
+    op.environment_revision += 1;
+    registry.honeycomb_operation(&op, "tos>dm").await?;
+    assert!(
+        matches!(
+            tokio::time::timeout(Duration::from_secs(2), running).await??,
+            Err(AppError::Unauthorized)
+        ),
+        "epoch revocation still stops the old worker"
+    );
+    cancel.cancel();
+    Ok(())
+}
+
+async fn wait_readiness_attempts(store: &PostgresStore, attempt: i64, accepted: bool) -> Result {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM ting_handoffs WHERE attempt_count >= $1 AND (accepted_at IS NOT NULL)=$2 AND ($2 OR last_error_code='ting_authority_unavailable')")
+                .bind(attempt).bind(accepted).fetch_one(store.pool()).await?;
+            if count == 2 { return Ok::<(), sqlx::Error>(()); }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await??;
     Ok(())
 }

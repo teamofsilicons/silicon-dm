@@ -187,7 +187,7 @@ impl TingDeliveryWorker {
                 })?;
                 Ok(Some(
                     registry
-                        .request_runtime_fence(
+                        .local_runtime_fence(
                             id,
                             generation,
                             self.runtime_revision.ok_or(AppError::Unauthorized)?,
@@ -199,6 +199,22 @@ impl TingDeliveryWorker {
                 "Ting environment and generation must be paired",
             )),
         }
+    }
+
+    async fn shared_readiness(&self) -> Result<(), TingFailure> {
+        if let (Some(registry), Some(id), Some(generation)) = (
+            &self.testing,
+            self.context.testing_environment_id,
+            self.context.testing_generation,
+        ) {
+            // IAM outages and rate limits leave the durable claim retryable. Only
+            // local lifecycle/epoch revocation terminates this cached worker.
+            registry
+                .ensure_active(id, generation)
+                .await
+                .map_err(|_| TingFailure::AuthorityUnavailable)?;
+        }
+        Ok(())
     }
 
     /// Runs one bounded batch. Only one row is leased at a time, so slow sends
@@ -231,9 +247,12 @@ impl TingDeliveryWorker {
             let outcome = if Instant::now() >= deadline {
                 Err(TingFailure::Timeout)
             } else if authorized {
-                timeout_at(deadline, self.publisher.publish(&claim))
-                    .await
-                    .unwrap_or(Err(TingFailure::Timeout))
+                timeout_at(deadline, async {
+                    self.shared_readiness().await?;
+                    self.publisher.publish(&claim).await
+                })
+                .await
+                .unwrap_or(Err(TingFailure::Timeout))
             } else {
                 Err(TingFailure::Rejected(
                     "ting_recipient_authority_changed".into(),
