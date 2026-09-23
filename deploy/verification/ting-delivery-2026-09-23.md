@@ -85,8 +85,8 @@ See the committed [32-check backend evidence](../../docs/ting-deployed-live-veri
 and [17-check native evidence](../../docs/ting-native-release-verification.json).
 Both sanitized reports are also public GitHub release assets.
 
-Task-owned callbacks, relays and hook processes were stopped; task profiles and
-sessions were logged out. Root's two additional DM refresh-family revocations
+Task-owned callbacks, relays and hook processes were stopped; native DM/Ting
+profiles and application sessions were logged out. Root's two additional DM refresh-family revocations
 returned 204 and its two Ting session revocations returned 200. Existing user
 profiles and processes were retained.
 
