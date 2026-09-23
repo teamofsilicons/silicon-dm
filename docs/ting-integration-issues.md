@@ -15,7 +15,12 @@ the shared sandbox generation from internal credential-cache invalidation, and
 idle workers no longer poll IAM. Deployed bidirectional message/receipt acceptance
 passed with real IAM and Ting in the task-owned testing environment; see
 [the deployed evidence](ting-deployed-live-verification.json). Client/CLI 0.10.1
-publication and installed-native verification are in progress.
+is published on crates.io, GitHub and Honeycomb. Fresh installation, the existing
+global installation and 17 native delivery/retry/receipt checks passed; see
+[the native release evidence](ting-native-release-verification.json). Existing
+profiles, queued state, relay and Ting bindings were preserved. The running Ting
+daemon remains 0.1.2, while the installed Ting CLI is 0.1.4; no shared-daemon
+restart was needed for these checks.
 
 The live Interface browser retained its production login and message history.
 Both websites now resolve their selected organization through authenticated Ting

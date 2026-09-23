@@ -12,8 +12,17 @@ retryable during temporary IAM failures. Deployed bidirectional Carbon/Silicon
 delivery passed with real IAM and Ting, including exact hydration, idempotent
 sends, explicit receipts, HTTP sync and presence. See
 [the deployed evidence](ting-deployed-live-verification.json) for the exact scope.
-Client/CLI 0.10.1 resolves canonical Ting organization IDs and passes its
-regressions; publication and installed-native verification are in progress.
+Client/CLI 0.10.1 resolves canonical Ting organization IDs and is published on
+crates.io, GitHub and Honeycomb. A fresh catalog installation and the existing
+global DM installation both verify 0.10.1 with matching artifact hashes; existing
+profiles, logical queue/cursor state and the running relay were preserved.
+The published CLI passed 17 native checks, including real Carbon/Silicon login,
+HTTP hydration, a 503-to-204 callback retry with one durable consumer effect,
+stable hook reconnect, and separate delivered/read receipts. See
+[the native release evidence](ting-native-release-verification.json). Task-only
+profiles and callbacks were cleaned up; the shared Ting daemon and existing
+bindings were retained. The running Ting daemon is 0.1.2, distinct from the
+installed Ting CLI 0.1.4; this release did not restart that daemon.
 Protocol crate 0.10.0 and HTTP message schema 3 remain unchanged.
 
 IAM 3.0.3 and Honeycomb 0.3.3 are deployed. Both a fresh rotated environment
@@ -156,6 +165,8 @@ and [Honeycomb issue evidence](honeycomb-ting-e2e-issues.md).
 The [integration record](ting-integration-issues.md) retains historical Ting
 findings and current verification. Backend 0.10.1 deployment and bidirectional
 acceptance are complete in the task-owned testing environment. Client and CLI
-publication, fresh installation and native verification are in progress. Production
-Bricks delivery requires a separate Ting type-lookup correction; a connected
-browser does not close that gate.
+publication, fresh installation, global update verification and native delivery
+checks are complete. The immutable v0.10.1 package includes preparation-time
+release status; this live record and the GitHub verification assets capture the
+final deployed result. Production Bricks delivery requires a separate Ting
+type-lookup correction; a connected browser does not close that gate.
