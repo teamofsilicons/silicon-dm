@@ -1,0 +1,73 @@
+{
+  "verified_at": "2026-09-23T09:09:36.419172+00:00",
+  "scope": "Published macOS ARM64 DM CLI against deployed DM, IAM and Ting in the task-owned Honeycomb testing environment. This does not establish production cross-organization Ting application registration.",
+  "dm_version": "0.10.1",
+  "dm_source": "85eaf145a961462e5931e1040a267e32a17fa59f",
+  "dm_binary_sha256": "cf01dbc05ffcf0808a3304d8648fd57724a14ce00d3def2270931b35f9ff074b",
+  "installation": "Fresh supported Honeycomb production-channel installation into an isolated directory; exact published archive binary.",
+  "environment_id": "1d32b4c6-dc84-4c44-b7b7-a16be7a31d06",
+  "testing_generation": 1,
+  "ting": {
+    "installed_cli_version": "0.1.4",
+    "running_daemon_package_version": "0.1.2",
+    "daemon_version_evidence": "Existing running process text mapping identifies package 0.1.2. Its old executable pathname was no longer readable; no executable hash or process restart is claimed.",
+    "existing_binding_count_preserved": 2
+  },
+  "checks": {
+    "sender_dm_auth": true,
+    "receiver_dm_auth": true,
+    "sender_ting_auth": true,
+    "receiver_ting_auth": true,
+    "stable_hook_id_on_reconnect": true,
+    "identical_ting_item_and_key_on_503_to_204_retry": true,
+    "direct_ting_callback_and_http_hydration": true,
+    "ting_acceptance_does_not_create_dm_receipts": true,
+    "explicit_dm_delivered_receipt": true,
+    "explicit_dm_read_receipt": true,
+    "one_consumer_effect_for_native_delivery": true,
+    "whole_successful_batch_durably_accepted": true,
+    "durable_consumer_acceptance": true,
+    "preexisting_ting_bindings_unchanged": true,
+    "shared_ting_daemon_not_restarted": true,
+    "task_profiles_logged_out_and_hook_detached": true,
+    "task_processes_stopped": true
+  },
+  "check_count": 17,
+  "message_id": "003",
+  "conversation_id": "dm-ting-tester::dm-ting-bot:tos",
+  "delivery_id": "01a0cd85-aab6-76a1-afbd-45a9a5c4092d",
+  "hook_id": "hook_a3b041fc6f93441ca62914c079795f94",
+  "retry": {
+    "callback_statuses": [
+      503,
+      204
+    ],
+    "same_ting_item_and_key": true,
+    "whole_batch_sha256_identical": true,
+    "durable_effects_for_native_delivery": 1,
+    "preexisting_batches": "Hydrated and committed before 204; failure injection targeted only the native test message."
+  },
+  "cleanup": [
+    "hook_unhooked",
+    "receiver_ting_logged_out",
+    "sender_ting_logged_out",
+    "receiver_dm_logged_out",
+    "sender_dm_logged_out",
+    "own_relay_stopped",
+    "own_hook_stopped"
+  ],
+  "fixture_notes": [
+    "Initial private relay start found an occupied default port; the successful run used an independently allocated loopback port.",
+    "An earlier attempt withheld acknowledgement for preexisting inbox messages; the successful fixture accepted backlog batches and targeted only the new message for 503 retry."
+  ],
+  "global_installed_cli": {
+    "verified_at": "2026-09-23T09:05:12.125514+00:00",
+    "version": "0.10.1",
+    "sha256": "cf01dbc05ffcf0808a3304d8648fd57724a14ce00d3def2270931b35f9ff074b",
+    "supported_update_status": "already_up_to_date",
+    "profile_config_unchanged": true,
+    "relay_database_logical_rows_unchanged": true,
+    "existing_relay_pid_unchanged": true,
+    "ting_daemon_restart": false
+  }
+}
