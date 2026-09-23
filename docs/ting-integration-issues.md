@@ -28,11 +28,12 @@ notification type there is denied, although the same app/type is visible in
 `tos`. Cross-organization type management is a separate outstanding dependency;
 a connected browser is not proof that a DM message can be handed off in Bricks.
 
-IAM 3.0.2 and Honeycomb 0.3.3 are deployed. The rotated fresh-environment credential
-now passes a new official-SDK OBO audience validation. IAM 3.0.3 is being deployed
-to let the original pending Honeycomb operation recover its definitive outcome
-when the environment revision has advanced. Its supported recovery remains a
-separate gate; see the two linked issue reports for the dated result.
+IAM 3.0.3 and Honeycomb 0.3.3 are deployed. The rotated fresh-environment credential
+passes a new official-SDK OBO audience validation. The original pending Honeycomb
+operation recovered its definitive configuration-revision rejection through the
+supported API; reconciliation and a new rotation then succeeded. A fresh official
+IAM SDK exchange returned the exact new Ting credential for that original
+environment. See the two linked issue reports for the dated evidence.
 
 ## Historical check: Ting 0.1.3 fixes verified
 
