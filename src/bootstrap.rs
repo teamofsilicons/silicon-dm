@@ -232,7 +232,8 @@ pub(crate) fn build_ting_worker(
         state.ting_delivery_context(),
         state.instance_id.clone(),
         state.settings.worker.clone(),
-    );
+    )
+    .with_auto_enrollment(state.ting_auto_enrollment(), state.ting_credentials()?);
     if let Some(registry) = &state.testing {
         worker = worker.with_testing_registry(registry.clone());
         if let Some(revision) = state.testing_runtime_revision {

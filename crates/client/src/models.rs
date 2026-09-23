@@ -489,6 +489,9 @@ pub struct Identity {
     pub session_id: Option<String>,
     pub org_role: Option<String>,
     pub capabilities: Vec<String>,
+    /// The session predates DM's Ting permissions; signing in again grants them.
+    #[serde(default)]
+    pub reconsent_required: bool,
 }
 /// Secrets are deliberately not Debug.
 #[derive(Clone, Serialize, Deserialize)]

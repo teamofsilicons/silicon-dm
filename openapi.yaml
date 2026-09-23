@@ -2453,7 +2453,10 @@ components:
         capabilities:
           type: array
           items: {type: string}
-      required: [member, organization_id, principal_id, session_id, org_role, capabilities]
+        reconsent_required:
+          type: boolean
+          description: True when this session predates DM's Ting permissions (Ting OBO endpoints subscriptions.register and tings.send). IAM refresh keeps the originally consented scopes, so the member must sign in again once; that login presents DM's current permissions. Delivery through Ting is part of DM's consent and never a separate choice.
+      required: [member, organization_id, principal_id, session_id, org_role, capabilities, reconsent_required]
     LoginInput:
       type: object
       properties:

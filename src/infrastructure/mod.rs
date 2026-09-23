@@ -4,6 +4,7 @@ pub mod giphy;
 pub mod iam;
 pub mod postgres;
 pub mod ting;
+pub mod ting_auto_enrollment;
 pub mod ting_credentials;
 pub mod ting_enrollment;
 pub mod ting_proof;

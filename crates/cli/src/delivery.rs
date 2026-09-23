@@ -32,7 +32,7 @@ pub enum Command {
     },
     /// Verify this bound Ting login and ask its system daemon for status.
     Status,
-    /// Explicitly register this DM recipient's IAM-consented grant in Ting.
+    /// Re-enroll now; DM already enrolls every member with Ting on login and use.
     Register,
     /// Explicitly reconnect the retained Ting destination; do not create another hook.
     Reconnect,
@@ -131,7 +131,7 @@ pub async fn run(
                 .await?;
             result["idempotency_key"] = json!(retry_key);
             eprintln!(
-                "Logged in to Ting. Configure a generic endpoint with dm webhook URL --all-apps. DM consent remains explicit: dm delivery register."
+                "Logged in to Ting. Configure a generic endpoint with dm webhook URL --all-apps. DM enrolls you with Ting automatically."
             );
             Ok(result)
         }

@@ -246,7 +246,7 @@ impl LocalRuntime {
                     result => {
                         let identity = result?;
                         return Ok::<_, anyhow::Error>(serde_json::json!({"authenticated":true,"profile":name,"testing_environment_id":test,
-                            "actor":identity.actor,"organization_id":identity.organization_id,"identity":identity,"webhook_url":profile.webhook_url}));
+                            "actor":identity.actor,"organization_id":identity.organization_id,"reconsent_required":identity.reconsent_required,"identity":identity,"webhook_url":profile.webhook_url}));
                     }
                 }
             }
