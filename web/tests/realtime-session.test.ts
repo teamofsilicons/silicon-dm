@@ -112,7 +112,7 @@ async function fixture(
     profile_id: "profile",
     organization_id: "tos",
     testing_environment_id: testingGeneration ? "sandbox" : null,
-    actor: { id: "alice", type: "carbon" },
+    actor: { id: "c:alice", type: "carbon" },
   };
   const events = {
     addEventListener() {},
@@ -161,7 +161,7 @@ async function fixture(
     }
     if (path === "/iam")
       return {
-        app_id: "tos>dm",
+        app_id: "dm",
         testing_environment_id: session.testing_environment_id,
         testing_generation: harness.serverGeneration,
       };

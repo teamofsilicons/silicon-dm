@@ -19,7 +19,7 @@ use crate::{
     domain::IdempotencyKey as DmIdempotencyKey,
 };
 
-const TING_APP_ID: &str = "tos>ting";
+const TING_APP_ID: &str = "ting";
 const ENDPOINT_ID: &str = "subscriptions.register";
 const ENDPOINT_PATH: &str = "/v1/subscriptions";
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -150,7 +150,7 @@ pub(crate) async fn register(
     context: &AuthContext,
     exchange_attempt_key: &str,
 ) -> AppResult<Value> {
-    if !context.has_capability("obo:tos>ting:subscriptions.register")
+    if !context.has_capability("obo:ting:subscriptions.register")
         || !context.has_capability("self.identity.read")
     {
         return Err(AppError::Forbidden);
@@ -343,7 +343,7 @@ mod tests {
         let ting = MockServer::start().await;
         let iam = Client::builder(&issuer.uri())?
             .credential(Credential::Application {
-                app_id: "tos>dm".to_owned(),
+                app_id: "dm".to_owned(),
                 secret: SecretString::from("fixture-app-secret"),
             })
             .build()?;
@@ -354,7 +354,7 @@ mod tests {
         let context = AuthContext {
             actor: crate::domain::ActorRef {
                 actor_type: crate::domain::ActorType::Carbon,
-                id: "alice".parse()?,
+                id: "c:alice".parse()?,
             },
             organization_id: "tos".parse()?,
             session_id: None,
@@ -363,26 +363,25 @@ mod tests {
             represented_actor_ids: BTreeSet::new(),
             capabilities: BTreeSet::from([
                 "self.identity.read".to_owned(),
-                "obo:tos>ting:subscriptions.register".to_owned(),
+                "obo:ting:subscriptions.register".to_owned(),
             ]),
             credential: PresentedCredential::Bearer(SecretString::from("fixture-recipient-oat")),
             credential_expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
         };
         let catalog: models::OboEndpointCatalog = serde_json::from_value(json!({
-            "application":{"app_id":"tos>ting","org_id":"tos"},
+            "application":{"app_id":"ting","org_id":"tos"},
             "endpoints":[{"endpoint_id":ENDPOINT_ID,"path":ENDPOINT_PATH,
                 "metadata":{},"critical":true,"ttl_seconds":60}]
         }))?;
-        let application_auth = format!("Basic {}", STANDARD.encode("tos>dm:fixture-app-secret"));
+        let application_auth = format!("Basic {}", STANDARD.encode("dm:fixture-app-secret"));
         Mock::given(method("GET"))
-            .and(path("/api/v1/obo-access/applications/tos%3Eting/endpoints"))
+            .and(path("/api/v1/obo-access/applications/ting/endpoints"))
             .and(header("authorization", application_auth.clone()))
             .respond_with(ResponseTemplate::new(200).set_body_json(&catalog))
             .expect(2)
             .mount(&issuer)
             .await;
-        let public_response =
-            json!({"id":"sub_alice","app_id":"tos>dm","for":"alice","active":true});
+        let public_response = json!({"id":"sub_alice","app_id":"dm","for":"c:alice","active":true});
         let attempts = [Uuid::new_v4().to_string(), Uuid::new_v4().to_string()];
         for attempt in &attempts {
             let proof = models::OboProofResponse {
@@ -413,7 +412,7 @@ mod tests {
                 .mount(&ting)
                 .await;
             assert_eq!(
-                register(&iam, &settings, "tos>dm", None, &context, attempt).await?,
+                register(&iam, &settings, "dm", None, &context, attempt).await?,
                 public_response
             );
         }
@@ -442,7 +441,7 @@ mod tests {
             );
             assert_eq!(
                 serde_json::from_slice::<Value>(&submission.body)?,
-                json!({"org_id":"tos","app_id":"tos>dm","for":"alice"})
+                json!({"org_id":"tos","app_id":"dm","for":"c:alice"})
             );
             let timestamp = exchange.headers["x-obo-timestamp"].to_str()?.parse()?;
             let mutation = Mutation::with_key(IdempotencyKey::parse(&attempts[index])?);
@@ -465,7 +464,7 @@ mod tests {
     #[test]
     fn registration_replays_only_confirmed_matching_receipts() -> AppResult<()> {
         let hash = [7_u8; 32];
-        let response = json!({"id":"sub_123","app_id":"tos>dm","for":"alice","active":true});
+        let response = json!({"id":"sub_123","app_id":"dm","for":"c:alice","active":true});
         assert_eq!(
             replay_receipt(Some((hash.to_vec(), Some(response.clone()))), &hash)?,
             response
@@ -478,24 +477,24 @@ mod tests {
 
     #[test]
     fn registration_response_cannot_switch_recipient_or_return_upstream_secrets() -> AppResult<()> {
-        let good = json!({"id":"sub_123","app_id":"tos>dm","for":"alice","active":true,
+        let good = json!({"id":"sub_123","app_id":"dm","for":"c:alice","active":true,
             "access_proof":"must-not-reach-the-client"});
         let output = subscription_result(
             &serde_json::to_vec(&good).map_err(AppError::internal)?,
-            "tos>dm",
-            "alice",
+            "dm",
+            "c:alice",
         )?;
         assert!(output.get("access_proof").is_none());
         for replacement in [
-            json!({"id":"sub_123","app_id":"tos>other","for":"alice","active":true}),
-            json!({"id":"sub_123","app_id":"tos>dm","for":"bob","active":true}),
-            json!({"id":"sub_123","app_id":"tos>dm","for":"alice","active":false}),
+            json!({"id":"sub_123","app_id":"other","for":"c:alice","active":true}),
+            json!({"id":"sub_123","app_id":"dm","for":"c:bob","active":true}),
+            json!({"id":"sub_123","app_id":"dm","for":"c:alice","active":false}),
         ] {
             assert!(
                 subscription_result(
                     &serde_json::to_vec(&replacement).map_err(AppError::internal)?,
-                    "tos>dm",
-                    "alice"
+                    "dm",
+                    "c:alice"
                 )
                 .is_err()
             );
@@ -539,7 +538,7 @@ mod tests {
             request_timeout: std::time::Duration::from_secs(5),
         };
         // Deliberately noncanonical whitespace must survive the transport intact.
-        let body = br#"{ "org_id": "tos", "for": "alice", "app_id": "tos>dm" }"#.to_vec();
+        let body = br#"{ "org_id": "tos", "for": "c:alice", "app_id": "dm" }"#.to_vec();
         let proof = || models::OboProofResponse {
             testing_context: None,
             access_proof: "fixture-proof".to_owned(),
@@ -552,13 +551,13 @@ mod tests {
             .and(header("authorization", "Bearer fixture-proof"))
             .and(body_bytes(body.clone()))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-                "id":"sub_123","app_id":"tos>dm","for":"alice","active":true
+                "id":"sub_123","app_id":"dm","for":"c:alice","active":true
             })))
             .expect(1)
             .mount(&server)
             .await;
         assert_eq!(
-            submit_registration(&settings, proof(), body.clone(), "tos>dm", "alice").await?["id"],
+            submit_registration(&settings, proof(), body.clone(), "dm", "c:alice").await?["id"],
             "sub_123"
         );
         server.verify().await;
@@ -577,7 +576,7 @@ mod tests {
             .mount(&server)
             .await;
         assert!(
-            submit_registration(&settings, proof(), body, "tos>dm", "alice")
+            submit_registration(&settings, proof(), body, "dm", "c:alice")
                 .await
                 .is_err()
         );

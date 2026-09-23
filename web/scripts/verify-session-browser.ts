@@ -189,14 +189,14 @@ const upstream = createServer(async (req, res) => {
     return json(res, 200, { ...actor, org_role: "member", capabilities: [] });
   if (url.pathname === "/api/v1/iam")
     return json(res, 200, {
-      app_id: "tos>dm",
+      app_id: "dm",
       iam_base_url: apiOrigin,
       api_base_url: apiOrigin,
       testing_environment_id: null,
       testing_generation: null,
       delivery: {
         transport: "ting",
-        app_id: "tos>ting",
+        app_id: "ting",
         browser_origin: tingOrigin,
         receiver_authentication: "ting_session",
         dm_websocket_supported: false,
@@ -239,7 +239,7 @@ const upstream = createServer(async (req, res) => {
     registrations++;
     return json(res, 200, {
       registered: true,
-      app_id: "tos>dm",
+      app_id: "dm",
       org_id: organization,
       actor,
     });

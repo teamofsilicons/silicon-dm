@@ -1,8 +1,8 @@
 # Maps the dm command to the six required release targets.
 format_version: 1
 
-app_id: "tos>dm"
-version: "0.10.1"
+app_id: "dm"
+version: "0.11.0"
 
 bin:
   dm: "app"

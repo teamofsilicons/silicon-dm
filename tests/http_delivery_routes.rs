@@ -44,7 +44,7 @@ impl IdentityProvider for Identity {
             organization_id,
         } = request;
         let actor = token.expose_secret();
-        if !["alice", "bob", "unavailable"].contains(&actor) {
+        if !["c:alice", "c:bob", "unavailable"].contains(&actor) {
             return Err(AppError::Unauthorized);
         }
         Ok(AuthContext {
@@ -109,7 +109,7 @@ impl IdentityProvider for Identity {
             return Err(AppError::DependencyUnavailable { dependency: "ting" });
         }
         Ok(
-            json!({"id":format!("sub_{}", context.actor.id),"app_id":"tos>dm","for":context.actor.id,"active":true}),
+            json!({"id":format!("sub_{}", context.actor.id),"app_id":"dm","for":context.actor.id,"active":true}),
         )
     }
 }
@@ -127,7 +127,7 @@ fn settings(database: DatabaseSettings) -> Result<Settings> {
         database,
         iam: IamSettings {
             base_url: "http://127.0.0.1:8081".parse()?,
-            app_id: "tos>dm".into(),
+            app_id: "dm".into(),
             app_secret: SecretString::from("cursor-signing-secret"),
             webhook_secret: SecretString::from("w".repeat(32)),
             webhook_key_version: 1,
@@ -283,7 +283,7 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
             .status(),
         401
     );
-    let initial: Value = request(reqwest::Method::GET, "/api/v1/sync?reset=true", "bob")
+    let initial: Value = request(reqwest::Method::GET, "/api/v1/sync?reset=true", "c:bob")
         .send()
         .await?
         .error_for_status()?
@@ -293,7 +293,7 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
     assert_eq!(initial["data"]["events"], json!([]));
     let cursor = initial["data"]["cursor"].as_str().ok_or("cursor")?;
     assert_eq!(
-        request(reqwest::Method::GET, "/api/v1/sync", "alice")
+        request(reqwest::Method::GET, "/api/v1/sync", "c:alice")
             .query(&[("cursor", cursor)])
             .send()
             .await?
@@ -303,7 +303,7 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
     assert_eq!(
         client
             .get(format!("{base}/api/v1/sync"))
-            .bearer_auth("bob")
+            .bearer_auth("c:bob")
             .header("X-Org-ID", "elsewhere")
             .query(&[("cursor", cursor)])
             .send()
@@ -312,7 +312,7 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
         409
     );
     assert_eq!(
-        request(reqwest::Method::GET, "/api/v1/sync?limit=0", "bob")
+        request(reqwest::Method::GET, "/api/v1/sync?limit=0", "c:bob")
             .send()
             .await?
             .status(),
@@ -322,7 +322,7 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
         request(
             reqwest::Method::GET,
             "/api/v1/sync?reset=true&cursor=invalid",
-            "bob"
+            "c:bob"
         )
         .send()
         .await?
@@ -331,7 +331,7 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
     );
     let invalid = format!("{cursor}x");
     assert_eq!(
-        request(reqwest::Method::GET, "/api/v1/sync", "bob")
+        request(reqwest::Method::GET, "/api/v1/sync", "c:bob")
             .query(&[("cursor", invalid)])
             .send()
             .await?
@@ -341,11 +341,11 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
 
     let alice = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
     };
     let bob = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "bob".parse()?,
+        id: "c:bob".parse()?,
     };
     let conversation = store
         .create_conversation(CreateConversationCommand {
@@ -367,7 +367,7 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
             idempotency_key: Uuid::new_v4().to_string().parse()?,
         })
         .await?;
-    let page: Value = request(reqwest::Method::GET, "/api/v1/sync", "bob")
+    let page: Value = request(reqwest::Method::GET, "/api/v1/sync", "c:bob")
         .query(&[("cursor", cursor)])
         .send()
         .await?
@@ -375,13 +375,16 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
         .json()
         .await?;
     assert_eq!(page["data"]["events"][0]["message_id"], "000");
-    assert_eq!(page["data"]["events"][0]["conversation_id"], "alice::bob");
+    assert_eq!(
+        page["data"]["events"][0]["conversation_id"],
+        "c:alice::c:bob"
+    );
     assert_eq!(page["data"]["has_more"], false);
     assert!(!page.to_string().contains("HTTP retrieval remains"));
     let lease: Value = request(
         reqwest::Method::PUT,
         "/api/v1/presence/devices/laptop",
-        "bob",
+        "c:bob",
     )
     .json(&json!({"type":"renew_presence","data":{"activity":"typing"}}))
     .send()
@@ -395,9 +398,9 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
         request(
             reqwest::Method::PUT,
             "/api/v1/presence/devices/laptop",
-            "bob"
+            "c:bob"
         )
-        .json(&json!({"type":"renew_presence","data":{"member_id":"alice"}}))
+        .json(&json!({"type":"renew_presence","data":{"member_id":"c:alice"}}))
         .send()
         .await?
         .status(),
@@ -407,14 +410,14 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
         request(
             reqwest::Method::DELETE,
             "/api/v1/presence/devices/laptop",
-            "alice"
+            "c:alice"
         )
         .send()
         .await?
         .status(),
         204
     );
-    let still_online: Value = request(reqwest::Method::GET, "/api/v1/presence/bob", "bob")
+    let still_online: Value = request(reqwest::Method::GET, "/api/v1/presence/c:bob", "c:bob")
         .send()
         .await?
         .error_for_status()?
@@ -425,7 +428,7 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
         request(
             reqwest::Method::DELETE,
             "/api/v1/presence/devices/laptop",
-            "bob"
+            "c:bob"
         )
         .send()
         .await?
@@ -438,7 +441,7 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
         let reply: Value = request(
             reqwest::Method::POST,
             "/api/v1/delivery/registration",
-            "bob",
+            "c:bob",
         )
         .header("Idempotency-Key", &key)
         .json(&json!({"type":"delivery_registration","data":{}}))
@@ -447,13 +450,13 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
         .error_for_status()?
         .json()
         .await?;
-        assert_eq!(reply["data"]["for"], "bob");
+        assert_eq!(reply["data"]["for"], "c:bob");
     }
     assert_eq!(identity.0.load(Ordering::SeqCst), 1);
     request(
         reqwest::Method::POST,
         "/api/v1/delivery/registration",
-        "alice",
+        "c:alice",
     )
     .header("Idempotency-Key", &key)
     .json(&json!({"type":"delivery_registration","data":{}}))
@@ -465,10 +468,10 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
         request(
             reqwest::Method::POST,
             "/api/v1/delivery/registration",
-            "bob"
+            "c:bob"
         )
         .header("Idempotency-Key", Uuid::new_v4().to_string())
-        .json(&json!({"type":"delivery_registration","data":{"for":"alice"}}))
+        .json(&json!({"type":"delivery_registration","data":{"for":"c:alice"}}))
         .send()
         .await?
         .status(),

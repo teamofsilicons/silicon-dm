@@ -70,10 +70,10 @@ async fn references_preserve_boundaries_permissions_and_retention_while_presence
     .await?;
     store.migrate().await?;
     let org = format!("sync_{}", Uuid::new_v4().simple());
-    let alice = authority(&org, "alice")?;
-    let bob = authority(&org, "bob")?;
+    let alice = authority(&org, "c:alice")?;
+    let bob = authority(&org, "c:bob")?;
     let mallory = authority(&org, "mallory")?;
-    let outsider = authority("other_org", "bob")?;
+    let outsider = authority("other_org", "c:bob")?;
     let chat = store
         .create_conversation(CreateConversationCommand {
             organization_id: alice.organization_id.clone(),
@@ -91,7 +91,7 @@ async fn references_preserve_boundaries_permissions_and_retention_while_presence
     assert_eq!(first.events.len(), 1);
     assert_eq!(first.position, 1);
     assert!(first.has_more);
-    assert_eq!(first.events[0].conversation_id, "alice::bob");
+    assert_eq!(first.events[0].conversation_id, "c:alice::c:bob");
     assert_eq!(first.events[0].message_id, "000");
     let serialized = serde_json::to_string(&first.events)?;
     assert!(!serialized.contains("content must not"));
@@ -121,7 +121,7 @@ async fn references_preserve_boundaries_permissions_and_retention_while_presence
     // Access may disappear after the event was queued. Scan the position without
     // exposing the reference, and do not confuse that filtered row with a gap.
     let tag = Uuid::new_v4();
-    sqlx::query("UPDATE iam_membership_projections SET tag_ids=$1 WHERE organization_id=$2 AND actor_id='bob'")
+    sqlx::query("UPDATE iam_membership_projections SET tag_ids=$1 WHERE organization_id=$2 AND actor_id='c:bob'")
         .bind(vec![tag]).bind(&org).execute(store.pool()).await?;
     let group = store
         .create_group(
@@ -166,7 +166,7 @@ async fn references_preserve_boundaries_permissions_and_retention_while_presence
 
     // Exercise real retention deletion, with a short retention interval only in
     // this owned test database. Missing source rows must never silently advance.
-    sqlx::query("UPDATE actor_deliveries SET acked_at=clock_timestamp(), retain_until=clock_timestamp()+interval '1 millisecond' WHERE organization_id=$1 AND target_id='bob' AND sequence=2")
+    sqlx::query("UPDATE actor_deliveries SET acked_at=clock_timestamp(), retain_until=clock_timestamp()+interval '1 millisecond' WHERE organization_id=$1 AND target_id='c:bob' AND sequence=2")
         .bind(&org).execute(store.pool()).await?;
     sqlx::query("SELECT pg_sleep(0.01)")
         .execute(store.pool())

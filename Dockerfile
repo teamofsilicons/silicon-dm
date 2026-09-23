@@ -9,6 +9,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
 COPY migrations ./migrations
 COPY src ./src
+COPY vendor ./vendor
 COPY crates ./crates
 COPY docs ./docs
 

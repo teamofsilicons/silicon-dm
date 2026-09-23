@@ -32,7 +32,7 @@ async fn send_guard_precedes_queue_and_override_warns_only_after_delivery() -> R
             "expires_at":4102444800u64, "tokens":{
                 "access_token":"test-access", "refresh_token":"test-refresh", "token_type":"Bearer",
                 "expires_in":1800, "scope":"dm", "organization_id":"org",
-                "actor":{"type":sender,"id":"sender:org"}
+                "actor":{"type":sender,"id":"si:sender"}
             }
         }))?;
         store.update(|config| {
@@ -50,9 +50,9 @@ async fn send_guard_precedes_queue_and_override_warns_only_after_delivery() -> R
             .respond_with(response(json!({"items":[], "next_cursor":"page-two"})))
             .mount(&server)
             .await;
-        let mut participants = vec![json!({"type":"silicon","id":"peer:org"})];
+        let mut participants = vec![json!({"type":"silicon","id":"si:peer"})];
         if carbon {
-            participants.push(json!({"type":"carbon","id":"saket"}));
+            participants.push(json!({"type":"carbon","id":"c:saket"}));
         }
         Mock::given(method("GET")).and(path("/api/v1/conversations"))
             .and(query_param("cursor", "page-two"))
@@ -94,7 +94,7 @@ async fn send_guard_precedes_queue_and_override_warns_only_after_delivery() -> R
                 "send",
                 id,
                 "--to",
-                "peer:org",
+                "si:peer",
             ]);
         if data_file {
             let file = directory.path().join("message.json");

@@ -24,7 +24,7 @@ paths:
       tags: [Delivery]
       summary: Explicitly enroll the authenticated recipient for Ting notifications.
       description: >-
-        Registers or reconnects the authenticated actor's tos>dm recipient grant in Ting using
+        Registers or reconnects the authenticated actor's dm recipient grant in Ting using
         their current IAM consent. Requires the approved external subscriptions.register scope
         and self.identity.read. This is not a Ting login or webhook registration. Completed
         Idempotency-Key retries return the cached public subscription without reactivating a
@@ -350,7 +350,7 @@ paths:
                 value:
                   type: create_conversation
                   data:
-                    participant_ids: [bob@example.com, 'assistant:acme']
+                    participant_ids: [bob@example.com, 'si:assistant']
               unknown_member:
                 summary: If one requested member cannot be verified, the entire request fails with 422.
                 value:
@@ -1971,7 +1971,7 @@ components:
       required: [transport, app_id, api_base_url, browser_origin, receiver_authentication, publisher_authority, registration_path, sync_path, presence_path, receipts_path, dm_websocket_supported]
       properties:
         transport: {type: string, const: ting}
-        app_id: {type: string, const: 'tos>ting'}
+        app_id: {type: string, const: 'ting'}
         api_base_url: {type: string, format: uri}
         browser_origin: {type: string, format: uri, const: 'https://ting.teamofsilicons.com'}
         receiver_authentication: {type: string, const: ting_session}
@@ -2002,7 +2002,7 @@ components:
       required: [id, app_id, for, active]
       properties:
         id: {type: string, description: Opaque Ting subscription identifier.}
-        app_id: {type: string, example: 'tos>dm'}
+        app_id: {type: string, example: 'dm'}
         for: {type: string, description: Authenticated recipient's canonical public ID.}
         active: {type: boolean, const: true}
     SyncEvent:
@@ -2147,7 +2147,7 @@ components:
         id:
           type: string
           description: IAM account ID.
-          examples: [alice@example.com, 'assistant:acme']
+          examples: [alice@example.com, 'si:assistant']
     Conversation:
       type: object
       required: [id, org_id, participants, created_at, updated_at]

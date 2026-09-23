@@ -1,0 +1,24 @@
+# Public identifier cutover
+
+The new public values are `c:alice`, `si:assistant`, `dm` and `c:alice[tos]` / `si:assistant[tos]`. An ISI address is `deliberate@si:assistant`. Organization IDs and `g:tos:group-name` group addresses do not change. Actor kind and organization grants come from authenticated IAM snapshots.
+
+1. Run IAM's global actor/app collision preflight first. Stop new writes and drain clients' pending offline sends and the DM Ting handoffs that already have a prepared request body. Migration 0036 refuses a prepared, unaccepted handoff: replaying its old signed bytes under a new recipient/app would be unsafe. Keep its original idempotency key; do not resend it as a new operation.
+2. Back up production and every sandbox. Apply IAM/SDK 4.0.0 and service migrations together while writers are stopped. Update `DM_IAM_APP_ID=dm`, Ting audience `ting`, scopes `obo:ting:...`, Honeycomb registration and environment app references. The sandbox schema migrator applies the same migration to each isolated data schema.
+3. Migration 0036 converts only enumerated identity-reference columns and ISI address components. It checks for many-to-one actor mapping collisions, retains membership/resource UUIDs, preserves FK definitions and historical `NOT VALID` checks in their original validation state, and restores exact user-trigger modes and RLS after the transaction. Errors roll back the entire migration. User text, attachments, signed bodies, historical response JSON and request digests are not searched or rewritten.
+4. Direct conversation addresses derive from migrated participant rows. Existing conversation UUIDs remain the same. The private participant dedup hash changes from BLAKE3 to SHA-256 over the same length-prefixed `(kind,id)` sequence, allowing PostgreSQL and Rust to recompute the same value. The database participant JSON/fingerprint is rebuilt. Group identities are retained. A migration regression verifies that opening the same chat after cutover resolves the original UUID and retains its exact old idempotency receipt.
+5. Existing Ting access-token ciphertext retains its original app/actor AAD components in `aad_app_id` and `aad_actor_id`. The reader uses those components only for decryption, while lookups and fresh IAM authorization use the new IDs. Re-encryption on the next verified write clears them. The migration regression decrypts a real pre-cutover token after migration.
+6. Restart workers/clients with the new SDK and schemas. Re-fetch IAM memberships and Ting registration. Clients should refresh cached session/identity data; old public addresses in unsent client-side queues must be resolved before the cutover, never blindly changed inside content. Verify two-way delivery, direct/group history, same-key replay, expired/foreign authority denial, and every sandbox separately.
+
+Rollback requires restoring the coordinated database snapshots and the old binaries/configuration with writers stopped. Do not run old writers against the new schema. Immutable historical response bodies intentionally retain their original bytes, even when those bytes contain old public identifiers.
+
+The matching IAM SDK 4.0.0 source is vendored under `vendor/silicon-iam-client`, with normalized Cargo metadata and local snapshot provenance. Standalone and Docker builds use this source. This change does not publish a new SDK release.
+
+Ting is an external coordinated dependency. The local checkout does not contain its server source: deploy a schema-compatible Ting service and migrate its state before reopening delivery. The pinned `silicon-ting-client` 0.1.2 accepts opaque recipient/app IDs; its `Prepared` registration/send behavior is covered with `c:`, `si:` and bare apps in the DM client tests. No Ting SDK patch is required.
+
+Migration 0035 is the already-deployed testing runtime revision migration from DM 0.10.1. Its bytes remain unchanged; this identifier cutover follows it as migration 0036. The source includes that release’s runtime-revision fencing and Ting organization-ID resolution fixes.
+
+## Release candidate validation
+
+Version 0.11.0 is a coordinated breaking public-identifier release, based on the deployed 0.10.1 source (`82412e9a21ae6f1ee52f02ba9efbe9ddb14d77d5`). Its shipped migrations 0001–0035 are byte-for-byte unchanged. Existing newer Ting delivery and testing-runtime fencing fixes are included. This candidate has not been published or deployed.
+
+Local validation passed 215 Rust tests (four live IAM tests ignored), with all features and targets, strict Clippy, formatting, the identifier migration and direct-conversation/AEAD preservation regression, the deployed HTTP and Ting database/transport suites, four client Ting hydration tests including canonical organization UUID mapping, and all 89 web tests. Production Ting readiness and coordinated backup, drain, migration and runtime-config gates remain release prerequisites.

@@ -6,7 +6,7 @@ Silicon IAM owns all Carbon and Silicon authentication, organization membership,
 
 ## Backend application registration
 
-The production application is `tos>dm`. Its registered callback is:
+The production application is `dm`. Its registered callback is:
 
 ```text
 POST https://backend.dm.teamofsilicons.com/webhook/
@@ -17,7 +17,7 @@ Use the exact trailing slash. Configure the following only in backend secret sto
 | Variable | Purpose |
 | --- | --- |
 | `DM_IAM_BASE_URL` | IAM origin, normally `https://backend.iam.teamofsilicons.com` |
-| `DM_IAM_APP_ID` | Canonical IAM application ID, `tos>dm` |
+| `DM_IAM_APP_ID` | Canonical IAM application ID, `dm` |
 | `DM_IAM_APP_SECRET` | Current application credential issued by IAM |
 | `DM_IAM_WEBHOOK_SECRET` | Caller-selected secret registered with IAM; 32–512 visible ASCII characters |
 | `DM_IAM_WEBHOOK_KEY_VERSION` | Exact webhook signing version, initially `1` |
@@ -52,7 +52,7 @@ DM calls the SDK's `oauth().login(app_id, slt, mutation)` using its server-side 
     "scope": "memberships.read offline_access organizations.read profile roles.read",
     "actor": {
       "type": "carbon",
-      "id": "alice"
+      "id": "c:alice"
     },
     "organization_id": "tos",
     "organization_ids": [
@@ -144,7 +144,7 @@ webhook is delayed.
 
 ## Ting authority and access-token retention
 
-DM declares `tos>ting` external endpoints `subscriptions.register` and
+DM declares `ting` external endpoints `subscriptions.register` and
 `tings.send`, alongside `self.identity.read`. These scopes need accepted
 application configuration and the account's consent. A preexisting token does
 not automatically gain newly requested scopes.
@@ -168,7 +168,7 @@ Sandbox secrets, cache entries and generation fences cannot authorize production
 
 ## IAM testing environment binding
 
-A DM testing environment requires a real IAM testing environment and an imported copy of `tos>dm`. Import the existing canonical app using the installed IAM CLI, which issues a fresh **test-only application secret** while preserving approved application configuration. Do not submit the production app secret as the test credential. The imported webhook configuration initially retains the registered callback and signing secret. To register a dedicated callback for an IAM test application, supply both optional `iam_webhook_secret` and `iam_webhook_key_version` in the DM environment creation body. The secret must contain 32–512 visible ASCII characters and the version must be positive. DM encrypts the override separately from the test application credential. Omit both to inherit the backend signer. This permits a local tunnel callback and independently rotated test signer without changing the production callback. Use IAM's returned webhook key version: changing a callback can advance it even when the secret is reused.
+A DM testing environment requires a real IAM testing environment and an imported copy of `dm`. Import the existing canonical app using the installed IAM CLI, which issues a fresh **test-only application secret** while preserving approved application configuration. Do not submit the production app secret as the test credential. The imported webhook configuration initially retains the registered callback and signing secret. To register a dedicated callback for an IAM test application, supply both optional `iam_webhook_secret` and `iam_webhook_key_version` in the DM environment creation body. The secret must contain 32–512 visible ASCII characters and the version must be positive. DM encrypts the override separately from the test application credential. Omit both to inherit the backend signer. This permits a local tunnel callback and independently rotated test signer without changing the production callback. Use IAM's returned webhook key version: changing a callback can advance it even when the secret is reused.
 
 Passing an IAM test application's `app_secret` asks IAM 1.8's testing-context API
 to discover its environment, canonical application ID, current credential version,

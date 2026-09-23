@@ -203,7 +203,7 @@ paths:
                 value:
                   type: create_conversation
                   data:
-                    participant_ids: [bob@example.com, 'assistant:acme']
+                    participant_ids: [bob@example.com, 'si:assistant']
               unknown_member:
                 summary: If one requested member cannot be verified, the entire request fails with 422.
                 value:
@@ -797,7 +797,7 @@ paths:
           - name: 'channel: bundle'
             direction: client → server
             schema: {$ref: '#/components/schemas/SharedClientChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Create a bundle atomically using the HTTP bundle rules. 1–100 unique
+            description: After subscribing assistant-work as si:assistant in acme. Create a bundle atomically using the HTTP bundle rules. 1–100 unique
               existing messages from the same conversation, none already bundled; caller supplies display content. Reuse the idempotency key and identical
               content after timeout or reconnect. Same key and content returns the same bundle; changed content conflicts. No partial bundle or display
               message on failure.
@@ -808,7 +808,7 @@ paths:
                 frame:
                   type: bundle
                   data:
-                    member_id: assistant:acme
+                    member_id: si:assistant
                     org_id: acme
                     conversation_id: g:acme:engineering
                     idempotency_key: bundle-engineering-001
@@ -819,7 +819,7 @@ paths:
           - name: 'channel: bundle.success'
             direction: server → client
             schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Durable creation confirmation, also returned for an identical retry.
+            description: After subscribing assistant-work as si:assistant in acme. Durable creation confirmation, also returned for an identical retry.
               Correlate by member_id, conversation_id and idempotency_key. No delivery ACK for this frame; the display message is delivered separately as
               message.created with data.metadata.
             example:
@@ -836,7 +836,7 @@ paths:
                       message-id: '004'
                       conversation_id: g:acme:engineering
                       recipient_id: g:acme:engineering
-                      sender: {type: silicon, id: 'assistant:acme'}
+                      sender: {type: silicon, id: 'si:assistant'}
                       message: 'Summary: We agreed to ship on Friday.'
                       attachments: []
                       voice_transcript: null
@@ -848,14 +848,14 @@ paths:
                       delivered_at: null
                       read_at: null
                       history: []
-                    created_by: {type: silicon, id: 'assistant:acme'}
+                    created_by: {type: silicon, id: 'si:assistant'}
                     created_at: '2026-09-17T10:00:00Z'
-                    member_id: assistant:acme
+                    member_id: si:assistant
                     idempotency_key: bundle-engineering-001
           - name: 'channel: bundle.success: identical retry'
             direction: server → client
             schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Resend the identical bundle request with the same idempotency_key.
+            description: After subscribing assistant-work as si:assistant in acme. Resend the identical bundle request with the same idempotency_key.
               Returns the original bundle and display message IDs without creating duplicates.
             example:
               type: channel
@@ -871,7 +871,7 @@ paths:
                       message-id: '004'
                       conversation_id: g:acme:engineering
                       recipient_id: g:acme:engineering
-                      sender: {type: silicon, id: 'assistant:acme'}
+                      sender: {type: silicon, id: 'si:assistant'}
                       message: 'Summary: We agreed to ship on Friday.'
                       attachments: []
                       voice_transcript: null
@@ -883,14 +883,14 @@ paths:
                       delivered_at: null
                       read_at: null
                       history: []
-                    created_by: {type: silicon, id: 'assistant:acme'}
+                    created_by: {type: silicon, id: 'si:assistant'}
                     created_at: '2026-09-17T10:00:00Z'
-                    member_id: assistant:acme
+                    member_id: si:assistant
                     idempotency_key: bundle-engineering-001
           - name: 'channel: bundle.error: invalid input'
             direction: server → client
             schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Reject invalid content, duplicate IDs, or a count outside 1–100. No
+            description: After subscribing assistant-work as si:assistant in acme. Reject invalid content, duplicate IDs, or a count outside 1–100. No
               partial changes; socket remains open.
             example:
               type: channel
@@ -902,13 +902,13 @@ paths:
                     code: invalid_request
                     message: bundle message_ids must be unique
                     recoverable: true
-                    member_id: assistant:acme
+                    member_id: si:assistant
                     conversation_id: g:acme:engineering
                     idempotency_key: bundle-engineering-001
           - name: 'channel: bundle.error: forbidden'
             direction: server → client
             schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Reject a Carbon creator, unauthorized member or organization, or missing
+            description: After subscribing assistant-work as si:assistant in acme. Reject a Carbon creator, unauthorized member or organization, or missing
               conversation access. No partial changes; socket remains open.
             example:
               type: channel
@@ -920,13 +920,13 @@ paths:
                     code: forbidden
                     message: only a Silicon with conversation access may create bundles
                     recoverable: true
-                    member_id: assistant:acme
+                    member_id: si:assistant
                     conversation_id: g:acme:engineering
                     idempotency_key: bundle-engineering-001
           - name: 'channel: bundle.error: conversation missing'
             direction: server → client
             schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. The target conversation does not exist; no conversation is created
+            description: After subscribing assistant-work as si:assistant in acme. The target conversation does not exist; no conversation is created
               by this command. No partial changes; socket remains open.
             example:
               type: channel
@@ -934,12 +934,12 @@ paths:
                 subscription_id: assistant-work
                 frame:
                   type: bundle.error
-                  data: {code: not_found, message: conversation not found, recoverable: true, member_id: 'assistant:acme', conversation_id: 'g:acme:engineering',
+                  data: {code: not_found, message: conversation not found, recoverable: true, member_id: 'si:assistant', conversation_id: 'g:acme:engineering',
                     idempotency_key: bundle-engineering-001}
           - name: 'channel: bundle.error: messages unavailable'
             direction: server → client
             schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Reject missing messages, messages from another conversation, and messages
+            description: After subscribing assistant-work as si:assistant in acme. Reject missing messages, messages from another conversation, and messages
               already in any bundle, including display messages. No partial changes; socket remains open.
             example:
               type: channel
@@ -951,13 +951,13 @@ paths:
                     code: conflict
                     message: one or more bundle messages are unavailable or already bundled
                     recoverable: true
-                    member_id: assistant:acme
+                    member_id: si:assistant
                     conversation_id: g:acme:engineering
                     idempotency_key: bundle-engineering-001
           - name: 'channel: bundle.error: idempotency conflict'
             direction: server → client
             schema: {$ref: '#/components/schemas/SharedServerChannelFrame'}
-            description: After subscribing assistant-work as assistant:acme in acme. Use a new key for a different operation; retry unchanged content with
+            description: After subscribing assistant-work as si:assistant in acme. Use a new key for a different operation; retry unchanged content with
               the original key after a lost confirmation. No partial changes; socket remains open.
             example:
               type: channel
@@ -969,7 +969,7 @@ paths:
                     code: conflict
                     message: idempotency key was already used with different request content
                     recoverable: true
-                    member_id: assistant:acme
+                    member_id: si:assistant
                     conversation_id: g:acme:engineering
                     idempotency_key: bundle-engineering-001
           - name: unsubscribe.success
@@ -1556,7 +1556,7 @@ paths:
               value: [alice@example.com]
             multiple_members:
               summary: Repeated query keys; requires a token authorized for every listed member.
-              value: [alice@example.com, 'assistant:acme']
+              value: [alice@example.com, 'si:assistant']
         - name: org_id
           in: query
           required: true
@@ -1641,7 +1641,7 @@ paths:
             example:
               type: bundle
               data:
-                member_id: assistant:acme
+                member_id: si:assistant
                 org_id: acme
                 conversation_id: g:acme:engineering
                 idempotency_key: bundle-engineering-001
@@ -1664,7 +1664,7 @@ paths:
                   message-id: '004'
                   conversation_id: g:acme:engineering
                   recipient_id: g:acme:engineering
-                  sender: {type: silicon, id: 'assistant:acme'}
+                  sender: {type: silicon, id: 'si:assistant'}
                   message: 'Summary: We agreed to ship on Friday.'
                   attachments: []
                   voice_transcript: null
@@ -1676,9 +1676,9 @@ paths:
                   delivered_at: null
                   read_at: null
                   history: []
-                created_by: {type: silicon, id: 'assistant:acme'}
+                created_by: {type: silicon, id: 'si:assistant'}
                 created_at: '2026-09-17T10:00:00Z'
-                member_id: assistant:acme
+                member_id: si:assistant
                 idempotency_key: bundle-engineering-001
           - name: 'bundle.success: identical retry'
             direction: server → client
@@ -1695,7 +1695,7 @@ paths:
                   message-id: '004'
                   conversation_id: g:acme:engineering
                   recipient_id: g:acme:engineering
-                  sender: {type: silicon, id: 'assistant:acme'}
+                  sender: {type: silicon, id: 'si:assistant'}
                   message: 'Summary: We agreed to ship on Friday.'
                   attachments: []
                   voice_transcript: null
@@ -1707,9 +1707,9 @@ paths:
                   delivered_at: null
                   read_at: null
                   history: []
-                created_by: {type: silicon, id: 'assistant:acme'}
+                created_by: {type: silicon, id: 'si:assistant'}
                 created_at: '2026-09-17T10:00:00Z'
-                member_id: assistant:acme
+                member_id: si:assistant
                 idempotency_key: bundle-engineering-001
           - name: 'bundle.error: invalid input'
             direction: server → client
@@ -1721,7 +1721,7 @@ paths:
                 code: invalid_request
                 message: bundle message_ids must be unique
                 recoverable: true
-                member_id: assistant:acme
+                member_id: si:assistant
                 conversation_id: g:acme:engineering
                 idempotency_key: bundle-engineering-001
           - name: 'bundle.error: forbidden'
@@ -1735,7 +1735,7 @@ paths:
                 code: forbidden
                 message: only a Silicon with conversation access may create bundles
                 recoverable: true
-                member_id: assistant:acme
+                member_id: si:assistant
                 conversation_id: g:acme:engineering
                 idempotency_key: bundle-engineering-001
           - name: 'bundle.error: conversation missing'
@@ -1744,7 +1744,7 @@ paths:
             description: The target conversation does not exist; no conversation is created by this command. No partial changes; socket remains open.
             example:
               type: bundle.error
-              data: {code: not_found, message: conversation not found, recoverable: true, member_id: 'assistant:acme', conversation_id: 'g:acme:engineering',
+              data: {code: not_found, message: conversation not found, recoverable: true, member_id: 'si:assistant', conversation_id: 'g:acme:engineering',
                 idempotency_key: bundle-engineering-001}
           - name: 'bundle.error: messages unavailable'
             direction: server → client
@@ -1757,7 +1757,7 @@ paths:
                 code: conflict
                 message: one or more bundle messages are unavailable or already bundled
                 recoverable: true
-                member_id: assistant:acme
+                member_id: si:assistant
                 conversation_id: g:acme:engineering
                 idempotency_key: bundle-engineering-001
           - name: 'bundle.error: idempotency conflict'
@@ -1771,7 +1771,7 @@ paths:
                 code: conflict
                 message: idempotency key was already used with different request content
                 recoverable: true
-                member_id: assistant:acme
+                member_id: si:assistant
                 conversation_id: g:acme:engineering
                 idempotency_key: bundle-engineering-001
           - name: connection.ready
@@ -3209,7 +3209,7 @@ components:
         id:
           type: string
           description: IAM account ID.
-          examples: [alice@example.com, 'assistant:acme']
+          examples: [alice@example.com, 'si:assistant']
     Conversation:
       type: object
       required: [id, org_id, participants, created_at, updated_at]

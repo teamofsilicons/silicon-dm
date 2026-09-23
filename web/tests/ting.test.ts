@@ -17,7 +17,7 @@ const testing = {
 };
 const identityFor = (environment: unknown) => ({
   authenticated: true,
-  id: "alice",
+  id: "c:alice",
   kind: "carbon",
   environment,
 });
@@ -141,7 +141,7 @@ async function fixture(
   vm.runInContext(bundle.outputFiles[0]!.text, context);
   const connection = context.ting.watchTing(
     "https://ting.example",
-    { id: "alice", type: "carbon" },
+    { id: "c:alice", type: "carbon" },
     "tos",
     environment,
     () => hints++,
@@ -192,7 +192,7 @@ test("Ting production cookie session is verified before scoped hints without rea
 test("same identifier with another member kind cannot open Ting watcher", async () => {
   const f = await fixture({
     authenticated: true,
-    id: "alice",
+    id: "c:alice",
     kind: "silicon",
   });
   try {
@@ -292,13 +292,13 @@ for (const [label, identity, expected, state] of [
   ],
   [
     "legacy missing environment",
-    { authenticated: true, id: "alice", kind: "carbon" },
+    { authenticated: true, id: "c:alice", kind: "carbon" },
     production,
     "unverified",
   ],
   [
     "legacy missing test environment",
-    { authenticated: true, id: "alice", kind: "carbon" },
+    { authenticated: true, id: "c:alice", kind: "carbon" },
     testing,
     "unverified",
   ],

@@ -82,7 +82,7 @@ mod tests {
     fn actor(actor_type: ActorType) -> Actor {
         Actor {
             actor_type,
-            id: "test:org".into(),
+            id: "si:test".into(),
         }
     }
 

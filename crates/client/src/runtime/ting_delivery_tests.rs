@@ -83,9 +83,9 @@ impl Fixture {
                 |id| json!({"kind":"testing","id":id,"generation":1}),
             )),
             iam_environment: test,
-            iam_app: "tos>ting".into(),
+            iam_app: "ting".into(),
             kind: "silicon".into(),
-            actor: "cos:tos".into(),
+            actor: "si:cos".into(),
             org: "tos".into(),
             fail_login: false,
             logins: vec![],
@@ -93,17 +93,17 @@ impl Fixture {
         }));
         let dm=Router::new()
             .route("/api/v1/iam",get(|State(state):State<Arc<Mutex<ServerState>>>|async move {
-                let state=state.lock().unwrap();Json(json!({"app_id":"tos>dm","iam_base_url":state.origin,
+                let state=state.lock().unwrap();Json(json!({"app_id":"dm","iam_base_url":state.origin,
                     "api_base_url":state.origin,"testing_environment_id":state.environment,"testing_generation":state.generation}))
             }))
             .route("/api/v1/auth/me",get(|headers:HeaderMap|async move {
                 assert_eq!(headers["authorization"],"Bearer fixture-dm-access");
-                Json(json!({"member":{"type":"silicon","id":"cos:tos"},"organization_id":"tos",
-                    "principal_id":"cos:tos","session_id":null,"org_role":null,"capabilities":[]}))
+                Json(json!({"member":{"type":"silicon","id":"si:cos"},"organization_id":"tos",
+                    "principal_id":"si:cos","session_id":null,"org_role":null,"capabilities":[]}))
             }))
             .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
         let app=dm.merge(Router::new()
-            .route("/v1/iam",get(||async{Json(json!({"app_id":"tos>ting"}))}))
+            .route("/v1/iam",get(||async{Json(json!({"app_id":"ting"}))}))
             .route("/v1/session",post(login))
             .route("/v1/me",get(me))
             .route("/v1/orgs",get(|State(state):State<Arc<Mutex<ServerState>>>,headers:HeaderMap|async move {
@@ -114,7 +114,7 @@ impl Fixture {
                 Json(json!({"items":items}))
             }))
             .route("/api/v1/application/testing-context",get(|State(state):State<Arc<Mutex<ServerState>>>,headers:HeaderMap|async move {
-                assert_eq!(headers["authorization"],"Basic dG9zPnRpbmc6Zml4dHVyZS10aW5nLWFwcC1zZWNyZXQ=");
+                assert_eq!(headers["authorization"],"Basic dGluZzpmaXh0dXJlLXRpbmctYXBwLXNlY3JldA==");
                 assert_eq!(headers["x-testing-environment-key"],"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
                 let mut state=state.lock().unwrap();state.iam_calls+=1;
                 Json(json!({"environment_id":state.iam_environment,"application":{"app_id":state.iam_app,"base_url":state.origin,
@@ -128,7 +128,7 @@ impl Fixture {
             config.profiles.insert(store::session_key("fixture",test),serde_json::from_value(json!({
                 "name":"fixture","base_url":origin,"device_id":"device","enabled":true,"expires_at":4_000_000_000_u64,
                 "testing_environment_id":test,"tokens":{"access_token":"fixture-dm-access","refresh_token":"fixture-dm-rotating-refresh",
-                "token_type":"Bearer","expires_in":3600,"scope":"dm","member":{"type":"silicon","id":"cos:tos"},"organization_id":"tos"}}))?);
+                "token_type":"Bearer","expires_in":3600,"scope":"dm","member":{"type":"silicon","id":"si:cos"},"organization_id":"tos"}}))?);
             if let Some(id)=test {config.testing_keys.insert(id,store::TestKey {key:"dddddddddddddddddddddddddddddddd".into(),base_url:origin.clone()});}
             Ok(())
         })?;
@@ -247,7 +247,7 @@ async fn every_daemon_action_rechecks_ting_context_after_login() -> Result<()> {
             calls.lock().unwrap().push(request.clone());
             std::future::ready(Ok(match request["op"].as_str().unwrap() {
                 "destinations" => json!({"hook-stable":url}),
-                "webhook" => json!({"id":"hook-stable","state":"connected","for":"cos:tos"}),
+                "webhook" => json!({"id":"hook-stable","state":"connected","for":"si:cos"}),
                 "status" => json!({"connected":true}),
                 "reconnect" => json!({"reconnected":true}),
                 _ => panic!("unexpected IPC"),
@@ -366,7 +366,7 @@ async fn direct_ting_attachment_keeps_ids_and_never_gives_daemon_dm_credentials(
             }
             "webhook" => {
                 assert_eq!(request["url"], url.as_str());
-                json!({"id":"hook-stable","state":"connected","for":"cos:tos"})
+                json!({"id":"hook-stable","state":"connected","for":"si:cos"})
             }
             "unhook" => {
                 assert_eq!(request["id"], "hook-stable");
@@ -436,7 +436,7 @@ async fn member_kind_organization_and_unverified_session_cannot_cross_bindings()
         {
             let mut state = fixture.state.lock().unwrap();
             match mismatch {
-                "member" => state.actor = "other:tos".into(),
+                "member" => state.actor = "si:other".into(),
                 "kind" => state.kind = "carbon".into(),
                 "ambiguous organization" => state.duplicate_org = true,
                 _ => state.org = "other".into(),
@@ -489,7 +489,7 @@ async fn sandbox_credentials_are_iam_verified_and_generation_fenced_before_slt_o
     );
     assert!(fixture.state.lock().unwrap().logins.is_empty());
     fixture.state.lock().unwrap().iam_environment = fixture.test;
-    fixture.state.lock().unwrap().iam_app = "tos>other".into();
+    fixture.state.lock().unwrap().iam_app = "other".into();
     assert!(
         fixture
             .runtime
@@ -498,7 +498,7 @@ async fn sandbox_credentials_are_iam_verified_and_generation_fenced_before_slt_o
             .is_err()
     );
     assert!(fixture.state.lock().unwrap().logins.is_empty());
-    fixture.state.lock().unwrap().iam_app = "tos>ting".into();
+    fixture.state.lock().unwrap().iam_app = "ting".into();
     fixture.runtime.delivery_login(&fixture.options()).await?;
     assert_eq!(fixture.state.lock().unwrap().iam_calls, 3);
     fixture.state.lock().unwrap().generation = Some(2);
@@ -567,7 +567,7 @@ async fn uncertain_daemon_attachment_recovers_stable_id_without_second_creation(
                 json!({"hook-recovered":url})
             } else {
                 assert_eq!(request["id"], "hook-recovered");
-                json!({"id":"hook-recovered","state":"connected","for":"cos:tos"})
+                json!({"id":"hook-recovered","state":"connected","for":"si:cos"})
             }))
         })
         .await?;
@@ -623,4 +623,26 @@ async fn uncertain_login_reuses_key_and_absolute_replay_window_without_secret_ou
     );
     assert!(profile.read::<Value>("dm-login-attempt.json")?.is_none());
     Ok(())
+}
+
+#[test]
+fn ting_sdk_accepts_current_actor_and_application_schema() {
+    for actor in ["c:alice", "si:assistant"] {
+        let registration =
+            serde_json::to_vec(&json!({"org_id":"tos", "app_id":"dm", "for":actor})).unwrap();
+        assert!(
+            ting_client::Prepared::new(
+                ting_client::ProofOperation::Register,
+                registration,
+                Some("tos")
+            )
+            .is_ok()
+        );
+        let send = serde_json::to_vec(&json!({"org_id":"tos", "type":"dm.sync.changed", "for":actor, "key":"schema-regression", "data":{}})).unwrap();
+        assert!(
+            ting_client::Prepared::new(ting_client::ProofOperation::Send, send, Some("tos"))
+                .is_ok()
+        );
+    }
+    assert_eq!(ting_client::type_app("dm.sync.changed").unwrap(), "dm");
 }

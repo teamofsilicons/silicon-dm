@@ -2,7 +2,7 @@
 
 ## Current status — 2026-09-23
 
-Honeycomb 0.3.3 and IAM 3.0.3 are deployed. Honeycomb now preserves the distinction
+Honeycomb 0.3.3 and IAM 3.0.2 are deployed. Honeycomb now preserves the distinction
 between its positive local configuration revision and IAM's accepted imported
 revision 0. New rotations bind the accepted IAM revision before saving the exact
 request; reconciliation recognizes the proven import mapping. A definitive
@@ -51,7 +51,7 @@ change lifecycle state, or deploy a repair. No credentials are included.
 ## Affected operation and observed state
 
 - Shared testing environment: `d70c8674-6d2e-41d4-bf8d-96ddd882edbd`.
-- Application: `tos>ting`.
+- Application: `ting`.
 - Secret rotation operation: `a2b700ff-90dd-4795-b6c1-27e98871ba9c`.
 - The rotation response reported `state: pending` and
   `error_code: revision_conflict`.
@@ -66,7 +66,7 @@ change lifecycle state, or deploy a repair. No credentials are included.
 Safe read-only reproduction of the projection and operation:
 
 ```sh
-honeycomb --test d70c8674-6d2e-41d4-bf8d-96ddd882edbd --json apps get 'tos>ting'
+honeycomb --test d70c8674-6d2e-41d4-bf8d-96ddd882edbd --json apps get 'ting'
 honeycomb --test d70c8674-6d2e-41d4-bf8d-96ddd882edbd --json operations get a2b700ff-90dd-4795-b6c1-27e98871ba9c
 ```
 

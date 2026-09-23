@@ -686,7 +686,7 @@ function EnvironmentForm(props: {
       props.current?.description || "",
     ),
     [values, setValues] = createSignal<Record<string, string>>({
-      iam_app_id: "tos>dm",
+      iam_app_id: "dm",
     }),
     [busy, setBusy] = createSignal(false),
     [error, setError] = createSignal<unknown>();

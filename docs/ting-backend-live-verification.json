@@ -22,11 +22,11 @@
       "messages": [
         {
           "id": "001",
-          "conversation_id": "dm-ting-tester::dm-ting-bot:tos"
+          "conversation_id": "dm-ting-tester::dm-si:ting-bot"
         },
         {
           "id": "002",
-          "conversation_id": "dm-ting-tester::dm-ting-bot:tos"
+          "conversation_id": "dm-ting-tester::dm-si:ting-bot"
         }
       ],
       "passed": true
@@ -42,7 +42,7 @@
       ],
       "pending": [
         {
-          "target_id": "dm-ting-bot:tos",
+          "target_id": "si:dm-ting-bot",
           "accepted": false,
           "last_error_code": "ting_originator_authentication_required",
           "attempt_count": 9
@@ -56,7 +56,7 @@
       ],
       "accepted": [
         {
-          "target_id": "dm-ting-bot:tos",
+          "target_id": "si:dm-ting-bot",
           "accepted": true,
           "last_error_code": null,
           "attempt_count": 12

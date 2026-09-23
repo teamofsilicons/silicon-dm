@@ -343,7 +343,7 @@ struct Content {
     /// Sender address; an optional ISI prefix is supported for silicon accounts.
     #[arg(long, visible_alias = "from")]
     sender_id: Option<String>,
-    /// Intended participant address, for example deliberate@cos:tos.
+    /// Intended participant address, for example deliberate@si:cos.
     #[arg(long, visible_alias = "to")]
     recipient_id: Option<String>,
     /// Message JSON file or '-'; supports text, attachment URLs, transcript and reply.
@@ -427,7 +427,7 @@ enum Messages {
     },
     /// Send any combination of text, existing links, voice or GIFs.
     #[command(
-        after_help = "EXAMPLES\n  dm messages send cos:tos --text 'hey'\n  dm messages send cos:tos --attachment https://example.com/file.pdf\n  dm messages send cos:tos --text \"what's up\" --reply-to 000\n  dm messages send cos:tos --data message.json\n\nJSON: {\"message\":\"hey\",\"attachments\":[],\"voice_transcript\":null,\"reply\":null}. Audio URLs go in attachments.\nNEXT: dm messages list cos:tos"
+        after_help = "EXAMPLES\n  dm messages send si:cos --text 'hey'\n  dm messages send si:cos --attachment https://example.com/file.pdf\n  dm messages send si:cos --text \"what's up\" --reply-to 000\n  dm messages send si:cos --data message.json\n\nJSON: {\"message\":\"hey\",\"attachments\":[],\"voice_transcript\":null,\"reply\":null}. Audio URLs go in attachments.\nNEXT: dm messages list si:cos"
     )]
     Send {
         #[arg(help = "Recipient account, direct conversation address, or group address")]
@@ -1587,9 +1587,9 @@ mod command_tests {
             "send",
             "00000000-0000-0000-0000-000000000001",
             "--from",
-            "compose@writer:tos",
+            "compose@si:writer",
             "--to",
-            "deliberate@cos:tos",
+            "deliberate@si:cos",
             "--text",
             "hello",
         ])?;
@@ -1600,8 +1600,8 @@ mod command_tests {
             bail!("wrong command")
         };
         let message = content.read()?;
-        assert_eq!(message.sender_id.as_deref(), Some("compose@writer:tos"));
-        assert_eq!(message.recipient_id.as_deref(), Some("deliberate@cos:tos"));
+        assert_eq!(message.sender_id.as_deref(), Some("compose@si:writer"));
+        assert_eq!(message.recipient_id.as_deref(), Some("deliberate@si:cos"));
         Ok(())
     }
 }

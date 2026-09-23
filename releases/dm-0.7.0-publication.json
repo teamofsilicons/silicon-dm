@@ -1,11 +1,11 @@
 {
-  "app_id": "tos>dm",
+  "app_id": "dm",
   "version": "0.7.0",
   "application_revision": 1,
   "configuration_operation": "fe13cbec-f84c-4d54-978d-f062014e3bf4",
   "iam_revision_at_registration": 7,
   "upload": {
-    "app_id": "tos>dm",
+    "app_id": "dm",
     "id": "ec6aa0f6-0759-444e-a23a-7d1c4598a770",
     "sha256": "59cb1f2fc3b961469c213b09dba939f534c14c761453cc66e1cdba190283183e",
     "size": 28716183,

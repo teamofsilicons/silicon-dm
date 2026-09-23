@@ -78,7 +78,7 @@ def main() -> None:
     if cli_version != version:
         raise SystemExit("The CLI version must match the DM app release version")
     manifest = (ROOT / "honeycomb.yaml").read_text()
-    for key, expected in (("app_id", "tos>dm"), ("version", version)):
+    for key, expected in (("app_id", "dm"), ("version", version)):
         match = re.search(rf"^{key}:\s*[\"']?([^\s\"'#]+)[\"']?\s*(?:#.*)?$", manifest, re.MULTILINE)
         if not match or match.group(1) != expected:
             raise SystemExit(f"honeycomb.yaml {key} must match {expected!r}")

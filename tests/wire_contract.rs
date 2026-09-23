@@ -17,7 +17,7 @@ fn message(content: &MessageCreate) -> Result<silicon_dm::domain::Message> {
     fields.extend(
         json!({
             "id":Uuid::nil(), "conversation_id":Uuid::nil(),
-            "sender":{"type":"silicon","id":"cos:tos"},
+            "sender":{"type":"silicon","id":"si:cos"},
             "sequence":1,"status":"sent","version":1,"deleted_at":null,
             "created_at":"2026-09-11T00:00:00Z"
         })
@@ -51,7 +51,7 @@ async fn sdk_http_send_and_response_preserve_content_headers_and_metadata() -> R
     let client = Client::new(&base)?.with_auth("access", "tos");
     let content: silicon_dm_client::MessageCreate = serde_json::from_value(json!({
         "message":"hello", "metadata":{"type":"keep","data":{"message":"nested"},"text":"untouched"},
-        "recipient_id":"deliberate@cos:tos",
+        "recipient_id":"deliberate@si:cos",
         "attachments":[{"permanent_url":"https://files.example/note.pdf"}]
     }))?;
     let result = client
@@ -114,7 +114,7 @@ fn websocket_command_and_delivery_round_trip_between_backend_and_sdk() -> Result
         "voice_transcript":"spoken hello"
     }))?;
     let encoded = serde_json::to_value(ClientFrame::SendMessage {
-        actor_id: "cos:tos".into(),
+        actor_id: "si:cos".into(),
         org_id: "tos".into(),
         conversation_id: Uuid::nil().to_string(),
         idempotency_key: "retry-message-key".into(),
@@ -131,7 +131,7 @@ fn websocket_command_and_delivery_round_trip_between_backend_and_sdk() -> Result
     };
     let frame = protocol::ServerFrame::Message {
         delivery_id: Uuid::nil(),
-        actor_id: "cos:tos".parse()?,
+        actor_id: "si:cos".parse()?,
         delivery_sequence: 1,
         message: Box::new(message(&serde_json::from_value(*content)?)?),
     };
@@ -169,7 +169,7 @@ fn creation_delivery_is_created_for_all_recipients_and_distinct_from_command_rep
     let content: MessageCreate = serde_json::from_value(json!({"message":"hello"}))?;
     let message: silicon_dm_client::Message =
         serde_json::from_value(serde_json::to_value(message(&content)?)?)?;
-    for recipient in ["cos:tos", "alice"] {
+    for recipient in ["si:cos", "c:alice"] {
         let frame = silicon_dm_client::ServerFrame::Message {
             delivery_id: Uuid::nil(),
             actor_id: recipient.into(),
@@ -252,7 +252,7 @@ async fn rest_creation_uses_a_command_and_a_successful_response() -> Result {
 
 #[tokio::test]
 async fn legacy_draft_conflict_keeps_remote_content_and_explains_recovery() -> Result {
-    let remote = json!({"conversation_id":Uuid::nil(),"member_id":"alice","version":3,"message_content":"newer text","metadata":{}});
+    let remote = json!({"conversation_id":Uuid::nil(),"member_id":"c:alice","version":3,"message_content":"newer text","metadata":{}});
     let body = remote.clone();
     let app = Router::new().route(
         "/api/v1/conversations/{id}/draft",

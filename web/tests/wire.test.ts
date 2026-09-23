@@ -31,7 +31,7 @@ test("message request uses links and keeps cached UI content unchanged", () => {
     ...wire.data,
     id: "m",
     conversation_id: "c",
-    sender: { type: "carbon", id: "alice" },
+    sender: { type: "carbon", id: "c:alice" },
   };
   assert.equal(decodeData({ items: [stored] }).items[0].text, "hello");
   assert.deepEqual(input.metadata, metadata);
@@ -42,11 +42,11 @@ test("v3 socket deliveries decode into durable UI models and heartbeat uses an e
     type: "new_message",
     data: {
       delivery_id: "d",
-      actor_id: "bob",
+      actor_id: "c:bob",
       delivery_sequence: 2,
       id: "m",
       conversation_id: "c",
-      sender: { type: "carbon", id: "alice" },
+      sender: { type: "carbon", id: "c:alice" },
       message: "hello",
       metadata: { nested: { message: "user data" } },
       version: 2,
@@ -72,7 +72,7 @@ test("attachment-only sends and bundles use public content and scoped references
   };
   const send = encodeFrame({
     type: "send_message",
-    actor_id: "bob",
+    actor_id: "c:bob",
     conversation_id: "c",
     message: content,
   });
@@ -101,7 +101,7 @@ test("group policy and invitation bodies retain their shared REST contract", () 
     description: "Full history",
     is_public: false,
     tag_ids: ["00000000-0000-4000-8000-000000000001"],
-    member_ids: ["cos:tos"],
+    member_ids: ["si:cos"],
   };
   assert.deepEqual(encodeRequest("POST", "/api/dm/groups", settings), {
     type: "create_group",
@@ -124,15 +124,15 @@ test("group policy and invitation bodies retain their shared REST contract", () 
 test("v4 IDs, replies, bundles and receipts stay scoped to the chat", () => {
   const raw = {
     "message-id": "000",
-    conversation_id: "alice::bob",
-    sender: { id: "alice", type: "carbon" },
-    recipient_id: "bob",
+    conversation_id: "c:alice::c:bob",
+    sender: { id: "c:alice", type: "carbon" },
+    recipient_id: "c:bob",
     message: "hey",
     attachments: ["https://files.example/a"],
     voice_transcript: null,
     reply: {
       "message-id": "001",
-      sender: { id: "bob", type: "carbon" },
+      sender: { id: "c:bob", type: "carbon" },
       content: null,
     },
     version: 1,
@@ -140,14 +140,14 @@ test("v4 IDs, replies, bundles and receipts stay scoped to the chat", () => {
     delivered_at: null,
   };
   const a = decodeData(raw),
-    b = decodeData({ ...raw, conversation_id: "alice::cos:tos" });
+    b = decodeData({ ...raw, conversation_id: "c:alice::si:cos" });
   assert.notEqual(a.id, b.id);
-  assert.equal(a.id, "alice::bob#000");
-  assert.equal(a.reply_to_message_id, "alice::bob#001");
+  assert.equal(a.id, "c:alice::c:bob#000");
+  assert.equal(a.reply_to_message_id, "c:alice::c:bob#001");
   assert.deepEqual(a.attachments, [
     { permanent_url: "https://files.example/a" },
   ]);
-  const reply = encodeRequest("POST", "/conversations/alice::bob/messages", {
+  const reply = encodeRequest("POST", "/conversations/c:alice::c:bob/messages", {
     text: "reply",
     reply_to_message_id: a.id,
   });
@@ -179,14 +179,14 @@ test("created notifications and legacy creation deliveries stay separate from co
     "message.create",
     "message.create.successful",
   ]) {
-    for (const recipient of ["alice", "bob"]) {
+    for (const recipient of ["c:alice", "c:bob"]) {
       const wire = {
         type,
         data: {
           "message-id": "000",
-          conversation_id: "alice::bob",
+          conversation_id: "c:alice::c:bob",
           recipient_id: recipient,
-          sender: { type: "carbon", id: "alice" },
+          sender: { type: "carbon", id: "c:alice" },
           message: "hello",
           attachments: [],
           metadata: {
@@ -200,7 +200,7 @@ test("created notifications and legacy creation deliveries stay separate from co
       assert.equal(frame.type, "message");
       assert.equal(frame.delivery_id, "delivery");
       assert.equal(frame.actor_id, recipient);
-      assert.equal(frame.message.id, "alice::bob#000");
+      assert.equal(frame.message.id, "c:alice::c:bob#000");
     }
   }
   for (const type of ["message.create.successful", "message.create.success"]) {
@@ -208,7 +208,7 @@ test("created notifications and legacy creation deliveries stay separate from co
       type,
       data: {
         "message-id": "000",
-        conversation_id: "alice::bob",
+        conversation_id: "c:alice::c:bob",
         idempotency_key: "retry-send",
         message: "hello",
         attachments: [],

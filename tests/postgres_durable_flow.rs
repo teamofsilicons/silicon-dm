@@ -39,7 +39,7 @@ async fn canonical_iam_snapshots_and_tombstones_preserve_existing_directory_rows
     let org: OrganizationId = "canonical-cutover".parse()?;
     let actor = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
     };
     let iam_org = Uuid::new_v4();
     let old_membership = Uuid::new_v4();
@@ -47,18 +47,18 @@ async fn canonical_iam_snapshots_and_tombstones_preserve_existing_directory_rows
         .refresh_directory(&org, std::slice::from_ref(&actor))
         .await?;
     // This row was written by the previously deployed SDK1 consumer.
-    sqlx::query("INSERT INTO iam_membership_projections(membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status) VALUES($1,$2,$3,$4,'carbon','alice',1,1,'active')")
+    sqlx::query("INSERT INTO iam_membership_projections(membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status) VALUES($1,$2,$3,$4,'carbon','c:alice',1,1,'active')")
         .bind(old_membership).bind(Uuid::new_v4()).bind(iam_org).bind(org.as_str())
         .execute(store.pool()).await?;
     let snapshot = |membership: &str| -> Result<ApplicationAuthorization, serde_json::Error> {
         serde_json::from_value(json!({
-            "actor_type":"carbon","public_id":"alice","organization_id":iam_org,
+            "actor_type":"carbon","public_id":"c:alice","organization_id":iam_org,
             "org_id":org,"membership_id":membership,"membership_version":1,
-            "authorization_epoch":1,"audience":"tos>dm","testing_environment_id":null,
+            "authorization_epoch":1,"audience":"dm","testing_environment_id":null,
             "scopes":[],"org_role":"member","tags":[]
         }))
     };
-    for membership in [old_membership.to_string(), format!("alice[{org}]")] {
+    for membership in [old_membership.to_string(), format!("c:alice[{org}]")] {
         store
             .project_iam_authorization(&snapshot(&membership)?, &actor)
             .await?;
@@ -81,7 +81,7 @@ async fn canonical_iam_snapshots_and_tombstones_preserve_existing_directory_rows
         "event_type":"organization.membership.removed.v1","occurred_at":"2026-09-21T00:00:00Z",
         "organization_id":iam_org,"aggregate":{},"data":{"current":{"members":[{
             "resource":{"type":"organization_membership","id":old_membership,
-                "membership_id":format!("alice[{org}]"),"principal_type":"carbon","status":"removed","version":2},
+                "membership_id":format!("c:alice[{org}]"),"principal_type":"carbon","status":"removed","version":2},
             "authorization":"removed"
         }]}}
     }))?;
@@ -90,7 +90,7 @@ async fn canonical_iam_snapshots_and_tombstones_preserve_existing_directory_rows
     transaction.commit().await?;
     assert!(
         store
-            .project_iam_authorization(&snapshot(&format!("alice[{org}]"))?, &actor)
+            .project_iam_authorization(&snapshot(&format!("c:alice[{org}]"))?, &actor)
             .await
             .is_err()
     );
@@ -167,8 +167,8 @@ impl TestDatabase {
 )]
 async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<()> {
     const ORGANIZATION_ID: &str = "organization-legacy-hook";
-    const SENDER_ID: &str = "carbon-legacy-message";
-    const TARGET_ID: &str = "silicon-legacy-hook";
+    const SENDER_ID: &str = "c:carbon-legacy-message";
+    const TARGET_ID: &str = "si:silicon-legacy-hook";
 
     let organization_id: OrganizationId = ORGANIZATION_ID.parse()?;
     let sender = ActorRef {
@@ -182,7 +182,9 @@ async fn exercise_product_contract_upgrade(store: &PostgresStore) -> TestResult<
     store
         .refresh_directory(&organization_id, &[sender.clone(), target.clone()])
         .await?;
-    // Seed the historical schema directly: current store readers require current migrations.
+    // Seed historical product state with canonical principals; the dedicated
+    // identifier_schema_migration fixture separately verifies old public labels.
+    // Current store readers require current migrations.
     let conversation_id = Uuid::now_v7();
     let mut tx = store.pool().begin().await?;
     sqlx::query("INSERT INTO conversations(id,organization_id,participant_set_hash,created_by_kind,created_by_id) VALUES($1,$2,$3,'carbon',$4)")
@@ -757,11 +759,11 @@ async fn durable_conversation_message_receipt_and_ack_flow() -> TestResult<()> {
         organization_id: "organization-primary".parse()?,
         sender: ActorRef {
             actor_type: ActorType::Carbon,
-            id: "carbon-alice".parse()?,
+            id: "c:alice".parse()?,
         },
         recipient: ActorRef {
             actor_type: ActorType::Silicon,
-            id: "silicon-bob".parse()?,
+            id: "si:bob".parse()?,
         },
     };
 
@@ -1136,11 +1138,11 @@ async fn exercise_isi_routing(store: &PostgresStore) -> TestResult<()> {
     let org: OrganizationId = "isi-org".parse()?;
     let sender = ActorRef {
         actor_type: ActorType::Silicon,
-        id: "writer:tos".parse()?,
+        id: "si:writer".parse()?,
     };
     let recipient = ActorRef {
         actor_type: ActorType::Silicon,
-        id: "cos:tos".parse()?,
+        id: "si:cos".parse()?,
     };
     let conversation = store
         .create_conversation(CreateConversationCommand {
@@ -1151,8 +1153,8 @@ async fn exercise_isi_routing(store: &PostgresStore) -> TestResult<()> {
         })
         .await?;
     let content = MessageCreate {
-        sender_id: Some("compose@writer:tos".parse()?),
-        recipient_id: Some("deliberate@cos:tos".parse()?),
+        sender_id: Some("compose@si:writer".parse()?),
+        recipient_id: Some("deliberate@si:cos".parse()?),
         text: Some("ISI round trip".into()),
         metadata: serde_json::from_value(serde_json::json!({"keep":{"nested":true}}))?,
         ..MessageCreate::default()
@@ -1181,7 +1183,7 @@ async fn exercise_isi_routing(store: &PostgresStore) -> TestResult<()> {
         message.id
     );
     let mut changed = content.clone();
-    changed.recipient_id = Some("review@cos:tos".parse()?);
+    changed.recipient_id = Some("review@si:cos".parse()?);
     assert!(
         store
             .send_message(command(changed, "isi-message-key")?)
@@ -1189,7 +1191,7 @@ async fn exercise_isi_routing(store: &PostgresStore) -> TestResult<()> {
             .is_err()
     );
     let mut changed = content.clone();
-    changed.sender_id = Some("review@writer:tos".parse()?);
+    changed.sender_id = Some("review@si:writer".parse()?);
     assert!(
         store
             .send_message(command(changed, "isi-message-key")?)
@@ -1197,7 +1199,7 @@ async fn exercise_isi_routing(store: &PostgresStore) -> TestResult<()> {
             .is_err()
     );
     let mut invalid = content.clone();
-    invalid.sender_id = Some("compose@cos:tos".parse()?);
+    invalid.sender_id = Some("compose@si:cos".parse()?);
     assert!(matches!(
         store
             .send_message(command(invalid, "isi-impersonation")?)
@@ -1205,7 +1207,7 @@ async fn exercise_isi_routing(store: &PostgresStore) -> TestResult<()> {
         Err(AppError::Forbidden)
     ));
     let mut invalid = content.clone();
-    invalid.recipient_id = Some("deliberate@outsider:tos".parse()?);
+    invalid.recipient_id = Some("deliberate@si:outsider".parse()?);
     assert!(
         store
             .send_message(command(invalid, "isi-outsider")?)
@@ -1243,7 +1245,7 @@ async fn exercise_isi_routing(store: &PostgresStore) -> TestResult<()> {
         .await?;
     assert_eq!(history.items[0].recipient_id, content.recipient_id);
     let mut reroute = content.clone();
-    reroute.recipient_id = Some("other@cos:tos".parse()?);
+    reroute.recipient_id = Some("other@si:cos".parse()?);
     assert!(
         store
             .revise_message(
@@ -1288,9 +1290,9 @@ async fn automatic_member_chats_are_scoped_idempotent_and_message_free() -> Test
     let org: OrganizationId = format!("auto-{}", Uuid::new_v4()).parse()?;
     let other_org: OrganizationId = format!("other-{}", Uuid::new_v4()).parse()?;
     let actor = member(ActorType::Carbon, "owner")?;
-    let tech = member(ActorType::Silicon, "tech:tos")?;
+    let tech = member(ActorType::Silicon, "si:tech")?;
     let colleague = member(ActorType::Carbon, "colleague")?;
-    let removed = member(ActorType::Silicon, "removed:tos")?;
+    let removed = member(ActorType::Silicon, "si:removed")?;
     let outsider = member(ActorType::Carbon, "outsider")?;
     let unknown = member(ActorType::Carbon, "undisclosed")?;
     store

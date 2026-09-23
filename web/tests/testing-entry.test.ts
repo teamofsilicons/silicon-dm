@@ -47,7 +47,7 @@ async function fixture(t: TestContext, saved = false) {
     if (req.url === "/api/v1/iam") {
       res.statusCode = state.discoveryStatus;
       data = {
-        app_id: "tos>dm",
+        app_id: "dm",
         testing_environment_id: environment,
         testing_environment: { name: "IAM sandbox" },
       };
@@ -60,7 +60,7 @@ async function fixture(t: TestContext, saved = false) {
         access_token: "test-access",
         refresh_token: "test-refresh",
         expires_in: 3600,
-        actor: { id: "test-alice", type: "carbon" },
+        actor: { id: "c:test-alice", type: "carbon" },
         organization_id: "test-org",
       };
     } else if (req.url === "/api/v1/auth/me") {
@@ -93,7 +93,7 @@ async function fixture(t: TestContext, saved = false) {
   browser.value.profiles = [
     {
       profile_id: production,
-      actor: { id: "real-alice", type: "carbon" },
+      actor: { id: "c:real-alice", type: "carbon" },
       organization_id: "real-org",
       access_token: "production-access",
       refresh_token: "production-refresh",
@@ -103,7 +103,7 @@ async function fixture(t: TestContext, saved = false) {
   if (saved)
     browser.value.profiles.push({
       profile_id: testProfile,
-      actor: { id: "test-alice", type: "carbon" },
+      actor: { id: "c:test-alice", type: "carbon" },
       organization_id: "test-org",
       access_token: "test-access",
       refresh_token: "test-refresh",
@@ -172,7 +172,7 @@ test("test login opens the existing DM API with isolated credentials and can ret
   const result = await f.enter("test-slt-token");
   assert.equal(result.status, 200);
   assert.equal(result.value.testing_environment_id, environment);
-  assert.equal(result.value.actor.id, "test-alice");
+  assert.equal(result.value.actor.id, "c:test-alice");
   assert.equal(result.value.profiles.length, 2);
   for (const secret of [
     rootKey,

@@ -570,7 +570,16 @@ fn validate_opaque_token(value: &str) -> AppResult<()> {
 }
 
 fn actor_ref(actor_type: ActorType, public_id: &str) -> AppResult<ActorRef> {
-    if public_id.trim() != public_id {
+    let prefix = match actor_type {
+        ActorType::Carbon => "c:",
+        ActorType::Silicon => "si:",
+    };
+    if !public_id.starts_with(prefix)
+        || public_id
+            .parse::<ActorId>()
+            .ok()
+            .is_none_or(|id| id.address_parts().is_err())
+    {
         return Err(dependency_unavailable());
     }
     Ok(ActorRef {

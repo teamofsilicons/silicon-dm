@@ -323,7 +323,7 @@ mod outgoing_tests {
             testing_environment_id: None,
             testing_generation: None,
             request: crate::relay::Operation::CreateConversation {
-                participant_ids: vec!["alice".into(), "bob".into()],
+                participant_ids: vec!["c:alice".into(), "c:bob".into()],
                 idempotency_key: "original-retry-key".into(),
             },
         };
@@ -374,11 +374,12 @@ mod outgoing_tests {
         )?);
         queue.database()?.execute_batch("CREATE TABLE inbox(session TEXT,delivery_id TEXT,actor TEXT,sequence INTEGER,frame TEXT,delivered INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0); CREATE TABLE cursors(session TEXT,actor TEXT,sequence INTEGER);")?;
         queue.database()?.execute(
-            "INSERT INTO inbox(session,delivery_id,actor,sequence,frame,attempts) VALUES('default:test#1','old','alice',1,'{\"preserved\":true}',7)", [],
+            "INSERT INTO inbox(session,delivery_id,actor,sequence,frame,attempts) VALUES('default:test#1','old','c:alice',1,'{\"preserved\":true}',7)", [],
         )?;
-        queue
-            .database()?
-            .execute("INSERT INTO cursors VALUES('default:test#1','alice',1)", [])?;
+        queue.database()?.execute(
+            "INSERT INTO cursors VALUES('default:test#1','c:alice',1)",
+            [],
+        )?;
         queue.adopt_generation("default:test", Some(2))?;
         drop(queue);
         let queue = Queue::open(&state)?;
@@ -421,7 +422,7 @@ mod generation_tests {
             testing_environment_id: Some(id),
             testing_generation: None,
             request: crate::relay::Operation::CreateConversation {
-                participant_ids: vec!["alice".into(), "bob".into()],
+                participant_ids: vec!["c:alice".into(), "c:bob".into()],
                 idempotency_key: "fixture".into(),
             },
         };

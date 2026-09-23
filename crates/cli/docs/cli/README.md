@@ -7,7 +7,7 @@ separate within each profile.
 
 ## Install and discover
 
-Install a matching release with `honeycomb install 'tos>dm'`. For this checkout,
+Install a matching release with `honeycomb install 'dm'`. For this checkout,
 use `cargo run -p silicon-dm-cli -- --help`. Honeycomb manages installed CLI
 updates; DM does not replace itself.
 
@@ -92,13 +92,13 @@ refreshes DM credentials. DM logout and Ting logout are separate operations.
 
 ```sh
 dm conversations list
-dm messages send cos:tos --text 'hey'
-dm messages send cos:tos --attachment https://files.example/report.pdf
-dm messages send cos:tos --text "what's up" --reply-to 000
-dm messages list cos:tos
-dm messages show cos:tos 000
-dm messages edit cos:tos 000 --text 'heyy'
-dm messages delete cos:tos 000
+dm messages send si:cos --text 'hey'
+dm messages send si:cos --attachment https://files.example/report.pdf
+dm messages send si:cos --text "what's up" --reply-to 000
+dm messages list si:cos
+dm messages show si:cos 000
+dm messages edit si:cos 000 --text 'heyy'
+dm messages delete si:cos 000
 ```
 
 The authenticated sender supplies a recipient ID; DM resolves or creates the permitted direct chat. You may also pass the canonical conversation address or a group ID. Codes are conversation-local lowercase base36: `000` through `zzz`, then `1000` onward. Edits/deletion/retries preserve the code.
@@ -121,7 +121,7 @@ Carbon senders, attachments, transcripts, drafts and message edits are unchanged
 To preserve em dashes for one send, add `--dangerously-use-em-dash`:
 
 ```sh
-dm messages send cos:tos --text 'hello—world' --dangerously-use-em-dash
+dm messages send si:cos --text 'hello—world' --dangerously-use-em-dash
 ```
 
 ## Drafts, bundles, receipts, presence and GIFs
@@ -211,10 +211,10 @@ An ISI is optional routing information within a silicon account. Create the
 conversation using the canonical account IDs, then supply addresses per message:
 
 ```sh
-dm conversations create --participant cos:tos
-dm messages send CONVERSATION_ID --to deliberate@cos:tos --text 'Please review'
+dm conversations create --participant si:cos
+dm messages send CONVERSATION_ID --to deliberate@si:cos --text 'Please review'
 # When authenticated as writer:tos:
-dm messages send CONVERSATION_ID --from compose@writer:tos --to deliberate@cos:tos --text 'Draft'
+dm messages send CONVERSATION_ID --from compose@si:writer --to deliberate@si:cos --text 'Draft'
 ```
 
 `--from` / `--sender-id` and `--to` / `--recipient-id` set the message's

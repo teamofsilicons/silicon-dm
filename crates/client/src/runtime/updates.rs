@@ -26,9 +26,9 @@ pub async fn command(
         })?;
     }
     Ok(
-        json!({"manager":"honeycomb","app_id":"tos>dm","current_version":current_version,
+        json!({"manager":"honeycomb","app_id":"dm","current_version":current_version,
         "auto_update":false,"can_replace_running_binary":false,
-        "command":"honeycomb install 'tos>dm'",
+        "command":"honeycomb install 'dm'",
         "message":"Honeycomb manages CLI installation and updates. Configure update policy in Honeycomb. Rust dependencies are updated through the consuming project."}),
     )
 }

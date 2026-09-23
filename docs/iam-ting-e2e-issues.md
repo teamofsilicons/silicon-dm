@@ -2,8 +2,8 @@
 
 ## Current status — 2026-09-23
 
-IAM 3.0.3 and Honeycomb 0.3.3 are deployed. The initial IAM 3.0.2 fix
-addressed the stale audience credential, which was traced to the encrypted import snapshot update running under a context that
+IAM 3.0.2 and Honeycomb 0.3.3 are deployed. The stale audience credential
+was traced to the encrypted import snapshot update running under a context that
 could rotate the authentication digest but could not update that snapshot. IAM
 now updates both atomically through a narrowly scoped database function; an
 unavailable or malformed snapshot fails the rotation instead of leaving two
@@ -70,16 +70,16 @@ Safe correlation evidence:
 
 1. Build the official IAM client with DM application credentials and the same
    five-second timeout as the local DM candidate. Select testing using
-   `with_testing_application("tos>dm", dm_test_secret)`.
-2. Fetch `obo().endpoints("tos>ting")`. Prepare exact registration JSON bytes
+   `with_testing_application("dm", dm_test_secret)`.
+2. Fetch `obo().endpoints("ting")`. Prepare exact registration JSON bytes
    containing `org_id`, `app_id` and `for`; retain their SHA-256 binding.
 3. Call `obo().exchange_signed(...)` with the verified recipient's DM access
    token, endpoint `subscriptions.register`, metadata `{}`, method `POST`, that
    body digest, and a new mutation idempotency key.
 4. Use **the credential returned by this fresh exchange** with
-   `with_credential(Credential::Application { app_id: "tos>ting", ... })`, then
+   `with_credential(Credential::Application { app_id: "ting", ... })`, then
    `with_environment(EnvironmentKey::new(returned_iam_test_key))`. Call
-   `applications().testing_context()` and require the selected UUID and `tos>ting`.
+   `applications().testing_context()` and require the selected UUID and `ting`.
 5. Stop when this validation fails. Do not submit the proof to Ting, substitute
    another secret, relax validation, or treat the failure as successful enrollment.
 

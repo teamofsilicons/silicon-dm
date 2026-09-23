@@ -289,9 +289,9 @@ pub fn bundle_sequence(code: &str) -> Option<i64> {
 mod creation_tests {
     #[test]
     fn delivery_notification_is_distinct_from_command_and_direct_success() {
-        for recipient in ["alice", "bob"] {
+        for recipient in ["c:alice", "c:bob"] {
             assert_eq!(
-                super::message_creation_event("alice", recipient),
+                super::message_creation_event("c:alice", recipient),
                 "message.created"
             );
         }

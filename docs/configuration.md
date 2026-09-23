@@ -16,26 +16,23 @@ your host, callback, or backend needs different behavior.
 | `DM_API_URL` | Production DM backend | Backend for login and automatic sandbox selection |
 | `--wait-seconds` | 30 | Foreground wait; timeout keeps durable work queued |
 
-Keep state on a durable local disk. It includes DM credentials, an outgoing
-SQLite queue and private Ting profile bindings. Each DM state directory has an
-outgoing relay; Ting's separate installed system daemon owns incoming connections
-and destinations across profiles. Legacy DM inbox rows remain stored for inspection
-and are not forwarded.
+Keep state on a durable local disk. It includes credentials and SQLite queues;
+use one daemon per state directory. Normal installation uses one shared directory
+and one backend connection for all profiles. Independent directories intentionally
+have independent runtimes.
 
 ## Callback delivery
 
-After separate `dm delivery login`, `dm webhook URL --all-apps` attaches the
-selected profile directly to Ting. `--secret-file FILE` adds an optional bearer
-secret stored privately. Authenticate it and `Ting-Webhook-Id`, then return HTTP
-204 only after accepting every item in the raw Ting batch. DM ACK JSON is retired.
-`dm unhook` detaches the stable Ting hook; explicitly reattach its saved ID.
+`dm webhook URL` attaches the selected profile. `--secret-file FILE` adds an
+optional bearer secret stored privately. Callback responses must acknowledge the
+matching delivery ID. `dm unhook` detaches delivery without deleting queued events.
 Use test callback URLs for sandbox integrations. HTTPS is required except for
 local loopback callback addresses.
 
 ## Updates
 
-Honeycomb owns CLI installation and update policy. Use `honeycomb install 'tos>dm'`.
-DM's daemon handles outgoing commands and never replaces the CLI. Legacy `dm updates`
+Honeycomb owns CLI installation and update policy. Use `honeycomb install 'dm'`.
+DM's daemon handles relay delivery and never replaces the CLI. Legacy `dm updates`
 commands report this guidance. Manage Rust dependencies through your project.
 Restart a running daemon after upgrading to load the new code; durable queues persist.
 
@@ -46,9 +43,8 @@ IAM, Giphy, body-size, connection pool, timeout, and worker settings. The testin
 database must differ from production, and the encryption key must stay stable
 across replicas. Attachments are external links; no upload credentials are required.
 
-`DM_TING_BASE_URL` selects the backend's Ting API origin. The native receiver uses
-`DM_TING_API_URL` or `delivery login --base-url`; its session is separate from DM.
-See [diagnostics](telemetry.md) for existing telemetry configuration.
+No Space Station SDK, telemetry exporter, or analytics integration is installed
+by this change.
 
 ## Bug report notifications
 

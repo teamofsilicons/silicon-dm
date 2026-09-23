@@ -114,7 +114,7 @@ The authenticated actor must participate in a conversation to access its history
 The [fixed message schema](../wire-format.md) defines all fields and examples. Send directly to the authorized recipient:
 
 ```http
-POST /api/v1/conversations/cos:tos/messages
+POST /api/v1/conversations/si:cos/messages
 Authorization: Bearer ACCESS_TOKEN
 X-Org-ID: tos
 X-DM-Contract-Version: 3
@@ -225,8 +225,8 @@ It never returns application secrets. The testing-environment
 key header selects the sandbox using the same rules as other public routes.
 
 Message creation, replies and bundle display messages accept optional
-`sender_id` and `recipient_id` addresses such as `compose@writer:tos` and
-`deliberate@cos:tos`. Senders authorize as the canonical IAM account; recipients
+`sender_id` and `recipient_id` addresses such as `compose@si:writer` and
+`deliberate@si:cos`. Senders authorize as the canonical IAM account; recipients
 must be existing conversation participants. ISI prefixes require silicon
 accounts; carbon email identifiers are unchanged. A prefix is nonempty and
 contains no whitespace, `@`, or `:`. Conversation creation and authentication use canonical account IDs.

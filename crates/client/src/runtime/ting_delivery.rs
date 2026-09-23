@@ -238,7 +238,7 @@ impl LocalRuntime {
         if let Some(credentials) = &options.testing {
             let iam = silicon_iam_client::Client::builder(&selection.info.iam_base_url)?
                 .credential(silicon_iam_client::Credential::application(
-                    "tos>ting",
+                    "ting",
                     credentials.app_secret,
                 ))
                 .environment(silicon_iam_client::EnvironmentKey::new(
@@ -252,7 +252,7 @@ impl LocalRuntime {
                 })?;
             ensure!(
                 Some(context.environment_id) == options.testing_environment_id
-                    && context.application.app_id == "tos>ting"
+                    && context.application.app_id == "ting"
                     && ting_client::api_origin(&context.application.base_url)? == client.origin,
                 "IAM Ting audience, environment or backend does not match DM's selected context"
             );
@@ -263,7 +263,7 @@ impl LocalRuntime {
             .json("GET", "/v1/iam", None, None, &TestHeaders::default())
             .await?;
         ensure!(
-            discovery["app_id"] == "tos>ting",
+            discovery["app_id"] == "ting",
             "Ting backend disclosed an unexpected IAM audience"
         );
         let fingerprint = digest(&json!({"slt":options.short_lived_token,"api":client.origin,

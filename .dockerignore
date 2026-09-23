@@ -11,3 +11,5 @@
 !crates/**
 !docs/
 !docs/**
+!vendor/
+!vendor/**

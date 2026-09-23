@@ -74,7 +74,7 @@ test("Ting cutover retires the bridge and preserves selected HTTP authority", as
   browser.value.profiles = [
     {
       profile_id: profile,
-      actor: { id: "test-carbon", type: "carbon" },
+      actor: { id: "c:test-carbon", type: "carbon" },
       organization_id: "tos",
       testing_environment_id: "00000000-0000-4000-8000-000000000022",
       testing_key: "fixture-plane-key",

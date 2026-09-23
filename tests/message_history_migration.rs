@@ -46,11 +46,11 @@ async fn upgrade_preserves_edits_and_keeps_deletion_out_of_history() -> Result {
     sqlx::query("CREATE VIEW dm.message_history AS SELECT NULL::uuid AS message_id,'[]'::jsonb AS history,NULL::jsonb AS content,NULL::timestamptz AS updated_at,NULL::timestamptz AS deleted_at WHERE false").execute(store.pool()).await?;
     let org: OrganizationId = "tos".parse()?;
     let author = ActorRef {
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
         actor_type: ActorType::Carbon,
     };
     let other = ActorRef {
-        id: "cos:tos".parse()?,
+        id: "si:cos".parse()?,
         actor_type: ActorType::Silicon,
     };
     let conversation = store
@@ -82,7 +82,7 @@ async fn upgrade_preserves_edits_and_keeps_deletion_out_of_history() -> Result {
             .map(|text| serde_json::from_value::<MessageCreate>(json!({"message":text})))
             .transpose()?;
         sqlx::query("INSERT INTO message_revisions(id,message_id,version,content,deleted_at) VALUES($1,$2,$3,$4,CASE WHEN $4::jsonb IS NULL THEN clock_timestamp() ELSE NULL END)").bind(Uuid::now_v7()).bind(message.id).bind(version).bind(content.map(sqlx::types::Json)).execute(&mut *tx).await?;
-        for (kind, id) in [("carbon", "alice"), ("silicon", "cos:tos")] {
+        for (kind, id) in [("carbon", "c:alice"), ("silicon", "si:cos")] {
             sqlx::query("INSERT INTO actor_deliveries(id,organization_id,target_kind,target_id,sequence,delivery_kind,conversation_id,message_id,delivery_revision) VALUES($1,'tos',$2::text::actor_kind,$3,1,'message',$4,$5,$6)").bind(Uuid::now_v7()).bind(kind).bind(id).bind(conversation.id).bind(message.id).bind(version).execute(&mut *tx).await?;
         }
         tx.commit().await?;

@@ -13,7 +13,7 @@ import { encodeRequest } from "../src/wire.ts";
 const primary = "00000000-0000-4000-8000-000000000011";
 const sibling = "00000000-0000-4000-8000-000000000012";
 const unrelated = "00000000-0000-4000-8000-000000000013";
-const actor = { id: "refresh-alice", type: "carbon" as const };
+const actor = { id: "c:refresh-alice", type: "carbon" as const };
 
 async function listen(server: Server) {
   server.listen(0, "127.0.0.1");
@@ -145,7 +145,7 @@ async function fixture(t: TestContext, expiresIn = 15000) {
     ),
     {
       profile_id: unrelated,
-      actor: { id: "refresh-bob", type: "carbon" },
+      actor: { id: "c:refresh-bob", type: "carbon" },
       organization_id: "org-a",
       access_token: "unrelated-access",
       refresh_token: "unrelated-refresh",

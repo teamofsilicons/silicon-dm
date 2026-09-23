@@ -7,7 +7,7 @@ No automated test scenario runner was used. Compilation and lint checks were
 performed separately.
 
 The main local API ran at `http://127.0.0.1:18790`. Production authentication
-was obtained for the registered `tos>dm` application. Test identities came
+was obtained for the registered `dm` application. Test identities came
 from the paired IAM testing environment. HTTP requests used a private utility
 that issues one selected request per invocation. WebSocket checks used an
 interactive program built with the public Rust DM client; frames and receipts
@@ -17,7 +17,7 @@ were sent manually, with an optional protocol-only ping responder.
 
 The lifecycle exercise used DM environment
 `01a072d4-d98e-7212-af08-59ced62c212f`. Its test actors were `dm-alice`,
-`dm-bob`, and Silicon `dm-agent-a:tos`. This environment was created separately
+`dm-bob`, and Silicon `si:dm-agent-a`. This environment was created separately
 from the main messaging exercise's environment. Root keys, IAM credentials,
 tokens, pairing JSON, and raw responses were kept in private files outside the
 repository. No secret values are included here.

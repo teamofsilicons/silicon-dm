@@ -27,7 +27,7 @@ Production rollout completed at 09:49 UTC from source commit
 - Migration 0015 was applied before rolling the runtime. Existing test schemas continue to migrate through the normal environment lifecycle.
 - CloudFormation stack `silicon-dm-production` in `us-east-1` reached `UPDATE_COMPLETE`.
 - API and worker task definitions are revision 5, each with one running task, zero pending tasks, and a single `COMPLETED` deployment. Both running image digests match the runtime digest above.
-- The ALB target is healthy. Public `/live` and `/ready` returned 204; `/api/v1/iam` returned 200 with `app_id: "tos>dm"`. The 0.3.0 CLI's `iam --json` command confirmed the same production response.
+- The ALB target is healthy. Public `/live` and `/ready` returned 204; `/api/v1/iam` returned 200 with `app_id: "dm"`. The 0.3.0 CLI's `iam --json` command confirmed the same production response.
 
 The rollout used the deployed CloudFormation template and preserved existing
 parameters except the two image references. No frontend or browser gateway

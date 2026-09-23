@@ -38,13 +38,13 @@ impl IdentityProvider for Identity {
             .expose_secret()
             .strip_prefix("token-")
             .ok_or(AppError::Unauthorized)?;
-        if !["alice", "bob", "cos:tos"].contains(&id) || organization_id.as_str() != "tos" {
+        if !["c:alice", "c:bob", "si:cos"].contains(&id) || organization_id.as_str() != "tos" {
             return Err(AppError::Unauthorized);
         }
         Ok(AuthContext {
             actor: ActorRef {
                 id: id.parse().map_err(|_| AppError::Unauthorized)?,
-                actor_type: if id == "cos:tos" {
+                actor_type: if id == "si:cos" {
                     ActorType::Silicon
                 } else {
                     ActorType::Carbon
@@ -53,7 +53,7 @@ impl IdentityProvider for Identity {
 
             session_id: None,
             organization_id: organization_id.clone(),
-            org_role: (id == "alice").then(|| "org_admin".into()),
+            org_role: (id == "c:alice").then(|| "org_admin".into()),
             tag_ids: None,
             represented_actor_ids: BTreeSet::new(),
             capabilities: BTreeSet::new(),
@@ -89,7 +89,7 @@ impl IdentityProvider for Identity {
             .iter()
             .map(|id| ActorRef {
                 id: id.clone(),
-                actor_type: if id.as_str() == "cos:tos" {
+                actor_type: if id.as_str() == "si:cos" {
                     ActorType::Silicon
                 } else {
                     ActorType::Carbon
@@ -125,7 +125,7 @@ fn settings(url: String, iam: &str) -> Result<Settings> {
         database: db,
         iam: IamSettings {
             base_url: iam.parse()?,
-            app_id: "tos>dm".into(),
+            app_id: "dm".into(),
             app_secret: SecretString::from("production-secret"),
             webhook_secret: SecretString::from("x".repeat(32)),
             webhook_key_version: 1,
@@ -196,8 +196,8 @@ async fn mock_context(
     cleaned: Option<&str>,
 ) {
     Mock::given(path("/api/v1/application/testing-context"))
-        .and(header("x-testing-application",format!("Basic {}",STANDARD.encode(format!("tos>dm:{secret}")))))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"environment_id":id,"application":{"app_id":"tos>dm","base_url":"https://backend.dm.example","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":id,"org_id":"tos","name":format!("Sandbox {version}"),"version":version,"key_generation":1,"cleaned_at":cleaned,"created_at":"2026-09-01T00:00:00Z","creator_type":"carbon","creator_id":"alice"},"webhook_key_digest":"00".repeat(32)}))).mount(iam).await;
+        .and(header("x-testing-application",format!("Basic {}",STANDARD.encode(format!("dm:{secret}")))))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"environment_id":id,"application":{"app_id":"dm","base_url":"https://backend.dm.example","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":id,"org_id":"tos","name":format!("Sandbox {version}"),"version":version,"key_generation":1,"cleaned_at":cleaned,"created_at":"2026-09-01T00:00:00Z","creator_type":"carbon","creator_id":"c:alice"},"webhook_key_digest":"00".repeat(32)}))).mount(iam).await;
 }
 #[tokio::test]
 #[allow(
@@ -239,7 +239,7 @@ async fn app_secret_discovery_is_isolated_revalidated_and_resets_generation() ->
     );
     let org: OrganizationId = "tos".parse()?;
     let actor = ActorRef {
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
         actor_type: ActorType::Carbon,
     };
     selected.store.refresh_directory(&org, &[actor]).await?;
@@ -327,11 +327,11 @@ async fn retired_sockets_leave_http_actor_scope_and_contract_lifecycle_intact() 
             &org,
             &[
                 ActorRef {
-                    id: "alice".parse()?,
+                    id: "c:alice".parse()?,
                     actor_type: ActorType::Carbon,
                 },
                 ActorRef {
-                    id: "bob".parse()?,
+                    id: "c:bob".parse()?,
                     actor_type: ActorType::Carbon,
                 },
             ],
@@ -349,7 +349,7 @@ async fn retired_sockets_leave_http_actor_scope_and_contract_lifecycle_intact() 
     for path in ["ws", "ws/shared"] {
         let response = http
             .get(format!("{base}/api/v1/{path}"))
-            .bearer_auth("token-alice")
+            .bearer_auth("token-c:alice")
             .header("X-Org-ID", "tos")
             .send()
             .await?;
@@ -360,16 +360,20 @@ async fn retired_sockets_leave_http_actor_scope_and_contract_lifecycle_intact() 
     assert!(client.prewarm_shared().await.is_err());
     assert!(
         client
-            .connect(&["alice".into()], "retired-client")
+            .connect(&["c:alice".into()], "retired-client")
             .await
             .is_err()
     );
-    for actor in ["alice", "bob"] {
+    for actor in ["c:alice", "c:bob"] {
         let scoped =
             silicon_dm_client::Client::new(&base)?.with_auth(format!("token-{actor}"), "tos");
         let page = scoped.sync_reset().await?;
         assert!(page.events.is_empty());
-        let other = if actor == "alice" { "bob" } else { "alice" };
+        let other = if actor == "c:alice" {
+            "c:bob"
+        } else {
+            "c:alice"
+        };
         let wrong =
             silicon_dm_client::Client::new(&base)?.with_auth(format!("token-{other}"), "tos");
         assert!(
@@ -441,7 +445,7 @@ async fn reports_retry_postmark_and_deduplicate_without_sending_test_email() -> 
     let server = tokio::spawn(async move {
         axum::serve(listener, silicon_dm::api::build_router(route_state)).await
     });
-    let client = silicon_dm_client::Client::new(&base)?.with_auth("token-alice", "tos");
+    let client = silicon_dm_client::Client::new(&base)?.with_auth("token-c:alice", "tos");
     let first = client
         .report("Fixture report only", None, "report-idempotency")
         .await?;
@@ -521,7 +525,7 @@ async fn daemon_reports_ting_delivery_ownership(base: &str) -> Result {
         .port();
     runtime.store().update(|config| {
         config.relay_port=port;config.auto_update=false;config.telemetry_enabled=false;
-        for (name,url) in [("alice",base.to_owned()),("bob",format!("{base}/api/v1/"))] {
+        for (name,url) in [("c:alice",base.to_owned()),("c:bob",format!("{base}/api/v1/"))] {
             let tokens=serde_json::from_value(json!({"access_token":format!("token-{name}"),"refresh_token":"refresh-fixture","token_type":"Bearer","scope":"messaging","expires_in":3600,"organization_id":"tos","actor":{"type":"carbon","id":name}}))?;
             config.profiles.insert(session_key(name,None),Profile{name:name.into(),base_url:url,tokens,webhook_url:None,device_id:format!("runtime-{name}"),expires_at:now()+3600,refresh_started_at:None,testing_environment_id:None,enabled:true});
         }
@@ -561,7 +565,7 @@ async fn sandbox_effects_are_isolated(production: &AppState, mut sandbox: AppSta
     sandbox.identity = Arc::new(Identity);
     Arc::make_mut(&mut sandbox.settings).telemetry.enabled = true;
     let pool = sandbox.store.pool().clone();
-    sqlx::query("INSERT INTO iam_membership_projections(membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status) VALUES($1,$2,$3,'tos','carbon','alice',1,1,'active')")
+    sqlx::query("INSERT INTO iam_membership_projections(membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status) VALUES($1,$2,$3,'tos','carbon','c:alice',1,1,'active')")
         .bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(Uuid::nil()).execute(&pool).await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
@@ -569,7 +573,7 @@ async fn sandbox_effects_are_isolated(production: &AppState, mut sandbox: AppSta
         tokio::spawn(
             async move { axum::serve(listener, silicon_dm::api::build_router(sandbox)).await },
         );
-    let client = silicon_dm_client::Client::new(&base)?.with_auth("token-alice", "tos");
+    let client = silicon_dm_client::Client::new(&base)?.with_auth("token-c:alice", "tos");
     assert_eq!(
         client
             .report("Sandbox fixture", None, "sandbox-report-fixture")
@@ -639,7 +643,7 @@ async fn sandbox_effects_are_isolated(production: &AppState, mut sandbox: AppSta
         .await?;
     assert_eq!(count, 0);
     let client = silicon_dm_client::Client::new(&base)?
-        .with_auth("token-alice", "tos")
+        .with_auth("token-c:alice", "tos")
         .with_telemetry(false);
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM telemetry_events")
         .fetch_one(&pool)
@@ -678,7 +682,7 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
     );
     let app = state(settings(url, "http://localhost:9999")?).await?;
     let org: OrganizationId = "tos".parse()?;
-    for id in ["alice", "bob"] {
+    for id in ["c:alice", "c:bob"] {
         let actor = ActorRef {
             id: id.parse()?,
             actor_type: ActorType::Carbon,
@@ -694,8 +698,8 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
         tokio::spawn(
             async move { axum::serve(listener, silicon_dm::api::build_router(app)).await },
         );
-    let owner = Client::new(&base)?.with_auth("token-alice", "tos");
-    let reader = Client::new(&base)?.with_auth("token-bob", "tos");
+    let owner = Client::new(&base)?.with_auth("token-c:alice", "tos");
+    let reader = Client::new(&base)?.with_auth("token-c:bob", "tos");
     let input = GroupCreate {
         settings: GroupSettings {
             name: "Delivery team".into(),
@@ -810,7 +814,7 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
     group_address_http_roundtrip(&owner, &group.id, "group-id-http-first").await?;
     group_address_http_roundtrip(&owner, &group.id, "group-id-http-second").await?;
     owner
-        .invite_group_members(&group.id, &["bob".into()], "invite-bob-to-group")
+        .invite_group_members(&group.id, &["c:bob".into()], "invite-bob-to-group")
         .await?;
     assert_eq!(
         reader
@@ -825,13 +829,13 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
     assert_eq!(reader.groups(&PageRequest::default()).await?.items.len(), 1);
     assert!(
         reader
-            .invite_group_members(&group.id, &["alice".into()], "reader-cannot-invite")
+            .invite_group_members(&group.id, &["c:alice".into()], "reader-cannot-invite")
             .await
             .is_err()
     );
     assert!(
         reader
-            .remove_group_members(&group.id, &["alice".into()], "reader-cannot-remove")
+            .remove_group_members(&group.id, &["c:alice".into()], "reader-cannot-remove")
             .await
             .is_err()
     );
@@ -878,11 +882,11 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
         updated.version
     );
     let removed = owner
-        .remove_group_members(&group.id, &["bob".into()], "remove-bob-once")
+        .remove_group_members(&group.id, &["c:bob".into()], "remove-bob-once")
         .await?;
     assert_eq!(
         owner
-            .remove_group_members(&group.id, &["bob".into()], "remove-bob-once")
+            .remove_group_members(&group.id, &["c:bob".into()], "remove-bob-once")
             .await?
             .version,
         removed.version
@@ -902,7 +906,7 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
             .is_empty()
     );
     let tag = Uuid::new_v4();
-    sqlx::query("UPDATE iam_membership_projections SET tag_ids=$1 WHERE actor_id='bob'")
+    sqlx::query("UPDATE iam_membership_projections SET tag_ids=$1 WHERE actor_id='c:bob'")
         .bind(vec![tag])
         .execute(&group_pool)
         .await?;
@@ -929,14 +933,14 @@ async fn groups_work_through_sdk_and_http_with_admin_and_retry_guards() -> Resul
     let encoded_id = format!("%{:02X}{}", raw_id.as_bytes()[0], &raw_id[1..]);
     let encoded = reqwest::Client::new()
         .get(format!("{base}/api/v1/conversations/{encoded_id}/messages"))
-        .bearer_auth("token-bob")
+        .bearer_auth("token-c:bob")
         .header("X-Org-ID", "tos")
         .send()
         .await?;
     assert_eq!(encoded.status(), 404);
     let bad = reqwest::Client::new()
         .post(format!("{base}/api/v1/groups"))
-        .bearer_auth("token-alice")
+        .bearer_auth("token-c:alice")
         .header("X-Org-ID", "tos")
         .header("Idempotency-Key", "wrong-wire-discriminator")
         .json(&json!({"type":"create_conversation","data":input}))
@@ -1005,7 +1009,7 @@ async fn honeycomb_lifecycle_is_authenticated_fenced_and_retry_safe() -> Result 
         registry.state_for_key(&app, &secret).await.is_err(),
         "runtime discovery cannot bypass preparation"
     );
-    let mut op = json!({"operation_id":Uuid::new_v4(),"environment_id":id,"org_id":"tos","app_id":"tos>dm","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"K".repeat(32),"name":"Shared DM","description":"coordinated sandbox","snapshot":{},"reason":"requested","retired_apps":[]});
+    let mut op = json!({"operation_id":Uuid::new_v4(),"environment_id":id,"org_id":"tos","app_id":"dm","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"K".repeat(32),"name":"Shared DM","description":"coordinated sandbox","snapshot":{},"reason":"requested","retired_apps":[]});
     let http = reqwest::Client::new();
     let endpoint = |body: &Value| {
         format!(
@@ -1052,7 +1056,7 @@ async fn honeycomb_lifecycle_is_authenticated_fenced_and_retry_safe() -> Result 
     let selected = registry.state_for_key(&app, &secret).await?;
     let old_generation = selected.testing_generation.ok_or("generation")?;
     let actor = ActorRef {
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
         actor_type: ActorType::Carbon,
     };
     selected
@@ -1084,14 +1088,12 @@ async fn honeycomb_lifecycle_is_authenticated_fenced_and_retry_safe() -> Result 
         .ok_or("generation")?;
     registry.touch(id, generation).await?;
     registry.report_honeycomb_activity().await?; // 404: retain for retry.
-    Mock::given(path(format!(
-        "/api/v1/environments/{id}/apps/tos%3Edm/activity"
-    )))
-    .and(header("x-testing-environment-key", "K".repeat(32)))
-    .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-    .expect(1)
-    .mount(&honeycomb)
-    .await;
+    Mock::given(path(format!("/api/v1/environments/{id}/apps/dm/activity")))
+        .and(header("x-testing-environment-key", "K".repeat(32)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&honeycomb)
+        .await;
     registry.report_honeycomb_activity().await?;
     registry.report_honeycomb_activity().await?; // acknowledged activity is not repeated.
     let clean = op.clone();
@@ -1312,14 +1314,14 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
         tokio::spawn(
             async move { axum::serve(listener, silicon_dm::api::build_router(app)).await },
         );
-    let alice = Client::new(&base)?.with_auth("token-alice", "tos");
-    let bob = Client::new(&base)?.with_auth("token-bob", "tos");
+    let alice = Client::new(&base)?.with_auth("token-c:alice", "tos");
+    let bob = Client::new(&base)?.with_auth("token-c:bob", "tos");
     let text: MessageCreate = serde_json::from_value(json!({"message":"hey"}))?;
-    let first = alice.send_message("bob", &text, "first-direct").await?;
+    let first = alice.send_message("c:bob", &text, "first-direct").await?;
     assert_eq!(first.id, "000");
-    assert_eq!(first.conversation_id, "alice::bob");
-    assert_eq!(first.content.recipient_id.as_deref(), Some("bob"));
-    for (client, recipient) in [(&alice, "alice"), (&bob, "bob")] {
+    assert_eq!(first.conversation_id, "c:alice::c:bob");
+    assert_eq!(first.content.recipient_id.as_deref(), Some("c:bob"));
+    for (client, recipient) in [(&alice, "c:alice"), (&bob, "c:bob")] {
         let page = client
             .sync(&silicon_dm_client::models::SyncRequest::default())
             .await?;
@@ -1332,12 +1334,12 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
             event.kind,
             silicon_dm_client::models::SyncEventKind::Message
         ));
-        assert_eq!(event.conversation_id, "alice::bob");
+        assert_eq!(event.conversation_id, "c:alice::c:bob");
         let hydrated = client
             .message(&event.conversation_id, &event.message_id)
             .await?;
         assert_eq!(hydrated.id, "000");
-        assert_eq!(hydrated.content.recipient_id.as_deref(), Some("bob"));
+        assert_eq!(hydrated.content.recipient_id.as_deref(), Some("c:bob"));
         let handoff: (String, String) =
             sqlx::query_as("SELECT event,target_id FROM ting_handoffs WHERE delivery_id=$1")
                 .bind(event.event_id)
@@ -1347,17 +1349,17 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
     }
 
     assert_eq!(
-        alice.send_message("bob", &text, "first-direct").await?.id,
+        alice.send_message("c:bob", &text, "first-direct").await?.id,
         first.id
     );
     let reply: MessageCreate = serde_json::from_value(
         json!({"message":"what's up","reply":{"message-id":"000","content":{"message":"forged"}}}),
     )?;
-    let second = bob.send_message("alice", &reply, "reply-direct").await?;
+    let second = bob.send_message("c:alice", &reply, "reply-direct").await?;
     assert_eq!(second.id, "001");
     assert_eq!(second.conversation_id, first.conversation_id);
     let quote = second.reply.as_ref().ok_or("missing quote")?;
-    assert_eq!(quote.sender.id, "alice");
+    assert_eq!(quote.sender.id, "c:alice");
     assert_eq!(
         quote.content.as_ref().and_then(|c| c.message.as_deref()),
         Some("hey")
@@ -1366,7 +1368,7 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
         json!({"attachments":["https://files.example/voice.ogg","https://files.example/note.pdf"],"voice_transcript":"hello"}),
     )?;
     let third = alice
-        .send_message("bob", &attachments, "attachments-direct")
+        .send_message("c:bob", &attachments, "attachments-direct")
         .await?;
     assert_eq!(third.id, "002");
     assert_eq!(third.content.text.as_deref(), Some(""));
@@ -1374,11 +1376,11 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
     assert_eq!(third.content.voice_transcript.as_deref(), Some("hello"));
     assert!(
         alice
-            .send_message("bob", &MessageCreate::default(), "empty-direct")
+            .send_message("c:bob", &MessageCreate::default(), "empty-direct")
             .await
             .is_err()
     );
-    assert!(alice.message("bob", "../000").await.is_err());
+    assert!(alice.message("c:bob", "../000").await.is_err());
     assert!(
         alice
             .send_message("blocked", &text, "denied-direct")
@@ -1392,7 +1394,7 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
     assert_eq!(alice.message(legacy.0, legacy.1).await?.id, "000");
     let edited = alice
         .edit_message(
-            "bob",
+            "c:bob",
             "000",
             &serde_json::from_value(json!({"message":"heyy"}))?,
             "edit-direct",
@@ -1404,7 +1406,7 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
     assert!(edited.updated_at.is_some());
     let before_receipt = alice.sync_reset().await?;
     let read = bob
-        .record_receipt("alice", "000", ReceiptStatus::Read, "test-device")
+        .record_receipt("c:alice", "000", ReceiptStatus::Read, "test-device")
         .await?;
     assert!(read.read_at.is_some());
     let updates = alice
@@ -1431,20 +1433,22 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
         .message(&reference.conversation_id, &reference.message_id)
         .await?;
     assert_eq!(snapshot.id, "000");
-    assert_eq!(snapshot.content.recipient_id.as_deref(), Some("bob"));
+    assert_eq!(snapshot.content.recipient_id.as_deref(), Some("c:bob"));
     assert_eq!(snapshot.content.text.as_deref(), Some("heyy"));
     assert!(snapshot.read_at.is_some());
     let serialized = serde_json::to_value(&snapshot)?;
     assert!(serialized.get("delivery_id").is_none());
     assert!(serialized.get("sequence").is_none());
-    let deleted = alice.delete_message("bob", "000", "delete-direct").await?;
+    let deleted = alice
+        .delete_message("c:bob", "000", "delete-direct")
+        .await?;
     let tombstone = serde_json::to_value(&deleted)?;
     assert_eq!(tombstone["message-id"], "000");
     assert!(tombstone["message"].is_null());
     assert_eq!(tombstone["attachments"], json!([]));
     assert!(
         alice
-            .message("bob", "001")
+            .message("c:bob", "001")
             .await?
             .reply
             .ok_or("quote")?
@@ -1463,39 +1467,43 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    let last = alice.send_message("bob", &text, "last-three-digit").await?;
-    let next = alice.send_message("bob", &text, "first-four-digit").await?;
+    let last = alice
+        .send_message("c:bob", &text, "last-three-digit")
+        .await?;
+    let next = alice
+        .send_message("c:bob", &text, "first-four-digit")
+        .await?;
     assert_eq!(last.id, "zzz");
     assert_eq!(next.id, "1000");
     let (left, right) = tokio::join!(
-        alice.send_message("bob", &text, "concurrent-left"),
-        bob.send_message("alice", &text, "concurrent-right")
+        alice.send_message("c:bob", &text, "concurrent-left"),
+        bob.send_message("c:alice", &text, "concurrent-right")
     );
     assert_ne!(left?.id, right?.id);
     let other = alice
-        .send_message("cos:tos", &text, "other-conversation")
+        .send_message("si:cos", &text, "other-conversation")
         .await?;
-    assert_eq!(other.conversation_id, "alice::cos:tos");
+    assert_eq!(other.conversation_id, "c:alice::si:cos");
     assert_eq!(other.id, "000");
     assert!(bob.message(&other.conversation_id, "000").await.is_err());
     let cross_reply: MessageCreate =
         serde_json::from_value(json!({"message":"invalid reply","reply":{"message-id":legacy.1}}))?;
     assert!(
         alice
-            .send_message("cos:tos", &cross_reply, "cross-chat-reply")
+            .send_message("si:cos", &cross_reply, "cross-chat-reply")
             .await
             .is_err()
     );
     assert_eq!(
-        alice.message("cos:tos", "000").await?.conversation_id,
+        alice.message("si:cos", "000").await?.conversation_id,
         other.conversation_id
     );
     let http = reqwest::Client::new();
     let raw: Value = http
         .get(format!(
-            "{base}/api/v1/conversations/alice::bob/messages/002"
+            "{base}/api/v1/conversations/c:alice::c:bob/messages/002"
         ))
-        .bearer_auth("token-alice")
+        .bearer_auth("token-c:alice")
         .header("X-Org-ID", "tos")
         .send()
         .await?
@@ -1534,17 +1542,17 @@ async fn recipient_addressed_messages_use_stable_local_codes_and_server_owned_re
     );
     let response = http
         .post(format!("{base}/api/v1/messages"))
-        .bearer_auth("token-bob")
+        .bearer_auth("token-c:bob")
         .header("X-Org-ID", "tos")
         .header("Idempotency-Key", "body-recipient")
         .json(
-            &json!({"type":"message.create","data":{"recipient_id":"alice","message":"from body"}}),
+            &json!({"type":"message.create","data":{"recipient_id":"c:alice","message":"from body"}}),
         )
         .send()
         .await?
         .error_for_status()?;
     let direct: Value = response.json().await?;
-    assert_eq!(direct["data"]["conversation_id"], "alice::bob");
+    assert_eq!(direct["data"]["conversation_id"], "c:alice::c:bob");
     server.abort();
     Ok(())
 }
@@ -1566,21 +1574,21 @@ async fn bundle_commands_and_history_are_atomic_and_retry_safe() -> Result {
         tokio::spawn(
             async move { axum::serve(listener, silicon_dm::api::build_router(app)).await },
         );
-    let client = Client::new(&base)?.with_auth("token-cos:tos", "tos");
+    let client = Client::new(&base)?.with_auth("token-si:cos", "tos");
     let content: MessageCreate = serde_json::from_value(json!({"message":"original"}))?;
     let first = client
-        .send_message("alice", &content, "history-first")
+        .send_message("c:alice", &content, "history-first")
         .await?;
     assert!(first.history.is_empty());
     let changed: MessageCreate = serde_json::from_value(json!({"message":"edited"}))?;
     let edit = client
-        .edit_message("alice", &first.id, &changed, "history-edit")
+        .edit_message("c:alice", &first.id, &changed, "history-edit")
         .await?;
     assert_eq!(edit.history.len(), 1);
     assert_eq!(edit.history[0]["message"], "original");
     assert_eq!(
         client
-            .edit_message("alice", &first.id, &changed, "history-edit")
+            .edit_message("c:alice", &first.id, &changed, "history-edit")
             .await?
             .history
             .len(),
@@ -1589,7 +1597,7 @@ async fn bundle_commands_and_history_are_atomic_and_retry_safe() -> Result {
     let again: MessageCreate = serde_json::from_value(json!({"message":"second edit"}))?;
     assert_eq!(
         client
-            .edit_message("alice", &first.id, &again, "history-edit-two")
+            .edit_message("c:alice", &first.id, &again, "history-edit-two")
             .await?
             .history[1]["message"],
         "edited"
@@ -1645,7 +1653,7 @@ async fn bundle_commands_and_history_are_atomic_and_retry_safe() -> Result {
         matches!(&missing, Err(Error::Api { status: 422, code, .. }) if code == "validation_error"),
         "missing bundle member must be rejected: {missing:?}"
     );
-    let recipient = Client::new(&base)?.with_auth("token-alice", "tos");
+    let recipient = Client::new(&base)?.with_auth("token-c:alice", "tos");
     assert_eq!(
         recipient.bundle(&first.conversation_id, "001").await?.id,
         accepted.id
@@ -1656,7 +1664,7 @@ async fn bundle_commands_and_history_are_atomic_and_retry_safe() -> Result {
             .await,
         Err(Error::Api { status: 403, .. })
     ));
-    let outsider = Client::new(&base)?.with_auth("token-bob", "tos");
+    let outsider = Client::new(&base)?.with_auth("token-c:bob", "tos");
     let denied = outsider.bundle(&first.conversation_id, "001").await;
     assert!(
         matches!(&denied, Err(Error::Api { status: 404, .. })),
@@ -1671,16 +1679,16 @@ async fn bundle_commands_and_history_are_atomic_and_retry_safe() -> Result {
     let lease = client
         .renew_presence("bundle-test", Some(Activity::Typing))
         .await?;
-    assert_eq!(lease.presence.actor_id, "cos:tos");
+    assert_eq!(lease.presence.actor_id, "si:cos");
     assert_eq!(lease.presence.availability, "online");
     assert!(matches!(lease.presence.activity, Some(Activity::Typing)));
-    let presence = client.presence("cos:tos").await?;
-    assert_eq!(presence.actor_id, "cos:tos");
+    let presence = client.presence("si:cos").await?;
+    assert_eq!(presence.actor_id, "si:cos");
     assert!(matches!(presence.activity, Some(Activity::Typing)));
     client.close_presence("bundle-test").await?;
-    assert_eq!(client.presence("cos:tos").await?.availability, "offline");
+    assert_eq!(client.presence("si:cos").await?.availability, "offline");
     let deleted = client
-        .delete_message("alice", &first.id, "history-delete")
+        .delete_message("c:alice", &first.id, "history-delete")
         .await?;
     assert!(deleted.deleted_at.is_some());
     assert!(deleted.history.is_empty());
@@ -1692,7 +1700,7 @@ async fn bundle_commands_and_history_are_atomic_and_retry_safe() -> Result {
     assert_eq!(stored.as_array().ok_or("history")?.len(), 2);
     assert!(
         client
-            .edit_message("alice", &first.id, &content, "after-delete")
+            .edit_message("c:alice", &first.id, &content, "after-delete")
             .await
             .is_err()
     );
@@ -1759,11 +1767,11 @@ async fn managed_generation_is_independent_of_credential_and_lifecycle_revisions
     let new_secret = format!("ask_{}", "b".repeat(43));
     mock_context(&iam, id, &old_secret, 1, None).await;
     let mut op: silicon_dm::testing::honeycomb::Operation = serde_json::from_value(json!({
-        "operation_id":Uuid::new_v4(),"environment_id":id,"org_id":"tos","app_id":"tos>dm",
+        "operation_id":Uuid::new_v4(),"environment_id":id,"org_id":"tos","app_id":"dm",
         "environment_revision":1,"generation":1,"key_version":1,"action":"prepare",
         "testing_key":"K".repeat(32),"snapshot":{},"reason":"fixture","retired_apps":[]
     }))?;
-    registry.honeycomb_operation(&op, "tos>dm").await?;
+    registry.honeycomb_operation(&op, "dm").await?;
     let original = peer.state_for_key(&app, &old_secret).await?;
     assert_eq!(original.testing_generation, Some(1));
     let old_revision = original.testing_runtime_revision.ok_or("epoch")?;
@@ -1823,7 +1831,7 @@ async fn managed_generation_is_independent_of_credential_and_lifecycle_revisions
             op.key_version += 1;
             op.testing_key = "N".repeat(32);
         }
-        registry.honeycomb_operation(&op, "tos>dm").await?;
+        registry.honeycomb_operation(&op, "dm").await?;
         assert!(matches!(
             registry.request_runtime_fence(id, 1, revision).await,
             Err(AppError::Unauthorized)
@@ -1843,7 +1851,7 @@ async fn managed_generation_is_independent_of_credential_and_lifecycle_revisions
     }
     let actor = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
     };
     let retained = registry.state_for_key(&app, &new_secret).await?;
     retained
@@ -1866,7 +1874,7 @@ async fn managed_generation_is_independent_of_credential_and_lifecycle_revisions
     op.environment_revision += 1;
     op.action = "clean".into();
     op.generation = 2;
-    registry.honeycomb_operation(&op, "tos>dm").await?;
+    registry.honeycomb_operation(&op, "dm").await?;
     assert!(registry.ensure_active(id, 1).await.is_err());
     let cleaned = registry.state_for_key(&app, &new_secret).await?;
     assert_eq!(cleaned.testing_generation, Some(2));
@@ -1925,7 +1933,7 @@ async fn sandbox_worker_retries_shared_readiness(
     op.operation_id = Uuid::new_v4();
     op.environment_revision += 1;
     op.action = "refresh-import".into();
-    registry.honeycomb_operation(&op, "tos>dm").await?;
+    registry.honeycomb_operation(&op, "dm").await?;
     let revision: i64 = sqlx::query_scalar(
         "SELECT runtime_revision FROM dm.testing_environments WHERE environment_id=$1",
     )
@@ -1946,7 +1954,7 @@ async fn sandbox_worker_retries_shared_readiness(
             store.clone(),
             publisher.clone(),
             TingDeliveryContext {
-                app_id: "tos>dm".into(),
+                app_id: "dm".into(),
                 testing_environment_id: Some(op.environment_id),
                 testing_generation: Some(op.generation),
             },
@@ -1967,11 +1975,11 @@ async fn sandbox_worker_retries_shared_readiness(
     );
     let alice = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
     };
     let bob = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "bob".parse()?,
+        id: "c:bob".parse()?,
     };
     let organization: OrganizationId = "tos".parse()?;
     let chat = store
@@ -2051,7 +2059,7 @@ async fn sandbox_worker_retries_shared_readiness(
     assert!(!running.is_finished());
     op.operation_id = Uuid::new_v4();
     op.environment_revision += 1;
-    registry.honeycomb_operation(&op, "tos>dm").await?;
+    registry.honeycomb_operation(&op, "dm").await?;
     assert!(
         matches!(
             tokio::time::timeout(Duration::from_secs(2), running).await??,

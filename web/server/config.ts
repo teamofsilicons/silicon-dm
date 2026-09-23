@@ -65,8 +65,8 @@ export function configuration(env: NodeJS.ProcessEnv = process.env): Config {
       "DM_WEB_MAX_BODY_BYTES must be between 16384 and 3221225472.",
     );
   }
-  const appId = env.DM_WEB_APP_ID || "tos>dm";
-  if (!/^[a-z0-9_-]+>[a-z0-9_-]+$/.test(appId))
+  const appId = env.DM_WEB_APP_ID || "dm";
+  if (!/^[a-z][a-z0-9_-]{0,79}$/.test(appId))
     throw new Error("Invalid canonical DM app ID.");
   return {
     origin,

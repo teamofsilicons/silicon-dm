@@ -114,7 +114,7 @@ async fn cli_normalizes_silicon_text_before_queueing_and_checks_final_length() -
             "expires_at":4102444800u64, "tokens":{
                 "access_token":"test-access", "refresh_token":"test-refresh", "token_type":"Bearer",
                 "expires_in":1800, "scope":"dm", "organization_id":"org",
-                "actor":{"type":sender,"id":"sender:org"}
+                "actor":{"type":sender,"id":"si:sender"}
             }
         }))?;
         store.update(|config| {
