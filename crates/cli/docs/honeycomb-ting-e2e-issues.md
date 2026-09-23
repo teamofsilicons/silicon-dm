@@ -2,7 +2,7 @@
 
 ## Current status — 2026-09-23
 
-Honeycomb 0.3.3 and IAM 3.0.2 are deployed. Honeycomb now preserves the distinction
+Honeycomb 0.3.3 and IAM 3.0.3 are deployed. Honeycomb now preserves the distinction
 between its positive local configuration revision and IAM's accepted imported
 revision 0. New rotations bind the accepted IAM revision before saving the exact
 request; reconciliation recognizes the proven import mapping. A definitive

@@ -2,8 +2,8 @@
 
 ## Current status — 2026-09-23
 
-IAM 3.0.2 and Honeycomb 0.3.3 are deployed. The stale audience credential
-was traced to the encrypted import snapshot update running under a context that
+IAM 3.0.3 and Honeycomb 0.3.3 are deployed. The initial IAM 3.0.2 fix
+addressed the stale audience credential, which was traced to the encrypted import snapshot update running under a context that
 could rotate the authentication digest but could not update that snapshot. IAM
 now updates both atomically through a narrowly scoped database function; an
 unavailable or malformed snapshot fails the rotation instead of leaving two
