@@ -19,14 +19,8 @@
       "self.tags.read"
     ],
     "external": [
-      {
-        "app_id": "tos>ting",
-        "endpoint_id": "subscriptions.register"
-      },
-      {
-        "app_id": "tos>ting",
-        "endpoint_id": "tings.send"
-      }
+      { "app_id": "ting", "endpoint_id": "subscriptions.register" },
+      { "app_id": "ting", "endpoint_id": "tings.send" }
     ]
   },
   "obo_endpoints": [],

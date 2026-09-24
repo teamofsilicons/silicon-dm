@@ -76,11 +76,11 @@ async fn worker_recovers_offline_handoffs_after_restart_without_changing_dm_rece
     store.migrate().await?;
     let alice = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
     };
     let bob = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "bob".parse()?,
+        id: "c:bob".parse()?,
     };
     let organization: OrganizationId = "tos".parse()?;
     let chat = store
@@ -104,7 +104,7 @@ async fn worker_recovers_offline_handoffs_after_restart_without_changing_dm_rece
         })
         .await?;
     let context = TingDeliveryContext {
-        app_id: "tos>dm".into(),
+        app_id: "dm".into(),
         testing_environment_id: None,
         testing_generation: None,
     };
@@ -254,23 +254,23 @@ async fn maintenance_preserves_online_devices_and_receipts(
     store: &PostgresStore,
     worker: &TingDeliveryWorker,
 ) -> Result {
-    sqlx::query("INSERT INTO client_presence_leases(organization_id,actor_kind,actor_id,device_id,heartbeat_at,lease_expires_at,activity,activity_expires_at) VALUES('tos','carbon','alice','expired',clock_timestamp()-interval '2 hours',clock_timestamp()-interval '1 hour','typing',clock_timestamp()-interval '119 minutes'),('tos','carbon','alice','active',clock_timestamp(),clock_timestamp()+interval '1 hour',NULL,NULL),('tos','carbon','bob','expired',clock_timestamp()-interval '2 hours',clock_timestamp()-interval '1 hour',NULL,NULL)")
+    sqlx::query("INSERT INTO client_presence_leases(organization_id,actor_kind,actor_id,device_id,heartbeat_at,lease_expires_at,activity,activity_expires_at) VALUES('tos','carbon','c:alice','expired',clock_timestamp()-interval '2 hours',clock_timestamp()-interval '1 hour','typing',clock_timestamp()-interval '119 minutes'),('tos','carbon','c:alice','active',clock_timestamp(),clock_timestamp()+interval '1 hour',NULL,NULL),('tos','carbon','c:bob','expired',clock_timestamp()-interval '2 hours',clock_timestamp()-interval '1 hour',NULL,NULL)")
         .execute(store.pool()).await?;
     sqlx::query("INSERT INTO contract_versions(family,version,status,introduced_at,deprecated_at,last_request_at) VALUES('http',999,'deprecated',clock_timestamp()-interval '10 days',clock_timestamp()-interval '8 days',clock_timestamp()-interval '8 days')")
         .execute(store.pool()).await?;
-    sqlx::query("INSERT INTO idempotency_records(organization_id,actor_kind,actor_id,operation,idempotency_key,request_hash,status,response_status,created_at,expires_at) VALUES('tos','carbon','alice','worker.maintenance','maintenance-expired',decode(repeat('00',32),'hex'),'completed',200,clock_timestamp()-interval '2 days',clock_timestamp()-interval '1 day')")
+    sqlx::query("INSERT INTO idempotency_records(organization_id,actor_kind,actor_id,operation,idempotency_key,request_hash,status,response_status,created_at,expires_at) VALUES('tos','carbon','c:alice','worker.maintenance','maintenance-expired',decode(repeat('00',32),'hex'),'completed',200,clock_timestamp()-interval '2 days',clock_timestamp()-interval '1 day')")
         .execute(store.pool()).await?;
     worker.maintain_once().await?;
     let closed: i64 = sqlx::query_scalar("SELECT count(*) FROM client_presence_leases WHERE disconnected_at IS NOT NULL AND activity IS NULL AND activity_expires_at IS NULL")
         .fetch_one(store.pool()).await?;
     assert_eq!(closed, 2);
-    let online_last_seen: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM actor_presence_state WHERE actor_id='alice' AND last_seen_at IS NOT NULL)")
+    let online_last_seen: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM actor_presence_state WHERE actor_id='c:alice' AND last_seen_at IS NOT NULL)")
         .fetch_one(store.pool()).await?;
     assert!(
         !online_last_seen,
         "expiring one device does not mark an online actor as last seen"
     );
-    let offline_last_seen: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM actor_presence_state p JOIN client_presence_leases l USING(organization_id,actor_kind,actor_id) WHERE p.actor_id='bob' AND p.last_seen_at=l.lease_expires_at)")
+    let offline_last_seen: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM actor_presence_state p JOIN client_presence_leases l USING(organization_id,actor_kind,actor_id) WHERE p.actor_id='c:bob' AND p.last_seen_at=l.lease_expires_at)")
         .fetch_one(store.pool()).await?;
     assert!(
         offline_last_seen,
@@ -466,7 +466,7 @@ async fn delayed_claim_cannot_start_an_expired_send(database: &DatabaseSettings)
         .await?;
     let publisher = Arc::new(Publisher::default());
     let context = TingDeliveryContext {
-        app_id: "tos>dm".into(),
+        app_id: "dm".into(),
         testing_environment_id: None,
         testing_generation: None,
     };

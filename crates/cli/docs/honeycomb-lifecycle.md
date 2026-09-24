@@ -42,15 +42,13 @@ participant; purge is irreversible and cannot be rediscovered through runtime au
 
 DM persists a pending control record before performing destructive work. An
 exclusive lock in the testing database serializes lifecycle effects against shared
-HTTP request and Ting handoff attempt fences. The control record remains linked during clean.
+HTTP and websocket request fences. The control record remains linked during clean.
 Only after the test database commits does the production receipt become completed.
 Crashes on either side of that commit can safely retry while access stays blocked.
 
 Every managed runtime request fence checks IAM's current testing context. IAM is
-responsible for enforcing shared readiness. DM revalidates lifecycle context
-before requests and publisher attempts. Generation changes invalidate local
-queued writes, sync cursors and cached data. Ting owns receiver-session lifecycle;
-its context must match the selected DM environment and generation.
+responsible for enforcing shared readiness. Local DM versions invalidate sockets,
+queued sends and draft synchronization after any accepted lifecycle revision.
 
 Activity is durably recorded and periodically sent to
 `POST /api/v1/environments/{id}/apps/{app_id}/activity` with the shared testing-key

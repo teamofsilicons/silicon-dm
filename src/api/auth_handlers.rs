@@ -101,6 +101,9 @@ pub async fn me(Authenticated(context): Authenticated) -> Response {
             "session_id": context.session_id,
             "org_role": context.org_role,
             "capabilities": context.capabilities,
+            // Delivery through Ting is part of DM's consent; an older session
+            // must sign in again once to receive DM's current permissions.
+            "reconsent_required": crate::infrastructure::ting_auto_enrollment::reconsent_required(&context),
         })),
     )
         .into_response()
@@ -179,6 +182,8 @@ fn remember_session(state: &AppState, session: &crate::application::auth::Applic
                     return Err(crate::AppError::Forbidden);
                 }
                 cache.remember(&context).await?;
+                // A new DM member is enrolled with Ting as part of signing in.
+                state.ting_auto_enrollment().ensure(&context).await?;
             }
             Ok::<(), crate::AppError>(())
         };

@@ -6,8 +6,7 @@ DM owns its isolated message data.
 
 ## Create the world in Honeycomb
 
-Create a shared testing environment in Honeycomb and include `tos>dm` and, for
-incoming delivery, `tos>ting`. Wait for
+Create a shared testing environment in Honeycomb and include `dm`. Wait for
 shared readiness, then use DM's test `app_secret`. IAM provides the sandbox
 Carbon/Silicon identities, memberships, authentication and signed webhooks.
 See [Honeycomb](https://docs.honeycomb.teamofsilicons.com/) for environment management.
@@ -37,19 +36,6 @@ identify that testing was selected without printing the secret.
 Production and sandbox profiles are separate. Omitting `--test` and unsetting
 `DM_TEST_APP_SECRET` selects production. A supplied invalid, revoked, mismatched,
 or unavailable test credential produces an error; it never selects production.
-
-## Connect Ting in the same sandbox
-
-Approve the DM external Ting scopes, register `tos>dm.sync.changed` in the selected
-Ting organization/environment, and explicitly run `dm --test UUID delivery register`.
-Use a separate Ting-bound test login and the verified Ting audience credential
-pair with `delivery login --token-file FILE --ting-app-secret-file FILE
---ting-environment-key-file FILE`. These are distinct from DM’s test app-secret
-selector. The CLI validates the exact typed actor, organization, environment UUID
-and generation before attaching to Ting. Attach a generic callback using
-`dm --test UUID webhook URL --all-apps`; Ting owns its queue and retries.
-See [CLI authentication](cli/README.md) for private input options and
-[the release gates](release-0.10.0.md) for the pending rotation verification.
 
 ## Enter from the website
 
@@ -99,13 +85,12 @@ environment, application, actor, membership, and organization.
 
 Each environment uses a separate schema in a testing database distinct from
 production. Message data, drafts, receipts, versions, directory projections,
-webhook receipts, Ting handoffs, encrypted publisher credentials, HTTP presence
-leases and sync records are scoped to it. Local queues and caches include the
-environment and generation. Honeycomb clean fences DM requests and publisher
-attempts and removes all DM-owned test records before reporting completion. This
-includes messages, drafts, groups, receipts, presence, queued deliveries and
-directory projections. Ting owns cleanup of its delivery state; receivers must
-revalidate that their Ting session matches DM’s current environment/generation. Attachment links are references; DM never deletes another app's files.
+webhook receipts, background jobs, contract counters, and realtime hubs are
+scoped to it. Local queues and caches include the environment and generation.
+Honeycomb clean blocks requests and deliveries, invalidates open connections,
+and removes all DM-owned test records before reporting completion. This includes
+messages, drafts, groups, receipts, presence, queued deliveries and directory
+projections. Attachment links are references; DM never deletes another app's files.
 Completed retries return the original receipt without cleaning subsequent data.
 A failed cleanup stays fenced until the same operation succeeds.
 
@@ -123,10 +108,9 @@ Only the corresponding sandbox receives the event. Deduplication and aggregate
 versions protect projections against repeated or out-of-order deliveries. Stored
 webhook records omit the root key and the raw secret-bearing envelope.
 
-DM hands message references to Ting for explicitly registered test recipients.
-A sandbox Ting callback must use a test or simulated destination; neither DM nor
-Ting can infer whether arbitrary callback code sends email, SMS, payments, or
-other effects. Configure separate callback
+DM sends messages to registered test identities. Your sandbox callback must use
+a test or simulated destination; DM does not infer whether arbitrary callback
+code sends email, SMS, payments, or other effects. Configure separate callback
 endpoints when exercising integrations with such systems.
 
 ## Existing manually paired environments

@@ -171,7 +171,7 @@ Groups, drafts, GIFs, sandbox management and normal send/edit/delete operations
 continue through HTTP; see the [API guide](../api/README.md).
 
 Optional ISI addresses belong in `MessageCreate.sender_id` and `recipient_id`,
-for example `deliberate@cos:tos`. They do not create another IAM principal or
+for example `deliberate@si:cos`. They do not create another IAM principal or
 change conversation permissions. Canonical identity stays in `Message.sender`;
 route the validated Ting reference's optional `isi` in the receiving application.
 Edits cannot change the original route.

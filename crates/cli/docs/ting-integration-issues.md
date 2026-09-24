@@ -10,17 +10,10 @@ the original failure evidence is retained for context.
 
 Production DM configuration revision 2 (IAM revision 23) now includes both Ting
 external scopes, and `tos>dm.sync.changed` is registered in production `tos`.
-DM backend 0.10.1, gateway and website are deployed. The backend now separates
-the shared sandbox generation from internal credential-cache invalidation, and
-idle workers no longer poll IAM. Deployed bidirectional message/receipt acceptance
-passed with real IAM and Ting in the task-owned testing environment; see
-[the deployed evidence](ting-deployed-live-verification.json). Client/CLI 0.10.1
-is published on crates.io, GitHub and Honeycomb. Fresh installation, the existing
-global installation and 17 native delivery/retry/receipt checks passed; see
-[the native release evidence](ting-native-release-verification.json). Existing
-profiles, queued state, relay and Ting bindings were preserved. The running Ting
-daemon remains 0.1.2, while the installed Ting CLI is 0.1.4; no shared-daemon
-restart was needed for these checks.
+DM's Ting delivery backend, gateway and website are deployed; a backend patch is
+undergoing verification to separate the shared sandbox generation from internal
+credential-cache invalidation. Client/CLI 0.10.1 publication is held until the
+patched deployed backend passes the full message/receipt acceptance run.
 
 The live Interface browser retained its production login and message history.
 Both websites now resolve their selected organization through authenticated Ting
@@ -32,12 +25,8 @@ These checks do not by themselves claim message delivery or recipient enrollment
 
 Ting's production app list is empty for `bricks`, and listing/registering DM's
 notification type there is denied, although the same app/type is visible in
-`tos`. Read-only source review found that sends also look up the type in the
-recipient organization. The inferred correction is to resolve publisher-owned
-types independently of recipient organization while retaining existing type
-management authorization and recipient grants. No Ting change has been made;
-cross-organization delivery remains an outstanding dependency. A connected
-browser is not proof that a DM message can be handed off in Bricks.
+`tos`. Cross-organization type management is a separate outstanding dependency;
+a connected browser is not proof that a DM message can be handed off in Bricks.
 
 IAM 3.0.3 and Honeycomb 0.3.3 are deployed. The rotated fresh-environment credential
 passes a new official-SDK OBO audience validation. The original pending Honeycomb
@@ -109,7 +98,7 @@ Evidence inspected initially:
 
 - [Public API contract](https://ting.teamofsilicons.com/docs/api.md).
 - [Live application information](https://backend.ting.teamofsilicons.com/v1/iam)
-  names `tos>ting`, API `v1`, and Rust package `silicon-ting-client`.
+  names `ting`, API `v1`, and Rust package `silicon-ting-client`.
 - [Live health](https://backend.ting.teamofsilicons.com/healthz) reports `0.1.2`.
 - [Published crate index](https://index.crates.io/si/li/silicon-ting-client)
   lists `0.1.2` as the latest non-yanked client, published 2026-09-22.
@@ -138,7 +127,7 @@ authority; a new eligible token wakes pending work for that same account.
 Before every handoff attempt, DM re-introspects the cached token, checks the
 exact organization and originator, and uses the official IAM SDK to obtain a
 fresh single-use `tings.send` proof over the unchanged persisted request bytes.
-IAM app identity binds the `tos>dm.sync.changed` type to DM. Sandbox proofs also
+IAM app identity binds the `dm.sync.changed` type to DM. Sandbox proofs also
 require IAM-verified Ting audience credentials from the same test environment.
 
 Expired or revoked authority leaves the event pending until that same account
@@ -164,9 +153,9 @@ does not release the pending event. Local fixtures cannot satisfy this gate.
 ## 2. Required setup: recipient enrollment is distinct from receiver login
 
 `POST /v1/subscriptions` is supported today. Prepare exact bytes containing
-`org_id`, `app_id: "tos>dm"` and optionally `for`. Use the recipient's DM access
+`org_id`, `app_id: "dm"` and optionally `for`. Use the recipient's DM access
 token as the OBO subject, the DM app credential to sign the exchange, audience
-`tos>ting`, endpoint `subscriptions.register`, metadata `{}`, and the SHA-256 of
+`ting`, endpoint `subscriptions.register`, metadata `{}`, and the SHA-256 of
 those exact bytes. Submit them unchanged with the returned proof. The
 [registration implementation](https://github.com/teamofsilicons/silicon-ting/blob/1999c7b02762077da77153b23de4bf5c8d6f9498/crates/ting-server/src/store.rs#L170)
 binds the grant to the verified issuing app and represented recipient.
@@ -174,7 +163,7 @@ binds the grant to the verified issuing app and represented recipient.
 DM must declare the relevant external scopes, obtain Ting's critical review and
 obtain recipient consent. Existing login tokens do not automatically gain a new
 scope. The checked-in `releases/honeycomb-application.json` now declares
-`tos>ting` / `subscriptions.register` and `tings.send`, and already declares
+`ting` / `subscriptions.register` and `tings.send`, and already declares
 `self.identity.read`.
 Production configuration revision 2 is now accepted at IAM revision 23, with
 both external Ting scopes active. Publication request
@@ -186,11 +175,11 @@ verified nested public identity against the proof actor.
 **One-time type setup is also required in each organization and environment.**
 Ting stores notification types by environment, organization and application;
 `tings.send` rejects an unregistered type. An authorized Ting application
-manager must register `tos>dm.sync.changed` before DM can hand off updates in
+manager must register `dm.sync.changed` before DM can hand off updates in
 that organization. The installed CLI exposes:
 
 ```sh
-ting --org ORG types register --type 'tos>dm.sync.changed' \
+ting --org ORG types register --type 'dm.sync.changed' \
   --description 'A DM message or receipt changed; fetch its current authorized state from DM.'
 ```
 
@@ -374,14 +363,14 @@ Its service receipt reports:
 > Protected lifecycle transport is not configured for this application
 
 The import command returned success and top-level `state: ready`, but also
-`operation_state: pending`. Inspecting `services` showed `tos>dm` failed and
+`operation_state: pending`. Inspecting `services` showed `dm` failed and
 `operation_pending: true`; DM is absent from the accepted `imports` list. The
 sandbox therefore cannot yet be reported as ready for the complete DM flow.
 The environment and original operation were re-read after local website
 verification: revision 4 is still pending, with the same failed DM receipt and
 DM still absent from accepted imports.
 
-Repair requires the deployed Honeycomb participant registry to include `tos>dm`
+Repair requires the deployed Honeycomb participant registry to include `dm`
 and DM's explicit backend origin, referencing a dedicated matching
 `DM_HONEYCOMB_SERVICE_TOKEN` in both services. Configure
 `DM_HONEYCOMB_BASE_URL`, load the settings in both running services, and retry
@@ -399,7 +388,7 @@ would not repair or adopt this deployed operation.
 The deployment change must preserve existing participant entries and add:
 
 ```json
-{"app_id":"tos>dm","base_url":"<DM HTTPS backend origin>","token_env":"DM_HONEYCOMB_SERVICE_TOKEN"}
+{"app_id":"dm","base_url":"<DM HTTPS backend origin>","token_env":"DM_HONEYCOMB_SERVICE_TOKEN"}
 ```
 
 Provision the matching dedicated credential through the services' secret stores,
@@ -504,7 +493,7 @@ regressions cover both. These local results do not satisfy the shared remote
 environment or live browser gates.
 
 The installed Ting CLI's latest read-only inspection reported version 0.1.2,
-logged in as `saket`; organization `tos` and app `tos>dm` are visible with
+logged in as `c:saket`; organization `tos` and app `dm` are visible with
 `can_manage_tings: true`. Explicit-org type and subscription listings were
 empty. No production type, grant or notification was created by those inspections.
 

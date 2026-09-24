@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
 use sqlx::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -532,18 +533,18 @@ fn canonicalize_participants(participants: &mut Vec<ActorRef>) {
 }
 
 fn participant_set_hash(participants: &[ActorRef]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = Sha256::new();
     for participant in participants {
         let kind = participant.actor_type.as_str().as_bytes();
         let id = participant.id.as_str().as_bytes();
         let kind_length = u64::try_from(kind.len()).unwrap_or(u64::MAX);
         let id_length = u64::try_from(id.len()).unwrap_or(u64::MAX);
-        hasher.update(&kind_length.to_be_bytes());
+        hasher.update(kind_length.to_be_bytes());
         hasher.update(kind);
-        hasher.update(&id_length.to_be_bytes());
+        hasher.update(id_length.to_be_bytes());
         hasher.update(id);
     }
-    *hasher.finalize().as_bytes()
+    hasher.finalize().into()
 }
 
 fn map_participant(record: &ParticipantRecord) -> AppResult<ActorRef> {

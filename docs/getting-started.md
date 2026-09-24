@@ -6,8 +6,8 @@ to your devices and generic local endpoints.
 ## 1. Install
 
 ```sh
-honeycomb install 'tos>dm'
-honeycomb install 'tos>ting'
+honeycomb install 'dm'
+honeycomb install 'ting'
 ```
 
 Use matching releases containing the Ting migration. Honeycomb manages updates.
@@ -23,7 +23,7 @@ dm login status --json
 dm delivery register
 ```
 
-Request a DM-bound IAM short-lived token for the displayed `app_id` (`tos>dm`).
+Request a DM-bound IAM short-lived token for the displayed `app_id` (`dm`).
 Input is hidden on terminals. Delivery registration uses the recipient's
 IAM-consented authority to let DM send them tings; login and reconnect do not
 restore revoked grants.

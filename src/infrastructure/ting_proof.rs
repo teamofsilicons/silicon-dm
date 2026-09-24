@@ -16,7 +16,7 @@ use crate::{
     application::auth::{AuthContext, PresentedCredential},
 };
 
-const AUDIENCE: &str = "tos>ting";
+const AUDIENCE: &str = "ting";
 const ENDPOINT: &str = "tings.send";
 const PATH: &str = "/v1/tings";
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
@@ -47,7 +47,7 @@ pub(crate) async fn issue(
     if context.credential_expires_at <= OffsetDateTime::now_utc() {
         return Err(AppError::Unauthorized);
     }
-    if !context.has_capability("obo:tos>ting:tings.send")
+    if !context.has_capability("obo:ting:tings.send")
         || !context.has_capability("self.identity.read")
     {
         return Err(AppError::Forbidden);
@@ -155,13 +155,13 @@ mod tests {
     use crate::domain::{ActorRef, ActorType};
 
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-    const BODY: &str = r#"{ "org_id": "tos", "type":"tos>dm.sync.changed", "for":"bob", "key":"event-key", "data":{} }"#;
+    const BODY: &str = r#"{ "org_id": "tos", "type":"dm.sync.changed", "for":"c:bob", "key":"event-key", "data":{} }"#;
 
     fn context() -> Result<AuthContext> {
         Ok(AuthContext {
             actor: ActorRef {
                 actor_type: ActorType::Carbon,
-                id: "alice".parse()?,
+                id: "c:alice".parse()?,
             },
             organization_id: "tos".parse()?,
             session_id: None,
@@ -170,7 +170,7 @@ mod tests {
             represented_actor_ids: BTreeSet::new(),
             capabilities: BTreeSet::from([
                 "self.identity.read".to_owned(),
-                "obo:tos>ting:tings.send".to_owned(),
+                "obo:ting:tings.send".to_owned(),
             ]),
             credential: PresentedCredential::Bearer(SecretString::from("fixture-originator-oat")),
             credential_expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
@@ -183,7 +183,7 @@ mod tests {
         let server = MockServer::start().await;
         let iam = Client::builder(&server.uri())?
             .credential(Credential::Application {
-                app_id: "tos>dm".to_owned(),
+                app_id: "dm".to_owned(),
                 secret: SecretString::from("fixture-dm-secret"),
             })
             .build()?;
@@ -193,7 +193,7 @@ mod tests {
                 "metadata":{},"ttl_seconds":60}]
         }))?;
         Mock::given(method("GET"))
-            .and(path("/api/v1/obo-access/applications/tos%3Eting/endpoints"))
+            .and(path("/api/v1/obo-access/applications/ting/endpoints"))
             .respond_with(ResponseTemplate::new(200).set_body_json(&catalog))
             .expect(1)
             .mount(&server)
@@ -209,7 +209,7 @@ mod tests {
             .and(path("/api/v1/obo-access/exchanges"))
             .and(header(
                 "authorization",
-                format!("Basic {}", STANDARD.encode("tos>dm:fixture-dm-secret")),
+                format!("Basic {}", STANDARD.encode("dm:fixture-dm-secret")),
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(&proof))
             .expect(1)
@@ -222,7 +222,7 @@ mod tests {
     async fn official_sdk_signs_the_original_body_and_originator() -> Result {
         let (server, iam, catalog) = issuer(None).await?;
         let attempt = Uuid::new_v4().to_string();
-        let authority = issue(&iam, "tos>dm", None, &context()?, BODY, &attempt).await?;
+        let authority = issue(&iam, "dm", None, &context()?, BODY, &attempt).await?;
         assert_eq!(authority.proof_token.expose_secret(), "fixture-bound-proof");
         assert!(authority.testing.is_none());
         let requests = server
@@ -268,27 +268,27 @@ mod tests {
         let server = MockServer::start().await;
         let iam = Client::new(&server.uri())?;
         let attempt = Uuid::new_v4().to_string();
-        for capability in ["self.identity.read", "obo:tos>ting:tings.send"] {
+        for capability in ["self.identity.read", "obo:ting:tings.send"] {
             let mut missing = context()?;
             missing.capabilities.remove(capability);
             assert!(matches!(
-                issue(&iam, "tos>dm", None, &missing, BODY, &attempt).await,
+                issue(&iam, "dm", None, &missing, BODY, &attempt).await,
                 Err(AppError::Forbidden)
             ));
         }
         let mut expired = context()?;
         expired.credential_expires_at = OffsetDateTime::now_utc() - time::Duration::seconds(1);
         assert!(matches!(
-            issue(&iam, "tos>dm", None, &expired, BODY, &attempt).await,
+            issue(&iam, "dm", None, &expired, BODY, &attempt).await,
             Err(AppError::Unauthorized)
         ));
         for body in [
             BODY.replace("\"tos\"", "\"other\""),
-            BODY.replace("tos>dm.sync.changed", "tos>other.sync.changed"),
-            BODY.replace("tos>dm.sync.changed", "tos>dm.unexpected.changed"),
+            BODY.replace("dm.sync.changed", "other.sync.changed"),
+            BODY.replace("dm.sync.changed", "dm.unexpected.changed"),
         ] {
             assert!(matches!(
-                issue(&iam, "tos>dm", None, &context()?, &body, &attempt).await,
+                issue(&iam, "dm", None, &context()?, &body, &attempt).await,
                 Err(AppError::Forbidden)
             ));
         }
@@ -313,7 +313,7 @@ mod tests {
         assert!(matches!(
             issue(
                 &iam,
-                "tos>dm",
+                "dm",
                 None,
                 &context()?,
                 BODY,
@@ -346,10 +346,7 @@ mod tests {
             .and(path("/api/v1/application/testing-context"))
             .and(header(
                 "authorization",
-                format!(
-                    "Basic {}",
-                    STANDARD.encode("tos>ting:fixture-ting-test-secret")
-                ),
+                format!("Basic {}", STANDARD.encode("ting:fixture-ting-test-secret")),
             ))
             .and(header("x-testing-environment-key", "a".repeat(32)))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -363,7 +360,7 @@ mod tests {
         assert!(matches!(
             issue(
                 &iam,
-                "tos>dm",
+                "dm",
                 Some(expected),
                 &context()?,
                 BODY,

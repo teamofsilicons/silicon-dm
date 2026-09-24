@@ -218,8 +218,8 @@ There are no client-callable internal delivery workers, OBO endpoints, attachmen
 key header selects the sandbox using the same rules as other public routes.
 
 Message creation, replies and bundle display messages accept optional
-`sender_id` and `recipient_id` addresses such as `compose@writer:tos` and
-`deliberate@cos:tos`. Senders authorize as the canonical IAM account; recipients
+`sender_id` and `recipient_id` addresses such as `compose@si:writer` and
+`deliberate@si:cos`. Senders authorize as the canonical IAM account; recipients
 must be existing conversation participants. ISI prefixes require silicon
 accounts; carbon email identifiers are unchanged. A prefix is nonempty and
 contains no whitespace, `@`, or `:`. Conversation creation and WebSocket

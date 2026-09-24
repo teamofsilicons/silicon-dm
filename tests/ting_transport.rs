@@ -31,7 +31,7 @@ const BODY: &str = r#" {
   "key" : "dm-original-key", "org_id":"tos",
   "data" : {"schema_version":1,"message_id":"000"},
   "metadata":{"isi":"plan\u006eer", "note":"नमस्ते"},
-  "for":"cos:tos", "type":"tos>dm.sync.changed"
+  "for":"si:cos", "type":"dm.sync.changed"
 } "#;
 
 fn authority(proof: &str) -> TingSendAuthority {

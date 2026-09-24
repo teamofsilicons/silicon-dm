@@ -545,14 +545,13 @@ fn validate_app_id(name: &'static str, value: &str) -> Result<(), SettingsError>
                 byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
             })
     };
-    if value.len() > 255
-        || !value
-            .split_once('>')
-            .is_some_and(|(org, app)| valid_part(org) && valid_part(app))
+    if !(1..=80).contains(&value.len())
+        || !value.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        || !valid_part(value)
     {
         return Err(invalid(
             name,
-            "must be the canonical IAM application ID, such as tos>dm",
+            "must be a bare IAM application handle, such as dm",
         ));
     }
     Ok(())
@@ -633,7 +632,7 @@ mod tests {
             .env("DM_PUBLIC_BASE_URL", "http://localhost:8080")
             .env("DM_DATABASE_URL", "postgres://user:secret@localhost/dm")
             .env("DM_IAM_BASE_URL", "http://localhost:8081")
-            .env("DM_IAM_APP_ID", "tos>dm")
+            .env("DM_IAM_APP_ID", "dm")
             .env("DM_IAM_APP_SECRET", "test-secret")
             .env(
                 "DM_IAM_WEBHOOK_SECRET",
@@ -690,8 +689,8 @@ mod tests {
 
     #[test]
     fn iam_application_identifiers_follow_the_published_contract() {
-        assert!(validate_app_id("DM_IAM_APP_ID", "tos>dm").is_ok());
+        assert!(validate_app_id("DM_IAM_APP_ID", "dm").is_ok());
         assert!(validate_app_id("DM_IAM_APP_ID", "Silicon-DM").is_err());
-        assert!(validate_app_id("DM_IAM_APP_ID", "ab").is_err());
+        assert!(validate_app_id("DM_IAM_APP_ID", "tos>dm").is_err());
     }
 }

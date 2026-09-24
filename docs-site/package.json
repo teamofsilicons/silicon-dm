@@ -1,5 +1,5 @@
 {
-  "name": "silicon-dm-docs", "version": "0.10.1", "private": true, "type": "module",
+  "name": "silicon-dm-docs", "version": "0.11.0", "private": true, "type": "module",
   "scripts": {"build": "node build.mjs", "check": "node check.mjs"},
   "engines": {"node": "24.x"},
   "devDependencies": {"markdown-it": "15.0.2"}

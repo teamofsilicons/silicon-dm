@@ -81,28 +81,39 @@ pub enum IdentityError {
 }
 
 impl ActorId {
-    /// Separates an optional ISI from a silicon address (`isi@silicon:org`).
-    /// Carbon email identifiers remain ordinary identifiers.
+    /// Separates an optional ISI from a Silicon address (`isi@si:handle`).
     ///
     /// # Errors
-    /// Returns an error for a malformed ISI prefix or silicon address.
+    /// Returns an error for an invalid public ID or ISI prefix.
     pub fn address_parts(&self) -> Result<(&str, Option<&str>), &'static str> {
-        let Some((isi, actor)) = self.0.split_once('@') else {
-            return Ok((&self.0, None));
+        let (actor, isi) = match self.0.split_once('@') {
+            Some((isi, actor)) => {
+                if isi.is_empty()
+                    || isi
+                        .chars()
+                        .any(|c| c.is_whitespace() || matches!(c, ':' | '@'))
+                    || !actor.starts_with("si:")
+                {
+                    return Err("silicon address must be ISI@si:handle with a non-empty ISI");
+                }
+                (actor, Some(isi))
+            }
+            None => (self.0.as_str(), None),
         };
-        if !self.0.contains(':') {
-            return Ok((&self.0, None));
+        let handle = actor
+            .strip_prefix("si:")
+            .or_else(|| actor.strip_prefix("c:"));
+        if !handle.is_some_and(|handle| {
+            (3..=if actor.starts_with("c:") { 30 } else { 50 }).contains(&handle.len())
+                && handle.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'-' | b'_')
+                })
+        }) {
+            return Err("actor ID must be c:handle or si:handle");
         }
-        if isi.is_empty()
-            || isi.chars().any(|c| c.is_whitespace() || c == ':')
-            || actor.contains('@')
-            || actor
-                .split_once(':')
-                .is_none_or(|(name, org)| name.is_empty() || org.is_empty())
-        {
-            return Err("silicon address must be ISI@silicon:org with a non-empty ISI");
-        }
-        Ok((actor, Some(isi)))
+        Ok((actor, isi))
     }
     /// Canonical IAM identity underlying an optional ISI address.
     ///
@@ -206,26 +217,32 @@ mod address_tests {
     use super::*;
     #[test]
     fn isi_is_routing_and_never_identity_authority() -> Result<(), Box<dyn std::error::Error>> {
-        let address: ActorId = "deliberate@cos:tos".parse()?;
-        assert_eq!(address.address_parts()?, ("cos:tos", Some("deliberate")));
-        assert_eq!(address.base_actor_id()?.as_str(), "cos:tos");
+        let address: ActorId = "deliberate@si:cos".parse()?;
+        assert_eq!(address.address_parts()?, ("si:cos", Some("deliberate")));
+        assert_eq!(address.base_actor_id()?.as_str(), "si:cos");
         assert!(address.addresses(&ActorRef {
             actor_type: ActorType::Silicon,
-            id: "cos:tos".parse()?
+            id: "si:cos".parse()?
         }));
         assert!(!address.addresses(&ActorRef {
             actor_type: ActorType::Carbon,
-            id: "cos:tos".parse()?
+            id: "si:cos".parse()?
         }));
         assert!(!address.addresses(&ActorRef {
             actor_type: ActorType::Silicon,
-            id: "other:tos".parse()?
+            id: "si:other".parse()?
         }));
-        assert_eq!(
-            "human@example.com".parse::<ActorId>()?.address_parts()?,
-            ("human@example.com", None)
+        assert!(
+            "human@example.com"
+                .parse::<ActorId>()?
+                .address_parts()
+                .is_err()
         );
-        for invalid in ["@cos:tos", "a@b@cos:tos", "a@:tos", "a@cos:", "a b@cos:tos"] {
+        assert_eq!(
+            "c:human".parse::<ActorId>()?.address_parts()?,
+            ("c:human", None)
+        );
+        for invalid in ["@si:cos", "a@b@si:cos", "a@:tos", "a@cos:", "a b@si:cos"] {
             assert!(invalid.parse::<ActorId>()?.address_parts().is_err());
         }
         Ok(())

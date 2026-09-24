@@ -25,7 +25,7 @@ type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
 fn context() -> TingDeliveryContext {
     TingDeliveryContext {
-        app_id: "tos>dm".into(),
+        app_id: "dm".into(),
         testing_environment_id: None,
         testing_generation: None,
     }
@@ -39,10 +39,7 @@ fn authority(org: &OrganizationId, actor: &ActorRef, token: &str) -> AuthContext
         org_role: None,
         tag_ids: None,
         represented_actor_ids: BTreeSet::from([actor.id.clone()]),
-        capabilities: BTreeSet::from([
-            "self.identity.read".into(),
-            "obo:tos>ting:tings.send".into(),
-        ]),
+        capabilities: BTreeSet::from(["self.identity.read".into(), "obo:ting:tings.send".into()]),
         credential: PresentedCredential::Bearer(SecretString::from(token.to_owned())),
         credential_expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
     }
@@ -68,11 +65,11 @@ async fn verified_access_tokens_are_encrypted_bounded_scoped_and_restart_safe() 
     let other_org: OrganizationId = "other".parse()?;
     let alice = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
     };
     let bob = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "bob".parse()?,
+        id: "c:bob".parse()?,
     };
     let typed_alice = ActorRef {
         actor_type: ActorType::Silicon,
@@ -98,7 +95,7 @@ async fn verified_access_tokens_are_encrypted_bounded_scoped_and_restart_safe() 
     assert_eq!(original.session_id, auth.session_id);
     assert!(!format!("{original:?}").contains(original_token));
     let (cipher, nonce): (Vec<u8>, Vec<u8>) =
-        sqlx::query_as("SELECT ciphertext,nonce FROM ting_credentials WHERE actor_id='alice'")
+        sqlx::query_as("SELECT ciphertext,nonce FROM ting_credentials WHERE actor_id='c:alice'")
             .fetch_one(store.pool())
             .await?;
     assert_ne!(cipher, original_token.as_bytes());
@@ -129,7 +126,7 @@ async fn verified_access_tokens_are_encrypted_bounded_scoped_and_restart_safe() 
     );
 
     let mut missing_scope = authority(&org, &bob, "oat-fixture-missing-scope");
-    missing_scope.capabilities.remove("obo:tos>ting:tings.send");
+    missing_scope.capabilities.remove("obo:ting:tings.send");
     assert!(!cache.remember(&missing_scope).await?);
     let mut expired = authority(&org, &bob, "oat-fixture-expired");
     expired.credential_expires_at = OffsetDateTime::now_utc() - time::Duration::seconds(1);
@@ -210,11 +207,11 @@ async fn assert_transplant_and_expiry_guards(
     sqlx::query("INSERT INTO ting_credentials(app_id,generation,organization_id,actor_kind,actor_id,token_digest,nonce,ciphertext,session_id,expires_at) SELECT app_id,generation,organization_id,'silicon',$1,token_digest,nonce,ciphertext,session_id,expires_at FROM ting_credentials WHERE token_digest=$2")
         .bind(typed_alice.id.as_str()).bind(digest.as_slice()).execute(store.pool()).await?;
     assert!(cache.candidates(org, typed_alice).await?.is_empty());
-    sqlx::query("INSERT INTO ting_credentials(app_id,generation,organization_id,actor_kind,actor_id,token_digest,nonce,ciphertext,session_id,expires_at) SELECT app_id,generation,$1,'carbon','alice',token_digest,nonce,ciphertext,session_id,expires_at FROM ting_credentials WHERE organization_id=$2 AND actor_id=$3 AND token_digest=$4")
+    sqlx::query("INSERT INTO ting_credentials(app_id,generation,organization_id,actor_kind,actor_id,token_digest,nonce,ciphertext,session_id,expires_at) SELECT app_id,generation,$1,'carbon','c:alice',token_digest,nonce,ciphertext,session_id,expires_at FROM ting_credentials WHERE organization_id=$2 AND actor_id=$3 AND token_digest=$4")
         .bind(other_org.as_str()).bind(org.as_str()).bind(bob.id.as_str()).bind(digest.as_slice()).execute(store.pool()).await?;
     let alice = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
     };
     assert!(cache.candidates(other_org, &alice).await?.is_empty());
     sqlx::query("UPDATE ting_credentials SET session_id=$2 WHERE organization_id=$3 AND actor_id=$4 AND token_digest=$1")

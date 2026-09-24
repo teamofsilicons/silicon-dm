@@ -48,11 +48,11 @@ async fn ting_handoffs_preserve_pending_events_and_separate_acceptance_from_rece
     let org: OrganizationId = "tos".parse()?;
     let author = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
     };
     let recipient = ActorRef {
         actor_type: ActorType::Silicon,
-        id: "cos:tos".parse()?,
+        id: "si:cos".parse()?,
     };
     let conversation = store
         .create_conversation(CreateConversationCommand {
@@ -68,7 +68,7 @@ async fn ting_handoffs_preserve_pending_events_and_separate_acceptance_from_rece
             conversation_id: conversation.id,
             sender: author.clone(),
             content: serde_json::from_value(
-                json!({"message":"private original", "recipient_id":"planner@cos:tos"}),
+                json!({"message":"private original", "recipient_id":"planner@si:cos"}),
             )?,
             idempotency_key: "ting-original".parse()?,
         })
@@ -93,7 +93,7 @@ async fn ting_handoffs_preserve_pending_events_and_separate_acceptance_from_rece
     assert_handoff_rollback(&store, legacy_pending[0]).await?;
 
     let context = TingDeliveryContext {
-        app_id: "tos>dm".into(),
+        app_id: "dm".into(),
         testing_environment_id: None,
         testing_generation: None,
     };
@@ -112,9 +112,9 @@ async fn ting_handoffs_preserve_pending_events_and_separate_acceptance_from_rece
     assert_eq!(original.originator, Some(author.clone()));
     let body: Value = serde_json::from_str(&original.request_body)?;
     assert_eq!(body["key"], original.delivery_id.to_string());
-    assert_eq!(body["type"], "tos>dm.sync.changed");
-    assert_eq!(body["for"], "cos:tos");
-    assert_eq!(body["data"]["conversation_id"], "alice::cos:tos");
+    assert_eq!(body["type"], "dm.sync.changed");
+    assert_eq!(body["for"], "si:cos");
+    assert_eq!(body["data"]["conversation_id"], "c:alice::si:cos");
     assert_eq!(body["data"]["message_id"], "000");
     assert_eq!(body["data"]["event"], "message.created");
     assert_eq!(body["metadata"]["isi"], "planner");
@@ -145,7 +145,7 @@ async fn ting_handoffs_preserve_pending_events_and_separate_acceptance_from_rece
     );
 
     // A membership change after claiming must stop the network send without losing work.
-    sqlx::query("UPDATE actor_snapshots SET status='suspended',iam_version=iam_version+1 WHERE actor_id='cos:tos'")
+    sqlx::query("UPDATE actor_snapshots SET status='suspended',iam_version=iam_version+1 WHERE actor_id='si:cos'")
         .execute(store.pool()).await?;
     assert!(!store.ting_delivery_authorized(&original).await?);
     store
@@ -162,7 +162,7 @@ async fn ting_handoffs_preserve_pending_events_and_separate_acceptance_from_rece
             .await?
             .is_empty()
     );
-    sqlx::query("UPDATE actor_snapshots SET status='active',iam_version=iam_version+1 WHERE actor_id='cos:tos'")
+    sqlx::query("UPDATE actor_snapshots SET status='active',iam_version=iam_version+1 WHERE actor_id='si:cos'")
         .execute(store.pool()).await?;
 
     // An edit creates its own immutable event; it cannot reserialize the uncertain original send.
@@ -281,7 +281,7 @@ async fn ting_handoffs_preserve_pending_events_and_separate_acceptance_from_rece
     assert_ne!(receipt[0].originator.as_ref(), Some(&receipt[0].target));
     let receipt_body: Value = serde_json::from_str(&receipt[0].request_body)?;
     assert_eq!(receipt_body["data"]["event"], "message.delivered");
-    assert_eq!(receipt_body["for"], "alice");
+    assert_eq!(receipt_body["for"], "c:alice");
     assert_eq!(
         store
             .get_message(&org, &author, conversation.id, message.id)
@@ -353,7 +353,7 @@ async fn ting_handoffs_preserve_pending_events_and_separate_acceptance_from_rece
             .await?;
     assert!(delete_origins.iter().all(|id| id == author.id.as_str()));
     let mismatch = TingDeliveryContext {
-        app_id: "tos>dm".into(),
+        app_id: "dm".into(),
         testing_environment_id: Some(Uuid::new_v4()),
         testing_generation: Some(1),
     };
@@ -490,7 +490,7 @@ async fn assert_generation_fencing(
         sqlx::query("INSERT INTO ting_handoffs(delivery_id,organization_id,target_kind,target_id,conversation_id,public_conversation_id,message_sequence,delivery_sequence,event,routing_address,created_at) SELECT $2,organization_id,target_kind,target_id,conversation_id,public_conversation_id,message_sequence,delivery_sequence,event,routing_address,created_at FROM dm.ting_handoffs WHERE delivery_id=$1")
             .bind(source).bind(event).execute(scoped.pool()).await?;
         let context = TingDeliveryContext {
-            app_id: "tos>dm".into(),
+            app_id: "dm".into(),
             testing_environment_id: Some(environment),
             testing_generation: Some(generation),
         };

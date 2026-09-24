@@ -45,12 +45,12 @@ async fn upgrade_keeps_existing_groups_and_assigns_unique_stable_addresses() -> 
     let org: OrganizationId = "tos".parse()?;
     let actor = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
     };
     store
         .refresh_directory(&org, std::slice::from_ref(&actor))
         .await?;
-    sqlx::query("INSERT INTO iam_membership_projections(membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status) VALUES($1,$2,$3,'tos','carbon','alice',1,1,'active')")
+    sqlx::query("INSERT INTO iam_membership_projections(membership_id,principal_id,iam_organization_id,organization_id,actor_kind,actor_id,iam_version,authorization_epoch,status) VALUES($1,$2,$3,'tos','carbon','c:alice',1,1,'active')")
         .bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(Uuid::new_v4()).execute(store.pool()).await?;
     let auth = AuthContext {
         actor,

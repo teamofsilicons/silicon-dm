@@ -68,12 +68,12 @@ settings. Group access and names refresh while the page is visible.
 
 ```sh
 dm groups create --name 'Product Design' --description 'Design discussion' --member @saket
-dm groups create --name Announcements --public --member cos:tos
+dm groups create --name Announcements --public --member si:cos
 dm groups create --name Engineering --tag 11111111-1111-4111-8111-111111111111
 dm groups list
 dm groups show g:tos:product-design
-dm groups invite g:tos:product-design --member cos:tos --member @saket
-dm groups remove g:tos:product-design --member cos:tos
+dm groups invite g:tos:product-design --member si:cos --member @saket
+dm groups remove g:tos:product-design --member si:cos
 dm groups update g:tos:product-design --version 3 --name Research --description 'Updated purpose'
 dm messages send g:tos:product-design --text 'Hello, group' --metadata '{}'
 dm messages list g:tos:product-design
@@ -104,7 +104,7 @@ let group = client.create_group(&GroupCreate {
         name: "Research".into(), description: "Shared work".into(),
         is_public: false, tag_ids: vec![],
     },
-    member_ids: vec!["cos:tos".into()],
+    member_ids: vec!["si:cos".into()],
 }, "create-research-group").await?;
 let current = client.group(&group.id).await?;
 client.invite_group_members(&group.id, &["@saket".into()], "invite-research-saket").await?;
@@ -114,7 +114,7 @@ let history = client.messages(&group.id, &PageRequest::default(), false).await?;
 ```
 
 `groups`, `group`, `create_group`, `update_group`, `invite_group_members` and
-`remove_group_members` are typed methods in `silicon-dm-client`.
+`remove_group_members` are typed methods in `silicon-dm-client` 0.7.
 The optional runtime also exposes matching `Operation` variants. Group metadata
 is the optional `Conversation.group` field; direct conversations omit it.
 
@@ -122,7 +122,7 @@ is the optional `Conversation.group` field; direct conversations omit it.
 
 | Method and path | Envelope type | Result |
 | --- | --- | --- |
-| `GET /conversations` | `conversations` | Paginated accessible conversations; filter items with group metadata |
+| `GET /groups` | `groups` | Paginated accessible conversations |
 | `POST /groups` | `create_group` | Group conversation (201) |
 | `GET /groups/{id}` | `group` | Accessible group conversation |
 | `PATCH /groups/{id}` | `update_group` | Group settings and invitation metadata |
@@ -131,14 +131,13 @@ is the optional `Conversation.group` field; direct conversations omit it.
 
 Paths are relative to `/api/v1`. Supply bearer authentication and `X-Org-ID`.
 All mutations require `Idempotency-Key`; settings updates also require `If-Match`
-with the observed group version. Member mutations use `{"member_ids":["cos:tos"]}`
+with the observed group version. Member mutations use `{"member_ids":["si:cos"]}`
 as `data`. Creation uses `name`, `description`, `is_public`, `tag_ids` and optional
 `member_ids`. Every JSON body is inside the normal two-field `type`/`data` envelope.
 
-Normal conversation listing includes accessible groups; there is no separate
-`GET /groups` route. HTTP contract 3 serves messages and receipts. Ting delivers
-change references, and hydration checks current membership and the individual
-authenticated token’s access. Former DM socket routes return HTTP 410. Joining
+Normal conversation listing includes accessible groups. Existing message routes,
+HTTP v1, WebSocket v3 and shared transport v1 remain compatible. Delivery uses
+current membership and the individual authenticated token's access. Joining
 does not backfill old transport deliveries: retrieve full earlier history using
 the message API, including normal pagination and bundle-original access. New
 members do not delay read/delivered aggregation for messages sent before they joined.

@@ -28,11 +28,11 @@ We maintain a websocket connection with Ting. Ting would be handling the entire 
 
 The client would be our own dm client installed on local systems for silicon(s) or the frontend of the website for our carbon(s). Sending messages, fetching them, editing them and sending receipts would still use DM's API. DM holds the messages, conversations, history and permissions, and decides which members should get an update. All these updates would be handed over to Ting to deliver to the said silicon or carbon, including their other devices.
 
-Ting owns the connections to the clients, the local daemon, webhook destinations, delivery queues, retries, replay and delivery acknowledgments. DM won't have its own incoming delivery daemon or webhook forwarding. The local listening endpoint would be configured with Ting and kept locally by Ting, it won't be sent to the DM backend. Register the said carbon or silicon with Ting using their IAM consent so DM is allowed to send them tings.
+Ting owns the connections to the clients, the local daemon, webhook destinations, delivery queues, retries, replay and delivery acknowledgments. DM won't have its own incoming delivery daemon or webhook forwarding. The local listening endpoint would be configured with Ting and kept locally by Ting, it won't be sent to the DM backend. Register the said carbon or silicon with Ting using their IAM consent so DM is allowed to send them tings. This registration is automatic and is not a user decision: DM registers every carbon and silicon with Ting as soon as it sees their session (login or any DM request), and backfills existing members it already holds a session for. Ting only accepts a registration proven by the recipient's own session, so a member with no live session is registered on their next DM request.
 
 The websocket with Ting would follow Ting's protocol for authentication, ping, pong and reconnecting. DM won't have a separate client heartbeat or delivery ACK protocol. A message send would still be acknowledged by DM once it has been saved, along with their exact request.
 
-For the said message sent and recieved when a message is being sent by a silicon or recieved by a silicon or sent to a silicon, it should be possible to include `isi` at the start, so say for when someone is sending a message to `cos:tos` they can say to send it to `deliberate@cos:tos` the deliberate here is the ISI, isi is an optional thing that can be configured via the sendee and requestee, dm just supports isi so isi can be used to send and recieve accordingly.
+For the said message sent and recieved when a message is being sent by a silicon or recieved by a silicon or sent to a silicon, it should be possible to include `isi` at the start, so say for when someone is sending a message to `si:cos` they can say to send it to `deliberate@si:cos` the deliberate here is the ISI, isi is an optional thing that can be configured via the sendee and requestee, dm just supports isi so isi can be used to send and recieve accordingly.
 
 For DM's own API the existing type/data format stays the same:
 ```
@@ -279,6 +279,8 @@ It should also expose these specific endpoints, and use Ting for receiving updat
 In CLI we would have a 140 characters limit for when a silicon tries to message a carbon, and when trying to send a message if the message is more than 140 characters, dont send the message, instead say  
 "message too long, not delivered. Your carbon would likely not read this long message, you can break this message down into multiple smaller messages, or just write a single short message, if you wanna still send the longer version you can send it by adding the flag --dangerously-send-long-message"
 
+when a silicon is trying to send a message and it contains em dash — replace that with - and if there are no spaces around — add space on both left and right. This is a cli level change, and also display the message that the em dash was replaced with a normal dash, if you wanna keep using em dashes send --dangerously-use-em-dash along with the message where you wanna use the em dash.
+
 And if --dangerously-send-long-message is attached in the message let the message go, still display the warning, "Message sent but it was above the 140 characters safe carbon read limits".
 
 
@@ -309,7 +311,7 @@ For receiving DM updates use Ting's commands:
 App Internals:
 DM has a stateless rust library and a stateful cli built on it. Ting owns the always running daemon for incoming delivery. DM should not duplicate that daemon's connections, queues, retries or webhook forwarding.
 
-On the docs page, show `honeycomb install 'tos>dm'` to install the CLI, followed by how to log in.
+On the docs page, show `honeycomb install 'dm'` to install the CLI, followed by how to log in.
 
 CLI design should be focused on giving details and helping finding the right command to use. CLI will often have lots of commands and it should be like a tree that can be traversed using --help.
 
@@ -382,3 +384,9 @@ We ship highly configurable apps with sensible defaults. Very much like VS Code.
 # Updates
 
 For each DM app release, provide one .tar.gz with honeycomb.yaml at the archive root and the prebuilt dm CLI for Linux, Windows and macOS on x86_64 and aarch64. The manifest maps the dm command to each target's executable and uses the app release version. Run `honeycomb validate` and then `honeycomb pack`. Refer to [Honeycomb docs](https://docs.honeycomb.teamofsilicons.com/) for the package format. Honeycomb handles installation and updates; DM must not independently replace a Honeycomb-managed CLI.
+
+# Identifier schema
+
+Silicon IDs use `si:{silicon_id}` (for example `si:cos`), Carbon IDs use `c:{carbon_id}` (for example `c:saket`), and application IDs use the bare `{app_id}` (for example `briefcase`). The components after `si:` and `c:` are handles; each prefix appears exactly once. Silicon IDs and application IDs do not contain an organisation component. Organisation membership and application ownership are stored separately under `org_id`.
+
+Outside the schema patterns above, fields and standalone placeholders named `silicon_id`, `sid`, `carbon_id`, or `cid` carry the complete prefixed public ID; `app_id` carries the bare application ID. This applies to authentication, API and CLI inputs and outputs, configuration, permissions, URLs, events and stored identity references. Where a CLI selector uses `@`, it precedes the complete ID, such as `@si:cos` or `@c:saket`.

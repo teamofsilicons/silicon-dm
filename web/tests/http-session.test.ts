@@ -59,7 +59,7 @@ function fixture(steps: Step[]) {
   const session = {
     authenticated: true,
     profile_id: "profile",
-    actor: { id: "alice", type: "carbon" },
+    actor: { id: "c:alice", type: "carbon" },
     profiles: [],
   };
   let generation = 23;

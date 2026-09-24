@@ -246,7 +246,7 @@ impl LocalRuntime {
                     result => {
                         let identity = result?;
                         return Ok::<_, anyhow::Error>(serde_json::json!({"authenticated":true,"profile":name,"testing_environment_id":test,
-                            "actor":identity.actor,"organization_id":identity.organization_id,"identity":identity,"webhook_url":profile.webhook_url}));
+                            "actor":identity.actor,"organization_id":identity.organization_id,"reconsent_required":identity.reconsent_required,"identity":identity,"webhook_url":profile.webhook_url}));
                     }
                 }
             }
@@ -369,7 +369,7 @@ mod tests {
     #[tokio::test]
     async fn login_then_hook_status_and_unhook() -> Result<()> {
         let tokens = json!({"access_token":"access", "refresh_token":"refresh", "token_type":"Bearer",
-            "expires_in":3600,"scope":"dm","actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos"});
+            "expires_in":3600,"scope":"dm","actor":{"type":"silicon","id":"si:cos"},"organization_id":"tos"});
         let login_tokens = tokens.clone();
         let app = Router::new()
             .route("/api/v1/auth/login", post(move |Json(body): Json<Value>| async move {
@@ -378,10 +378,10 @@ mod tests {
             }))
             .route("/api/v1/auth/me", get(|headers: HeaderMap| async move {
                 assert_eq!(headers["authorization"], "Bearer access");
-                Json(json!({"actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos",
+                Json(json!({"actor":{"type":"silicon","id":"si:cos"},"organization_id":"tos",
                     "principal_id":"principal","session_id":null,"org_role":null,"capabilities":[]}))
             }))
-            .route("/api/v1/iam", get(|| async { Json(json!({"app_id":"tos>dm","iam_base_url":"https://iam.example",
+            .route("/api/v1/iam", get(|| async { Json(json!({"app_id":"dm","iam_base_url":"https://iam.example",
                 "api_base_url":"https://dm.example/api/v1"})) }))
             .route("/status", get(|| async { Json(json!({"running":true,"incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false}})) }))
             .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
@@ -399,7 +399,7 @@ mod tests {
             false
         );
         let base = format!("http://127.0.0.1:{port}");
-        assert_eq!(crate::Client::new(&base)?.iam().await?.app_id, "tos>dm");
+        assert_eq!(crate::Client::new(&base)?.iam().await?.app_id, "dm");
         let old_callback: Url = "http://localhost:9000/events".parse()?;
         assert!(
             runtime
@@ -453,7 +453,7 @@ mod tests {
         );
         let status = reopened.login_status("default", None).await?;
         assert_eq!(status["authenticated"], true);
-        assert_eq!(status["actor"]["id"], "cos:tos");
+        assert_eq!(status["actor"]["id"], "si:cos");
         assert!(!status.to_string().contains("refresh_token"));
         assert!(
             runtime
@@ -515,13 +515,13 @@ mod tests {
                     assert_eq!(body["data"]["refresh_token"], "old");
                     calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     Json(json!({"access_token":"fresh-access","refresh_token":"fresh","token_type":"Bearer",
-                        "expires_in":1800,"scope":"dm","actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos"}))
+                        "expires_in":1800,"scope":"dm","actor":{"type":"silicon","id":"si:cos"},"organization_id":"tos"}))
                 }
             }))
             .route("/api/v1/auth/me", get(|headers: HeaderMap| async move {
                 if headers["authorization"] == "Bearer old-access" { return StatusCode::UNAUTHORIZED.into_response(); }
                 assert_eq!(headers["authorization"], "Bearer fresh-access");
-                Json(json!({"actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos",
+                Json(json!({"actor":{"type":"silicon","id":"si:cos"},"organization_id":"tos",
                     "principal_id":"principal","session_id":null,"org_role":null,"capabilities":[]})).into_response()
             }))
             .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
@@ -535,7 +535,7 @@ mod tests {
                 "name":"default","base_url":base,"device_id":"fixture","enabled":true,"expires_at":4_000_000_000u64,
                 "testing_environment_id":null,"webhook_url":null,
                 "tokens":{"access_token":"old-access","refresh_token":"old","token_type":"Bearer","expires_in":1800,
-                "scope":"dm","actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos"}}))?);
+                "scope":"dm","actor":{"type":"silicon","id":"si:cos"},"organization_id":"tos"}}))?);
             Ok(())
         })?;
         for _ in 0..2 {
@@ -571,12 +571,12 @@ mod tests {
                     calls.lock().unwrap().push((old.to_owned(), headers["idempotency-key"].to_str().unwrap().to_owned()));
                     let new = if old == "old" { "replayed" } else { assert_eq!(old, "replayed"); "fresh" };
                     Json(json!({"access_token":format!("access-{new}"),"refresh_token":new,"token_type":"Bearer",
-                        "expires_in":1800,"scope":"dm","actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos"}))
+                        "expires_in":1800,"scope":"dm","actor":{"type":"silicon","id":"si:cos"},"organization_id":"tos"}))
                 }
             }))
             .route("/api/v1/auth/me", get(|headers: HeaderMap| async move {
                 assert_eq!(headers["authorization"], "Bearer access-fresh");
-                Json(json!({"actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos",
+                Json(json!({"actor":{"type":"silicon","id":"si:cos"},"organization_id":"tos",
                     "principal_id":"principal","session_id":null,"org_role":null,"capabilities":[]}))
             }))
             .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
@@ -590,7 +590,7 @@ mod tests {
                 "name":"default","base_url":base,"device_id":"fixture","enabled":true,"expires_at":0,"refresh_started_at":1,
                 "testing_environment_id":null,"webhook_url":null,
                 "tokens":{"access_token":"old-access","refresh_token":"old","token_type":"Bearer","expires_in":1800,
-                "scope":"dm","actor":{"type":"silicon","id":"cos:tos"},"organization_id":"tos"}}))?);
+                "scope":"dm","actor":{"type":"silicon","id":"si:cos"},"organization_id":"tos"}}))?);
             Ok(())
         })?;
         assert_eq!(

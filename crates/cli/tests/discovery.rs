@@ -9,7 +9,7 @@ use wiremock::{
 async fn iam_discovery_unwraps_the_current_api_envelope_in_a_fresh_home() -> Result<()> {
     let server = MockServer::start().await;
     let home = tempfile::tempdir()?;
-    let data = json!({"app_id":"tos>dm", "iam_base_url":"https://iam.example.test", "api_base_url":server.uri()});
+    let data = json!({"app_id":"dm", "iam_base_url":"https://iam.example.test", "api_base_url":server.uri()});
     Mock::given(method("GET"))
         .and(path("/api/v1/iam"))
         .respond_with(
@@ -35,7 +35,7 @@ async fn iam_discovery_unwraps_the_current_api_envelope_in_a_fresh_home() -> Res
         String::from_utf8_lossy(&output.stderr)
     );
     let response: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(response["app_id"], "tos>dm");
+    assert_eq!(response["app_id"], "dm");
     assert_eq!(response["iam_base_url"], "https://iam.example.test");
     assert_eq!(response["api_base_url"], server.uri());
     for request in server.received_requests().await.unwrap_or_default() {

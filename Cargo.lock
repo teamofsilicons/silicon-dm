@@ -2945,7 +2945,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-dm"
-version = "0.10.1"
+version = "0.11.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2988,7 +2988,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-dm-cli"
-version = "0.10.1"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3007,7 +3007,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-dm-client"
-version = "0.10.1"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3032,7 +3032,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-dm-protocol"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -3042,9 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-iam-client"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66ae8c19bfc293cc4c5c1da432efd38bf5509e9772fda5bbf7fc0795a4f288e5"
+version = "4.0.0"
 dependencies = [
  "base64 0.22.1",
  "hex",

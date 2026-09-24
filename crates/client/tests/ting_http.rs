@@ -76,13 +76,13 @@ async fn handler(State(requests): State<Requests>, request: Request) -> Response
     });
     let value = match path.as_str() {
         "/api/v1/auth/me" => {
-            json!({"member":{"type":"carbon","id":"alice"},"organization_id":"tos","principal_id":"alice","session_id":null,"org_role":null,"capabilities":[]})
+            json!({"member":{"type":"carbon","id":"c:alice"},"organization_id":"tos","principal_id":"c:alice","session_id":null,"org_role":null,"capabilities":[]})
         }
         "/api/v1/iam" => {
-            json!({"app_id":"tos>dm","iam_base_url":"https://iam.invalid","api_base_url":"https://dm.invalid","testing_environment_id":null,"testing_generation":null})
+            json!({"app_id":"dm","iam_base_url":"https://iam.invalid","api_base_url":"https://dm.invalid","testing_environment_id":null,"testing_generation":null})
         }
         "/api/v1/delivery/registration" => {
-            json!({"id":"sub_fixture","app_id":"tos>dm","for":"alice","active":true})
+            json!({"id":"sub_fixture","app_id":"dm","for":"c:alice","active":true})
         }
         "/api/v1/sync" => {
             if query
@@ -97,15 +97,15 @@ async fn handler(State(requests): State<Requests>, request: Request) -> Response
             if method == "DELETE" {
                 return StatusCode::NO_CONTENT.into_response();
             }
-            json!({"presence":{"member_id":"alice","availability":"online","activity":"typing","last_seen_at":null},"lease_expires_at":"2026-09-22T10:02:00Z","activity_expires_at":"2026-09-22T10:00:10Z"})
+            json!({"presence":{"member_id":"c:alice","availability":"online","activity":"typing","last_seen_at":null},"lease_expires_at":"2026-09-22T10:02:00Z","activity_expires_at":"2026-09-22T10:00:10Z"})
         }
-        "/api/v1/conversations/alice::bob/messages/000" => {
-            json!({"message-id":"000","conversation_id":"alice::bob","sender":{"type":"carbon","id":"bob"},"recipient_id":"alice","message":null,"attachments":[],"created_at":"2026-09-22T10:00:00Z","deleted_at":"2026-09-22T10:01:00Z"})
+        "/api/v1/conversations/c:alice::c:bob/messages/000" => {
+            json!({"message-id":"000","conversation_id":"c:alice::c:bob","sender":{"type":"carbon","id":"c:bob"},"recipient_id":"c:alice","message":null,"attachments":[],"created_at":"2026-09-22T10:00:00Z","deleted_at":"2026-09-22T10:01:00Z"})
         }
-        "/api/v1/conversations/alice::bob/messages/001" => {
+        "/api/v1/conversations/c:alice::c:bob/messages/001" => {
             return failure(StatusCode::NOT_FOUND, "not_found");
         }
-        "/api/v1/conversations/alice::bob/messages/002" => {
+        "/api/v1/conversations/c:alice::c:bob/messages/002" => {
             return failure(StatusCode::SERVICE_UNAVAILABLE, "dependency_unavailable");
         }
         _ => return failure(StatusCode::NOT_FOUND, "not_found"),
@@ -129,7 +129,7 @@ async fn typed_delivery_sync_and_presence_use_http_contracts() -> Result {
         .register_delivery("explicit-registration")
         .await?;
     assert!(registration.active);
-    assert_eq!(registration.recipient, "alice");
+    assert_eq!(registration.recipient, "c:alice");
     let page = fixture
         .client
         .sync(&SyncRequest {
@@ -154,7 +154,7 @@ async fn typed_delivery_sync_and_presence_use_http_contracts() -> Result {
         .client
         .renew_presence("desk /+", Some(Activity::Typing))
         .await?;
-    assert_eq!(presence.presence.actor_id, "alice");
+    assert_eq!(presence.presence.actor_id, "c:alice");
     fixture.client.close_presence("desk /+").await?;
     let selected = fixture
         .client
@@ -188,19 +188,19 @@ async fn typed_delivery_sync_and_presence_use_http_contracts() -> Result {
 
 fn reference(message: &str) -> Value {
     let id = Uuid::new_v4();
-    json!({"id":format!("msg_{message}"),"type":"tos>dm.sync.changed","key":id,
+    json!({"id":format!("msg_{message}"),"type":"dm.sync.changed","key":id,
         "metadata":{"testing_environment_id":null,"testing_generation":null},
-        "data":{"schema_version":1,"event":"message.created","org_id":"tos","conversation_id":"alice::bob","message_id":message,"delivery_id":id,"delivery_sequence":1}})
+        "data":{"schema_version":1,"event":"message.created","org_id":"tos","conversation_id":"c:alice::c:bob","message_id":message,"delivery_id":id,"delivery_sequence":1}})
 }
 
 fn receiver() -> TingReceiverContext {
     TingReceiverContext {
         ting_organization_id: None,
-        app_id: "tos>dm".into(),
+        app_id: "dm".into(),
         organization_id: "tos".into(),
         actor: Actor {
             actor_type: ActorType::Carbon,
-            id: "alice".into(),
+            id: "c:alice".into(),
         },
         testing_environment_id: None,
         testing_generation: None,
@@ -211,9 +211,9 @@ fn receiver() -> TingReceiverContext {
 async fn hydration_rechecks_identity_and_fetches_only_valid_dm_references_without_acks() -> Result {
     let fixture = Fixture::new().await?;
     let mut other = reference("000");
-    other["type"] = json!("tos>remind.changed");
+    other["type"] = json!("remind.changed");
     let mut wrong = reference("000");
-    wrong["for"] = json!("bob");
+    wrong["for"] = json!("c:bob");
     let batch = serde_json::to_vec(
         &json!({"tings":[reference("000"),reference("001"),reference("002"),other,wrong]}),
     )?;
@@ -256,7 +256,7 @@ async fn canonical_inbox_org_hydrates_only_the_mapped_dm_organization() -> Resul
         receiver().with_ting_organizations(&json!({"items":[{"id":canonical,"handle":"tos"}]}))?;
     let mut allowed = reference("000");
     allowed["org_id"] = json!(canonical);
-    allowed["for"] = json!("alice");
+    allowed["for"] = json!("c:alice");
     let mut wrong = allowed.clone();
     wrong["org_id"] = json!(Uuid::new_v4());
     let raw = serde_json::to_vec(&json!({"tings":[allowed,wrong]}))?;
@@ -301,11 +301,11 @@ async fn mismatched_hook_binding_and_retired_sockets_cannot_dispatch_network_del
         fixture.client.prewarm_shared().await,
         fixture
             .client
-            .connect(&["alice".into()], "old-device")
+            .connect(&["c:alice".into()], "old-device")
             .await,
         fixture
             .client
-            .connect_with_generation(&["alice".into()], "old-device", Some(1))
+            .connect_with_generation(&["c:alice".into()], "old-device", Some(1))
             .await,
     ] {
         assert!(

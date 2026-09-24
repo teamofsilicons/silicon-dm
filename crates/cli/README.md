@@ -4,7 +4,7 @@
 Ting owns incoming delivery, its system daemon, destination queues, retry and ACKs.
 The CLI uses the public `silicon-dm-client` runtime.
 
-Install a matching release with `honeycomb install 'tos>dm'`. For development,
+Install a matching release with `honeycomb install 'dm'`. For development,
 use `cargo run -p silicon-dm-cli -- --help` from this checkout. Honeycomb manages
 installed CLI updates; DM does not replace its executable.
 

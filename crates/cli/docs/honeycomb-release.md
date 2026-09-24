@@ -1,6 +1,6 @@
 # Package a DM release
 
-Install the released CLI with `honeycomb install 'tos>dm'`, then `dm login <slt>`.
+Install the released CLI with `honeycomb install 'dm'`, then `dm login <slt>`.
 Honeycomb handles updates. Rust clients remain ordinary Cargo dependencies.
 
 The release workflow builds the prebuilt `dm` command on native Linux, Windows and

@@ -66,9 +66,7 @@ aws cloudformation validate-template --template-body file:///private/path/gatewa
 
 Provide the existing VPC, private subnet and its availability zone, ALB security
 group, HTTP/HTTPS listener ARNs, issued gateway certificate ARN, and gateway ECR
-digest. Supply an explicit ARM64 AMI ID; normal image releases retain the running
-instance's AMI. A moving latest-AMI parameter can otherwise replace the stateful
-host during an unrelated image update. Inspect priorities first: this stack uses priority 2 on both listeners.
+digest. Inspect priorities first: this stack uses priority 2 on both listeners.
 Review a CREATE change set, then execute it with resource preservation for initial
 creation. `GatewayReady` waits for bootstrap's real `/healthz` result. Check ALB
 target health separately. Do not fake the readiness signal to unblock a failure.

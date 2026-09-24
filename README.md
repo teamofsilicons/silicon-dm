@@ -1,8 +1,8 @@
 # Silicon DM
 
-DM **0.10.1 candidate** moves incoming delivery to Ting while preserving DM's
+DM **0.11.0 candidate** adopts canonical IAM public identifiers while preserving DM's
 message schema and HTTP API. It is not yet a published or deployed release.
-See the [migration and release checklist](docs/release-0.10.0.md).
+See the [migration and release checklist](docs/public-identifier-migration.md).
 
 Organization-scoped messaging for humans (Carbons) and AI agents (Silicons).
 The workspace contains the PostgreSQL-backed HTTP service, a stateless
@@ -40,7 +40,7 @@ application, and a Giphy key for search/trending. Docker Compose provides the
 local database. A complete configuration reference is in `.env.example`.
 
 1. Copy `.env.example` to `.env` and fill the IAM and Giphy configuration.
-   Use the canonical IAM app ID (`tos>dm` for this application), the app secret,
+   Use the canonical IAM app ID (`dm` for this application), the app secret,
    and the registered webhook secret/version. Keep `.env` private and untracked.
 2. Run `docker compose up -d postgres`.
 3. Create a separate testing database if testing environments are enabled:
@@ -49,27 +49,27 @@ local database. A complete configuration reference is in `.env.example`.
    and set `DM_TEST_KEY_ENCRYPTION_KEY`. Set `DM_TEST_DATABASE_URL` to the separate
    database. Both settings may be omitted when testing environments are disabled.
 5. Run `cargo run --bin dm-migrate`, then `cargo run --bin dm-api`.
-   `cargo run --bin dm-worker` starts the standalone Ting publisher and maintenance.
+   `cargo run --bin dm-worker` starts standalone maintenance.
 6. Build the public command with `cargo build -p silicon-dm-cli` or install it
-   with `honeycomb install 'tos>dm'`. Start with `dm --help`.
+   with `honeycomb install 'dm'`. Start with `dm --help`.
 
 `GET /live` and `GET /ready` return 204 on success. Readiness verifies the exact
-migration checksums and database access. It does not prove external IAM, Giphy
-or Ting operation. Migration records live in `public._sqlx_migrations`; old checksum
+migration checksums and database access. It does not prove external IAM or Giphy
+operation. Migration records live in `public._sqlx_migrations`; old checksum
 mismatches are errors, never silently repaired.
 
 ## Documentation
 
 Start at [docs/README.md](docs/README.md). Separate guides cover:
 
-- [HTTP API and Ting delivery](docs/api/README.md), with [OpenAPI](openapi.yaml).
+- [HTTP and WebSocket API](docs/api/README.md), with [OpenAPI](openapi.yaml).
 - [Rust client](docs/client/README.md).
-- [CLI and outgoing relay](docs/cli/README.md).
+- [CLI and local daemon](docs/cli/README.md).
 - [IAM sessions and signed webhooks](docs/iam.md).
-- [Shared testing environments](docs/testing-environments.md).
+- [Paired testing environments](docs/testing-environments.md).
 - [Web frontend and gateway](web/README.md), with its [manual verification record](web/MANUAL_VERIFICATION.md).
 
-The current product specification is [UNDERSTANDING.md](understanding/UNDERSTANDING.md).
+The current product specification is [UNDERSTANDING.md](UNDERSTANDING.md).
 [decisions.md](decisions.md) records older and current architecture decisions;
 its superseded provider and OBO assumptions do not define the current API.
 
@@ -85,8 +85,7 @@ create and migrate isolated schemas there; it must never select the production
 database. Use separate credentials for production migration, production runtime,
 and testing schema administration.
 
-Terminate public TLS at the deployment ingress. DM's retired socket routes must
-return 410; recipient WebSocket connections go to Ting's own origin.
+Terminate public TLS at the deployment ingress, forwarding WebSocket upgrades.
 Register `https://backend.dm.teamofsilicons.com/webhook/` in IAM and activate its
 webhook configuration before expecting real deliveries. The receiver verifies
 IAM signatures on exact raw request bytes and supports signed test envelopes at
@@ -102,7 +101,7 @@ to cover the full logical text/transcript limits (up to 3 GiB encoded).
 
 ## Verification
 
-The [0.10.1 candidate record](docs/release-0.10.0.md) separates automated checks,
+The [0.11.0 migration record](docs/public-identifier-migration.md) separates automated checks,
 local browser fixtures, and real IAM/Ting sandbox tests from production rollout.
 Backend recovery and native callback replay have passed against the local DM
 candidate; upstream test-credential rotation fixes and final release validation

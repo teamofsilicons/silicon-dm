@@ -27,7 +27,7 @@ body limit does not restrict DM's large-message transport.
 | `DM_TING_BROWSER_ORIGIN`      | `https://ting.teamofsilicons.com`; exact cookie-issuing Ting browser origin. HTTP loopback is allowed for local fixtures.                                        |
 | `VITE_DM_TING_BROWSER_ORIGIN` | Static Vercel CSP setting, same default; keep it equal to the gateway’s Ting browser origin. Public origin only.                                                 |
 | `IAM_LOGIN_ORIGIN`            | `https://auth.iam.teamofsilicons.com`; IAM browser authentication origin.                                                                                        |
-| `DM_WEB_APP_ID`               | `tos>dm`; canonical IAM application ID.                                                                                                                          |
+| `DM_WEB_APP_ID`               | `dm`; canonical IAM application ID.                                                                                                                          |
 | `DM_WEB_STATE_DIR`            | `~/.silicon-dm/web`; absolute private directory outside the application checkout and assets.                                                                     |
 | `DM_WEB_MAX_BODY_BYTES`       | 134217728 bytes (128 MiB); configurable up to 3 GiB. Authentication JSON is separately limited to 16 KiB.                                                        |
 | `HOST`, `PORT`                | `127.0.0.1`, `4315`; use a suitable bind address behind the hosting ingress.                                                                                     |

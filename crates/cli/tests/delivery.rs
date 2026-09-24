@@ -27,7 +27,7 @@ fn state(directory: &std::path::Path, base: &str, test: Option<Uuid>) -> Result<
     let profile: Profile = serde_json::from_value(json!({
         "name":"default","base_url":base,"device_id":"fixture-device","expires_at":4102444800u64,
         "testing_environment_id":test,"tokens":{"access_token":"dm-fixture-access","refresh_token":"dm-fixture-refresh",
-            "token_type":"Bearer","expires_in":3600,"scope":"dm","organization_id":"tos","actor":{"type":"silicon","id":"bob"}}
+            "token_type":"Bearer","expires_in":3600,"scope":"dm","organization_id":"tos","actor":{"type":"carbon","id":"c:bob"}}
     }))?;
     store.update(|config| {
         config.telemetry_enabled = false;
@@ -56,7 +56,7 @@ async fn discovery(server: &MockServer, test: Option<Uuid>, generation: Option<i
     Mock::given(method("GET"))
         .and(path("/api/v1/iam"))
         .respond_with(dm_response(
-            json!({"app_id":"tos>dm","iam_base_url":server.uri(),"api_base_url":server.uri(),
+            json!({"app_id":"dm","iam_base_url":server.uri(),"api_base_url":server.uri(),
             "testing_environment_id":test,"testing_generation":generation}),
         ))
         .mount(server)
@@ -64,7 +64,7 @@ async fn discovery(server: &MockServer, test: Option<Uuid>, generation: Option<i
     Mock::given(method("GET"))
         .and(path("/api/v1/auth/me"))
         .respond_with(dm_response(
-            json!({"actor":{"type":"silicon","id":"bob"},"organization_id":"tos",
+            json!({"actor":{"type":"carbon","id":"c:bob"},"organization_id":"tos",
             "principal_id":"fixture-principal","capabilities":[]}),
         ))
         .mount(server)
@@ -138,20 +138,20 @@ async fn ting_login_reads_stdin_and_never_substitutes_dm_tokens_or_registers_con
     discovery(&dm, None, None).await;
     Mock::given(method("GET"))
         .and(path("/v1/iam"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"app_id":"tos>ting"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"app_id":"ting"})))
         .mount(&ting)
         .await;
     Mock::given(method("POST")).and(path("/v1/session"))
         .and(header("Idempotency-Key", "fixture-ting-login-key"))
         .and(body_json(json!({"slt":"ting-fixture-slt"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"authenticated":true,"id":"bob","kind":"silicon","session_token":"ting-fixture-session"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"authenticated":true,"id":"c:bob","kind":"carbon","session_token":"ting-fixture-session"})))
         .expect(1).mount(&ting).await;
     Mock::given(method("GET"))
         .and(path("/v1/me"))
         .and(header("Authorization", "Bearer ting-fixture-session"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_json(json!({"authenticated":true,"id":"bob","kind":"silicon","environment":{"kind":"production"}})),
+                .set_body_json(json!({"authenticated":true,"id":"c:bob","kind":"carbon","environment":{"kind":"production"}})),
         )
         .mount(&ting)
         .await;
@@ -229,7 +229,7 @@ async fn explicit_registration_binds_the_selected_test_generation_and_retry_key(
         .and(header("Idempotency-Key", "fixture-enrollment-key"))
         .and(body_json(json!({"type":"delivery_registration","data":{}})))
         .respond_with(dm_response(
-            json!({"id":"subscription-fixture","app_id":"tos>dm","for":"bob","active":true}),
+            json!({"id":"subscription-fixture","app_id":"dm","for":"c:bob","active":true}),
         ))
         .expect(2)
         .mount(&dm)
@@ -254,7 +254,7 @@ async fn explicit_registration_binds_the_selected_test_generation_and_retry_key(
         );
         let result: Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(result["subscription"]["recipient"], Value::Null);
-        assert_eq!(result["subscription"]["for"], "bob");
+        assert_eq!(result["subscription"]["for"], "c:bob");
         assert_eq!(result["idempotency_key"], "fixture-enrollment-key");
     }
     assert!(!directory.path().join("relay.sqlite3").exists());

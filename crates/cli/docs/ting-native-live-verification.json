@@ -21,7 +21,7 @@
   "actors": {
     "sender": {
       "kind": "silicon",
-      "id": "dm-ting-bot:tos"
+      "id": "si:dm-ting-bot"
     },
     "receiver": {
       "kind": "carbon",
@@ -54,7 +54,7 @@
     {
       "name": "native_send_and_authorized_hydration",
       "passed": true,
-      "conversation_id": "dm-ting-tester::dm-ting-bot:tos",
+      "conversation_id": "dm-ting-tester::dm-si:ting-bot",
       "message_id": "004",
       "ting_id": "msg_cc5128ff8e5f4197aeeffc72b0dc76aa",
       "delivery_id": "01a0cad4-2fa9-7b31-b820-0a906cd5e795",

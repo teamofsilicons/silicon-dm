@@ -131,10 +131,9 @@ inspection rules or sampled request capture.
 Fargate allows at most 120 seconds for `StopTimeout`, so DM's graceful-shutdown
 deadline is 110 seconds and the task stop timeout is 120 seconds. A request
 that uses the entire REST allowance can still be interrupted during shutdown;
-clients must retry using the same durable idempotency key. Ting owns incoming
-connection recovery and delivery replay; DM consumers reconcile through HTTP sync.
-These containers do not need a writable root filesystem or a Fargate-unsupported
-`tmpfs` option.
+clients must retry using the same durable idempotency key. WebSockets reconnect
+and replay committed deliveries. These containers do not need a writable root
+filesystem or a Fargate-unsupported `tmpfs` option.
 
 ## Recovering an incomplete EC2 stack without recreating RDS
 

@@ -58,4 +58,17 @@ impl AppState {
             self.ting_delivery_context(),
         )
     }
+
+    /// Enrolls members with Ting in the selected data plane using their own sessions.
+    #[must_use]
+    pub fn ting_auto_enrollment(
+        &self,
+    ) -> crate::infrastructure::ting_auto_enrollment::TingAutoEnrollment {
+        crate::infrastructure::ting_auto_enrollment::TingAutoEnrollment::new(
+            self.store.clone(),
+            self.identity.clone(),
+            self.settings.ting.clone(),
+            self.ting_delivery_context(),
+        )
+    }
 }

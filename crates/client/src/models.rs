@@ -99,7 +99,7 @@ pub struct Gif {
 #[derive(Clone, Debug, Default)]
 pub struct MessageCreate {
     pub sender_id: Option<String>,
-    /// Optional recipient address, for example deliberate@cos:tos.
+    /// Optional recipient address, for example deliberate@si:cos.
     pub recipient_id: Option<String>,
     pub text: Option<String>,
     pub attachments: Vec<Attachment>,
@@ -114,7 +114,7 @@ pub struct MessageCreate {
 struct MessageCreateWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_id: Option<String>,
-    /// Optional recipient address, for example deliberate@cos:tos.
+    /// Optional recipient address, for example deliberate@si:cos.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -489,6 +489,9 @@ pub struct Identity {
     pub session_id: Option<String>,
     pub org_role: Option<String>,
     pub capabilities: Vec<String>,
+    /// The session predates DM's Ting permissions; signing in again grants them.
+    #[serde(default)]
+    pub reconsent_required: bool,
 }
 /// Secrets are deliberately not Debug.
 #[derive(Clone, Serialize, Deserialize)]

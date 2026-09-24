@@ -1,13 +1,14 @@
 # Build on DM
 
-Use the stateless Rust client for typed HTTP operations and Ting reference
-hydration. Its optional runtime provides a durable outgoing command relay and
-explicit setup of destinations directly on Ting's installed system daemon.
-The CLI uses the same library; DM runs no incoming callback relay.
+DM 0.6 adds [groups, IAM tag access and invitations](groups.md) across the API, Rust client, CLI and web.
+
+Use the stateless Rust client for typed operations, and opt into its runtime
+when you need a durable inbox, outbox, callback relay, and shared connection.
+The CLI uses the same library.
 
 ## Authenticate and select a plane
 
-Production: obtain an IAM SLT for `tos>dm`, exchange with `Client::login`, and
+Production: obtain an IAM SLT for `dm`, exchange with `Client::login`, and
 construct a client with the returned access token and organization ID. Keep the
 rotating refresh token secure. Never collect IAM passwords or OTPs.
 
@@ -19,29 +20,25 @@ the returned actor token supplies user authority. [Complete flow](testing-enviro
 
 Generate a stable idempotency key for each logical mutation. Preserve it and the
 same content across ambiguous failures. Use `send_message`, drafts, bundles, and
-receipt methods. Keep message content in DM’s fixed schema and transport metadata
-in the Ting reference envelope. Attachments are links to existing files; DM performs
-no upload.
+receipt methods. A message's metadata is always a JSON object and must survive
+round trips. Attachments are links to existing files; DM performs no upload.
 
 ## Receive and acknowledge
 
-Explicitly call `Client::register_delivery` for recipient consent, then log in
-separately to Ting with the same typed account, organization and environment.
-With the `runtime` feature, use `LocalRuntime::delivery_login` and
-`delivery_attach` to configure a generic destination directly on Ting.
+For an existing application, enable the client's `runtime` Cargo feature and
+host `LocalRuntime::run`, or start the packaged daemon. Register each profile's
+callback. The daemon establishes one multiplexed WebSocket per backend origin
+and independently authenticates each Carbon/Silicon subscription. Production,
+organizations, and testing generations remain separate even on a shared socket.
 
-Authenticate the callback secret and saved `Ting-Webhook-Id`. Route every app in
-the raw `{"tings":[...]}` batch, deduplicate, and durably accept the whole batch
-before HTTP 204. `hydrate_ting_batch` validates DM references and fetches current
-content under DM authorization; it does not acknowledge anything or send receipts.
-Ting owns retry/replay. Explicit DM Delivered and Read remain separate operations.
+A durable frame enters SQLite before a transport ACK is sent. Your callback
+must deduplicate the delivery ID and persist work before returning its ACK.
+A successful callback queues Delivered; Read remains explicit. Reconnection
+replays from committed per-profile cursors. [Protocol reference](client/realtime.md).
 
-Initialize history with an HTTP sync boundary, accessible snapshots, and cursor
-resume. Reconcile on startup, reconnect and periodically because silent Ting
-events produce no browser hint. Never translate a Ting sequence into a DM sync
-cursor. DM socket methods are retired and return migration guidance without
-network I/O. See [delivery migration](client/realtime.md) and
-[contracts](contracts.md).
+A direct client can still use `connect` for WebSocket v3. It owns cursor storage,
+retries, ACKs and immediate ping responses. `prewarm_shared` opens the shared
+transport before subscription work. [Shared transport contract](contracts.md).
 
 ## Handle failures deliberately
 

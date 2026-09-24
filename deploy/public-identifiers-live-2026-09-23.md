@@ -1,0 +1,7 @@
+# Public identifier cutover — 2026-09-23
+
+Dm 0.11.0 is live at `273f299a0a5398e859e9efed15eea9a642486a0a`. Public readiness passes.
+
+Production migration 36 ran after frozen backup and rollback rehearsal. All 470 messages and1426 delivery rows stayed unchanged. The original650notification request hashes matched; two additional notifications arrived before the freeze. All 652 unaccepted, prepared and unleased requests were archived with full row/body hashes in restricted dm_cutover_hold.ting_handoffs and removed only from the active queue. Runtime cannot access the hold. No notifications were cancelled or marked accepted. API and worker task definition 22 have one desired/running task each, zero pending and completed rollouts. Ten browser sessions were converted. Fresh c:saket login and status succeeded.
+
+Frozen backup, mapping, migration, session conversion and activation receipts are retained in the protected operator directory `/tmp/consumer-cutover-20260923/`, including final-artifact-verification.json, fresh-cli-auth.json and service-specific SSM receipts. Public health was independently rechecked after all activations. Client/CLI crates are published. The six-platform GitHub v0.11.0 release is public after remote asset SHA256 verification. Honeycomb release `33ce5670-6ec8-4590-9baa-f8738c280d54` is accepted with archive SHA256 `2007afc6e9fe4fdf700271bd18732e0d76b6a41984e9f0c48fd8753315e1408c`. Hosted documentation was rebuilt, published and checked.

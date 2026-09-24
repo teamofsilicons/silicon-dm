@@ -16,7 +16,7 @@ pub(super) fn is_retired_socket(path: &str) -> bool {
 pub(super) fn delivery(settings: &TingSettings) -> Value {
     json!({
         "transport":"ting",
-        "app_id":"tos>ting",
+        "app_id":"ting",
         "api_base_url":settings.base_url,
         "browser_origin":"https://ting.teamofsilicons.com",
         "receiver_authentication":"ting_session",

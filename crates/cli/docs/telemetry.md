@@ -3,9 +3,9 @@
 DM records operational diagnostics by default. Turn them off in the web Account
 page, with `dm config telemetry false`, with `Client::with_telemetry(false)`, or
 with `DM_TELEMETRY_ENABLED=false` on the backend. `dm config telemetry true`
-reenables CLI and outgoing-relay diagnostics. CLI configuration and the environment
-override apply to DM HTTP operations. Ting owns incoming transport diagnostics
-independently; DM’s preference does not configure Ting’s shared system daemon.
+reenables the CLI and daemon. CLI configuration and the environment override apply
+to both HTTP requests and shared WebSocket subscriptions. Web settings reconnect
+open sockets so the new preference takes effect.
 
 ## Where events go
 
@@ -25,10 +25,9 @@ late writes after a clean. Cleaning a sandbox also clears its diagnostics.
 
 Events contain a schema version, DM version, source, event, environment and
 process identity. HTTP events add the route template, method, request ID, response
-status, success and duration. CLI completion, outgoing-relay queue checks, and
-browser page views, request timings and error classifications provide client-side
-context. Historical DM socket/callback event names may remain in retained data;
-current incoming connections, queues and callback outcomes belong to Ting.
+status, success and duration. Connection events include session identity and
+close code. CLI completion, daemon queue checks and callback outcomes, and browser
+page views, request timings and error classifications provide client-side context.
 Space Station adds system and ingestion metadata itself.
 
 Group mutation events carry the canonical `group_id`, such as

@@ -86,7 +86,7 @@ impl IdentityProvider for Identity {
             return Err(AppError::Forbidden);
         }
         match self.mode.load(Ordering::SeqCst) {
-            3 => context.actor.id = "bob".parse().map_err(|_| AppError::Unauthorized)?,
+            3 => context.actor.id = "c:bob".parse().map_err(|_| AppError::Unauthorized)?,
             4 => {
                 context.organization_id =
                     "wrong-org".parse().map_err(|_| AppError::Unauthorized)?;
@@ -102,7 +102,7 @@ impl IdentityProvider for Identity {
         attempt: &str,
     ) -> AppResult<TingSendAuthority> {
         if !context.has_capability("self.identity.read")
-            || !context.has_capability("obo:tos>ting:tings.send")
+            || !context.has_capability("obo:ting:tings.send")
         {
             return Err(AppError::Forbidden);
         }
@@ -150,10 +150,7 @@ fn auth(org: &OrganizationId, actor: &ActorRef, token: &str) -> AuthContext {
         org_role: None,
         tag_ids: None,
         represented_actor_ids: BTreeSet::from([actor.id.clone()]),
-        capabilities: BTreeSet::from([
-            "self.identity.read".into(),
-            "obo:tos>ting:tings.send".into(),
-        ]),
+        capabilities: BTreeSet::from(["self.identity.read".into(), "obo:ting:tings.send".into()]),
         credential: PresentedCredential::Bearer(SecretString::from(token.to_owned())),
         credential_expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
     }
@@ -179,11 +176,11 @@ async fn only_the_verified_originator_can_publish_and_fresh_authority_recovers_p
     let org: OrganizationId = "tos".parse()?;
     let alice = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "alice".parse()?,
+        id: "c:alice".parse()?,
     };
     let bob = ActorRef {
         actor_type: ActorType::Carbon,
-        id: "bob".parse()?,
+        id: "c:bob".parse()?,
     };
     let chat = store
         .create_conversation(CreateConversationCommand {
@@ -206,7 +203,7 @@ async fn only_the_verified_originator_can_publish_and_fresh_authority_recovers_p
         })
         .await?;
     let context = TingDeliveryContext {
-        app_id: "tos>dm".into(),
+        app_id: "dm".into(),
         testing_environment_id: None,
         testing_generation: None,
     };

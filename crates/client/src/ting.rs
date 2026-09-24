@@ -418,11 +418,11 @@ mod tests {
     fn context() -> (TingReceiverContext, Identity) {
         let actor = Actor {
             actor_type: ActorType::Silicon,
-            id: "cos:tos".into(),
+            id: "si:cos".into(),
         };
         (
             TingReceiverContext {
-                app_id: "tos>dm".into(),
+                app_id: "dm".into(),
                 organization_id: "tos".into(),
                 ting_organization_id: None,
                 actor: actor.clone(),
@@ -432,19 +432,20 @@ mod tests {
             Identity {
                 actor,
                 organization_id: "tos".into(),
-                principal_id: "cos:tos".into(),
+                principal_id: "si:cos".into(),
                 session_id: None,
                 org_role: None,
                 capabilities: Vec::new(),
+                reconsent_required: false,
             },
         )
     }
 
     fn event() -> Value {
         let id = Uuid::new_v4();
-        json!({"id":"msg_123", "type":"tos>dm.sync.changed", "created_at":"2026-09-22T10:00:00Z", "key":id,
+        json!({"id":"msg_123", "type":"dm.sync.changed", "created_at":"2026-09-22T10:00:00Z", "key":id,
             "metadata":{"testing_environment_id":null,"testing_generation":null,"isi":"planner"},
-            "data":{"schema_version":1,"event":"message.created","org_id":"tos","conversation_id":"alice::cos:tos",
+            "data":{"schema_version":1,"event":"message.created","org_id":"tos","conversation_id":"c:alice::si:cos",
                 "message_id":"000","delivery_id":id,"delivery_sequence":1}})
     }
 
@@ -462,7 +463,7 @@ mod tests {
     fn local_callback_uses_trusted_typed_binding_and_leaves_other_apps_unclaimed() {
         let (receiver, identity) = context();
         let mut other = event();
-        other["type"] = json!("tos>remind.sync.changed");
+        other["type"] = json!("remind.sync.changed");
         let items = validate_batch(
             &serde_json::to_vec(&json!({"tings":[event(),other]})).unwrap(),
             &receiver,
@@ -480,7 +481,7 @@ mod tests {
             Err(TingBatchError::InvalidReceiver)
         ));
         let mut wrong_recipient = event();
-        wrong_recipient["for"] = json!("alice");
+        wrong_recipient["for"] = json!("c:alice");
         assert!(matches!(
             validate(wrong_recipient, &receiver, &identity),
             TingItem::Rejected {

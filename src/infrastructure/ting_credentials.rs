@@ -23,7 +23,7 @@ use crate::{
 const KEY_DOMAIN: &str = "silicon-dm Ting originator credential encryption v1";
 const MAX_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_CANDIDATES: i64 = 8;
-const REQUIRED_SCOPES: [&str; 2] = ["self.identity.read", "obo:tos>ting:tings.send"];
+const REQUIRED_SCOPES: [&str; 2] = ["self.identity.read", "obo:ting:tings.send"];
 
 /// A candidate must be freshly authorized with IAM before minting any proof.
 pub struct CachedTingCredential {
@@ -59,6 +59,8 @@ pub struct TingCredentialCache {
 
 #[derive(FromRow)]
 struct CredentialRecord {
+    aad_app_id: Option<String>,
+    aad_actor_id: Option<String>,
     token_digest: Vec<u8>,
     nonce: Vec<u8>,
     ciphertext: Vec<u8>,
@@ -140,7 +142,7 @@ impl TingCredentialCache {
             .await?;
         prune_expired(&mut transaction).await?;
         let existing = sqlx::query_as::<_, CredentialRecord>(
-            "SELECT token_digest,nonce,ciphertext,session_id,expires_at FROM ting_credentials \
+            "SELECT token_digest,nonce,ciphertext,session_id,expires_at,aad_app_id,aad_actor_id FROM ting_credentials \
              WHERE app_id=$1 AND generation=$2 AND organization_id=$3 AND actor_kind=$4::text::actor_kind \
              AND actor_id=$5 AND token_digest=$6",
         ).bind(&self.context.app_id).bind(self.generation()).bind(auth.organization_id.as_str())
@@ -180,7 +182,7 @@ impl TingCredentialCache {
             "INSERT INTO ting_credentials(app_id,generation,organization_id,actor_kind,actor_id,token_digest,nonce,ciphertext,session_id,expires_at) \
              SELECT $1,$2,$3,$4::text::actor_kind,$5,$6,$7,$8,$9,$10 WHERE $10>clock_timestamp() \
              ON CONFLICT(app_id,generation,organization_id,actor_kind,actor_id,token_digest) DO UPDATE \
-             SET nonce=EXCLUDED.nonce,ciphertext=EXCLUDED.ciphertext,session_id=EXCLUDED.session_id,expires_at=EXCLUDED.expires_at,verified_at=clock_timestamp()",
+             SET nonce=EXCLUDED.nonce,ciphertext=EXCLUDED.ciphertext,session_id=EXCLUDED.session_id,expires_at=EXCLUDED.expires_at,verified_at=clock_timestamp(),aad_app_id=NULL,aad_actor_id=NULL",
         ).bind(&self.context.app_id).bind(self.generation()).bind(auth.organization_id.as_str())
             .bind(auth.actor.actor_type.as_str()).bind(auth.actor.id.as_str()).bind(digest.as_slice())
             .bind(nonce.as_slice()).bind(ciphertext).bind(auth.session_id).bind(expires_at)
@@ -215,7 +217,7 @@ impl TingCredentialCache {
         self.verify_schema(&mut transaction).await?;
         prune_expired(&mut transaction).await?;
         let rows = sqlx::query_as::<_, CredentialRecord>(
-            "SELECT token_digest,nonce,ciphertext,session_id,expires_at FROM ting_credentials \
+            "SELECT token_digest,nonce,ciphertext,session_id,expires_at,aad_app_id,aad_actor_id FROM ting_credentials \
              WHERE app_id=$1 AND generation=$2 AND organization_id=$3 AND actor_kind=$4::text::actor_kind AND actor_id=$5 \
              AND expires_at>clock_timestamp() ORDER BY verified_at DESC,expires_at DESC,token_digest DESC LIMIT $6",
         ).bind(&self.context.app_id).bind(self.generation()).bind(org.as_str())
@@ -334,7 +336,45 @@ impl TingCredentialCache {
             .as_slice()
             .try_into()
             .map_err(|_| credential_error())?;
-        let aad = self.aad(org, actor, &digest, row.session_id, row.expires_at)?;
+        let mut aad: serde_json::Value = serde_json::from_slice(&self.aad(
+            org,
+            actor,
+            &digest,
+            row.session_id,
+            row.expires_at,
+        )?)
+        .map_err(|_| credential_error())?;
+        if let Some(original) = &row.aad_app_id {
+            let mapped = original
+                .split_once('>')
+                .map_or(original.as_str(), |(_, app)| app);
+            if mapped != self.context.app_id {
+                return Err(credential_error());
+            }
+            aad["app_id"] = json!(original);
+        }
+        if let Some(original) = &row.aad_actor_id {
+            let mapped = if original.starts_with("c:") || original.starts_with("si:") {
+                original.clone()
+            } else {
+                match actor.actor_type {
+                    crate::domain::ActorType::Carbon => format!("c:{original}"),
+                    crate::domain::ActorType::Silicon => {
+                        let (handle, original_org) =
+                            original.split_once(':').ok_or_else(credential_error)?;
+                        if original_org != org.as_str() {
+                            return Err(credential_error());
+                        }
+                        format!("si:{handle}")
+                    }
+                }
+            };
+            if mapped != actor.id.as_str() {
+                return Err(credential_error());
+            }
+            aad["actor"]["id"] = json!(original);
+        }
+        let aad = serde_json::to_vec(&aad).map_err(|_| credential_error())?;
         let plaintext = self
             .cipher
             .decrypt(

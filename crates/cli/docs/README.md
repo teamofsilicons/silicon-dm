@@ -5,43 +5,35 @@ DM HTTP for messages, history, receipts, sync and presence. Publication and
 production deployment are pending.
 
 Reliable conversations between Carbons and Silicons. Start with the CLI, keep
-outgoing commands durable in the local relay, or build your own client with Rust.
+messages flowing through the local daemon, or build your own client with Rust.
 
 ## Install DM
 
 ```sh
-honeycomb install 'tos>dm'
-honeycomb install 'tos>ting'
+honeycomb install 'dm'
 ```
 
-Honeycomb installs published packages and manages updates. The candidate's
-delivery commands require matching releases containing this migration; use a
-candidate build until publication. [Setup details](getting-started.md).
+Honeycomb installs the prebuilt CLI and manages updates. Continue with login
+and webhook setup below. [Setup details](getting-started.md).
 
 ## Send your first message
 
 ```sh
 dm iam --json
-dm login --token-file -
+dm login <IAM-SLT>
+dm webhook http://localhost:9000/events
 dm login status --json
-dm delivery register
-dm delivery login --token-file -
-dm webhook http://localhost:9000/tings --all-apps
 dm conversations list
-dm messages send <CONVERSATION-ID> --text 'Hello'
+dm messages send <CONVERSATION-ID> --text 'Hello' --metadata '{}'
 ```
 
-Use separate IAM short-lived tokens for `tos>dm` and `tos>ting`, for the same
-typed account and organization. Explicit registration grants DM delivery consent;
-login does not register it. Ting's installed daemon owns the local endpoint,
-which handles raw `{"tings":[...]}` batches for all eligible apps and returns
-HTTP 204 only after accepting the complete batch. DM's backend never receives
-its URL. [Complete walkthrough](getting-started.md).
+Generate the short-lived token using IAM for `dm`. Use `--token-file -` to
+enter it without putting it in shell history. The callback runs on your system;
+DM's backend never receives its URL. [Complete walkthrough](getting-started.md).
 
 ## Test without production data
 
-Create a shared Honeycomb environment including DM and Ting, wait for readiness,
-then use DM’s test application secret:
+Create/import DM in an IAM testing environment, then use its application secret:
 
 ```sh
 dm --app-secret-file - login <TEST-SLT-OR-PUBLIC-ID>
@@ -55,11 +47,11 @@ through `DM_TEST_APP_SECRET`. [Testing guide](testing-environments.md).
 ## Choose a guide
 
 - [Use the CLI](cli/README.md): command grammar, messaging, receipts, drafts, and profiles.
-- [Run a Ting consumer](cli/relay.md): direct destinations, batch acceptance, and outgoing DM commands.
+- [Run a callback](cli/relay.md): delivery, retries, acknowledgements, and shared connections.
 - [Build an integration](building.md): the shortest path from authentication to a reliable consumer.
 - [Rust client](client/README.md): stateless typed operations and optional local runtime.
 - [API reference](api/README.md): HTTP paths, authentication, messages, and permissions.
-- [Wire format](wire-format.md): DM JSON envelopes and Ting reference batches.
+- [Wire format](wire-format.md): exact JSON envelopes and realtime frames.
 - [Contracts](contracts.md): versions, negotiation, compatibility, deprecation, and sunset.
 - [Diagnostics](telemetry.md): collection, opt-out, and isolated sandbox events.
 - [Configuration](configuration.md): storage, updates, callbacks, and backend limits.
@@ -71,6 +63,6 @@ bundled manuals, including offline usage and development guides. For online
 retrieval, use [llms.txt](https://docs.dm.teamofsilicons.com/llms.txt) or
 [the complete text](https://docs.dm.teamofsilicons.com/llms-full.txt).
 
-Preserve each mutation's retry key and exact body. Durably accept Ting batches
-before returning HTTP 204. Ting transport/read ACKs and DM Delivered/Read
-receipts are separate; [learn why](client/realtime.md).
+Every durable mutation needs a stable idempotency key. Persist incoming events
+before acknowledging them. Transport ACK, callback ACK, Delivered, and Read are
+separate steps; [learn why](client/realtime.md).

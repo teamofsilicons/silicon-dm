@@ -655,7 +655,7 @@ mod tests {
             "device_id":"outgoing-device","expires_at":store::now()+3600,
             "testing_environment_id":testing,"enabled":true,
             "tokens":{"access_token":"fixture","refresh_token":"fixture-refresh","token_type":"Bearer","expires_in":3600,
-                "scope":"dm","actor":{"type":"silicon","id":"bob"},"organization_id":"tos"}
+                "scope":"dm","actor":{"type":"carbon","id":"c:bob"},"organization_id":"tos"}
         }))?;
         let port = std::net::TcpListener::bind("127.0.0.1:0")?
             .local_addr()?
@@ -687,7 +687,7 @@ mod tests {
             testing_environment_id: testing,
             testing_generation: generation,
             request: crate::relay::Operation::CreateConversation {
-                participant_ids: vec!["alice".into(), "bob".into()],
+                participant_ids: vec!["c:alice".into(), "c:bob".into()],
                 idempotency_key: "stable-outgoing-key".into(),
             },
         }
@@ -718,14 +718,14 @@ mod tests {
                     }}})))
                 }
             }))
-            .route("/api/v1/conversations/alice::bob/messages", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+            .route("/api/v1/conversations/c:alice::c:bob/messages", post(move |headers: HeaderMap, Json(body): Json<Value>| {
                 let count = send_count.clone();
                 async move {
                     assert_eq!(headers["idempotency-key"], "following-send");
                     assert_eq!(body["data"]["message"], "durable message");
                     count.fetch_add(1, Ordering::SeqCst);
                     Json(json!({"type":"message","data":{
-                        "message-id":"001","conversation_id":"alice::bob","sender":{"type":"silicon","id":"bob"},
+                        "message-id":"001","conversation_id":"c:alice::c:bob","sender":{"type":"carbon","id":"c:bob"},
                         "message":"durable message","created_at":"2026-09-22T00:00:00Z"
                     }}))
                 }
@@ -741,7 +741,7 @@ mod tests {
         let presence = activity(None, None);
         let send = RelayRequest {
             request: crate::relay::Operation::SendMessage {
-                conversation_id: "alice::bob".into(),
+                conversation_id: "c:alice::c:bob".into(),
                 message: crate::MessageCreate {
                     text: Some("durable message".into()),
                     ..Default::default()
@@ -799,7 +799,7 @@ mod tests {
             let environment = Uuid::new_v4();
             let router = Router::new().route("/api/v1/iam", get(move || async move {
                 if case == "generation_unavailable" {
-                    Json(json!({"type":"iam","data":{"app_id":"tos>dm","iam_base_url":"http://localhost",
+                    Json(json!({"type":"iam","data":{"app_id":"dm","iam_base_url":"http://localhost",
                         "api_base_url":"http://localhost","testing_environment_id":environment,"testing_generation":null}})).into_response()
                 } else {
                     (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"type":"error","data":{"error":{
@@ -1015,12 +1015,12 @@ mod tests {
             let sends = sends_handler.clone();
             async move {
                 assert_eq!(headers["idempotency-key"], "stable-outgoing-key");
-                assert_eq!(body, json!({"type":"create_conversation","data":{"participant_ids":["alice","bob"]}}));
+                assert_eq!(body, json!({"type":"create_conversation","data":{"participant_ids":["c:alice","c:bob"]}}));
                 if sends.fetch_add(1, Ordering::SeqCst) == 0 {
                     return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"type":"error","data":{"error":{"code":"retry","message":"fixture retry"}}}))).into_response();
                 }
                 Json(json!({"type":"conversation","data":{
-                    "id":"alice::bob","org_id":"tos","participants":[],"last_message":null,
+                    "id":"c:alice::c:bob","org_id":"tos","participants":[],"last_message":null,
                     "created_at":"2026-09-22T00:00:00Z","updated_at":"2026-09-22T00:00:00Z"
                 }})).into_response()
             }
@@ -1032,13 +1032,13 @@ mod tests {
         let state = fixture_store(&format!("http://{}", listener.local_addr()?), None)?;
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
         let queue = queue::Queue::open(&state)?;
-        let legacy = json!({"type":"message.created","data":{"message-id":"000","conversation_id":"alice::bob",
-            "message":"retained","sender":{"type":"carbon","id":"alice"},"recipient_id":"bob",
+        let legacy = json!({"type":"message.created","data":{"message-id":"000","conversation_id":"c:alice::c:bob",
+            "message":"retained","sender":{"type":"carbon","id":"c:alice"},"recipient_id":"c:bob",
             "metadata":{"source":"dm","delivery_id":Uuid::nil(),"delivery_sequence":1}}});
         let legacy_db = rusqlite::Connection::open(state.directory().join("relay.sqlite3"))?;
         legacy_db.execute_batch("CREATE TABLE inbox(session TEXT,delivery_id TEXT,actor TEXT,sequence INTEGER,frame TEXT,delivered INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0);")?;
         legacy_db.execute(
-            "INSERT INTO inbox(session,delivery_id,actor,sequence,frame) VALUES('default:production',?1,'bob',1,?2)",
+            "INSERT INTO inbox(session,delivery_id,actor,sequence,frame) VALUES('default:production',?1,'c:bob',1,?2)",
             rusqlite::params![Uuid::nil().to_string(), legacy.to_string()],
         )?;
         let request = command(None, None);
@@ -1089,7 +1089,7 @@ mod tests {
         let mutations = Arc::new(AtomicUsize::new(0));
         let counter = mutations.clone();
         let router = Router::new().route("/api/v1/iam", get(move || async move {
-            Json(json!({"type":"iam","data":{"app_id":"tos>dm","iam_base_url":"http://localhost",
+            Json(json!({"type":"iam","data":{"app_id":"dm","iam_base_url":"http://localhost",
                 "api_base_url":"http://localhost","testing_environment_id":environment,"testing_generation":2}}))
         })).fallback(move || {
             let counter = counter.clone();
