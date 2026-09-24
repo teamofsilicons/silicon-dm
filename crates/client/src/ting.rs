@@ -436,6 +436,7 @@ mod tests {
                 session_id: None,
                 org_role: None,
                 capabilities: Vec::new(),
+                reconsent_required: false,
             },
         )
     }

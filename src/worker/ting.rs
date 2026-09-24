@@ -13,6 +13,8 @@ use crate::{
     infrastructure::{
         postgres::{PostgresStore, TingDeliveryContext},
         ting::{SharedTingPublisher, TingFailure},
+        ting_auto_enrollment::TingAutoEnrollment,
+        ting_credentials::TingCredentialCache,
     },
     testing::TestingRegistry,
 };
@@ -29,6 +31,7 @@ pub struct TingDeliveryWorker {
     settings: WorkerSettings,
     testing: Option<Arc<TestingRegistry>>,
     runtime_revision: Option<i64>,
+    enrollment: Option<(TingAutoEnrollment, TingCredentialCache)>,
 }
 
 impl TingDeliveryWorker {
@@ -49,7 +52,20 @@ impl TingDeliveryWorker {
             settings,
             testing: None,
             runtime_revision: None,
+            enrollment: None,
         }
+    }
+
+    /// Backfills Ting enrollment for members with cached sessions, and re-enrolls
+    /// a member whose grant Ting reports missing on their next session.
+    #[must_use]
+    pub fn with_auto_enrollment(
+        mut self,
+        enrollment: TingAutoEnrollment,
+        credentials: TingCredentialCache,
+    ) -> Self {
+        self.enrollment = Some((enrollment, credentials));
+        self
     }
 
     /// Binds sandbox attempts to the live generation/lifecycle lock. A sandbox
@@ -162,6 +178,17 @@ impl TingDeliveryWorker {
         let expired_sessions = self.store.expire_realtime_sessions().await?;
         let expired_http_leases = self.store.expire_http_presence_leases().await?;
         let compacted = self.store.compact_delivery_state().await?;
+        if let Some((enrollment, credentials)) = &self.enrollment {
+            // Enrollment is best effort: IAM or Ting being down must not stop maintenance.
+            match enrollment.sweep(credentials).await {
+                Ok(0) => {}
+                Ok(enrolled) => tracing::info!(enrolled, "Ting enrollment sweep completed"),
+                Err(error) => tracing::warn!(
+                    code = error.code(),
+                    "Ting enrollment sweep will retry at the next maintenance tick"
+                ),
+            }
+        }
         if expired_sessions > 0 || expired_http_leases > 0 || compacted > 0 {
             tracing::info!(
                 expired_sessions,
@@ -276,6 +303,13 @@ impl TingDeliveryWorker {
                         + time::Duration::try_from(delay).map_err(AppError::internal)?;
                     tracing::warn!(delivery_id = %claim.delivery_id, code = error.code(),
                         "Ting handoff remains pending");
+                    if error.code() == "recipient_not_registered"
+                        && let Some((enrollment, _)) = &self.enrollment
+                    {
+                        enrollment
+                            .forget(&claim.organization_id, &claim.target)
+                            .await?;
+                    }
                     self.store
                         .retry_ting_delivery(claim.delivery_id, claim.lease_id, next, error.code())
                         .await

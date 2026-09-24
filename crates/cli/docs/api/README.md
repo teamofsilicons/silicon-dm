@@ -61,7 +61,7 @@ The response `X-Request-ID` is useful for correlation; it is separate from the e
 | `POST /auth/login` | `{"slt":"oac_..."}` | 200 application session |
 | `POST /auth/refresh` | `{"refresh_token":"ort_..."}` | 200 rotated application session |
 | `POST /auth/logout` | `{"token":"ort_..."}` | 204 revoked family; an `oat_` token revokes only itself |
-| `GET /auth/me` | Bearer and `X-Org-ID` headers | 200 current actor, organization, principal/session UUIDs, role and effective scopes |
+| `GET /auth/me` | Bearer and `X-Org-ID` headers | 200 current actor, organization, principal/session UUIDs, role, effective scopes and `reconsent_required` (sign in again once to receive DM's Ting permissions) |
 
 The three session mutations require an idempotency key but no separate Bearer or organization header. Their maximum JSON body is 16 KiB. Login and refresh return `access_token`, `refresh_token`, `token_type: "Bearer"`, `expires_in`, `scope`, `actor: {type,id}`, and `organization_id`, with `Cache-Control: no-store` and `Pragma: no-cache`. Persist both tokens atomically; refresh rotates the current refresh token. Never log session bodies. The client-side webhook URL is local relay configuration and is absent from every backend session input.
 

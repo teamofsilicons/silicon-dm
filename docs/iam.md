@@ -149,9 +149,16 @@ DM declares `ting` external endpoints `subscriptions.register` and
 application configuration and the account's consent. A preexisting token does
 not automatically gain newly requested scopes.
 
-Explicit delivery registration uses the recipient's own DM session to establish
-the Ting grant. Login alone never recreates a revoked grant. Receiving requires
-a separate Ting session and destination; a DM token is not a Ting receiver token.
+DM enrolls every member with Ting automatically; it is not a member decision.
+Ting only accepts a grant proven by the recipient's own session, so DM enrolls a
+member whenever it verifies one: at login, on any authenticated request, and in
+the worker's sweep over cached, unexpired access tokens. Enrollment is recorded
+per app, generation, organization and typed actor in `ting_automatic_enrollments`;
+failed or unscoped attempts wait five minutes before retrying. When Ting rejects a
+send as `recipient_not_registered`, DM forgets the enrollment and the member's next
+session enrolls them again. `POST /api/v1/delivery/registration` remains as an
+explicit re-enrollment. Receiving requires a separate Ting session and
+destination; a DM token is not a Ting receiver token.
 
 The backend encrypts at most eight verified, unexpired DM access tokens per
 organization, typed actor, application and data generation. Login, refresh and

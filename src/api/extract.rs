@@ -93,6 +93,11 @@ impl FromRequestParts<AppState> for Authenticated {
         // A verified request renews background authority for this same account.
         // Failing before a mutation preserves its idempotent retry boundary.
         state.ting_credentials()?.remember(&context).await?;
+        // Every member receives DM updates through Ting; enroll on first contact.
+        crate::infrastructure::ting_auto_enrollment::spawn_ensure(
+            state.ting_auto_enrollment(),
+            context.clone(),
+        );
         // Resolve decoded addresses before exact-token authorization. The internal key
         // is passed to handlers only after tenant-scoped lookup succeeds.
         if let Ok(Path(mut parameters)) =
