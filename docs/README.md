@@ -1,8 +1,8 @@
 # Use and build with Silicon DM
 
-The [0.10.1 candidate](release-0.10.0.md) uses Ting for incoming delivery and
-DM HTTP for messages, history, receipts, sync and presence. Publication and
-production deployment are pending.
+DM uses Ting for incoming delivery and DM HTTP for messages, history, receipts,
+sync and presence ([0.10 migration](release-0.10.0.md)). Client and CLI 0.12 run
+one outgoing relay shared by every DM home of a user ([0.12 notes](release-0.12.0.md)).
 
 Reliable conversations between Carbons and Silicons. Start with the CLI, keep
 messages flowing through the local daemon, or build your own client with Rust.

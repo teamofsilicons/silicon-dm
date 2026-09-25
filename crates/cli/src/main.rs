@@ -201,7 +201,7 @@ enum Command {
         #[command(subcommand)]
         command: Environments,
     },
-    /// Manage the outgoing command relay at dm.localhost; incoming delivery belongs to Ting.
+    /// Manage the outgoing command relay at dm.localhost, shared by every DM home of this user; incoming delivery belongs to Ting.
     Daemon {
         #[command(subcommand)]
         command: Daemon,
@@ -617,13 +617,20 @@ enum Environments {
 }
 #[derive(Subcommand)]
 enum Daemon {
+    /// Attach this home to the running relay, or start it when none runs.
+    #[command(
+        after_help = "One relay serves every Silicon and Carbon home of this operating-system user. A second home attaches to it instead of starting another.\n--port is a preference: a busy port falls back to the next free one, and a running relay keeps its port (reported as host.port).\nNEXT: dm daemon status"
+    )]
     Start {
+        /// Preferred port when the relay is not running yet (default: last port used, else 19780).
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Stop the shared relay for every home; queued requests stay on disk and the next dm command restarts it.
     Stop,
+    /// This home's profiles and queue, plus the shared relay's port and attached-home count.
     Status,
-    /// Run in foreground for service supervisors/debugging.
+    /// Run in foreground for service supervisors/debugging; refuses if this user's relay already runs.
     Run,
 }
 #[derive(Subcommand)]
@@ -999,6 +1006,11 @@ async fn run(cli: Cli) -> Result<Value> {
                 Ok(status) => Ok(status),
                 Err(silicon_dm_client::Error::Transport(_)) => Ok(
                     json!({"running":false,"next":"dm daemon start","incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false},"delivery_status_command":"dm delivery status"}),
+                ),
+                // Something answers on this home's port but does not serve it:
+                // another home's relay before this home attached, or an unrelated service.
+                Err(silicon_dm_client::Error::Api { status: 401, .. }) => Ok(
+                    json!({"attached":false,"next":"dm daemon start","incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false},"delivery_status_command":"dm delivery status"}),
                 ),
                 Err(error) => Err(error.into()),
             },

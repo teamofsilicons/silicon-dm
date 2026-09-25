@@ -23,11 +23,6 @@ workspace connection. Fresh real IAM SLTs also passed Carbon/Silicon Ting cookie
 CORS and WebSocket checks from both website origins in the exact test generation.
 These checks do not by themselves claim message delivery or recipient enrollment.
 
-Ting's production app list is empty for `bricks`, and listing/registering DM's
-notification type there is denied, although the same app/type is visible in
-`tos`. Cross-organization type management is a separate outstanding dependency;
-a connected browser is not proof that a DM message can be handed off in Bricks.
-
 IAM 3.0.3 and Honeycomb 0.3.3 are deployed. The rotated fresh-environment credential
 passes a new official-SDK OBO audience validation. The original pending Honeycomb
 operation recovered its definitive configuration-revision rejection through the

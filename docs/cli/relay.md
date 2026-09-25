@@ -57,13 +57,33 @@ this bound Ting session. DM logout remains separate.
 ## Outgoing loopback API
 
 `dm daemon start|stop|status|run` controls only the outgoing relay. Login starts
-it; `run` stays foreground for a supervisor. Its default address is
-`http://dm.localhost:19780`, bound to `127.0.0.1`. A process lock permits one host
-per state directory. `start --port PORT` chooses the listener port.
+it; `run` stays foreground for a supervisor. It is bound to `127.0.0.1`,
+reachable as `http://dm.localhost:PORT`.
 
-`dm relay credentials` explicitly prints its local bearer and URLs; this bearer
-is not an IAM token. Every endpoint requires it. Requests with an Origin header
-are rejected; this is not a cross-origin browser API.
+One relay process serves every DM home of an operating-system user: each
+Silicon's `SILICON_HOME`, a Carbon's `~/.silicon-dm`, and any `SILICON_DM_HOME`.
+When a home runs a DM command and the relay is already running, the home attaches
+to it instead of starting another. Homes keep separate profiles, queues and
+bearers; a request reaches only its own home's queue. The shared directory is
+`~/.silicon-dm/relay` of the real user account (not `HOME` or `SILICON_HOME`),
+overridable with an absolute `SILICON_DM_RELAY_HOME`. It holds the host lock,
+`host.json` (PID, port and a private attach token), `stores.json` (every attached
+home, so a restarted relay resumes all their queues) and `daemon.log`.
+
+A new relay prefers the port the launching home last used (19780 by default, or
+`start --port PORT`). If that port is in use it tries the next 100 ports, then any
+free loopback port. The port in use is written to each attached home's
+`relay_port` and reported as `host.port` by `daemon status`. `--port` is only a
+preference: a running relay keeps its port and reports the request as
+`host.requested_port`. `daemon stop` stops the relay for every home; queued
+requests stay on disk and the next DM command from any home starts it again.
+When a newer CLI finds an older shared relay, it stops it and starts its own.
+The 16 concurrent outgoing requests and the 128 MiB payload budget are shared by
+all homes.
+
+`dm relay credentials` explicitly prints this home's local bearer and URLs; this
+bearer is not an IAM token. Every endpoint requires it. Requests with an Origin
+header are rejected; this is not a cross-origin browser API.
 
 | Route | Purpose |
 | --- | --- |
@@ -71,7 +91,8 @@ are rejected; this is not a cross-origin browser API.
 | `POST /requests` | Durably accept a typed request and echo its exact JSON. |
 | `GET /requests/{id}` | Read the original request and pending/completed/failed result. |
 | `GET /requests/{id}/status` | Read lightweight progress. |
-| `POST /shutdown` | Stop the outgoing relay without deleting requests. |
+| `POST /shutdown` | Stop the shared relay for every home without deleting requests. |
+| `POST /homes` | Attach a home. Requires the attach token from `host.json`, not a home's bearer. |
 
 `dm relay submit --data FILE` submits a `type: request` envelope containing a
 `RelayRequest`. Keep its request UUID and operation idempotency key unchanged when
@@ -92,8 +113,11 @@ to a cleaned environment. No socket handshake is involved.
 
 ## Upgrading existing state
 
-New runtime startup stops a recognized old DM relay before launching the new
-outgoing-only host, preserving state. An unrelated local service is not stopped.
+A relay from an older release served one home only. When the shared relay
+attaches that home, it stops the recognized old relay (using that home's own
+port and bearer), waits for its lock and then serves the home's existing queue.
+An unrelated service on that port is not stopped; the shared relay uses another
+port.
 `daemon status` reports `incoming_delivery.code: delivery_moved_to_ting` and
 `forwarding: false`; `delivery status` separately reports Ting state.
 

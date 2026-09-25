@@ -235,8 +235,9 @@ new idempotency key when changing either ISI. Metadata remains caller-owned.
 
 Default state uses `$SILICON_HOME/.silicon-dm` when `SILICON_HOME` is set, otherwise `~/.silicon-dm`. `SILICON_HOME` must name an existing absolute directory. Change the parent directory with `dm config home LOCATION`; LOCATION must already be a directory. State then lives under `LOCATION/.silicon-dm`.
 
-The selected state directory contains `config.json`, `relay.sqlite3`, lock files
-and `daemon.log`. The directory is mode 0700 and credential/database/log files
+The selected state directory contains `config.json`, `relay.sqlite3` and lock
+files. The outgoing relay and its `daemon.log` are shared by every state directory
+of the operating-system user; see [the relay guide](relay.md#outgoing-loopback-api). The directory is mode 0700 and credential/database/log files
 are 0600 on Unix. Tokens and root keys are private but are stored locally in
 plaintext under those permissions. SQLite WAL mode with FULL synchronous commits
 protects outgoing requests. No incoming DM queue is created. Legacy inbox/cursor

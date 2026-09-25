@@ -48,7 +48,10 @@ pub struct Config {
     pub testing_names: BTreeMap<Uuid, String>,
     #[serde(default)]
     pub webhook_secrets: BTreeMap<String, String>,
+    /// Port of the shared relay serving this home. The relay rewrites it when it
+    /// attaches the home, and prefers it when it starts, so it stays stable.
     pub relay_port: u16,
+    /// This home's private bearer; the shared relay routes requests by it.
     pub relay_token: String,
     #[serde(default)]
     pub auto_update: bool,
@@ -168,6 +171,27 @@ pub fn set_home_directory(home: impl AsRef<Path>) -> Result<PathBuf> {
     // Windows cannot open directories through File::open; the file was synced above.
     #[cfg(unix)]
     File::open(base)?.sync_all()?;
+    Ok(directory)
+}
+/// One relay serves every DM home of this operating-system user, so its
+/// directory ignores SILICON_HOME and HOME unless explicitly overridden.
+pub fn relay_home_directory() -> Result<PathBuf> {
+    let directory = match std::env::var_os("SILICON_DM_RELAY_HOME") {
+        Some(directory) => PathBuf::from(directory),
+        None => ting_client::real_home()
+            .map_err(|_| anyhow::anyhow!("cannot resolve this user's home for the shared DM relay; set SILICON_DM_RELAY_HOME"))?
+            .join(".silicon-dm")
+            .join("relay"),
+    };
+    if !directory.is_absolute() {
+        bail!("SILICON_DM_RELAY_HOME must be an absolute path")
+    }
+    ting_client::private_dir(&directory).map_err(|_| {
+        anyhow::anyhow!(
+            "cannot create the private shared relay directory {}",
+            directory.display()
+        )
+    })?;
     Ok(directory)
 }
 pub fn secure_open(path: &Path) -> Result<File> {
@@ -356,6 +380,7 @@ impl Store {
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    relay_home: Option<PathBuf>,
 }
 impl Store {
     pub fn new(directory: impl Into<PathBuf>) -> Result<Self> {
@@ -366,7 +391,31 @@ impl Store {
         fs::create_dir_all(&root)?;
         #[cfg(unix)]
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            relay_home: None,
+        })
+    }
+    /// Uses a caller-owned shared relay directory instead of this user's default.
+    /// Homes sharing it share one relay process.
+    pub fn with_relay_home(mut self, directory: impl Into<PathBuf>) -> Result<Self> {
+        let directory = directory.into();
+        if !directory.is_absolute() {
+            bail!("shared relay directory must be absolute");
+        }
+        ting_client::private_dir(&directory).map_err(|_| {
+            anyhow::anyhow!(
+                "cannot create the private shared relay directory {}",
+                directory.display()
+            )
+        })?;
+        self.relay_home = Some(directory);
+        Ok(self)
+    }
+    pub fn relay_home(&self) -> Result<PathBuf> {
+        self.relay_home
+            .clone()
+            .map_or_else(relay_home_directory, Ok)
     }
     pub fn from_environment() -> Result<Self> {
         Self::new(default_directory()?)

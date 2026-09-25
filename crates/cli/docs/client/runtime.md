@@ -146,8 +146,11 @@ current history using the SDK's boundary/snapshot/sync procedure in the
 [client guide](README.md#initial-history-and-recovery).
 
 An embedding application can run `runtime.run().await` rather than launch a
-process. Use one host per state directory. `runtime.client()?.stop().await`,
-Ctrl-C, or cancelling `run()` stops the outgoing host; durable requests remain.
+process. One relay serves every state directory of an operating-system user, so
+`run()` refuses while that relay is running and `start()` attaches the directory
+to it instead. `LocalRuntime::with_relay_home(dir)` shares a relay only with
+directories using the same `dir`, as tests do. `runtime.client()?.stop().await`,
+Ctrl-C, or cancelling `run()` stops the shared relay; durable requests remain.
 The generic Ting consumer has its own lifecycle.
 
 ## Sandboxes and credentials

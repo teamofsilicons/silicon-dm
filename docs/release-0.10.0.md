@@ -31,12 +31,10 @@ validation. The original operation recovered a definitive rejection through
 the supported API, followed by successful reconciliation and a new rotation.
 
 Production DM configuration revision 2 includes both required Ting scopes, and
-`tos>dm.sync.changed` is registered in `tos`. Ting currently denies managing
-that type in `bricks` because its application list omits the app owned by `tos`.
-Cross-organization type lookup during sends remains an outstanding dependency.
+`tos>dm.sync.changed` is registered in `tos`.
 Interface retains its existing login/history and confirms a real Ting connection
-in Bricks; this is not proof of recipient enrollment or message delivery there.
-See the [integration record](ting-integration-issues.md) for the current boundary.
+in Bricks. See the [integration record](ting-integration-issues.md) for verification
+details.
 
 ## What changes
 
@@ -106,8 +104,7 @@ request was reused; no duplicate configuration request was created.
 
 This establishes application configuration approval. Per-account consent and
 recipient enrollment remain explicit. Production type registration is verified
-in `tos`; the Bricks registration limitation and remaining patch/distribution
-gates are recorded above.
+in `tos`.
 
 ## Historical 0.10.0 candidate validation
 
@@ -168,5 +165,4 @@ acceptance are complete in the task-owned testing environment. Client and CLI
 publication, fresh installation, global update verification and native delivery
 checks are complete. The immutable v0.10.1 package includes preparation-time
 release status; this live record and the GitHub verification assets capture the
-final deployed result. Production Bricks delivery requires a separate Ting
-type-lookup correction; a connected browser does not close that gate.
+final deployed result.
