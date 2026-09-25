@@ -15,7 +15,9 @@ Only the backend holds `DM_SPACE_STATION_TABLE_KEY`. It uses the official
 `space-station` Rust package 0.1.1, whose local daemon spools records and ships them
 with acknowledgements. The SDK, CLI and browser use DM's authenticated
 `POST /api/v1/telemetry` endpoint; the ingest credential is never shipped in a
-browser bundle or a CLI binary.
+browser bundle or a CLI binary. A CLI command records its diagnostic in its home's
+local queue and exits; the relay uploads it in the background (keeping at most
+1,000 unsent events), so no command waits on the network for telemetry.
 
 Sandbox diagnostics are written to that sandbox's `telemetry_events` table and
 never exported through the production Space Station key. Generation fences reject

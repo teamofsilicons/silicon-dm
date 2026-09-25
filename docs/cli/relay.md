@@ -101,8 +101,28 @@ success, Ting acceptance or recipient delivery. Use `dm relay result REQUEST_ID`
 to recover an uncertain outcome. Ordinary message, draft, group and receipt
 commands use this same outgoing relay; no auth secret belongs in a queued command.
 
-Work executes in order per profile/environment, with up to 16 concurrent profile
-workers and a 128 MiB encoded-payload admission budget. A larger single request
+Work is ordered in lanes within each profile/environment. Requests about one
+conversation (sends, edits, deletes, receipts, drafts, bundles and reads of that
+conversation) run strictly in order, so a later read observes earlier sends, but
+conversations do not wait for each other: a send retrying in one conversation
+never delays another. Presence has its own lane. Every other request (groups,
+conversation lists, creating conversations) keeps order with everything queued
+before it, except requests already failing and retrying. Up to 16 lanes run
+concurrently with a 128 MiB encoded-payload admission budget.
+
+A submitted request starts at once; the relay does not wait for a periodic scan.
+One HTTP connection pool (HTTP/2 when the backend offers it) serves every home and
+profile, and the relay keeps it warm with a light `GET /live` every 20 seconds
+while any profile is logged in, replacing it after the machine sleeps. Access
+tokens are refreshed in the background at 80% of their lifetime (at most five
+minutes early), so a send after a long idle period does not wait for a refresh.
+A request that fails in transit, or whose refresh meets a momentary 5xx/429, is
+retried once immediately on a new connection before normal backoff applies.
+
+`dm messages send` does not need the relay to be ready. When the relay is not
+running, or does not yet serve this home, the CLI writes the request straight into
+the home's durable queue, launches `dm daemon start` detached, and returns; the
+relay sends the request as soon as it attaches the home. A larger single request
 runs alone; this is not a total process-memory limit. Retryable mutations retain
 their original key; failed reads return structured errors for explicit retry.
 Presence uses HTTP leases and expires across relay restart.

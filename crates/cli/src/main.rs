@@ -58,9 +58,10 @@ struct Cli {
     /// Reuse the original key when retrying a mutation. Generated keys are echoed.
     #[arg(long, global = true)]
     idempotency_key: Option<String>,
-    /// Wait for relay completion; timeout leaves the request durably queued.
-    #[arg(long, global = true, default_value_t = 30)]
-    wait_seconds: u64,
+    /// Wait for relay completion (default 30); timeout leaves the request durably queued.
+    /// messages send returns once queued unless --wait or this flag is given.
+    #[arg(long, global = true)]
+    wait_seconds: Option<u64>,
     #[command(subcommand)]
     command: Command,
 }
@@ -440,6 +441,11 @@ enum Messages {
         /// Preserve em dashes in this Silicon message instead of replacing them with spaced hyphens.
         #[arg(long)]
         dangerously_use_em_dash: bool,
+        /// Wait until DM's backend accepts the message and print it with its message ID
+        /// (up to --wait-seconds, default 30). Without it, send returns as soon as the
+        /// message is durably queued on this machine; the relay delivers it in the background.
+        #[arg(long)]
+        wait: bool,
     },
     /// Full replacement; previous content is appended to history.
     #[command(
@@ -1061,6 +1067,7 @@ async fn run(cli: Cli) -> Result<Value> {
         other => {
             let profile = store::profile(&config, &name, cli.test)?;
             let mut long_message_override = false;
+            let mut queue_only = false;
             let operation = match other {
                 Command::Groups { command } => match command {
                     Groups::List { page } => Operation::ListGroups { page: page.page() },
@@ -1125,7 +1132,9 @@ async fn run(cli: Cli) -> Result<Value> {
                         content,
                         dangerously_send_long_message,
                         dangerously_use_em_dash,
+                        wait,
                     } => {
+                        queue_only = !wait && cli.wait_seconds.is_none();
                         let mut message = content.read()?;
                         if em_dash::replace(
                             &profile.tokens.actor,
@@ -1234,13 +1243,58 @@ async fn run(cli: Cli) -> Result<Value> {
                 },
                 _ => bail!("unsupported command"),
             };
-            let result = execute(&name, cli.test, operation, cli.wait_seconds).await?;
+            let result = if queue_only {
+                queue(&name, cli.test, operation).await?
+            } else {
+                execute(&name, cli.test, operation, cli.wait_seconds.unwrap_or(30)).await?
+            };
+            // The warning reports a delivered message, so a send that is only
+            // queued (the default) prints it when waited for with --wait.
             if message_length::sent_warning(long_message_override, &result) {
                 eprintln!("{}", message_length::SENT_WARNING);
             }
             Ok(result)
         }
     }
+}
+/// Durably queues a send and returns without waiting for DM's backend. The
+/// relay starts it immediately when running, or as soon as it attaches this
+/// home; the message is in the Waiting state until the backend accepts it.
+async fn queue(profile: &str, test: Option<Uuid>, request: Operation) -> Result<Value> {
+    let request = RelayRequest {
+        request_id: Uuid::new_v4(),
+        profile: profile.into(),
+        testing_environment_id: test,
+        testing_generation: None,
+        request,
+    };
+    let starter = silicon_dm_client::runtime::DaemonCommand {
+        executable: std::env::current_exe()?,
+        arguments: vec!["daemon".into(), "start".into()],
+    };
+    let ack = match silicon_dm_client::runtime::LocalRuntime::from_environment()?
+        .submit_or_queue(&request, &starter)
+        .await
+    {
+        Ok(ack) => ack,
+        // Nothing was queued (for example a sandbox whose generation must be
+        // discovered first); use the relay's full submission path.
+        Err(_) => return execute(profile, test, request.request, 0).await,
+    };
+    let request_id = ack.request_id;
+    let envelope = ack.request.clone();
+    Ok(json!({
+        "acknowledgement": acknowledgement_value(ack),
+        "response": {
+            "request_id": request_id,
+            "state": "pending",
+            "request": envelope,
+            "result": null,
+            "error": null,
+        },
+        "message_state": "waiting",
+        "next": format!("dm relay result {request_id}  (or send with --wait for the message ID)"),
+    }))
 }
 async fn execute(
     profile: &str,
@@ -1303,7 +1357,9 @@ async fn execute(
             }
             return Ok(value);
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Loopback status reads are cheap; poll finely so a completed request
+        // is reported within milliseconds rather than on a coarse tick.
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 async fn environments(

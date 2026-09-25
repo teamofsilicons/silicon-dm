@@ -1,6 +1,6 @@
 [package]
 name = "silicon-dm-client"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.98"
 license = "LicenseRef-Proprietary"
@@ -29,7 +29,7 @@ libc = { version = "0.2", optional = true }
 rusqlite = { version = "0.38", features = ["bundled"], optional = true }
 semver = { version = "1", optional = true }
 futures-util = "0.3.31"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "http2"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"

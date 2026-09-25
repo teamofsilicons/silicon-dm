@@ -14,7 +14,7 @@ your host, callback, or backend needs different behavior.
 | `--app-secret-file FILE` / `DM_TEST_APP_SECRET` | Unset | Automatic IAM test environment selection |
 | `ISI` | Unset | Optional Silicon routing identity |
 | `DM_API_URL` | Production DM backend | Backend for login and automatic sandbox selection |
-| `--wait-seconds` | 30 | Foreground wait; timeout keeps durable work queued |
+| `--wait-seconds` | 30 | Foreground wait; timeout keeps durable work queued. `messages send` does not wait unless given this or `--wait` |
 
 Keep state on a durable local disk. It includes credentials and SQLite queues;
 use one daemon per state directory. Normal installation uses one shared directory

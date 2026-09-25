@@ -12,13 +12,16 @@ use fs2::FileExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore, watch},
+    sync::{Notify, OwnedSemaphorePermit, Semaphore, watch},
     task::{JoinHandle, JoinSet},
 };
 use uuid::Uuid;
@@ -35,6 +38,7 @@ struct Host {
     attaching: tokio::sync::Mutex<()>,
     payload_budget: Arc<Semaphore>,
     workers: Arc<Semaphore>,
+    http: Arc<Pool>,
     shutdown: watch::Sender<bool>,
 }
 impl Host {
@@ -87,6 +91,70 @@ struct RuntimeContext {
     queue: queue::Queue,
     payload_budget: Arc<Semaphore>,
     workers: Arc<Semaphore>,
+    http: Arc<Pool>,
+    /// Signalled when a request is queued so the outbox starts it at once
+    /// instead of on its next periodic scan.
+    wake: Arc<Notify>,
+}
+
+/// The relay's one HTTP connection pool, shared by every home, profile,
+/// request, token refresh and diagnostic upload. Reusing an open TLS
+/// connection removes a full handshake (several round trips) from every send.
+///
+/// A pooled connection can silently die while the machine sleeps. The pool
+/// records the wall-clock time of its last successful exchange; the monotonic
+/// clock does not advance during sleep, so only wall-clock time can reveal it.
+/// A gap longer than the keepalive cadence replaces the pool before use.
+struct Pool {
+    client: RwLock<reqwest::Client>,
+    last_ok: AtomicU64,
+}
+/// Keepalive ping cadence while any profile is logged in; well inside common
+/// load-balancer idle limits (60 s by default on AWS ALB).
+const KEEPALIVE: Duration = Duration::from_secs(20);
+/// A pool idle for longer than this (in wall-clock seconds) is presumed dead.
+const STALE_POOL_SECS: u64 = 45;
+impl Pool {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            client: RwLock::new(crate::http_client()?),
+            last_ok: AtomicU64::new(store::now()),
+        })
+    }
+    /// The pool to use now, replaced first if it has been idle long enough
+    /// (sleep, lost network) that its connections are likely gone.
+    fn get(&self) -> reqwest::Client {
+        if store::now().saturating_sub(self.last_ok.load(Ordering::Relaxed)) > STALE_POOL_SECS {
+            self.reset();
+        }
+        self.client
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+    fn reset(&self) {
+        if let Ok(fresh) = crate::http_client() {
+            *self
+                .client
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
+        }
+        self.touch();
+    }
+    fn touch(&self) {
+        self.last_ok.store(store::now(), Ordering::Relaxed);
+    }
+    fn idle_for(&self) -> u64 {
+        store::now().saturating_sub(self.last_ok.load(Ordering::Relaxed))
+    }
+}
+/// A profile client that sends through the relay's shared pool.
+fn pooled_client(
+    context: &RuntimeContext,
+    config: &store::Config,
+    profile: &store::Profile,
+) -> Result<crate::Client> {
+    Ok(store::client(config, profile)?.with_http_client(context.http.get()))
 }
 // Count MiB of encoded queued work, not just tasks. Deserialization and HTTP
 // serialization need additional memory. A larger single item takes the entire
@@ -286,6 +354,18 @@ pub async fn start(
     }
 }
 
+/// Whether a current shared relay is running and already serves this home,
+/// checked over loopback within a short budget.
+pub(crate) async fn serving(config: &store::Config) -> bool {
+    let Ok(relay) = store::relay(config) else {
+        return false;
+    };
+    matches!(
+        tokio::time::timeout(Duration::from_millis(250), relay.status()).await,
+        Ok(Ok(status)) if shared_status(&status) && !older_than_this(&status)
+    )
+}
+
 async fn continue_after_pause(deadline: tokio::time::Instant, log: &std::path::Path) -> Result<()> {
     if tokio::time::Instant::now() >= deadline {
         bail!(
@@ -351,6 +431,8 @@ async fn attach_home(host: &Arc<Host>, directory: PathBuf) -> Result<Arc<Tenant>
         queue,
         payload_budget: host.payload_budget.clone(),
         workers: host.workers.clone(),
+        http: host.http.clone(),
+        wake: Arc::default(),
     };
     let tenant = Arc::new(Tenant {
         bearer: bearer(&token),
@@ -383,6 +465,7 @@ pub async fn run(state: store::Store) -> Result<()> {
         attaching: tokio::sync::Mutex::default(),
         payload_budget: Arc::new(Semaphore::new(PAYLOAD_BUDGET_MIB as usize)),
         workers: Arc::new(Semaphore::new(WORKERS)),
+        http: Arc::new(Pool::new()?),
         shutdown: shutdown.clone(),
     });
     if let Err(error) = attach_home(&host, launching.clone()).await {
@@ -428,26 +511,9 @@ pub async fn run(state: store::Store) -> Result<()> {
             }
         }
     }));
-    let telemetry_host = host.clone();
+    let maintenance_host = host.clone();
     let mut telemetry_task = AbortOnDrop(tokio::spawn(async move {
-        let mut timer = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            timer.tick().await;
-            let tenants: Vec<_> = telemetry_host.homes().values().cloned().collect();
-            for tenant in tenants {
-                let Ok(config) = tenant.context.store.load() else {
-                    continue;
-                };
-                for profile in config.profiles.values().filter(|p| p.enabled) {
-                    if let Ok(client) = store::client(&config, profile) {
-                        let _ = client
-                            .with_source("daemon")
-                            .telemetry("queue", true, 0)
-                            .await;
-                    }
-                }
-            }
-        }
+        maintenance(maintenance_host).await;
     }));
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = shutdown_rx.changed().await;
@@ -633,6 +699,9 @@ async fn submit(
     let queued = context.queue.enqueue(&request, &envelope.data);
     let request_id = request.request_id;
     drop(request);
+    if queued.is_ok() {
+        context.wake.notify_one();
+    }
     match queued {
         Ok(()) => (
             StatusCode::ACCEPTED,
@@ -714,8 +783,12 @@ fn client_error(error: &crate::Error) -> Value {
 }
 async fn outbox(context: RuntimeContext) {
     let mut workers = JoinSet::new();
-    let mut running = HashMap::new();
-    let mut polling = tokio::time::interval(Duration::from_millis(300));
+    let mut running: HashMap<tokio::task::Id, (String, String)> = HashMap::new();
+    // The periodic scan only catches retries whose backoff has elapsed and
+    // requests queued directly on disk by a CLI while no relay was running.
+    // New submissions wake the loop immediately, and so does every finished
+    // request, so the next request in its lane starts without delay.
+    let mut polling = tokio::time::interval(Duration::from_millis(250));
     loop {
         tokio::select! {
             finished = workers.join_next_with_id(), if !workers.is_empty() => {
@@ -725,24 +798,154 @@ async fn outbox(context: RuntimeContext) {
                     None => {}
                 }
             }
-            _ = polling.tick() => {
-                if let Ok(candidates) = context.queue.request_candidates() {
-                    for candidate in candidates {
-                        if running.values().any(|active| active == &candidate.session) { continue; }
-                        let Ok(worker) = context.workers.clone().try_acquire_owned() else { break; };
-                        let Some(permit) = reserve_payload(&context, candidate.payload_bytes) else { continue; };
-                        let Ok(Some(request)) = context.queue.load_request(candidate.request_id) else { continue; };
-                        let context = context.clone();
-                        let task = workers.spawn(async move {
-                            let _worker = worker;
-                            let _permit = permit;
-                            execute_request(context, request).await;
-                        });
-                        running.insert(task.id(), candidate.session);
+            () = context.wake.notified() => {}
+            _ = polling.tick() => {}
+        }
+        schedule(&context, &mut workers, &mut running);
+    }
+}
+fn schedule(
+    context: &RuntimeContext,
+    workers: &mut JoinSet<()>,
+    running: &mut HashMap<tokio::task::Id, (String, String)>,
+) {
+    let Ok(candidates) = context.queue.request_candidates() else {
+        return;
+    };
+    for candidate in candidates {
+        let lane = (candidate.session, candidate.lane);
+        if running.values().any(|active| active == &lane) {
+            continue;
+        }
+        let Ok(worker) = context.workers.clone().try_acquire_owned() else {
+            break;
+        };
+        let Some(permit) = reserve_payload(context, candidate.payload_bytes) else {
+            continue;
+        };
+        let Ok(Some(request)) = context.queue.load_request(candidate.request_id) else {
+            continue;
+        };
+        let context = context.clone();
+        let task = workers.spawn(async move {
+            let _worker = worker;
+            let _permit = permit;
+            execute_request(context, request).await;
+        });
+        running.insert(task.id(), lane);
+    }
+}
+
+/// Background upkeep that keeps the send path free of network setup:
+/// refreshes access tokens well before they expire, keeps one warm connection
+/// per backend, replaces the pool after sleep, and uploads locally recorded
+/// diagnostics. None of this runs while a command waits.
+async fn maintenance(host: Arc<Host>) {
+    let mut timer = tokio::time::interval(Duration::from_secs(5));
+    let mut last_tick = store::now();
+    let mut last_heartbeat = 0;
+    // Open a connection as soon as the relay starts so its first send is warm.
+    let mut warm_now = true;
+    loop {
+        timer.tick().await;
+        let now = store::now();
+        // The monotonic timer pauses during sleep; wall-clock time does not.
+        if now.saturating_sub(last_tick) > 15 {
+            host.http.reset();
+            warm_now = true;
+        }
+        last_tick = now;
+        let tenants: Vec<_> = host.homes().values().cloned().collect();
+        let mut backends = BTreeSet::new();
+        for tenant in &tenants {
+            let context = &tenant.context;
+            let Ok(config) = context.store.load() else {
+                continue;
+            };
+            for (key, profile) in config.profiles.iter().filter(|(_, p)| p.enabled) {
+                backends.insert(profile.base_url.clone());
+                // Refresh at 80% of the token's lifetime, at most five minutes early.
+                let lifetime = profile.tokens.expires_in.max(0) as u64;
+                let margin = (lifetime / 5).clamp(60, 300);
+                if profile.expires_at <= now + margin {
+                    let http = context.http.get();
+                    if context
+                        .store
+                        .fresh_profile_within(key, margin, Some(&http))
+                        .await
+                        .is_ok()
+                    {
+                        context.http.touch();
+                    }
+                }
+            }
+            upload_diagnostics(context, &config).await;
+        }
+        if warm_now || host.http.idle_for() >= KEEPALIVE.as_secs() {
+            warm_now = false;
+            let http = host.http.get();
+            for base in &backends {
+                if let Ok(client) = crate::Client::new(base)
+                    && client.with_http_client(http.clone()).warm().await.is_ok()
+                {
+                    host.http.touch();
+                }
+            }
+        }
+        if now.saturating_sub(last_heartbeat) >= 60 {
+            last_heartbeat = now;
+            for tenant in &tenants {
+                let Ok(config) = tenant.context.store.load() else {
+                    continue;
+                };
+                for profile in config.profiles.values().filter(|p| p.enabled) {
+                    if let Ok(client) = pooled_client(&tenant.context, &config, profile) {
+                        let _ = client
+                            .with_source("daemon")
+                            .telemetry("queue", true, 0)
+                            .await;
                     }
                 }
             }
         }
+    }
+}
+
+/// Sends diagnostics that CLI commands recorded locally instead of posting
+/// them before exiting. Events for a missing or logged-out profile are dropped.
+async fn upload_diagnostics(context: &RuntimeContext, config: &store::Config) {
+    let Ok(pending) = context.queue.pending_diagnostics(100) else {
+        return;
+    };
+    for diagnostic in pending {
+        let profile = config
+            .profiles
+            .get(&diagnostic.session)
+            .filter(|p| p.enabled);
+        if let Some(profile) = profile
+            && let Ok(client) = pooled_client(context, config, profile)
+        {
+            let source = match diagnostic.source.as_str() {
+                "cli" => "cli",
+                "daemon" => "daemon",
+                "web" => "web",
+                _ => "sdk",
+            };
+            if client
+                .with_source(source)
+                .telemetry(
+                    &diagnostic.event,
+                    diagnostic.success,
+                    diagnostic.duration_ms,
+                )
+                .await
+                .is_err()
+            {
+                // Keep it for the next pass; the backlog is bounded.
+                return;
+            }
+        }
+        let _ = context.queue.forget_diagnostic(diagnostic.id);
     }
 }
 fn transient_request(request: &RelayRequest) -> bool {
@@ -772,7 +975,29 @@ fn expire_attempted_token(state: &store::Store, session: &str, attempted_token: 
 
 async fn execute_request(context: RuntimeContext, request: RelayRequest) {
     let session = store::session_key(&request.profile, request.testing_environment_id);
-    let (config, profile) = match context.store.fresh_profile(&session).await {
+    // A refresh that fails in transit is retried once at once on a new
+    // connection; a dropped pooled connection must not cost a backoff.
+    let refreshed = match context
+        .store
+        .fresh_profile_within(&session, 60, Some(&context.http.get()))
+        .await
+    {
+        // A dropped connection or a momentary backend/IAM failure (5xx, 429)
+        // is retried once at once; a rejected login is not.
+        Err(error)
+            if error
+                .downcast_ref::<crate::Error>()
+                .is_some_and(crate::Error::retryable) =>
+        {
+            context.http.reset();
+            context
+                .store
+                .fresh_profile_within(&session, 60, Some(&context.http.get()))
+                .await
+        }
+        other => other,
+    };
+    let (config, profile) = match refreshed {
         Ok(p) => p,
         Err(_) => {
             let message = if transient_request(&request) {
@@ -788,7 +1013,7 @@ async fn execute_request(context: RuntimeContext, request: RelayRequest) {
             return;
         }
     };
-    let mut client = match store::client(&config, &profile) {
+    let mut client = match pooled_client(&context, &config, &profile) {
         Ok(c) => c,
         Err(_) => {
             retry_or_finish(
@@ -866,12 +1091,25 @@ async fn execute_request(context: RuntimeContext, request: RelayRequest) {
             }
         }
     }
-    match request
+    let mut outcome = request
         .request
         .execute_with_device(&client, &profile.device_id)
-        .await
-    {
+        .await;
+    // Mutations carry a stable idempotency key, so repeating one after a
+    // transport failure is safe; the second attempt uses a fresh connection.
+    if matches!(outcome, Err(crate::Error::Transport(_))) {
+        context.http.reset();
+        outcome = request
+            .request
+            .execute_with_device(
+                &client.with_http_client(context.http.get()),
+                &profile.device_id,
+            )
+            .await;
+    }
+    match outcome {
         Ok(value) => {
+            context.http.touch();
             let _ = context.queue.finish(request.request_id, Some(&value), None);
         }
         Err(error) => {
@@ -993,6 +1231,8 @@ mod tests {
             store: state.clone(),
             payload_budget: Arc::new(Semaphore::new(PAYLOAD_BUDGET_MIB as usize)),
             workers: Arc::new(Semaphore::new(WORKERS)),
+            http: Arc::new(Pool::new()?),
+            wake: Arc::default(),
         };
         let presence = activity(None, None);
         let send = RelayRequest {
@@ -1088,6 +1328,8 @@ mod tests {
                 store: state.clone(),
                 payload_budget: Arc::new(Semaphore::new(PAYLOAD_BUDGET_MIB as usize)),
                 workers: Arc::new(Semaphore::new(WORKERS)),
+                http: Arc::new(Pool::new()?),
+                wake: Arc::default(),
             };
             context.queue.adopt_generation(&session, Some(1))?;
             let presence = activity(Some(environment), Some(1));
@@ -1152,6 +1394,8 @@ mod tests {
                     store: state.clone(),
                     payload_budget: Arc::new(Semaphore::new(PAYLOAD_BUDGET_MIB as usize)),
                     workers: Arc::new(Semaphore::new(WORKERS)),
+                    http: Arc::new(Pool::new()?),
+                    wake: Arc::default(),
                 };
                 let session = store::session_key("default", testing);
                 let generation = testing.map(|_| 1);
@@ -1463,7 +1707,10 @@ mod tests {
                     "created_at":"2026-09-22T00:00:00Z","updated_at":"2026-09-22T00:00:00Z"
                 }})).into_response()
             }
-        })).fallback(move || {
+        }))
+        // The relay keeps its pooled connection warm; this is not delivery.
+        .route("/live", get(|| async { StatusCode::NO_CONTENT }))
+        .fallback(move || {
             let counter = unexpected_handler.clone();
             async move { counter.fetch_add(1, Ordering::SeqCst); StatusCode::NOT_FOUND }
         });
@@ -1545,6 +1792,8 @@ mod tests {
             store: state.clone(),
             payload_budget: Arc::new(Semaphore::new(PAYLOAD_BUDGET_MIB as usize)),
             workers: Arc::new(Semaphore::new(WORKERS)),
+            http: Arc::new(Pool::new()?),
+            wake: Arc::default(),
         };
         let request = command(Some(environment), Some(1));
         context

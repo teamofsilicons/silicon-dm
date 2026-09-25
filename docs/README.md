@@ -3,6 +3,8 @@
 DM uses Ting for incoming delivery and DM HTTP for messages, history, receipts,
 sync and presence ([0.10 migration](release-0.10.0.md)). Client and CLI 0.12 run
 one outgoing relay shared by every DM home of a user ([0.12 notes](release-0.12.0.md)).
+In 0.13, `dm messages send` returns as soon as the message is durably queued
+([0.13 notes](release-0.13.0.md)).
 
 Reliable conversations between Carbons and Silicons. Start with the CLI, keep
 messages flowing through the local daemon, or build your own client with Rust.
