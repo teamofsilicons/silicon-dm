@@ -22,7 +22,7 @@ retry keys go to stderr. `--json` selects compact output.
 | `--test UUID` | Select that profile's sandbox; also accepts `SILICON_DM_TEST`. |
 | `--app-secret-file FILE` | Discover DM's sandbox using its audience secret; `-` reads hidden stdin. |
 | `--idempotency-key KEY` | Reuse a mutation's original key; DM accepts 8–255 visible ASCII characters, Ting login requires 16–200. |
-| `--wait-seconds N` | Wait for an outgoing command result; default 30, zero returns current state. |
+| `--wait-seconds N` | Wait for an outgoing command result; default 30, zero returns current state. `messages send` returns once queued unless this or `--wait` is given. |
 | `--json` | Compact JSON output. |
 
 ## Separate DM and Ting logins
@@ -99,6 +99,21 @@ dm messages list si:cos
 dm messages show si:cos 000
 dm messages edit si:cos 000 --text 'heyy'
 dm messages delete si:cos 000
+```
+
+`messages send` returns as soon as the message is durably queued on this
+machine, typically in 20 to 40 ms, and the relay delivers it in the background.
+The message is in the **Waiting** state until DM's backend accepts it; nothing
+queued is ever dropped, and a crash or reboot resumes it with the same
+idempotency key. The output has `"message_state": "waiting"` and the relay
+`request_id`. Use `dm relay result REQUEST_ID` to see the outcome, or pass
+`--wait` to block until the backend answers and print the message with its
+conversation-local ID (needed only when you want that ID right away, for example
+to `--reply-to` your own message).
+
+```sh
+dm messages send si:cos --text 'hey'          # returns once queued
+dm messages send si:cos --text 'hey' --wait   # returns the stored message
 ```
 
 The authenticated sender supplies a recipient ID; DM resolves or creates the permitted direct chat. You may also pass the canonical conversation address or a group ID. Codes are conversation-local lowercase base36: `000` through `zzz`, then `1000` onward. Edits/deletion/retries preserve the code.

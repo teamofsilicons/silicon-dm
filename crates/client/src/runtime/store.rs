@@ -315,6 +315,18 @@ impl Store {
         Ok(lock)
     }
     pub async fn fresh_profile(&self, key: &str) -> Result<(Config, Profile)> {
+        self.fresh_profile_within(key, 60, None).await
+    }
+    /// Refreshes when the access token expires within `margin` seconds. The
+    /// relay refreshes ahead of expiry with a wide margin so a send after a long
+    /// idle period never waits for a refresh, and passes its pool so the refresh
+    /// reuses the open connection.
+    pub(crate) async fn fresh_profile_within(
+        &self,
+        key: &str,
+        margin: u64,
+        http: Option<&reqwest::Client>,
+    ) -> Result<(Config, Profile)> {
         let config = self.load()?;
         let profile = config
             .profiles
@@ -322,7 +334,7 @@ impl Store {
             .filter(|p| p.enabled)
             .context("profile is logged out")?
             .clone();
-        if profile.expires_at > now() + 60 && profile.refresh_started_at.is_none() {
+        if profile.expires_at > now() + margin && profile.refresh_started_at.is_none() {
             return Ok((config, profile));
         }
         let lock = self.profile_lock(key).await?;
@@ -334,7 +346,7 @@ impl Store {
                 .filter(|p| p.enabled)
                 .context("profile is logged out")?
                 .clone();
-            if profile.expires_at > now() + 60 && profile.refresh_started_at.is_none() {
+            if profile.expires_at > now() + margin && profile.refresh_started_at.is_none() {
                 return Ok((config, profile));
             }
             let started_at = profile.refresh_started_at.unwrap_or_else(now);
@@ -351,7 +363,11 @@ impl Store {
                 "dm-refresh-{}",
                 blake3::hash(profile.tokens.refresh_token.as_bytes())
             );
-            let tokens = client(&config, &profile)?
+            let mut refresher = client(&config, &profile)?;
+            if let Some(http) = http {
+                refresher = refresher.with_http_client(http.clone());
+            }
+            let tokens = refresher
                 .refresh(&profile.tokens.refresh_token, &refresh_key)
                 .await?;
             let expires_at = started_at.saturating_add(tokens.expires_in.max(0) as u64);

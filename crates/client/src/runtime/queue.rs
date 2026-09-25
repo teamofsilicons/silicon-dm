@@ -25,6 +25,7 @@ fn json_column<T: serde::de::DeserializeOwned>(
 pub(crate) struct RequestCandidate {
     pub request_id: Uuid,
     pub session: String,
+    pub lane: String,
     pub payload_bytes: u32,
 }
 
@@ -64,8 +65,78 @@ fn open_database(state: &store::Store) -> Result<Connection> {
             [],
         )?;
     }
+    let lane_column: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('outbox') WHERE name='lane'",
+        [],
+        |r| r.get(0),
+    )?;
+    if lane_column == 0 {
+        // Rows queued by an older release keep the whole-profile ordering they
+        // were submitted under: the empty lane is a barrier for every lane.
+        conn.execute(
+            "ALTER TABLE outbox ADD COLUMN lane TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS outbox_session_pending ON outbox(session,state);
+      CREATE TABLE IF NOT EXISTS diagnostics(id INTEGER PRIMARY KEY,session TEXT NOT NULL,source TEXT NOT NULL,event TEXT NOT NULL,success INTEGER NOT NULL,duration_ms INTEGER NOT NULL,created INTEGER NOT NULL);")?;
     Ok(conn)
 }
+
+/// The ordering lane of a request within its profile. Requests about one
+/// conversation stay strictly ordered, so a later read observes earlier sends,
+/// but conversations no longer wait for each other: one send stuck in retry
+/// backoff cannot delay messages to anyone else. Presence is transient and has
+/// its own lane. Everything else uses the empty lane, which keeps ordering with
+/// every request queued before it.
+pub(crate) fn lane(operation: &crate::relay::Operation) -> String {
+    use crate::relay::Operation::*;
+    match operation {
+        ListMessages {
+            conversation_id, ..
+        }
+        | GetMessage {
+            conversation_id, ..
+        }
+        | SendMessage {
+            conversation_id, ..
+        }
+        | EditMessage {
+            conversation_id, ..
+        }
+        | DeleteMessage {
+            conversation_id, ..
+        }
+        | Receipt {
+            conversation_id, ..
+        }
+        | GetDraft { conversation_id }
+        | PutDraft {
+            conversation_id, ..
+        }
+        | DeleteDraft { conversation_id }
+        | CreateBundle {
+            conversation_id, ..
+        }
+        | GetBundle {
+            conversation_id, ..
+        } => format!("conversation:{conversation_id}"),
+        SetPresence { .. } => "presence".into(),
+        _ => String::new(),
+    }
+}
+
+/// One locally recorded diagnostic awaiting upload by the relay.
+pub(crate) struct Diagnostic {
+    pub id: i64,
+    pub session: String,
+    pub source: String,
+    pub event: String,
+    pub success: bool,
+    pub duration_ms: u64,
+}
+/// Diagnostics are best effort: keep at most this many unsent events.
+const DIAGNOSTIC_BACKLOG: i64 = 1000;
 impl Queue {
     pub fn generation(&self, session: &str) -> Result<Option<i64>> {
         Ok(self
@@ -132,13 +203,14 @@ impl Queue {
             );
         }
         conn.execute(
-        "INSERT INTO outbox(request_id,session,request,created,expected_generation) VALUES(?1,?2,?3,?4,?5)",
+        "INSERT INTO outbox(request_id,session,request,created,expected_generation,lane) VALUES(?1,?2,?3,?4,?5,?6)",
         params![
             request.request_id.to_string(),
             store::session_key(&request.profile, request.testing_environment_id),
             raw,
             (store::now() as i64),
-            request.testing_generation.or(known)
+            request.testing_generation.or(known),
+            lane(&request.request)
         ],
     )?;
         Ok(())
@@ -193,21 +265,27 @@ impl Queue {
     /// reserves its byte budget before loading any payload.
     pub(crate) fn request_candidates(&self) -> Result<Vec<RequestCandidate>> {
         let conn = self.database()?;
-        let mut stmt=conn.prepare("SELECT request_id,session,octet_length(request) FROM outbox o WHERE state='pending' AND next_attempt<=?1 AND NOT EXISTS (SELECT 1 FROM outbox previous WHERE previous.session=o.session AND previous.state='pending' AND previous.rowid<o.rowid) ORDER BY rowid LIMIT 50")?;
+        // An earlier pending request blocks this one when it shares the lane,
+        // when it is in the empty lane (a barrier), or, for an empty-lane
+        // request, when it has not failed yet. A request already retrying in
+        // another conversation does not hold back unrelated work.
+        let mut stmt=conn.prepare("SELECT request_id,session,lane,octet_length(request) FROM outbox o WHERE state='pending' AND next_attempt<=?1 AND NOT EXISTS (SELECT 1 FROM outbox previous WHERE previous.session=o.session AND previous.state='pending' AND previous.rowid<o.rowid AND (previous.lane=o.lane OR previous.lane='' OR (o.lane='' AND previous.attempts=0))) ORDER BY rowid LIMIT 50")?;
         let rows = stmt
             .query_map(params![(store::now() as i64)], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
-                    r.get::<_, u32>(2)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, u32>(3)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(request_id, session, payload_bytes)| {
+            .map(|(request_id, session, lane, payload_bytes)| {
                 Ok(RequestCandidate {
                     request_id: request_id.parse()?,
                     session,
+                    lane,
                     payload_bytes,
                 })
             })
@@ -262,6 +340,52 @@ impl Queue {
 
     pub fn retry(&self, id: Uuid, error: &Value) -> Result<()> {
         self.database()?.execute("UPDATE outbox SET attempts=attempts+1,next_attempt=?2+MIN(60,1 << MIN(attempts,6)),error=?3 WHERE request_id=?1",params![id.to_string(),(store::now() as i64),serde_json::to_string(error)?])?;
+        Ok(())
+    }
+}
+impl Queue {
+    /// Records a diagnostic locally in microseconds; the relay uploads it later
+    /// so no command waits on the network for telemetry.
+    pub(crate) fn record_diagnostic(
+        &self,
+        session: &str,
+        source: &str,
+        event: &str,
+        success: bool,
+        duration_ms: u64,
+    ) -> Result<()> {
+        let conn = self.database()?;
+        conn.execute(
+            "INSERT INTO diagnostics(session,source,event,success,duration_ms,created) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![session, source, event, success, duration_ms.min(i64::MAX as u64) as i64, store::now() as i64],
+        )?;
+        conn.execute(
+            "DELETE FROM diagnostics WHERE id <= (SELECT MAX(id) FROM diagnostics) - ?1",
+            params![DIAGNOSTIC_BACKLOG],
+        )?;
+        Ok(())
+    }
+    pub(crate) fn pending_diagnostics(&self, limit: u32) -> Result<Vec<Diagnostic>> {
+        let conn = self.database()?;
+        let mut stmt = conn.prepare(
+            "SELECT id,session,source,event,success,duration_ms FROM diagnostics ORDER BY id LIMIT ?1",
+        )?;
+        Ok(stmt
+            .query_map(params![limit], |r| {
+                Ok(Diagnostic {
+                    id: r.get(0)?,
+                    session: r.get(1)?,
+                    source: r.get(2)?,
+                    event: r.get(3)?,
+                    success: r.get(4)?,
+                    duration_ms: r.get::<_, i64>(5)?.max(0) as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+    pub(crate) fn forget_diagnostic(&self, id: i64) -> Result<()> {
+        self.database()?
+            .execute("DELETE FROM diagnostics WHERE id=?1", params![id])?;
         Ok(())
     }
 }
@@ -464,6 +588,121 @@ mod generation_tests {
         }
         drop(queue);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+    use crate::relay::Operation;
+
+    fn request(operation: Operation) -> RelayRequest {
+        RelayRequest {
+            request_id: Uuid::new_v4(),
+            profile: "default".into(),
+            testing_environment_id: None,
+            testing_generation: None,
+            request: operation,
+        }
+    }
+    fn send(conversation: &str) -> RelayRequest {
+        request(Operation::SendMessage {
+            conversation_id: conversation.into(),
+            message: crate::MessageCreate {
+                text: Some("hi".into()),
+                ..Default::default()
+            },
+            idempotency_key: Uuid::new_v4().to_string(),
+        })
+    }
+    fn candidates(queue: &Queue) -> Result<Vec<Uuid>> {
+        Ok(queue
+            .request_candidates()?
+            .into_iter()
+            .map(|c| c.request_id)
+            .collect())
+    }
+    fn queue() -> Result<Queue> {
+        let root = std::env::temp_dir().join(format!("dm-lanes-{}", Uuid::new_v4()));
+        Queue::open(&store::Store::new(&root)?)
+    }
+    fn enqueue(queue: &Queue, request: &RelayRequest) -> Result<()> {
+        queue.enqueue(request, &serde_json::to_value(request)?)
+    }
+
+    #[test]
+    fn a_send_retrying_in_one_conversation_does_not_hold_another() -> Result<()> {
+        let queue = queue()?;
+        let stuck = send("c:alice::c:bob");
+        let later_same = send("c:alice::c:bob");
+        let other = send("c:alice::c:carol");
+        enqueue(&queue, &stuck)?;
+        enqueue(&queue, &later_same)?;
+        enqueue(&queue, &other)?;
+        // Before any failure both lanes start with their oldest request.
+        assert_eq!(
+            candidates(&queue)?,
+            vec![stuck.request_id, other.request_id]
+        );
+        queue.retry(stuck.request_id, &json!({"code":"transport_error"}))?;
+        // The failing send backs off; its conversation stays ordered behind it,
+        // but the other conversation proceeds.
+        assert_eq!(candidates(&queue)?, vec![other.request_id]);
+        Ok(())
+    }
+
+    #[test]
+    fn profile_wide_requests_keep_order_with_everything_before_them() -> Result<()> {
+        let queue = queue()?;
+        let first = send("c:alice::c:bob");
+        let list = request(Operation::ListConversations {
+            page: Default::default(),
+        });
+        let after = send("c:alice::c:carol");
+        enqueue(&queue, &first)?;
+        enqueue(&queue, &list)?;
+        enqueue(&queue, &after)?;
+        // The profile-wide read waits for the fresh send; the later send waits
+        // for the profile-wide read (the empty lane is a barrier).
+        assert_eq!(candidates(&queue)?, vec![first.request_id]);
+        queue.retry(first.request_id, &json!({"code":"transport_error"}))?;
+        // A send that is already failing no longer holds profile-wide work.
+        assert_eq!(candidates(&queue)?, vec![list.request_id]);
+        Ok(())
+    }
+
+    #[test]
+    fn rows_from_an_older_release_keep_whole_profile_order() -> Result<()> {
+        let queue = queue()?;
+        let old = send("c:alice::c:bob");
+        let new = send("c:alice::c:carol");
+        enqueue(&queue, &old)?;
+        enqueue(&queue, &new)?;
+        // Simulate a row written before lanes existed.
+        queue.database()?.execute(
+            "UPDATE outbox SET lane='' WHERE request_id=?1",
+            params![old.request_id.to_string()],
+        )?;
+        queue.retry(old.request_id, &json!({"code":"transport_error"}))?;
+        assert!(candidates(&queue)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostics_are_spooled_locally_and_bounded() -> Result<()> {
+        let queue = queue()?;
+        for i in 0..(DIAGNOSTIC_BACKLOG + 5) {
+            queue.record_diagnostic("default:production", "cli", "command", true, i as u64)?;
+        }
+        let pending = queue.pending_diagnostics(u32::MAX)?;
+        assert_eq!(pending.len() as i64, DIAGNOSTIC_BACKLOG);
+        assert_eq!(
+            pending[0].duration_ms, 5,
+            "the oldest events are dropped first"
+        );
+        queue.forget_diagnostic(pending[0].id)?;
+        assert_eq!(queue.pending_diagnostics(1)?[0].duration_ms, 6);
         Ok(())
     }
 }

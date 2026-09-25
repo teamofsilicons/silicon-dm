@@ -96,13 +96,8 @@ impl Client {
             format!("{path}/")
         };
         base.set_path(&path);
-        let http = HttpClient::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(45))
-            .user_agent(concat!("silicon-dm-client/", env!("CARGO_PKG_VERSION")))
-            .build()?;
         Ok(Self {
-            http,
+            http: http_client()?,
             base,
             token: None,
             organization: None,
@@ -112,6 +107,30 @@ impl Client {
             telemetry_enabled: true,
             telemetry_source: "sdk",
         })
+    }
+    /// Sends through a caller-owned connection pool. A long-lived process (the
+    /// local relay) keeps one pool so every request, refresh and diagnostic
+    /// reuses an open TLS connection instead of paying a new handshake.
+    pub(crate) fn with_http_client(mut self, http: HttpClient) -> Self {
+        self.http = http;
+        self
+    }
+    /// A cheap unauthenticated request that opens, or keeps open, a pooled
+    /// connection to this backend's origin.
+    pub(crate) async fn warm(&self) -> Result<()> {
+        let url = self
+            .base
+            .join("/live")
+            .map_err(|e| Error::Configuration(e.to_string()))?;
+        checked(
+            self.http
+                .get(url)
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(())
     }
     pub fn with_auth(mut self, token: impl Into<String>, organization: impl Into<String>) -> Self {
         self.token = Some(token.into());
@@ -732,6 +751,19 @@ pub enum GifList<'a> {
     Recent,
 }
 
+/// The HTTP settings every DM request uses. Idle connections stay pooled for
+/// five minutes with TCP keepalive so a relay that sends rarely still finds a
+/// warm connection; the relay's own pings keep it inside load-balancer idle limits.
+pub(crate) fn http_client() -> Result<HttpClient> {
+    Ok(HttpClient::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(45))
+        .pool_idle_timeout(Duration::from_secs(300))
+        .tcp_keepalive(Duration::from_secs(30))
+        .tcp_nodelay(true)
+        .user_agent(concat!("silicon-dm-client/", env!("CARGO_PKG_VERSION")))
+        .build()?)
+}
 pub fn validate_endpoint(url: &Url) -> Result<()> {
     let loopback = matches!(
         url.host_str(),

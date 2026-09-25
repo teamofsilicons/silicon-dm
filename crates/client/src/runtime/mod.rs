@@ -145,12 +145,83 @@ impl LocalRuntime {
         let Ok(profile) = store::profile(&config, profile, testing) else {
             return;
         };
-        if let Ok(client) = store::client(&config, profile) {
-            let _ = client
-                .with_source(source)
-                .telemetry(event, success, duration_ms)
-                .await;
+        if !config.telemetry_enabled
+            || std::env::var("DM_TELEMETRY_ENABLED").as_deref() == Ok("false")
+        {
+            return;
         }
+        // Spool locally; the relay uploads it. A command never waits on the
+        // network for its own diagnostic.
+        if let Ok(queue) = queue::Queue::open(&self.store) {
+            let _ = queue.record_diagnostic(
+                &store::session_key(&profile.name, testing),
+                source,
+                event,
+                success,
+                duration_ms,
+            );
+        }
+    }
+    /// Durably queues `request` and returns without waiting for the backend.
+    ///
+    /// When the shared relay is running and serves this home, the request is
+    /// handed to it over loopback and starts immediately. Otherwise it is
+    /// written straight into this home's durable queue and `starter` is
+    /// launched detached to attach the home (starting the relay if needed);
+    /// the relay resumes the queue as soon as it attaches. Either way the
+    /// request survives crashes and is sent exactly once per idempotency key.
+    ///
+    /// `starter` must attach this home to the shared relay and exit, as
+    /// `dm daemon start` does. An error means nothing was queued; the caller
+    /// may fall back to [`LocalRuntime::start_with`] and submit normally.
+    pub async fn submit_or_queue(
+        &self,
+        request: &crate::relay::RelayRequest,
+        starter: &DaemonCommand,
+    ) -> Result<crate::relay::RelayAcknowledgement> {
+        let config = self.store.load()?;
+        if daemon::serving(&config).await
+            && let Ok(Ok(ack)) = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                store::relay(&config)?.submit(request),
+            )
+            .await
+        {
+            return Ok(ack);
+        }
+        queue::Queue::open(&self.store)?.enqueue(request, &serde_json::to_value(request)?)?;
+        let mut command = std::process::Command::new(&starter.executable);
+        command
+            .args(&starter.arguments)
+            .env("SILICON_DM_HOME", self.store.directory())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Ok(relay_home) = self.store.relay_home() {
+            command.env("SILICON_DM_RELAY_HOME", relay_home);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // Detach so the caller can exit (and its pipes close) at once.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() < 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                });
+            }
+        }
+        // The request is already durable; if the starter cannot launch, the
+        // next DM command that starts the relay sends it.
+        let _ = command.spawn();
+        Ok(crate::relay::RelayAcknowledgement {
+            acknowledged: true,
+            request_id: request.request_id,
+            request: serde_json::to_value(crate::Envelope::new("request", request))?,
+        })
     }
     /// An authenticated transport to this runtime's local HTTP relay.
     pub fn client(&self) -> Result<crate::relay::RelayClient> {
@@ -630,6 +701,56 @@ mod tests {
         assert_ne!(calls[0].1, calls[1].1);
         server.abort();
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod queue_first_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_send_is_durably_queued_without_a_running_relay() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("dm-queue-first-{}", Uuid::new_v4()));
+        let runtime = LocalRuntime::new(root.join("home"))?.with_relay_home(root.join("relay"))?;
+        // Nothing listens on this port, so the relay is not serving this home.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
+        runtime.store().update(|config| {
+            config.relay_port = port;
+            Ok(())
+        })?;
+        let request = crate::relay::RelayRequest {
+            request_id: Uuid::new_v4(),
+            profile: "default".into(),
+            testing_environment_id: None,
+            testing_generation: None,
+            request: crate::relay::Operation::SendMessage {
+                conversation_id: "c:alice::c:bob".into(),
+                message: crate::MessageCreate {
+                    text: Some("queued before any relay runs".into()),
+                    ..Default::default()
+                },
+                idempotency_key: "queue-first-key".into(),
+            },
+        };
+        // A starter that cannot launch must not lose the already-durable request.
+        let starter = DaemonCommand {
+            executable: root.join("missing-dm-starter"),
+            arguments: vec![],
+        };
+        let started = std::time::Instant::now();
+        let ack = runtime.submit_or_queue(&request, &starter).await?;
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(ack.acknowledged);
+        assert_eq!(ack.request_id, request.request_id);
+        assert_eq!(ack.request["type"], "request");
+        let stored = queue::Queue::open(runtime.store())?
+            .result(request.request_id)?
+            .expect("the request is in the durable queue");
+        assert_eq!(stored.state, "pending");
+        assert_eq!(stored.request, serde_json::to_value(&request)?);
         Ok(())
     }
 }
