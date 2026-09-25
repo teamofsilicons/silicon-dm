@@ -425,4 +425,25 @@ impl RelayClient {
         crate::checked(self.http.post(url).bearer_auth(&self.token).send().await?).await?;
         Ok(())
     }
+    /// Asks the shared relay to serve a DM home; requires the relay's own token
+    /// from its private host record. Returns that home's status.
+    pub async fn attach(&self, directory: &std::path::Path) -> Result<Value> {
+        let url = self
+            .base
+            .join("homes")
+            .map_err(|e| crate::Error::Configuration(e.to_string()))?;
+        let body = crate::Envelope::new("attach", json!({ "directory": directory }));
+        Ok(crate::checked(
+            self.http
+                .post(url)
+                .bearer_auth(&self.token)
+                .json(&body)
+                .send()
+                .await?,
+        )
+        .await?
+        .json::<crate::Envelope<Value>>()
+        .await?
+        .data)
+    }
 }

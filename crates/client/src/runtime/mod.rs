@@ -1,9 +1,11 @@
 //! Optional durable outgoing command relay and explicit Ting delivery setup.
 //!
 //! The default `Client` remains stateless. Enable the `runtime` feature to host
-//! the same outgoing relay used by the CLI or launch `dm-relay`. Ting's installed
+//! the same outgoing relay used by the CLI or launch `dm-relay`. One relay
+//! process serves every DM home of an operating-system user. Ting's installed
 //! system daemon exclusively owns incoming sockets, callbacks, queues and ACKs.
 mod daemon;
+mod host;
 mod queue;
 pub mod store;
 mod ting_delivery;
@@ -63,10 +65,18 @@ pub struct LocalRuntime {
     store: store::Store,
 }
 impl LocalRuntime {
-    /// Opens a private, caller-owned directory; multiple directories are independent.
+    /// Opens a private, caller-owned directory. Directories keep independent
+    /// profiles and queues but share this user's one outgoing relay process.
     pub fn new(directory: impl Into<PathBuf>) -> Result<Self> {
         Ok(Self {
             store: store::Store::new(directory)?,
+        })
+    }
+    /// Shares a relay only with homes using the same caller-owned directory,
+    /// instead of this user's default; tests and isolated embedders use it.
+    pub fn with_relay_home(self, directory: impl Into<PathBuf>) -> Result<Self> {
+        Ok(Self {
+            store: self.store.with_relay_home(directory)?,
         })
     }
     /// Uses the explicit DM state override, configured home, or SILICON_HOME/HOME.
@@ -146,12 +156,16 @@ impl LocalRuntime {
     pub fn client(&self) -> Result<crate::relay::RelayClient> {
         store::relay(&self.store.load()?)
     }
-    /// Runs the durable listener until local shutdown or Ctrl-C. Dropping this
-    /// future cancels its owned workers and connections; queues remain on disk.
+    /// Runs the shared relay for this home and every registered home until local
+    /// shutdown or Ctrl-C. It refuses to run when this user's relay already
+    /// runs. Dropping this future cancels its owned workers and connections;
+    /// queues remain on disk.
     pub async fn run(&self) -> Result<()> {
         daemon::run(self.store.clone()).await
     }
-    /// Starts the packaged `dm-relay` executable from PATH.
+    /// Attaches this home to the running shared relay, or starts the packaged
+    /// `dm-relay` executable from PATH when none runs. A busy port falls back
+    /// to the next free one, which is saved as this home's `relay_port`.
     pub async fn start(&self, port: Option<u16>) -> Result<Value> {
         self.start_with(&DaemonCommand::default(), port).await
     }
@@ -383,13 +397,13 @@ mod tests {
             }))
             .route("/api/v1/iam", get(|| async { Json(json!({"app_id":"dm","iam_base_url":"https://iam.example",
                 "api_base_url":"https://dm.example/api/v1"})) }))
-            .route("/status", get(|| async { Json(json!({"running":true,"incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false}})) }))
+            .route("/status", get(|| async { Json(json!({"running":true,"incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false},"host":{"shared":true}})) }))
             .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let root = std::env::temp_dir().join(format!("dm-onboarding-{}", Uuid::new_v4()));
-        let runtime = LocalRuntime::new(&root)?;
+        let runtime = LocalRuntime::new(&root)?.with_relay_home(root.join("shared-relay"))?;
         runtime.store.update(|config| {
             config.relay_port = port;
             Ok(())

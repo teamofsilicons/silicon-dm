@@ -519,7 +519,8 @@ async fn daemon_reports_ting_delivery_ownership(base: &str) -> Result {
         store::{Profile, now, session_key},
     };
     let directory = tempfile::tempdir()?;
-    let runtime = LocalRuntime::new(directory.path())?;
+    let runtime = LocalRuntime::new(directory.path())?
+        .with_relay_home(directory.path().join("shared-relay"))?;
     let port = std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
         .port();
@@ -531,11 +532,12 @@ async fn daemon_reports_ting_delivery_ownership(base: &str) -> Result {
         }
         Ok(())
     })?;
-    let relay = runtime.client()?;
+    let relay_runtime = LocalRuntime::new(directory.path())?;
     let task = tokio::spawn(async move { runtime.run().await });
     tokio::time::timeout(Duration::from_secs(12), async {
         loop {
-            if let Ok(status) = relay.status().await {
+            // The relay records its port in the home once it attaches it.
+            if let Ok(status) = relay_runtime.client()?.status().await {
                 let profiles = status["profiles"].as_object().ok_or("profiles")?;
                 if profiles.len() == 2 && profiles.values().all(|p| p["state"] == "outgoing_only") {
                     break;
@@ -546,7 +548,9 @@ async fn daemon_reports_ting_delivery_ownership(base: &str) -> Result {
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     })
     .await??;
+    let relay = relay_runtime.client()?;
     let status = relay.status().await?;
+    assert_eq!(status["host"]["shared"], true);
     assert_eq!(
         status["incoming_delivery"]["code"],
         "delivery_moved_to_ting"
