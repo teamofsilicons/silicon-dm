@@ -99,7 +99,6 @@ record, integration issues, IAM/Honeycomb issue records, OpenAPI and full text.
 The static-site CSP was verified. See [documentation proof](dm-docs-live-2026-09-23.json).
 
 DM and Interface websites are deployed with canonical Ting organization
-resolution. The remaining production Bricks dependency is Ting's cross-organization
-type lookup during sends. The current release proves live delivery in the
-explicit task-owned test environment, not production Bricks delivery. No Ting
-code or management-authorization change was made in this release.
+resolution. This release's live delivery verification covered the explicit
+task-owned test environment. No Ting code or management-authorization change was
+made in this release.
