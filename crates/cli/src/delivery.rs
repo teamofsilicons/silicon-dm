@@ -178,6 +178,7 @@ pub async fn run(
                     "DM returned an unexpected test generation for production"
                 );
             }
+            let registration = matches!(command, Command::Register);
             let result = match command {
                 Command::Authorize => client.authorize_delivery(key).await?,
                 Command::Complete {
@@ -198,7 +199,11 @@ pub async fn run(
                 }
                 _ => serde_json::to_value(client.register_delivery(key).await?)?,
             };
-            Ok(json!({"result":result,"idempotency_key":key}))
+            if registration {
+                Ok(json!({"subscription":result,"idempotency_key":key}))
+            } else {
+                Ok(json!({"result":result,"idempotency_key":key}))
+            }
         }
     }
 }
