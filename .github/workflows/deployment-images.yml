@@ -39,6 +39,11 @@ jobs:
               docker build --platform linux/arm64 "${labels[@]}" \
                 --file deploy/aws/Dockerfile.runtime \
                 --build-arg "BACKEND_IMAGE=$base" --tag "$image" .
+              bootstrap="silicon-dm-bootstrap:${GITHUB_SHA}"
+              docker build --platform linux/arm64 "${labels[@]}" \
+                --file deploy/aws/Dockerfile.bootstrap \
+                --build-arg "BACKEND_IMAGE=$image" --tag "$bootstrap" .
+              printf 'BOOTSTRAP_TAG=%s\n' "$bootstrap" >> "$GITHUB_ENV"
               ;;
             gateway)
               docker build --platform linux/arm64 "${labels[@]}" \
@@ -87,5 +92,34 @@ jobs:
         with:
           name: dm-deployment-${{ matrix.image }}
           path: artifacts/
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Export matching migration bootstrap image
+        if: matrix.image == 'backend'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir bootstrap-artifacts
+          docker image inspect "$BOOTSTRAP_TAG" > bootstrap-artifacts/bootstrap.metadata.json
+          python3 - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          image = json.loads(Path("bootstrap-artifacts/bootstrap.metadata.json").read_text())[0]
+          assert image["Architecture"] == "arm64" and image["Os"] == "linux"
+          assert image["Config"]["Labels"]["org.opencontainers.image.revision"] == os.environ["GITHUB_SHA"]
+          assert image["Config"]["Labels"]["org.opencontainers.image.version"] == os.environ["IMAGE_VERSION"]
+          PYTHON
+          docker save --output bootstrap-artifacts/bootstrap.tar "$BOOTSTRAP_TAG"
+          printf '%s\n' "$GITHUB_SHA" > bootstrap-artifacts/SOURCE_REVISION
+          cd bootstrap-artifacts
+          sha256sum bootstrap.tar bootstrap.metadata.json SOURCE_REVISION > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.image == 'backend'
+        with:
+          name: dm-deployment-bootstrap
+          path: bootstrap-artifacts/
           if-no-files-found: error
           compression-level: 0
