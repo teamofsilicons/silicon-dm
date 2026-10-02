@@ -49,6 +49,18 @@ fn build_plane_router(state: AppState) -> Router {
         .route("/contracts", get(super::contracts::describe))
         .route("/sync", get(super::sync::events))
         .route(
+            "/delivery/authorization",
+            get(super::ting::status).post(super::ting::authorize),
+        )
+        .route(
+            "/delivery/authorization/complete",
+            post(super::ting::complete),
+        )
+        .route(
+            "/delivery/authorization/disconnect",
+            post(super::ting::disconnect),
+        )
+        .route(
             "/delivery/registration",
             post(super::ting::register_delivery),
         )

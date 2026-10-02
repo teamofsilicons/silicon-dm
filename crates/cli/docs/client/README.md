@@ -42,6 +42,21 @@ Do not generate another key inside a retry loop. Save replacement tokens atomica
 when using `refresh(refresh_token, key)`; `logout(refresh_token, key)` revokes that
 family. `Tokens` deliberately has no `Debug` implementation.
 
+## Separate Ting authorization
+
+Call `authorize_delivery(key)` only after the user chooses notification authorization.
+Show the returned IAM URL, then pass the reviewed one-time code to
+`complete_delivery_authorization(id, code, key)`. DM stores dedicated rotating
+OBO credentials encrypted and bound to that account, organization and environment
+generation. Ordinary login and logout do not create or destroy this consent.
+`delivery_authorization()` reports local state; `disconnect_delivery_authorization(key)`
+deletes local credentials. The user revokes grants globally in IAM.
+
+Retries retain their original mutation key and code. No token is returned to the
+caller. `428 ting_authorization_required` means explicit approval is needed; signing
+in again cannot replace it. DM notification permissions require the same provider
+account and organization as the originating DM identity.
+
 ## Explicit delivery consent
 
 An authenticated recipient explicitly enrolls its own DM grant in Ting:
@@ -51,7 +66,7 @@ let registration_key = Uuid::new_v4().to_string();
 let subscription = dm.register_delivery(&registration_key).await?;
 ```
 
-DM performs the IAM OBO exchange for this recipient. This call neither logs the
+DM uses the separately approved registration token for this recipient. This call neither logs the
 recipient into Ting nor configures a destination. Retry a known registration with
 its original key. An uncertain upstream outcome is reported rather than silently
 re-enrolling; follow the returned recovery guidance. Signing in or reconnecting

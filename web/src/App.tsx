@@ -1,3 +1,4 @@
+import { TingAuthorization } from "./TingAuthorization";
 import {
   ErrorBoundary,
   createMemo,
@@ -1565,6 +1566,7 @@ function Workspace(props: {
           </div>
         </header>
         <div class="delivery-status" role="status">
+          <TingAuthorization session={workspaceSession} enabled={() => { setDeliveryEnabled(true); setDeliveryUncertain(false); setNotice("Ting delivery authorized. Sign in to Ting with this account to receive updates."); }} />
           <span>
             {tingStatus()?.message ||
               "Loading message history and checking Ting delivery…"}

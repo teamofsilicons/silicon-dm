@@ -489,7 +489,7 @@ pub struct Identity {
     pub session_id: Option<String>,
     pub org_role: Option<String>,
     pub capabilities: Vec<String>,
-    /// The session predates DM's Ting permissions; signing in again grants them.
+    /// Compatibility field, always false: Ting permission requires separate approval.
     #[serde(default)]
     pub reconsent_required: bool,
 }

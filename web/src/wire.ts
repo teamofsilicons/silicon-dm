@@ -13,6 +13,8 @@ export function httpType(method: string, path: string): string {
   if (p[0] === "sync") return "sync";
   if (p[0] === "delivery" && p[1] === "registration")
     return "delivery_registration";
+  if (p[0] === "delivery" && p[1] === "authorization")
+    return p[2] ? `delivery_authorization_${p[2]}` : "delivery_authorization";
   if (p[0] === "auth") return p[1];
   if (p[0] === "api") return p[1];
   if (p[0] === "groups") {

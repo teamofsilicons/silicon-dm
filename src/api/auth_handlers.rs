@@ -50,7 +50,6 @@ pub async fn login(
     ApiJson(input): ApiJson<LoginInput>,
 ) -> AppResult<Response> {
     let session = state.identity.login(&input.slt, key.as_str()).await?;
-    remember_session(&state, &session);
     Ok((no_store(), Json(session)).into_response())
 }
 
@@ -67,7 +66,6 @@ pub async fn refresh(
         .identity
         .refresh(&input.refresh_token, key.as_str())
         .await?;
-    remember_session(&state, &session);
     Ok((no_store(), Json(session)).into_response())
 }
 
@@ -101,9 +99,8 @@ pub async fn me(Authenticated(context): Authenticated) -> Response {
             "session_id": context.session_id,
             "org_role": context.org_role,
             "capabilities": context.capabilities,
-            // Delivery through Ting is part of DM's consent; an older session
-            // must sign in again once to receive DM's current permissions.
-            "reconsent_required": crate::infrastructure::ting_auto_enrollment::reconsent_required(&context),
+            // Ting grants are requested separately, never by signing in again.
+            "reconsent_required": false,
         })),
     )
         .into_response()
@@ -137,65 +134,4 @@ pub async fn iam(State(state): State<AppState>) -> AppResult<Response> {
         })),
     )
         .into_response())
-}
-
-// Deliver the new refresh token immediately. Optional capture must not consume
-// the HTTP response deadline after IAM has already rotated the token family.
-fn remember_session(state: &AppState, session: &crate::application::auth::ApplicationSession) {
-    let state = state.clone();
-    // Only the access token crosses into the background job, never the refresh token.
-    let token = SecretString::from(session.access_token.clone());
-    let actor = session.actor.clone();
-    let organizations = session.organization_ids.clone();
-    tokio::spawn(async move {
-        let capture = async {
-            // The response's request fence may already be gone. Reacquire it so
-            // clean/delete cannot race a write into an obsolete generation.
-            let _fence = match (state.testing_environment, state.testing_generation) {
-                (None, None) => None,
-                (Some(id), Some(generation)) => Some(
-                    state
-                        .testing
-                        .as_ref()
-                        .ok_or(crate::AppError::Unauthorized)?
-                        .request_runtime_fence(
-                            id,
-                            generation,
-                            state
-                                .testing_runtime_revision
-                                .ok_or(crate::AppError::Unauthorized)?,
-                        )
-                        .await?,
-                ),
-                _ => return Err(crate::AppError::Unauthorized),
-            };
-            let cache = state.ting_credentials()?;
-            for organization_id in &organizations {
-                let context = state
-                    .identity
-                    .authenticate(crate::application::ports::AuthenticationRequest::Bearer {
-                        token: &token,
-                        organization_id,
-                    })
-                    .await?;
-                if context.actor != actor || context.organization_id != *organization_id {
-                    return Err(crate::AppError::Forbidden);
-                }
-                cache.remember(&context).await?;
-                // A new DM member is enrolled with Ting as part of signing in.
-                state.ting_auto_enrollment().ensure(&context).await?;
-            }
-            Ok::<(), crate::AppError>(())
-        };
-        match tokio::time::timeout(std::time::Duration::from_secs(30), capture).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(
-                code = error.code(),
-                "Ting authority will be captured on the next DM request"
-            ),
-            Err(_) => {
-                tracing::warn!("Ting authority capture timed out; the next DM request can retry");
-            }
-        }
-    });
 }

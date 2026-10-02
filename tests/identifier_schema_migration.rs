@@ -105,7 +105,18 @@ async fn cutover_preserves_conversation_and_exact_replay_receipt() -> Result {
     let receipt_before: serde_json::Value=sqlx::query_scalar("SELECT to_jsonb(r)-'actor_id' FROM idempotency_records r WHERE idempotency_key='before-id-schema'")
         .fetch_one(store.pool()).await?;
     sqlx::raw_sql("CREATE FUNCTION schema_trigger_probe() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; CREATE TRIGGER schema_disabled AFTER UPDATE ON dm.actor_snapshots FOR EACH ROW EXECUTE FUNCTION schema_trigger_probe(); ALTER TABLE dm.actor_snapshots DISABLE TRIGGER schema_disabled; CREATE TRIGGER schema_replica AFTER UPDATE ON dm.actor_snapshots FOR EACH ROW EXECUTE FUNCTION schema_trigger_probe(); ALTER TABLE dm.actor_snapshots ENABLE REPLICA TRIGGER schema_replica; CREATE TRIGGER schema_always AFTER UPDATE ON dm.actor_snapshots FOR EACH ROW EXECUTE FUNCTION schema_trigger_probe(); ALTER TABLE dm.actor_snapshots ENABLE ALWAYS TRIGGER schema_always; ").execute(store.pool()).await?;
-    store.migrate().await?;
+    // Verify identifier compatibility before the independent OBO cutover.
+    let mut connection = store.pool().acquire().await?;
+    sqlx::query("SET search_path=public")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::migrate!("./migrations")
+        .run_to(37, &mut *connection)
+        .await?;
+    sqlx::query("SET search_path=dm")
+        .execute(&mut *connection)
+        .await?;
+    drop(connection);
     let current = vec![
         ActorRef {
             actor_type: ActorType::Carbon,
@@ -186,6 +197,20 @@ async fn cutover_preserves_conversation_and_exact_replay_receipt() -> Result {
     let triggers:i64=sqlx::query_scalar("SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN('dm','dm_private') AND NOT t.tgisinternal AND t.tgenabled='D'")
         .fetch_one(store.pool()).await?;
     assert_eq!(triggers, 0);
+    store.migrate().await?;
+    assert!(
+        cache
+            .candidates(
+                &"tos".parse()?,
+                &ActorRef {
+                    actor_type: ActorType::Carbon,
+                    id: "c:alice".parse()?,
+                }
+            )
+            .await?
+            .is_empty(),
+        "separate OBO rollout must invalidate legacy login credentials"
+    );
     let _: Uuid = created.id;
     Ok(())
 }

@@ -33,6 +33,15 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Opens separately approved Ting credentials for this exact data plane.
+    /// # Errors
+    /// Rejects invalid encryption material or an incomplete testing context.
+    pub fn ting_authorization(
+        &self,
+    ) -> crate::AppResult<crate::infrastructure::ting_authorization::TingAuthorization> {
+        Ok(crate::infrastructure::ting_authorization::TingAuthorization(self.ting_credentials()?))
+    }
+
     /// Immutable application/environment binding for delivery and credential storage.
     #[must_use]
     pub fn ting_delivery_context(&self) -> crate::infrastructure::postgres::TingDeliveryContext {
@@ -55,19 +64,6 @@ impl AppState {
         crate::infrastructure::ting_credentials::TingCredentialCache::new(
             self.store.clone(),
             &self.settings.iam.app_secret,
-            self.ting_delivery_context(),
-        )
-    }
-
-    /// Enrolls members with Ting in the selected data plane using their own sessions.
-    #[must_use]
-    pub fn ting_auto_enrollment(
-        &self,
-    ) -> crate::infrastructure::ting_auto_enrollment::TingAutoEnrollment {
-        crate::infrastructure::ting_auto_enrollment::TingAutoEnrollment::new(
-            self.store.clone(),
-            self.identity.clone(),
-            self.settings.ting.clone(),
             self.ting_delivery_context(),
         )
     }

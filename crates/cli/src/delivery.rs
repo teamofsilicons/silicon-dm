@@ -32,7 +32,19 @@ pub enum Command {
     },
     /// Verify this bound Ting login and ask its system daemon for status.
     Status,
-    /// Re-enroll now; DM already enrolls every member with Ting on login and use.
+    /// Request separate IAM permission for Ting registration and sends.
+    Authorize,
+    /// Complete reviewed IAM permission with a one-time code file.
+    Complete {
+        authorization_id: Uuid,
+        #[arg(long, default_value = "-")]
+        code_file: PathBuf,
+    },
+    /// Show the separately stored DM-to-Ting authorization status.
+    AuthorizationStatus,
+    /// Remove DM's delegated credentials; revoke the grant globally in IAM.
+    DisconnectAuthorization,
+    /// Register using separately approved Ting permission.
     Register,
     /// Explicitly reconnect the retained Ting destination; do not create another hook.
     Reconnect,
@@ -131,14 +143,18 @@ pub async fn run(
                 .await?;
             result["idempotency_key"] = json!(retry_key);
             eprintln!(
-                "Logged in to Ting. Configure a generic endpoint with dm webhook URL --all-apps. DM enrolls you with Ting automatically."
+                "Logged in to Ting. Configure a generic endpoint with dm webhook URL --all-apps. Authorize DM delivery separately with dm delivery authorize."
             );
             Ok(result)
         }
         Command::Status => runtime.delivery_status(name, test).await,
         Command::Reconnect => runtime.delivery_reconnect(name, test).await,
         Command::Logout => runtime.delivery_logout(name, test).await,
-        Command::Register => {
+        command @ (Command::Register
+        | Command::Authorize
+        | Command::Complete { .. }
+        | Command::AuthorizationStatus
+        | Command::DisconnectAuthorization) => {
             // Print the safe retry key before I/O so an uncertain response cannot
             // tempt a caller to silently re-enroll with another generated key.
             eprintln!("Delivery registration idempotency key: {key}");
@@ -162,8 +178,27 @@ pub async fn run(
                     "DM returned an unexpected test generation for production"
                 );
             }
-            let subscription = client.register_delivery(key).await?;
-            Ok(json!({"subscription":subscription,"idempotency_key":key}))
+            let result = match command {
+                Command::Authorize => client.authorize_delivery(key).await?,
+                Command::Complete {
+                    authorization_id,
+                    code_file,
+                } => {
+                    client
+                        .complete_delivery_authorization(
+                            authorization_id,
+                            &super::read_secret(&code_file)?,
+                            key,
+                        )
+                        .await?
+                }
+                Command::AuthorizationStatus => client.delivery_authorization().await?,
+                Command::DisconnectAuthorization => {
+                    client.disconnect_delivery_authorization(key).await?
+                }
+                _ => serde_json::to_value(client.register_delivery(key).await?)?,
+            };
+            Ok(json!({"result":result,"idempotency_key":key}))
         }
     }
 }

@@ -1,4 +1,4 @@
-//! Ting v1's proof-bound WebSocket publisher. The database owns retries.
+//! Ting v1 reusable OBO WebSocket publisher. The database owns retries.
 //!
 //! This adapter deliberately requires fresh authority for each attempt. A live
 //! socket does not provide application authority or solve background issuance.
@@ -27,10 +27,10 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
-/// One attempt's single-use IAM proof and, when applicable, receiver test context.
+/// Dedicated reusable OBO authority and, when applicable, receiver test context.
 /// Never derive Debug or persist this value in the handoff queue.
 pub struct TingSendAuthority {
-    /// A freshly minted proof over the exact prepared body.
+    /// Reusable OBO access token. The internal legacy field name is retained.
     pub proof_token: SecretString,
     /// Paired audience credentials verified against the intended environment.
     pub testing: Option<TingTestingHeaders>,
@@ -74,7 +74,7 @@ pub enum TingFailure {
     #[error("Ting prepared request is invalid")]
     InvalidRequest,
     /// The event originator must supply a current consented DM session.
-    #[error("Ting delivery awaits the originator signing in to DM")]
+    #[error("Ting delivery awaits separate IAM authorization by the originator")]
     OriginatorAuthenticationRequired,
     /// IAM or the credential store could not safely authorize this attempt.
     #[error("Ting delivery authority is temporarily unavailable")]
@@ -91,7 +91,7 @@ impl TingFailure {
             Self::Protocol => "ting_protocol_error",
             Self::Rejected(code) => code,
             Self::InvalidRequest => "ting_invalid_prepared_request",
-            Self::OriginatorAuthenticationRequired => "ting_originator_authentication_required",
+            Self::OriginatorAuthenticationRequired => "ting_authorization_required",
             Self::AuthorityUnavailable => "ting_authority_unavailable",
         }
     }

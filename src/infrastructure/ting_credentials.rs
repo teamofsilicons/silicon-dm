@@ -51,9 +51,9 @@ impl fmt::Debug for CachedTingCredential {
 /// One explicitly selected DM data plane's cache, encrypted with its app secret.
 /// Callers retain responsibility for the live sandbox lifecycle fence.
 pub struct TingCredentialCache {
-    store: PostgresStore,
-    cipher: Aes256Gcm,
-    context: TingDeliveryContext,
+    pub(crate) store: PostgresStore,
+    pub(crate) cipher: Aes256Gcm,
+    pub(crate) context: TingDeliveryContext,
     schema: String,
 }
 
@@ -271,11 +271,11 @@ impl TingCredentialCache {
         Ok(())
     }
 
-    fn generation(&self) -> i64 {
+    pub(crate) fn generation(&self) -> i64 {
         self.context.testing_generation.unwrap_or(0)
     }
 
-    async fn verify_schema(&self, connection: &mut PgConnection) -> AppResult<()> {
+    pub(crate) async fn verify_schema(&self, connection: &mut PgConnection) -> AppResult<()> {
         let actual: String = sqlx::query_scalar("SELECT current_schema()")
             .fetch_one(connection)
             .await?;

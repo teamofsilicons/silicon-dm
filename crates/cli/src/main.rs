@@ -26,7 +26,7 @@ use uuid::Uuid;
     version,
     about = "Silicon DM: reliable messaging for Carbons and Silicons",
     arg_required_else_help = true,
-    after_help = "FIRST STEPS\n  dm iam --json\n  dm login --token-file -\n  dm delivery login --token-file -\n  dm webhook http://localhost:9000/tings --all-apps\n  dm delivery status\n  dm messages send CONVERSATION_ID --text 'Hello'\n\nTing login requires its own Ting-bound SLT. Destinations receive raw Ting batches for all eligible apps and acknowledge HTTP 204.\nTESTING\n  dm --app-secret-file /private/dm-app-secret login --token-file -\n  dm --test ENV_UUID delivery login --token-file - --ting-app-secret-file /private/ting-app-secret --ting-environment-key-file /private/iam-environment-key\n\nDocs: https://docs.dm.teamofsilicons.com\nRepository: https://github.com/teamofsilicons/silicon-dm\nEvery command has --help. DM state holds private credentials and outgoing requests; Ting owns incoming delivery."
+    after_help = "FIRST STEPS\n  dm iam --json\n  dm login --token-file -\n  dm delivery authorize\n  dm delivery login --token-file -\n  dm webhook http://localhost:9000/tings --all-apps\n  dm delivery status\n  dm messages send CONVERSATION_ID --text 'Hello'\n\nTing login requires its own Ting-bound SLT. Destinations receive raw Ting batches for all eligible apps and acknowledge HTTP 204.\nTESTING\n  dm --app-secret-file /private/dm-app-secret login --token-file -\n  dm --test ENV_UUID delivery login --token-file - --ting-app-secret-file /private/ting-app-secret --ting-environment-key-file /private/iam-environment-key\n\nDocs: https://docs.dm.teamofsilicons.com\nRepository: https://github.com/teamofsilicons/silicon-dm\nEvery command has --help. DM state holds private credentials and outgoing requests; Ting owns incoming delivery."
 )]
 struct Cli {
     /// Local profile; defaults to the name selected with profiles use.
@@ -69,7 +69,7 @@ struct Cli {
 enum Command {
     /// Exchange an IAM short-lived token, or run login status to verify the saved session.
     #[command(
-        after_help = "DM login enrolls you with Ting automatically but does not attach a callback. NEXT: dm delivery login --token-file - (a separate Ting-bound SLT); dm webhook URL --all-apps. Ting's system daemon sends raw batches and accepts HTTP 204."
+        after_help = "DM login does not grant notification permission. NEXT: dm delivery authorize; dm delivery complete AUTHORIZATION_ID --code-file -; dm delivery login --token-file - (a separate Ting-bound SLT); dm webhook URL --all-apps. Ting's system daemon sends raw batches and accepts HTTP 204."
     )]
     #[command(
         subcommand_precedence_over_arg = true,
