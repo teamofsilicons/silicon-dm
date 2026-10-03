@@ -528,7 +528,7 @@ async fn daemon_reports_ting_delivery_ownership(base: &str) -> Result {
         config.relay_port=port;config.auto_update=false;config.telemetry_enabled=false;
         for (name,url) in [("c:alice",base.to_owned()),("c:bob",format!("{base}/api/v1/"))] {
             let tokens=serde_json::from_value(json!({"access_token":format!("token-{name}"),"refresh_token":"refresh-fixture","token_type":"Bearer","scope":"messaging","expires_in":3600,"organization_id":"tos","actor":{"type":"carbon","id":name}}))?;
-            config.profiles.insert(session_key(name,None),Profile{name:name.into(),base_url:url,tokens,webhook_url:None,device_id:format!("runtime-{name}"),expires_at:now()+3600,refresh_started_at:None,testing_environment_id:None,enabled:true});
+            config.profiles.insert(session_key(name,None),Profile{name:name.into(),base_url:url,tokens,webhook_url:None,device_id:format!("runtime-{name}"),expires_at:now()+3600,refresh_started_at:None,testing_environment_id:None,testing_generation:None,enabled:true});
         }
         Ok(())
     })?;
