@@ -34,6 +34,7 @@ async function fixture(t: TestContext, saved = false) {
     discoveryStatus: 200,
     loginStatus: 200,
     meStatus: 200,
+    beforeMeReply: undefined as (() => Promise<void>) | undefined,
     consentStatus: 200,
     loginOrganizations: ["test-org"],
     key: rootKey,
@@ -97,6 +98,7 @@ async function fixture(t: TestContext, saved = false) {
         message: body?.data.message ?? "Sandbox only",
       };
     }
+    if (req.url === "/api/v1/auth/me") await state.beforeMeReply?.();
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ type: "response", data }));
   });
@@ -254,6 +256,73 @@ test("subsequent visits reuse the saved test profile without a login exchange", 
   assert.equal(result.value.profile_id, testProfile);
   assert(!f.calls.some((c) => c.path.endsWith("/auth/login")));
 });
+
+for (const status of [429, 503]) {
+  test(`a profile switch rejected by upstream ${status} preserves the durable selection and can be retried`, async (t) => {
+    const f = await fixture(t, true);
+    f.state.meStatus = status;
+    const rejected = await f.request("/api/profiles/select", {
+      profile_id: testProfile,
+    });
+    assert.equal(rejected.status, 503);
+    assert.equal(rejected.value.error.code, "session_unavailable");
+    assert.equal(
+      (await f.gateway.sessions.read(f.browser.id))!.value.selected,
+      production,
+    );
+    f.state.meStatus = 200;
+    const prior = await f.request("/api/session", undefined, "");
+    assert.equal(prior.value.profile_id, production);
+    const recovered = await f.request("/api/profiles/select", {
+      profile_id: testProfile,
+    });
+    assert.equal(recovered.status, 200);
+    assert.equal(recovered.value.profile_id, testProfile);
+    assert.equal(
+      (await f.gateway.sessions.read(f.browser.id))!.value.selected,
+      testProfile,
+    );
+    const checks = f.calls.filter((c) => c.path === "/api/v1/auth/me");
+    assert.deepEqual(
+      checks.map((c) => [c.headers.authorization, c.headers["x-org-id"]]),
+      [
+        ["Bearer test-access", "test-org"],
+        ["Bearer production-access", "real-org"],
+        ["Bearer test-access", "test-org"],
+      ],
+    );
+  });
+}
+
+for (const drift of ["actor", "organization", "world", "revoked"] as const) {
+  test(`a profile ${drift} change during verification cannot commit a stale selection`, async (t) => {
+    const f = await fixture(t, true);
+    f.state.beforeMeReply = async () => {
+      await f.gateway.sessions.locked(f.browser.id, async () => {
+        const saved = (await f.gateway.sessions.read(f.browser.id))!;
+        const target = saved.value.profiles.find(
+          (profile) => profile.profile_id === testProfile,
+        )!;
+        if (drift === "actor") target.actor.id = "c:another-account";
+        if (drift === "organization") target.organization_id = "another-org";
+        if (drift === "world")
+          target.testing_environment_id =
+            "00000000-0000-4000-8000-000000000099";
+        if (drift === "revoked") target.auth_required = true;
+        await f.gateway.sessions.save(saved);
+      });
+    };
+    const result = await f.request("/api/profiles/select", {
+      profile_id: testProfile,
+    });
+    assert.equal(result.status, 409);
+    assert.equal(result.value.error.code, "profile_changed");
+    assert.equal(
+      (await f.gateway.sessions.read(f.browser.id))!.value.selected,
+      production,
+    );
+  });
+}
 
 test("rotated keys require a fresh test login and do not reuse the old session", async (t) => {
   const f = await fixture(t, true);
