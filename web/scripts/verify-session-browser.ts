@@ -186,7 +186,7 @@ const upstream = createServer(async (req, res) => {
       },
     });
   if (url.pathname === "/api/v1/auth/me")
-    return json(res, 200, { ...actor, org_role: "member", capabilities: [] });
+    return json(res, 200, { member: actor, organization_id: organization, org_role: "member", capabilities: [] });
   if (url.pathname === "/api/v1/iam")
     return json(res, 200, {
       app_id: "dm",

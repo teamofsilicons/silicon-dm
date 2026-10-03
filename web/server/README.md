@@ -138,4 +138,8 @@ returned 403, a trusted-origin WebSocket without a session returned 401, and an
 untrusted-origin WebSocket returned 403. These checks made no IAM or backend
 mutations. Its WebSocket expectations are historical: current trusted upgrades return 410, as verified by `tests/ting-gateway.test.ts`.
 
-IAM consent may return multiple organizations. DM creates an account-menu workspace for each authorized organization. These views share a token family: refresh updates all sibling credentials atomically, and logout signs out every workspace in that family. No organization is inferred from the app ID.
+IAM 5 issues one account and organization per application login. Each DM profile keeps its own credential family; refresh verifies both actor and organization and only rotates that profile. Sign in separately to add another organization. Logout removes only the selected profile. No organization is inferred from the app ID.
+
+Session format 2 retires the old shared-family profile format. Existing format-1 labels remain available for reauthentication, but their credentials are cleared before the gateway accepts requests. Browser responses from an earlier selection cannot restore that selection. Message bodies, profile headers, retry keys and sandbox generations are captured before asynchronous work.
+
+Ting delivery is a separate explicit consent flow through `/delivery/authorization` and `/delivery/authorization/complete`. Permission expiry (412/428) starts a fresh review; uncertain responses reuse the same request body and key. Navigating away or changing account discards its approval code. These routes and `/delivery/authorization/disconnect` preserve the requesting DM profile and test context. A provider consent error never expires the application login.

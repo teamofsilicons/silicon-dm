@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +44,8 @@ async function fixture(t: TestContext, expiresIn = 15000) {
   }[] = [];
   const state = {
     refreshStatus: 200,
+    refreshOrg: "org-a",
+    meOrg: "",
     accessValid: true,
     acceptedMessages: 0,
     rotation: 0,
@@ -82,8 +84,8 @@ async function fixture(t: TestContext, expiresIn = 15000) {
           refresh_token: state.refreshToken,
           expires_in: 3600,
           actor,
-          organization_id: "org-a",
-          organization_ids: ["org-a", "org-b"],
+          organization_id: state.refreshOrg,
+          organization_ids: [state.refreshOrg],
         };
       }
     } else if (
@@ -92,16 +94,27 @@ async function fixture(t: TestContext, expiresIn = 15000) {
     ) {
       if (
         !state.accessValid ||
-        ![`Bearer ${state.accessToken}`, "Bearer unrelated-access"].includes(
-          req.headers.authorization || "",
-        )
+        ![
+          `Bearer ${state.accessToken}`,
+          "Bearer unrelated-access",
+          "Bearer sibling-access",
+        ].includes(req.headers.authorization || "")
       ) {
         res.statusCode = 401;
         data = { error: { code: "access_token_expired" } };
       } else if (req.url.endsWith("/messages")) {
         state.acceptedMessages += 1;
         data = { accepted: true };
-      } else data = { org_role: "member", capabilities: [] };
+      } else
+        data = {
+          member:
+            req.headers.authorization === "Bearer unrelated-access"
+              ? { id: "c:refresh-bob", type: "carbon" }
+              : actor,
+          organization_id: state.meOrg || req.headers["x-org-id"],
+          org_role: "member",
+          capabilities: [],
+        };
     } else {
       res.statusCode = 404;
       data = { error: { code: "unexpected_endpoint" } };
@@ -137,10 +150,10 @@ async function fixture(t: TestContext, expiresIn = 15000) {
         profile_id,
         actor,
         organization_id: index ? "org-b" : "org-a",
-        access_token: state.accessToken,
-        refresh_token: state.refreshToken,
+        access_token: index ? "sibling-access" : state.accessToken,
+        refresh_token: index ? "sibling-refresh" : state.refreshToken,
         // Default both organization views to the proactive renewal window.
-        expires_at: Date.now() + expiresIn,
+        expires_at: Date.now() + (index ? 3600000 : expiresIn),
       }),
     ),
     {
@@ -245,7 +258,7 @@ test(
 );
 
 test(
-  "concurrent near-expiry requests rotate once and persist every organization sibling",
+  "concurrent near-expiry requests rotate once without changing another organization family",
   { timeout: 10000 },
   async (t) => {
     const f = await fixture(t);
@@ -267,7 +280,11 @@ test(
     assert.equal(identityCalls.length, 8);
     assert(
       identityCalls.every(
-        (call) => call.authorization === "Bearer fake-access-1",
+        (call) =>
+          call.authorization ===
+          (call.organization === "org-a"
+            ? "Bearer fake-access-1"
+            : "Bearer sibling-access"),
       ),
     );
     assert.deepEqual(
@@ -277,12 +294,13 @@ test(
 
     const saved = await f.saved();
     assert.equal(saved.selected, primary);
-    for (const profile of saved.profiles.slice(0, 2)) {
+    for (const profile of saved.profiles.slice(0, 1)) {
       assert.equal(profile.access_token, "fake-access-1");
       assert.equal(profile.refresh_token, "fake-refresh-1");
       assert.equal(profile.auth_required, false);
       assert(profile.expires_at > Date.now() + 3500000);
     }
+    assert.deepEqual(saved.profiles[1], f.initialProfiles[1]);
     assert.deepEqual(saved.profiles[2], f.initialProfiles[2]);
   },
 );
@@ -310,14 +328,14 @@ test(
     const pending = await f.saved();
     const started = pending.profiles[0]!.refresh_started_at;
     assert.equal(typeof started, "number");
-    assert.equal(pending.profiles[1]!.refresh_started_at, started);
+    assert.equal(pending.profiles[1]!.refresh_started_at, undefined);
     assert.equal(
       pending.profiles[0]!.refresh_token,
       saved.profiles[0]!.refresh_token,
     );
     await f.restart();
     assert.deepEqual(await f.saved(), pending);
-    const reused = await f.request("/api/session", sibling);
+    const reused = await f.request("/api/session", primary);
     assert.equal(reused.status, 503);
     assert.equal(f.refreshCalls().length, 3);
     assert.equal(f.refreshCalls().at(-1)!.idempotencyKey, retryKey);
@@ -338,7 +356,7 @@ test(
     assert.equal(completed.profiles[0]!.refresh_started_at, undefined);
     assert(
       (await f.saved()).profiles
-        .slice(0, 2)
+        .slice(0, 1)
         .every((profile) => profile.refresh_token === "fake-refresh-2"),
     );
     for (const response of [first, reused, renewed]) {
@@ -419,3 +437,40 @@ test(
     assert.deepEqual((await f.saved()).profiles[2], f.initialProfiles[2]);
   },
 );
+
+test("refresh and identity responses cannot move a saved organization context", async (t) => {
+  const f = await fixture(t);
+  const before = await f.saved();
+  f.state.refreshOrg = "org-b";
+  assert.equal(
+    (await f.request("/api/refresh", primary, { profile_id: primary })).status,
+    502,
+  );
+  const after = await f.saved();
+  assert.equal(after.profiles[0]!.organization_id, "org-a");
+  assert.equal(
+    after.profiles[0]!.refresh_token,
+    before.profiles[0]!.refresh_token,
+  );
+  assert.deepEqual(after.profiles[1], before.profiles[1]);
+  f.state.meOrg = "wrong-org";
+  assert.equal((await f.request("/api/session", sibling)).status, 401);
+});
+
+test("legacy shared-family sessions retain profile labels but require fresh IAM login", async (t) => {
+  const f = await fixture(t);
+  const old = await f.saved();
+  old.version = 1;
+  await writeFile(f.sessionPath, JSON.stringify(old));
+  await f.restart();
+  const result = await f.request("/api/session");
+  assert.equal(result.value.authenticated, false);
+  assert.equal(f.refreshCalls().length, 0);
+  const saved = await f.saved();
+  assert.equal(saved.version, 2);
+  assert(
+    saved.profiles.every(
+      (p) => p.auth_required && !p.access_token && !p.refresh_token,
+    ),
+  );
+});

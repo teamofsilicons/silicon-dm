@@ -128,8 +128,8 @@ export class Auth {
       typeof value.refresh_token !== "string" ||
       !value.access_token ||
       !value.refresh_token ||
-      typeof value.expires_in !== "number" ||
-      value.expires_in <= 0 ||
+      !Number.isSafeInteger(value.expires_in) ||
+      (value.expires_in as number) <= 0 ||
       !actor ||
       typeof actor.id !== "string" ||
       !["carbon", "silicon"].includes(actor.type) ||
@@ -144,17 +144,16 @@ export class Auth {
     const organizations = value.organization_ids ?? [value.organization_id];
     if (
       !Array.isArray(organizations) ||
-      !organizations.length ||
-      organizations.length > 1000 ||
+      organizations.length !== 1 ||
       !organizations.every(
         (org) => typeof org === "string" && /^[a-z0-9_-]{1,128}$/.test(org),
       ) ||
-      !organizations.includes(value.organization_id)
+      organizations[0] !== value.organization_id
     )
       throw new GatewayError(
         502,
         "upstream_response",
-        "The backend returned invalid organization grants.",
+        "Sign in again and choose exactly one organization in IAM.",
       );
     return {
       ...value,
@@ -252,28 +251,27 @@ export class Auth {
       { slt: body.slt },
       testingKey as string | undefined,
     );
-    const profiles = tokens.organization_ids!.map(
-      (organization_id): Profile => {
-        const previous = browser.value.profiles.find(
-          (p) =>
-            p.actor.id === tokens.actor.id &&
-            p.actor.type === tokens.actor.type &&
-            p.organization_id === organization_id &&
-            p.testing_environment_id === environment,
-        );
-        return {
-          profile_id: previous?.profile_id || randomUUID(),
-          actor: tokens.actor,
-          organization_id,
-          access_token: tokens.access_token,
-          refresh_token: tokens.refresh_token,
-          expires_at: Date.now() + tokens.expires_in * 1000,
-          testing_environment_id: environment as string | undefined,
-          testing_key: testingKey as string | undefined,
-          testing_environment_name: environmentName,
-        };
-      },
+    const organization_id = tokens.organization_id;
+    const previous = browser.value.profiles.find(
+      (p) =>
+        p.actor.id === tokens.actor.id &&
+        p.actor.type === tokens.actor.type &&
+        p.organization_id === organization_id &&
+        p.testing_environment_id === environment,
     );
+    const profiles: Profile[] = [
+      {
+        profile_id: previous?.profile_id || randomUUID(),
+        actor: tokens.actor,
+        organization_id,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_at: Date.now() + tokens.expires_in * 1000,
+        testing_environment_id: environment as string | undefined,
+        testing_key: testingKey as string | undefined,
+        testing_environment_name: environmentName,
+      },
+    ];
     const replaced = new Set(profiles.map((p) => p.profile_id));
     browser.value.profiles = browser.value.profiles.filter(
       (p) => !replaced.has(p.profile_id),
@@ -323,9 +321,7 @@ export class Auth {
       ) {
         try {
           const started = profile.refresh_started_at ?? Date.now();
-          for (const sibling of browser.value.profiles)
-            if (sibling.refresh_token === profile.refresh_token)
-              sibling.refresh_started_at = started;
+          profile.refresh_started_at = started;
           // Save the original attempt time before sending the deterministic
           // refresh request. A replay after restart must not extend access TTL.
           await this.sessions.save(browser);
@@ -336,29 +332,21 @@ export class Auth {
           );
           if (
             tokens.actor.id !== profile.actor.id ||
-            tokens.actor.type !== profile.actor.type
+            tokens.actor.type !== profile.actor.type ||
+            tokens.organization_id !== profile.organization_id
           )
             throw new GatewayError(
               502,
               "identity_changed",
-              "Refresh returned an unexpected identity.",
+              "Refresh returned a different account or organization.",
             );
-          // Each organization view shares one rotating IAM family. Update all
-          // siblings atomically before any of them can attempt another refresh.
-          const previousToken = profile.refresh_token;
-          for (const sibling of browser.value.profiles) {
-            if (sibling.refresh_token !== previousToken) continue;
-            Object.assign(sibling, {
-              access_token: tokens.access_token,
-              refresh_token: tokens.refresh_token,
-              expires_at: started + tokens.expires_in * 1000,
-              auth_required: !tokens.organization_ids!.includes(
-                sibling.organization_id,
-              ),
-            });
-            delete sibling.refresh_started_at;
-            if (sibling.auth_required) this.invalidate(id, sibling.profile_id);
-          }
+          Object.assign(profile, {
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            expires_at: started + tokens.expires_in * 1000,
+            auth_required: false,
+          });
+          delete profile.refresh_started_at;
           await this.sessions.save(browser);
           force = false;
           if (profile.auth_required)
@@ -518,6 +506,18 @@ export class Auth {
       );
     }
     const identity = await responseJson(response);
+    const member = identity.member as Actor | undefined;
+    if (
+      member?.id !== current.profile.actor.id ||
+      member?.type !== current.profile.actor.type ||
+      identity.organization_id !== current.profile.organization_id
+    ) {
+      throw new GatewayError(
+        401,
+        "identity_changed",
+        "The session identity changed. Sign in again in the selected organization.",
+      );
+    }
     return {
       ...publicProfile(current.profile),
       authenticated: true,
@@ -534,21 +534,23 @@ export class Auth {
       if (!browser || !browser.value.profiles.length) return;
       const profile = selectProfile(browser, requested);
       try {
-        const response = await this.authenticationRequest(
-          "/api/v1/auth/logout",
-          { token: profile.refresh_token },
-          profile.testing_key,
-        );
-        await response.body?.cancel();
+        if (profile.refresh_token) {
+          const response = await this.authenticationRequest(
+            "/api/v1/auth/logout",
+            { token: profile.refresh_token },
+            profile.testing_key,
+          );
+          await response.body?.cancel();
+        }
       } catch (error) {
         if (!(error instanceof GatewayError) || error.status !== 401)
           throw error;
       }
       const family = browser.value.profiles.filter(
-        (p) => p.refresh_token === profile.refresh_token,
+        (p) => p.profile_id === profile.profile_id,
       );
       browser.value.profiles = browser.value.profiles.filter(
-        (p) => p.refresh_token !== profile.refresh_token,
+        (p) => p.profile_id !== profile.profile_id,
       );
       if (
         !browser.value.profiles.some(

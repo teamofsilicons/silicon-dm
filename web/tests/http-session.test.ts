@@ -49,7 +49,10 @@ function response(status: number, data: unknown = {}) {
 
 function failure(status: number) {
   return response(status, {
-    error: { code: `http_${status}`, message: `Request failed (${status}).` },
+    error: {
+      code: status === 401 ? "unauthorized" : `http_${status}`,
+      message: `Request failed (${status}).`,
+    },
   });
 }
 
@@ -106,6 +109,9 @@ function fixture(steps: Step[]) {
     events,
     setSession: context.http.setSession,
     currentSession: context.http.currentSession,
+    getSession: context.http.getSession,
+    selectProfile: context.http.selectProfile,
+    refreshSession: context.http.refreshSession,
     setGeneration: (value: number) => (generation = value),
     generationReads: () => generationReads,
   };
@@ -302,4 +308,65 @@ test("forbidden DM requests do not trigger token refresh or logout", async () =>
   await assert.rejects(f.api("/auth/me"), (error: any) => error.status === 403);
   assert.equal(f.calls.length, 1);
   assert.equal(f.events.length, 0);
+});
+
+test("feature consent failures do not refresh or sign out the application login", async () => {
+  const f = fixture([
+    response(401, {
+      error: {
+        code: "ting_authorization_required",
+        message: "Review Ting access",
+      },
+    }),
+  ]);
+  await assert.rejects(
+    f.api("/delivery/authorization/complete", {
+      method: "POST",
+      body: { authorization_id: "x", authorization_code: "y" },
+    }),
+    (e: any) => e.code === "ting_authorization_required",
+  );
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.events.length, 0);
+});
+
+test("late session and refresh replies cannot replace a newly selected profile", async () => {
+  let release!: (response: Response) => void;
+  const f = fixture([
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    response(200, {
+      authenticated: true,
+      profile_id: "other-profile",
+      profiles: [],
+    }),
+  ]);
+  const pending = f.getSession();
+  const refused = assert.rejects(
+    pending,
+    (e: any) => e.code === "context_changed",
+  );
+  await f.selectProfile("other-profile");
+  release(response(200, f.session));
+  await refused;
+  assert.equal(f.currentSession().profile_id, "other-profile");
+});
+
+test("sandbox request bodies freeze before asynchronous generation lookup", async () => {
+  const f = fixture([response(200, { accepted: true })]);
+  f.setSession({ ...f.session, testing_environment_id: "sandbox" });
+  const body = { text: "original message", attachments: [] };
+  const sending = f.api("/conversations/a/messages", {
+    method: "POST",
+    body,
+    idempotencyKey: "immutable-body-key",
+  });
+  body.text = "new draft";
+  await sending;
+  assert.equal(
+    JSON.parse(f.calls[0].options.body as string).data.message,
+    "original message",
+  );
 });

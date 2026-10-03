@@ -34,7 +34,7 @@ export type Profile = {
   auth_required?: boolean;
 };
 export type BrowserSession = {
-  version: 1;
+  version: 1 | 2;
   binding: string;
   deadline: number;
   selected?: string;
@@ -42,7 +42,7 @@ export type BrowserSession = {
   profiles: Profile[];
   flow?: { state: string; deadline: number };
 };
-export type Browser = { id: string; value: BrowserSession };
+export type Browser = { id: string; value: BrowserSession; upgrade?: boolean };
 export class GatewayError extends Error {
   status: number;
   code: string;
@@ -194,13 +194,27 @@ export class Sessions {
         await file.close();
       }
       if (
-        value.version !== 1 ||
+        ![1, 2].includes(value.version) ||
         value.binding !== this.binding() ||
         !Array.isArray(value.profiles) ||
         value.deadline <= Date.now()
       )
         return;
-      return { id, value };
+      const upgrade = value.version === 1;
+      if (upgrade) {
+        // Legacy profiles could share one multi-organization token family. Keep labels
+        // for reauthentication, but never forward or rotate those credentials.
+        value.version = 2;
+        delete value.flow;
+        for (const profile of value.profiles) {
+          profile.auth_required = true;
+          profile.access_token = "";
+          profile.refresh_token = "";
+          profile.expires_at = 0;
+          delete profile.refresh_started_at;
+        }
+      }
+      return { id, value, upgrade };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
       throw e;
@@ -220,7 +234,7 @@ export class Sessions {
     return {
       id: randomBytes(32).toString("base64url"),
       value: {
-        version: 1,
+        version: 2,
         binding: this.binding(),
         deadline: Date.now() + lifetime,
         profiles: [],
@@ -269,8 +283,9 @@ export class Sessions {
       if (!/^[A-Za-z0-9_-]{43}\.json$/.test(file)) continue;
       try {
         const id = file.slice(0, -5);
-        if (!(await this.read(id)))
-          await unlink(join(this.config.directory, file));
+        const browser = await this.read(id);
+        if (!browser) await unlink(join(this.config.directory, file));
+        else if (browser.upgrade) await this.save(browser);
       } catch {
         /* Corrupt private files remain for operator inspection. */
       }

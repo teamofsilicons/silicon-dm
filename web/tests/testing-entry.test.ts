@@ -34,6 +34,8 @@ async function fixture(t: TestContext, saved = false) {
     discoveryStatus: 200,
     loginStatus: 200,
     meStatus: 200,
+    consentStatus: 200,
+    loginOrganizations: ["test-org"],
     key: rootKey,
   };
   const upstream = createServer(async (req, res) => {
@@ -62,10 +64,33 @@ async function fixture(t: TestContext, saved = false) {
         expires_in: 3600,
         actor: { id: "c:test-alice", type: "carbon" },
         organization_id: "test-org",
+        organization_ids: state.loginOrganizations,
       };
     } else if (req.url === "/api/v1/auth/me") {
       res.statusCode = state.meStatus;
-      data = { org_role: "owner", capabilities: [] };
+      data = {
+        member: {
+          id:
+            req.headers.authorization === "Bearer production-access"
+              ? "c:real-alice"
+              : "c:test-alice",
+          type: "carbon",
+        },
+        organization_id: req.headers["x-org-id"],
+        org_role: "owner",
+        capabilities: [],
+      };
+    } else if (req.url === "/api/v1/delivery/authorization") {
+      res.statusCode = state.consentStatus;
+      data =
+        state.consentStatus === 401
+          ? {
+              error: {
+                code: "ting_authorization_required",
+                message: "Review permission",
+              },
+            }
+          : {};
     } else if (req.url?.includes("/messages")) {
       data = {
         id: "test-message",
@@ -466,4 +491,65 @@ test("public conversation addresses and short message IDs reach drafts and messa
     assert([400, 404].includes(result.status), path);
     assert.equal(f.calls.length, before);
   }
+});
+
+test("explicit Ting consent routes retain the original sandbox profile and retry identity", async (t) => {
+  const f = await fixture(t, true);
+  for (const [path, body] of [
+    ["/delivery/authorization", undefined],
+    ["/delivery/authorization", {}],
+    [
+      "/delivery/authorization/complete",
+      { authorization_id: production, authorization_code: "one-use-code" },
+    ],
+    ["/delivery/authorization/disconnect", {}],
+  ] as const) {
+    const response = await f.request("/api/dm" + path, body, testProfile, {
+      "Idempotency-Key": "stable-consent-key",
+    });
+    assert.equal(response.status, 200);
+    const call = f.calls.at(-1)!;
+    assert.equal(call.path, "/api/v1" + path);
+    assert.equal(call.headers.authorization, "Bearer test-access");
+    assert.equal(call.headers["x-org-id"], "test-org");
+    assert.equal(call.headers["x-testing-environment-key"], rootKey);
+    assert.equal(call.headers["idempotency-key"], "stable-consent-key");
+  }
+});
+
+test("provider consent errors do not expire the saved DM login", async (t) => {
+  const f = await fixture(t, true);
+  f.state.consentStatus = 401;
+  const before = (await f.gateway.sessions.read(
+    f.browser.id,
+  ))!.value.profiles.find((p) => p.profile_id === testProfile)!;
+  const response = await f.request(
+    "/api/dm/delivery/authorization",
+    {},
+    testProfile,
+    { "Idempotency-Key": "feature-consent-key" },
+  );
+  assert.equal(response.status, 401);
+  const after = (await f.gateway.sessions.read(
+    f.browser.id,
+  ))!.value.profiles.find((p) => p.profile_id === testProfile)!;
+  assert.equal(after.expires_at, before.expires_at);
+  assert.equal(after.refresh_token, before.refresh_token);
+});
+
+test("an IAM login can save only one organization and rejects legacy multi-org responses", async (t) => {
+  const f = await fixture(t);
+  f.state.loginOrganizations = ["test-org", "other-org"];
+  const before = (await f.gateway.sessions.read(f.browser.id))!.value;
+  const failed = await f.request("/api/login", { slt: "test-slt" });
+  assert.equal(failed.status, 502);
+  assert.deepEqual(
+    (await f.gateway.sessions.read(f.browser.id))!.value,
+    before,
+  );
+  f.state.loginOrganizations = ["test-org"];
+  const good = await f.request("/api/login", { slt: "single-org-slt" });
+  assert.equal(good.status, 200);
+  assert.equal(good.value.organization_id, "test-org");
+  assert.equal(good.value.profiles.length, 2);
 });

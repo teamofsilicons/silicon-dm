@@ -64,6 +64,7 @@ export interface ApiOptions extends Omit<RequestInit, "body"> {
   idempotencyKey?: string;
   version?: number;
 }
+let sessionRevision = 0;
 let selectedSession: Session = { authenticated: false, profiles: [] };
 if (typeof window !== "undefined") {
   const diagnosticError = () =>
@@ -75,6 +76,7 @@ export function currentSession(): Session {
   return selectedSession;
 }
 export function setSession(session: Session): Session {
+  sessionRevision++;
   selectedSession = session;
   if (typeof window !== "undefined")
     recordTelemetry(session, gatewayOrigin(), "page_view");
@@ -146,6 +148,31 @@ function destination(path: string): string {
     );
   return path.startsWith("/api/") ? path : `/api/dm${path}`;
 }
+async function authenticationRejected(response: Response): Promise<boolean> {
+  if (response.status !== 401) return false;
+  try {
+    const text = await response.clone().text();
+    if (text.length > 65536) return false;
+    const value = unwrap(JSON.parse(text)) as { error?: { code?: string } };
+    return [
+      "unauthorized",
+      "access_token_expired",
+      "token_expired",
+      "login_required",
+    ].includes(value.error?.code || "");
+  } catch {
+    return false;
+  }
+}
+function adoptSession(value: Session, revision: number): Session {
+  if (revision !== sessionRevision)
+    throw new ApiError(
+      409,
+      "context_changed",
+      "The selected account changed while this request was pending.",
+    );
+  return setSession(value);
+}
 /** Renew authentication once after a rejected request, preserving its exact bytes and retry guards. */
 export async function api<T>(
   path: string,
@@ -186,6 +213,17 @@ export async function api<T>(
       );
     headers.set("If-Match", String(version));
   }
+  let encoded: string | undefined;
+  if (body !== undefined) {
+    encoded = JSON.stringify(
+      encodeRequest(
+        (requestOptions.method || "GET").toUpperCase(),
+        target,
+        body,
+      ),
+    );
+    headers.set("Content-Type", "application/json");
+  }
   if (target.startsWith("/api/dm/") && session.testing_environment_id) {
     const fence =
       generation === undefined ? await getGeneration(session) : generation;
@@ -201,17 +239,6 @@ export async function api<T>(
       );
     if (fence !== undefined && fence !== null)
       headers.set("X-Testing-Environment-Generation", String(fence));
-  }
-  let encoded: string | undefined;
-  if (body !== undefined) {
-    encoded = JSON.stringify(
-      encodeRequest(
-        (requestOptions.method || "GET").toUpperCase(),
-        target,
-        body,
-      ),
-    );
-    headers.set("Content-Type", "application/json");
   }
   const diagnosticStart = performance.now();
   const send = async (): Promise<Response> => {
@@ -244,7 +271,11 @@ export async function api<T>(
     }
   };
   let response = await send();
-  if (response.status === 401 && profile && target.startsWith("/api/dm/")) {
+  if (
+    (await authenticationRejected(response)) &&
+    profile &&
+    target.startsWith("/api/dm/")
+  ) {
     await response.body?.cancel();
     const renewed = await api<Session>("/api/refresh", {
       method: "POST",
@@ -269,7 +300,7 @@ export async function api<T>(
     response = await send();
   }
   if (
-    response.status === 401 &&
+    (await authenticationRejected(response)) &&
     (target.startsWith("/api/dm/") || target === "/api/refresh")
   )
     window.dispatchEvent(
@@ -326,37 +357,49 @@ export function mutation<T>(
   return api<T>(path, { method, body, idempotencyKey: key, version });
 }
 export async function getSession(): Promise<Session> {
-  return setSession(await api<Session>("/api/session"));
+  const revision = sessionRevision;
+  return adoptSession(await api<Session>("/api/session"), revision);
 }
 export function getConfig(): Promise<AppConfig> {
   return api("/api/config");
 }
 export async function login(input: LoginInput): Promise<Session> {
+  const revision = ++sessionRevision;
   const result = await api<Session>("/api/login", {
     method: "POST",
     body: input,
   });
+  if (revision !== sessionRevision)
+    throw new ApiError(
+      409,
+      "context_changed",
+      "The selected account changed while signing in.",
+    );
   return result?.authenticated === undefined
     ? getSession()
-    : setSession(result);
+    : adoptSession(result, revision);
 }
 export async function logout(
   profileId = selectedSession.profile_id,
 ): Promise<Session> {
-  return setSession(
+  const revision = ++sessionRevision;
+  return adoptSession(
     await api<Session>("/api/logout", {
       method: "POST",
       body: { profile_id: profileId },
       profileId,
     }),
+    revision,
   );
 }
 export async function selectProfile(profileId: string): Promise<Session> {
-  return setSession(
+  const revision = ++sessionRevision;
+  return adoptSession(
     await api<Session>("/api/profiles/select", {
       method: "POST",
       body: { profile_id: profileId },
     }),
+    revision,
   );
 }
 export async function enterTestingEnvironment(
@@ -364,7 +407,8 @@ export async function enterTestingEnvironment(
   session: Session,
   slt?: string,
 ): Promise<Session> {
-  return setSession(
+  const revision = ++sessionRevision;
+  return adoptSession(
     await api<Session>("/api/testing-environments/enter", {
       method: "POST",
       session,
@@ -373,18 +417,25 @@ export async function enterTestingEnvironment(
         ...(slt === undefined ? {} : { slt }),
       },
     }),
+    revision,
   );
 }
 export async function refreshSession(
   profileId = selectedSession.profile_id,
 ): Promise<Session> {
-  return setSession(
-    await api<Session>("/api/refresh", {
-      method: "POST",
-      body: { profile_id: profileId },
-      profileId,
-    }),
-  );
+  const revision = sessionRevision;
+  const result = await api<Session>("/api/refresh", {
+    method: "POST",
+    body: { profile_id: profileId },
+    profileId,
+  });
+  if (profileId !== selectedSession.profile_id)
+    throw new ApiError(
+      409,
+      "context_changed",
+      "Return to the original profile to retry.",
+    );
+  return adoptSession(result, revision);
 }
 export function sessionForProfile(profile: Profile): Session {
   return { ...profile, authenticated: true };
