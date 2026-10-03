@@ -2,7 +2,7 @@
 
 Current delivery guidance: [HTTP and Ting contracts](contracts.md), [Ting integration status](ting-integration-issues.md), and [sandbox entry](testing-environments.md). The previous DM WebSocket contracts are retired.
 
-Silicon IAM owns all Carbon and Silicon authentication, organization membership, organization roles, consent, application sessions, refresh rotation, and revocation. DM uses the official [`silicon-iam-client`](https://crates.io/crates/silicon-iam-client) Rust SDK (1.4.0 or a compatible newer release) for every IAM request. Application integrations do not enable the SDK's `cli-session` feature. DM has no OBO login, OBO proof exchange, delegated endpoint catalog, or inbound OBO routes.
+Silicon IAM owns all Carbon and Silicon authentication, organization membership, organization roles, consent, application sessions, refresh rotation, and revocation. DM uses the official [`silicon-iam-client`](https://crates.io/crates/silicon-iam-client) Rust SDK (5.0.0) for every IAM request. Application integrations do not enable the SDK's `cli-session` feature. DM has no OBO login, OBO proof exchange, delegated endpoint catalog, or inbound OBO routes.
 
 ## Backend application registration
 
@@ -25,11 +25,11 @@ Use the exact trailing slash. Configure the following only in backend secret sto
 
 The webhook secret differs from the application secret. Production credentials stay in backend secret storage and are never included in ordinary client login or session responses. An authorized administrator may explicitly configure a dedicated test signer through the testing-environment creation input described below. Never commit `.env` or print it in command transcripts. When rotating a webhook secret/version, coordinate the backend configuration and IAM registration; deliveries with an unconfigured version are rejected. The current backend configuration accepts one signing version, so IAM's retained old deliveries require the corresponding old version/secret to be temporarily restored and replayed if a rotation crosses their delivery window.
 
-DM needs the IAM application to be verified and approved for `profile`, `memberships.read`, `organizations.read`, `roles.read`, and `offline_access`. The effective grant also depends on the user's consent and organization authority. Email and phone scopes are unnecessary for DM identity resolution. `roles.read` supplies organization administration authority; an undisclosed role grants no administrative privileges.
+DM declares `self.identity.read`, `self.profile.read`, `self.organizations.read`, `self.membership.read`, and `self.tags.read`. The application must be verified, its configuration accepted, and the relevant disclosures authorized by IAM. Email and phone scopes are unnecessary for DM identity resolution. Membership disclosures supply the live organization role; an undisclosed role grants no administrative privileges. External Ting permissions require a separate feature approval described below.
 
 ## Login without collecting credentials
 
-A caller obtains an IAM short-lived token after explicitly selecting the organizations DM may access. Browser login starts at IAM `/login` with only `app_id` and `redirect_uri`; DM supplies no `org_id` or organization picker. Existing IAM CLI users can obtain one through the IAM app-login/SLT command described by `iam --help` and `iam docs client/authentication`. The DM client asks only for this SLT and the local relay webhook URL. The local webhook URL belongs to the client/CLI and is never sent to DM or IAM by the DM login route.
+A caller obtains an IAM short-lived token after explicitly selecting one account and one organization for the DM session. Browser login starts at IAM `/login` with only `app_id` and `redirect_uri`; DM supplies no `org_id` or organization picker. Existing IAM CLI users can obtain one through the IAM app-login/SLT command described by `iam --help` and `iam docs client/authentication`. The DM client asks only for this SLT and the local relay webhook URL. The local webhook URL belongs to the client/CLI and is never sent to DM or IAM by the DM login route.
 
 ```http
 POST /api/v1/auth/login
@@ -49,7 +49,7 @@ DM calls the SDK's `oauth().login(app_id, slt, mutation)` using its server-side 
     "refresh_token": "ort_REDACTED",
     "token_type": "Bearer",
     "expires_in": 1800,
-    "scope": "memberships.read offline_access organizations.read profile roles.read",
+    "scope": "self.identity.read self.membership.read self.organizations.read self.profile.read self.tags.read",
     "actor": {
       "type": "carbon",
       "id": "c:alice"
@@ -62,7 +62,7 @@ DM calls the SDK's `oauth().login(app_id, slt, mutation)` using its server-side 
 }
 ```
 
-The actor can also be `silicon`; its ID is IAM's canonical public Silicon ID. The sample lifetime and scopes are illustrative; use the returned values. Login and refresh responses carry `Cache-Control: no-store` and `Pragma: no-cache`. No password, OTP, Silicon credential, application secret, or user-supplied actor ID is accepted by this route. Unscoped SLTs are supported. DM calls `oauth().authorizations()` to retrieve IAM-selected active memberships, rejects an empty set, and verifies the initial organization with live scoped introspection. The additive `organization_ids` response field lists selected organizations; `organization_id` is the initial workspace (first handle in sorted order) for existing clients. It grants no authority beyond live IAM consent.
+The actor can also be `silicon`; its ID is IAM's canonical public Silicon ID. The sample lifetime and scopes are illustrative; use the returned values. Login and refresh responses carry `Cache-Control: no-store` and `Pragma: no-cache`. No password, OTP, Silicon credential, application secret, or user-supplied actor ID is accepted by this route. IAM 5 application sessions select exactly one account and one organization. DM calls `oauth().authorizations()` to retrieve IAM-selected active membership authority, rejects an empty set, and verifies the selected organization with live scoped introspection. The compatibility `organization_ids` array therefore contains the same single organization as `organization_id`. To work in another account or organization, obtain a separate session; the array does not authorize switching to an unselected organization.
 
 ## Requests and identity
 
@@ -73,7 +73,7 @@ Authorization: Bearer oat_REDACTED
 X-Org-ID: tos
 ```
 
-The organization must be among the token's selected, active memberships; every request introspects that specific organization. Direct IAM Carbon (`cat_`) and Silicon (`sat_`) session tokens are not DM application tokens. Refresh tokens are accepted only by the refresh/revoke session routes. OBO proof headers are rejected, including requests that also carry a bearer token. Authentication headers must occur once; duplicate, comma-separated, empty, or malformed values fail closed.
+The organization must match the token's selected, active membership; every request introspects that specific organization. Direct IAM Carbon (`cat_`) and Silicon (`sat_`) session tokens are not DM application tokens. Refresh tokens are accepted only by the refresh/revoke session routes. Both legacy OBO proof headers and `X-IAM-OBO-Access-Token` are rejected on DM routes, including requests that also carry a bearer token. Authentication headers must occur once; duplicate, comma-separated, empty, or malformed values fail closed.
 
 DM performs live IAM introspection on authenticated requests. It verifies:
 
@@ -86,7 +86,7 @@ DM performs live IAM introspection on authenticated requests. It verifies:
 
 Before creating a conversation or reading another actor's presence, DM resolves recipients from its scoped IAM membership projection. Every fresh, cross-validated application-token introspection records the caller's principal, organization, membership UUID, public identity, membership version, and authorization epoch. Verified IAM `current.members` webhooks maintain other members and removal tombstones atomically with event deduplication. Older membership versions cannot overwrite newer snapshots; equal-version removals take precedence. Ordinary message/presence writes cannot reactivate a removed member. The projection grants recipient discovery only: every acting account still requires fresh IAM authorization. Ambiguous public IDs across actor types fail closed. A token represents its verified actor; delivery handoffs remain bound to the typed account that initiated the mutation.
 
-IAM 1.2.1 intentionally rejects application sessions on its first-party member and directory endpoints. The SDK currently offers a caller authorization snapshot and consent-filtered signed events, but no application-scoped lookup of an arbitrary organization member. Consequently, an offline recipient works after their membership has been supplied by sign-in or webhook. A recipient never supplied to DM returns 422 with an explanation to sign in; DM does not infer membership from a public identifier. Missing/delayed webhooks can leave a recipient projection stale, while fresh authentication still controls all actual senders and receivers. This limitation also applies immediately after cleaning a DM environment. See the [upstream member lookup proposal](iam-member-resolution-proposal.md).
+DM resolves recipients from its own membership projection populated by verified sign-ins and IAM webhooks; it does not query a directory endpoint for an arbitrary recipient. An offline recipient works after their membership has been supplied by sign-in or webhook. A recipient never supplied to DM returns 422 with an explanation to sign in; DM does not infer membership from a public identifier. Missing/delayed webhooks can leave a recipient projection stale, while fresh authentication still controls all actual senders and receivers. This limitation also applies immediately after cleaning a DM environment. See the [upstream member lookup proposal](iam-member-resolution-proposal.md).
 
 ## Refresh and logout
 
@@ -120,7 +120,7 @@ consent from a different parent IAM session can invalidate older families'
 refresh authority; reauthenticate those profiles rather than reusing rejected
 credentials.
 
-Revocation advances the backend's durable authorization revision. Every Ting publish attempt revalidates its originator's current access token with IAM. An IAM dependency outage fails closed; DM never manufactures sessions or falls back to a mock identity. Backend errors expose stable DM error categories and redact IAM provider details and credentials.
+Revocation advances the backend's durable authorization revision. Every Ting publish attempt uses the originator's separately approved OBO credentials, refreshing the dedicated token when needed. Ting verifies current endpoint authority with IAM for each operation. An IAM dependency outage fails closed; DM never manufactures sessions or falls back to a mock identity. Backend errors expose stable DM error categories and redact IAM provider details and credentials.
 
 ## IAM webhook verification and delivery
 
@@ -139,45 +139,61 @@ A verified event ID is persisted transactionally before returning `204`. Duplica
 IDs are safe to retry. DM stores normalized event metadata rather than the raw
 envelope or its secrets, and advances the plane's authorization revision.
 Membership projections retain current removals and authority. HTTP requests and
-every Ting proof attempt independently revalidate with IAM, including when a
+every delegated Ting operation independently revalidate with IAM, including when a
 webhook is delayed.
 
-## Ting authority and access-token retention
+## Separate Ting authorization
 
-DM declares `ting` external endpoints `subscriptions.register` and
-`tings.send`, alongside `self.identity.read`. These scopes need accepted
-application configuration and the account's consent. A preexisting token does
-not automatically gain newly requested scopes.
+DM declares the external Ting endpoints `subscriptions.register` and `tings.send`.
+Accepted application configuration permits DM to request these endpoints; it does
+not grant user permission. After ordinary DM login, the account explicitly starts
+feature authorization, reviews the IAM consent page, and completes the returned
+one-time authorization code:
 
-DM enrolls every member with Ting automatically; it is not a member decision.
-Ting only accepts a grant proven by the recipient's own session, so DM enrolls a
-member whenever it verifies one: at login, on any authenticated request, and in
-the worker's sweep over cached, unexpired access tokens. Enrollment is recorded
-per app, generation, organization and typed actor in `ting_automatic_enrollments`;
-failed or unscoped attempts wait five minutes before retrying. When Ting rejects a
-send as `recipient_not_registered`, DM forgets the enrollment and the member's next
-session enrolls them again. `POST /api/v1/delivery/registration` remains as an
-explicit re-enrollment. Receiving requires a separate Ting session and
-destination; a DM token is not a Ting receiver token.
+```sh
+dm delivery authorize
+dm delivery complete AUTHORIZATION_ID --code-file -
+dm delivery authorization-status
+```
 
-The backend encrypts at most eight verified, unexpired DM access tokens per
-organization, typed actor, application and data generation. Login, refresh and
-ordinary authenticated requests capture eligible authority. Refresh tokens stay
-with their existing client owner and are never retained or rotated by the
-publisher. OBO proofs are single-use and are never persisted.
+For HTTP integrations, use `POST /api/v1/delivery/authorization`, then
+`POST /api/v1/delivery/authorization/complete`; see the [API guide](api/README.md)
+for envelopes and mutation keys. Completion stores the separately approved
+credentials and registers the recipient. DM requires Ting's selected account type,
+account ID and organization to match the originating DM identity. A different
+provider account or organization is rejected.
 
-Each handoff records the initiating actor transactionally. Publishing rechecks
-that actor's token with IAM and signs the exact persisted reference bytes with
-a fresh Ting proof. No other account can supply substitute authority. Expiry or
-revocation leaves the handoff pending until the same account authenticates again;
-it does not change DM message status or fabricate a delivered/read receipt.
-Sandbox secrets, cache entries and generation fences cannot authorize production.
+The backend stores dedicated OBO access and refresh credentials encrypted and
+bound to the account, organization, endpoint, application, testing environment and
+data generation. Only these dedicated credentials are refreshed by the publisher.
+Ordinary DM login, refresh and logout neither create nor destroy this permission;
+ordinary application tokens are not retained as notification authority. Migration
+0038 clears legacy cached login tokens and automatic enrollment state rather than
+converting them into consent. Signing in again cannot substitute for approval.
+
+Each handoff records its initiating actor transactionally. Publishing uses that
+actor's approved `tings.send` token, and registration uses its separately approved
+`subscriptions.register` token. Neither another account nor a sandbox credential
+can supply substitute authority. Missing, revoked or unusable authorization leaves
+the handoff pending and reports `ting_authorization_required` when applicable; it
+does not change DM message status or fabricate a delivered/read receipt.
+
+Use `dm delivery register` only to explicitly register with already approved
+permission. It does not create a consent grant. Receiving also requires a separate
+Ting session and destination: `dm delivery login --token-file -` accepts a
+Ting-bound SLT, and `dm webhook URL --all-apps` configures the consumer endpoint.
+A DM token cannot act as a Ting receiver login.
+
+`dm delivery disconnect-authorization` deletes the dedicated credentials stored
+by DM. Revoke the grant in IAM to disable it globally. The corresponding HTTP
+routes are `GET /api/v1/delivery/authorization` for local status and
+`POST /api/v1/delivery/authorization/disconnect` for local disconnection.
 
 ## IAM testing environment binding
 
 A DM testing environment requires a real IAM testing environment and an imported copy of `dm`. Import the existing canonical app using the installed IAM CLI, which issues a fresh **test-only application secret** while preserving approved application configuration. Do not submit the production app secret as the test credential. The imported webhook configuration initially retains the registered callback and signing secret. To register a dedicated callback for an IAM test application, supply both optional `iam_webhook_secret` and `iam_webhook_key_version` in the DM environment creation body. The secret must contain 32–512 visible ASCII characters and the version must be positive. DM encrypts the override separately from the test application credential. Omit both to inherit the backend signer. This permits a local tunnel callback and independently rotated test signer without changing the production callback. Use IAM's returned webhook key version: changing a callback can advance it even when the secret is reused.
 
-Passing an IAM test application's `app_secret` asks IAM 1.8's testing-context API
+Passing an IAM test application's `app_secret` asks IAM's testing-context API
 to discover its environment, canonical application ID, current credential version,
 webhook key digest, and cleaned timestamp. DM encrypts the selector and lazily
 creates an empty isolated schema. It rechecks IAM on selection, invalidates older
