@@ -360,6 +360,33 @@ export async function getSession(): Promise<Session> {
   const revision = sessionRevision;
   return adoptSession(await api<Session>("/api/session"), revision);
 }
+/** Verify the exact popup context before selecting it in this tab. */
+export async function completeBrowserLogin(
+  profileId: string,
+  kind: "carbon" | "silicon",
+  previous: Session,
+  signal: AbortSignal,
+): Promise<Session> {
+  if (selectedSession !== previous || signal.aborted)
+    throw new ApiError(
+      409,
+      "context_changed",
+      "The selected account changed while signing in.",
+    );
+  const revision = sessionRevision;
+  const value = await api<Session>("/api/session", { profileId, signal });
+  if (
+    !value.authenticated ||
+    value.profile_id !== profileId ||
+    value.actor?.type !== kind
+  )
+    throw new ApiError(
+      409,
+      "identity_changed",
+      "The returned login does not match the selected account type and session.",
+    );
+  return adoptSession(value, revision);
+}
 export function getConfig(): Promise<AppConfig> {
   return api("/api/config");
 }

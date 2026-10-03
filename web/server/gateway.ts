@@ -196,16 +196,48 @@ export class Gateway {
           "delivery_moved_to_ting",
           "DM browser delivery has moved to Ting. Use HTTP for messages, synchronization, presence and receipts.",
         );
+      if (path === "/auth/retry.js" && method === "GET") {
+        res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+        res.end(
+          'document.querySelector("button").addEventListener("click",()=>location.reload());',
+        );
+        return true;
+      }
       if (path === "/auth/login" && method === "GET") {
         this.authRate(req);
+        const kind = url.searchParams.get("identity_kind"),
+          nonce = url.searchParams.get("popup_nonce"),
+          selected = url.searchParams.get("profile_id");
+        if (
+          ["identity_kind", "popup_nonce", "profile_id"].some(
+            (key) => url.searchParams.getAll(key).length > 1,
+          ) ||
+          (kind !== null && kind !== "carbon" && kind !== "silicon") ||
+          (nonce !== null && (!kind || !/^[a-f0-9]{64}$/.test(nonce))) ||
+          (selected !== null && !uuidPattern.test(selected))
+        )
+          throw new GatewayError(
+            400,
+            "invalid_login",
+            "Choose Carbon or Silicon to sign in.",
+          );
         const previous = await this.sessions.read(this.sessions.cookieId(req));
         const browser = previous || (await this.sessions.create());
         const state = randomBytes(32).toString("base64url");
         await this.sessions.locked(browser.id, async () => {
           const current = (await this.sessions.read(browser.id)) || browser;
+          if (selected && selected !== current.value.selected)
+            throw new GatewayError(
+              409,
+              "context_changed",
+              "The selected account changed. Start sign-in again.",
+            );
           current.value.flow = {
             state: this.sessions.keyFor("login-state", state),
             deadline: Date.now() + 10 * 60 * 1000,
+            identity_kind: kind || undefined,
+            popup_nonce: nonce || undefined,
+            selected: current.value.selected,
           };
           await this.sessions.save(current);
         });
@@ -213,6 +245,8 @@ export class Gateway {
         callback.searchParams.set("state", state);
         const target = new URL("/login", this.config.iam);
         target.searchParams.set("app_id", this.config.appId);
+        if (kind) target.searchParams.set("identity_kind", kind);
+        if (nonce) target.searchParams.set("display", "popup");
         target.searchParams.set("redirect_uri", callback.href);
         res.setHeader("Set-Cookie", this.sessions.cookie(browser.id));
         res.writeHead(303, { Location: target.href });
@@ -236,13 +270,14 @@ export class Gateway {
             "login_state",
             "Login callback is missing its browser binding. Start sign-in again.",
           );
-        await this.sessions.locked(id, async () => {
+        const completed = await this.sessions.locked(id, async () => {
           const browser = await this.sessions.read(id),
             flow = browser?.value.flow;
           if (
             !browser ||
             !flow ||
             flow.deadline <= Date.now() ||
+            (flow.completed || flow.selected) !== browser.value.selected ||
             !constantEqual(
               flow.state,
               this.sessions.keyFor("login-state", state),
@@ -253,10 +288,44 @@ export class Gateway {
               "login_state",
               "Login state is expired or belongs to another browser. Start sign-in again.",
             );
-          await this.auth.login(browser, { slt });
+          const input = this.sessions.keyFor("login-callback-input", slt);
+          if (flow.input && !constantEqual(flow.input, input))
+            throw new GatewayError(
+              409,
+              "login_changed",
+              "This sign-in attempt already belongs to a different callback.",
+            );
+          if (flow.completed) {
+            const profile = selectProfile(browser, flow.completed);
+            if (
+              profile.auth_required ||
+              (flow.identity_kind && profile.actor.type !== flow.identity_kind)
+            )
+              throw new GatewayError(
+                409,
+                "login_changed",
+                "The completed sign-in is no longer available.",
+              );
+            return { nonce: flow.popup_nonce, profile: profile.profile_id };
+          }
+          flow.input = input;
+          await this.sessions.save(browser);
+          const profile = await this.auth.login(
+            browser,
+            { slt },
+            flow.identity_kind,
+            flow,
+          );
+          return { nonce: flow.popup_nonce, profile: profile.profile_id };
         });
         res.setHeader("Set-Cookie", this.sessions.cookie(id));
-        res.writeHead(303, { Location: this.config.frontend.href });
+        const destination = new URL(this.config.frontend);
+        if (completed.nonce) {
+          destination.searchParams.set("iam_popup", "complete");
+          destination.searchParams.set("nonce", completed.nonce);
+          destination.searchParams.set("profile_id", completed.profile);
+        }
+        res.writeHead(303, { Location: destination.href });
         res.end();
         return true;
       }
@@ -292,6 +361,7 @@ export class Gateway {
                 !p.testing_environment_id,
             ) || browser.value.profiles.find((p) => !p.testing_environment_id);
           browser.value.selected = production?.profile_id;
+          delete browser.value.flow;
           await this.sessions.save(browser);
         });
         json(res, await this.auth.describe(id));
@@ -325,6 +395,7 @@ export class Gateway {
               );
             selectProfile(browser, profile);
             browser.value.selected = profile;
+            delete browser.value.flow;
             await this.sessions.save(browser);
           });
           json(res, session);
@@ -399,6 +470,7 @@ export class Gateway {
               "profile_changed",
               "This profile changed while it was being verified. Retry the switch.",
             );
+          if (browser.value.selected !== requested) delete browser.value.flow;
           browser.value.selected = requested;
           await this.sessions.save(browser);
           verified.profiles = browser.value.profiles.map(publicProfile);
@@ -431,6 +503,23 @@ export class Gateway {
         "This gateway endpoint does not exist.",
       );
     } catch (error) {
+      // Keep the exact callback and durable attempt for an explicit retry.
+      if (
+        raw.split("?")[0] === "/auth/callback" &&
+        error instanceof GatewayError &&
+        (error.status === 429 || error.status >= 500)
+      ) {
+        res.writeHead(error.status, {
+          "Content-Type": "text/html; charset=utf-8",
+          "Referrer-Policy": "no-referrer",
+          "Content-Security-Policy":
+            "default-src 'none'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+        });
+        res.end(
+          '<!doctype html><html><head><meta name="referrer" content="no-referrer"><title>Retry DM sign-in</title></head><body><h1>Sign-in is temporarily unavailable</h1><p>Your sign-in attempt is saved. Retry this same attempt when the service is ready.</p><button>Retry sign-in</button><script src="/auth/retry.js"></script></body></html>',
+        );
+        return true;
+      }
       failure(res, error);
       return true;
     }

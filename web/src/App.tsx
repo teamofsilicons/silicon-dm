@@ -1,3 +1,4 @@
+import { completeIamPopup, openIamPopup, type IdentityKind } from "./iam-popup";
 import { TingAuthorization } from "./TingAuthorization";
 import {
   ErrorBoundary,
@@ -15,6 +16,8 @@ import {
   ApiError,
   api,
   getConfig,
+  completeBrowserLogin,
+  currentSession,
   getSession,
   login,
   exitTesting,
@@ -129,6 +132,7 @@ export default function App() {
     setSession(await getSession());
   }
   onMount(() => {
+    if (completeIamPopup()) return;
     void Promise.all([getConfig(), getSession()])
       .then(([c, s]) => {
         setConfig(c);
@@ -175,7 +179,7 @@ export default function App() {
           <Show
             when={session().authenticated && session().profile_id}
             keyed
-            fallback={<SignIn config={config()} />}
+            fallback={<SignIn config={config()} done={setSession} />}
           >
             {(_profile: string) => (
               <Workspace
@@ -194,13 +198,80 @@ export default function App() {
           subtitle="Choose your organizations securely in IAM."
           close={() => setAdd()}
         >
-          <SignIn compact config={config()} />
+          <SignIn
+            compact
+            config={config()}
+            done={(value) => {
+              setSession(value);
+              setAdd();
+            }}
+          />
         </Modal>
       </Show>
     </ErrorBoundary>
   );
 }
-function SignIn(props: { compact?: boolean; config?: AppConfig }) {
+function SignIn(props: {
+  compact?: boolean;
+  config?: AppConfig;
+  done: (value: Session) => void;
+}) {
+  const [busy, setBusy] = createSignal(false),
+    [error, setError] = createSignal<unknown>();
+  const [verification, setVerification] = createSignal<{
+    profile: string;
+    kind: IdentityKind;
+    previous: Session;
+    controller: AbortController;
+  }>();
+  let pending: AbortController | undefined;
+  async function verifyLogin(
+    attempt: NonNullable<ReturnType<typeof verification>>,
+  ) {
+    setBusy(true);
+    setError();
+    try {
+      props.done(
+        await completeBrowserLogin(
+          attempt.profile,
+          attempt.kind,
+          attempt.previous,
+          attempt.controller.signal,
+        ),
+      );
+      setVerification();
+    } catch (error) {
+      if (!attempt.controller.signal.aborted) {
+        setError(error);
+        if (!(error instanceof ApiError && error.retryable)) setVerification();
+      }
+    } finally {
+      if (!attempt.controller.signal.aborted) setBusy(false);
+    }
+  }
+  onCleanup(() => pending?.abort());
+  async function signIn(kind: IdentityKind) {
+    if (busy()) return;
+    const previous = currentSession();
+    const controller = new AbortController();
+    pending = controller;
+    setBusy(true);
+    setError();
+    setVerification();
+    try {
+      const profile = await openIamPopup(
+        (nonce) => iamLoginHref(kind, nonce, previous.profile_id),
+        controller.signal,
+      );
+      const attempt = { profile, kind, previous, controller };
+      setVerification(attempt);
+      await verifyLogin(attempt);
+    } catch (error) {
+      if (!controller.signal.aborted) setError(error);
+    } finally {
+      if (!controller.signal.aborted) setBusy(false);
+    }
+  }
   const [testSecret, setTestSecret] = createSignal("");
   const [testIdentity, setTestIdentity] = createSignal("");
   const [testError, setTestError] = createSignal<unknown>();
@@ -221,11 +292,18 @@ function SignIn(props: { compact?: boolean; config?: AppConfig }) {
       setTestBusy(false);
     }
   }
-  const iamLoginHref = () => {
+  const iamLoginHref = (
+    kind: IdentityKind,
+    nonce?: string,
+    profile = currentSession().profile_id,
+  ) => {
     const url = new URL(
       props.config?.iam_login_url || "/auth/login",
       window.location.origin,
     );
+    url.searchParams.set("identity_kind", kind);
+    if (nonce) url.searchParams.set("popup_nonce", nonce);
+    if (profile) url.searchParams.set("profile_id", profile);
     return url.href;
   };
   const form = () => (
@@ -236,14 +314,40 @@ function SignIn(props: { compact?: boolean; config?: AppConfig }) {
         <p class="muted auth-intro">A shared space for your conversations.</p>
       </Show>
       <div class="stack">
-        <a class="button primary full" href={iamLoginHref()}>
+        <button
+          class="button primary full"
+          disabled={busy()}
+          onClick={() => void signIn("carbon")}
+        >
           <img class="button-mark" src="/brand/mark.svg" alt="" />
-          Continue with IAM
-          <Icon name="chevron" size={15} />
-        </a>
-        <p class="footnote">
-          Sign in or create your identity securely with IAM.
-        </p>
+          Continue as Carbon
+        </button>
+        <button
+          class="button full"
+          disabled={busy()}
+          onClick={() => void signIn("silicon")}
+        >
+          Continue as Silicon
+        </button>
+        <Notice error={error()} />
+        <Show when={verification()}>
+          {(attempt) => (
+            <button
+              class="button full"
+              disabled={busy()}
+              onClick={() => void verifyLogin(attempt())}
+            >
+              Retry saved sign-in
+            </button>
+          )}
+        </Show>
+        <Show when={!busy()}>
+          <p class="footnote">
+            If popups are unavailable, continue in this tab as{" "}
+            <a href={iamLoginHref("carbon")}>Carbon</a> or{" "}
+            <a href={iamLoginHref("silicon")}>Silicon</a>.
+          </p>
+        </Show>
         <details class="test-signin">
           <summary>Use a testing environment</summary>
           <form class="stack" onSubmit={(event) => void enterTest(event)}>
@@ -1566,7 +1670,16 @@ function Workspace(props: {
           </div>
         </header>
         <div class="delivery-status" role="status">
-          <TingAuthorization session={workspaceSession} enabled={() => { setDeliveryEnabled(true); setDeliveryUncertain(false); setNotice("Ting delivery authorized. Sign in to Ting with this account to receive updates."); }} />
+          <TingAuthorization
+            session={workspaceSession}
+            enabled={() => {
+              setDeliveryEnabled(true);
+              setDeliveryUncertain(false);
+              setNotice(
+                "Ting delivery authorized. Sign in to Ting with this account to receive updates.",
+              );
+            }}
+          />
           <span>
             {tingStatus()?.message ||
               "Loading message history and checking Ting delivery…"}

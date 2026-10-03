@@ -164,6 +164,8 @@ export class Auth {
   async login(
     browser: Browser,
     body: Record<string, unknown>,
+    expectedKind?: Actor["type"],
+    callbackFlow?: Browser["value"]["flow"],
   ): Promise<Profile> {
     if (
       typeof body.slt !== "string" ||
@@ -251,6 +253,12 @@ export class Auth {
       { slt: body.slt },
       testingKey as string | undefined,
     );
+    if (expectedKind && tokens.actor.type !== expectedKind)
+      throw new GatewayError(
+        403,
+        "identity_kind_mismatch",
+        "Choose the same account type you selected in DM.",
+      );
     const organization_id = tokens.organization_id;
     const previous = browser.value.profiles.find(
       (p) =>
@@ -287,7 +295,12 @@ export class Auth {
     )
       browser.value.production_profile_id = previousSelection.profile_id;
     browser.value.selected = profiles[0]!.profile_id;
-    delete browser.value.flow;
+    if (callbackFlow)
+      browser.value.flow = {
+        ...callbackFlow,
+        completed: profiles[0]!.profile_id,
+      };
+    else delete browser.value.flow;
     await this.sessions.save(browser);
     for (const profile of profiles)
       this.invalidate(browser.id, profile.profile_id);
@@ -532,6 +545,7 @@ export class Auth {
     await this.sessions.locked(id, async () => {
       const browser = await this.sessions.read(id);
       if (!browser || !browser.value.profiles.length) return;
+      delete browser.value.flow;
       const profile = selectProfile(browser, requested);
       try {
         if (profile.refresh_token) {
