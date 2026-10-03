@@ -110,6 +110,7 @@ function fixture(steps: Step[]) {
     setSession: context.http.setSession,
     currentSession: context.http.currentSession,
     getSession: context.http.getSession,
+    completeBrowserLogin: context.http.completeBrowserLogin,
     selectProfile: context.http.selectProfile,
     refreshSession: context.http.refreshSession,
     setGeneration: (value: number) => (generation = value),
@@ -368,5 +369,110 @@ test("sandbox request bodies freeze before asynchronous generation lookup", asyn
   assert.equal(
     JSON.parse(f.calls[0].options.body as string).data.message,
     "original message",
+  );
+});
+
+for (const mismatch of ["kind", "profile", "unauthenticated"]) {
+  test(`popup session ${mismatch} is not installed`, async () => {
+    const value = {
+      authenticated: mismatch !== "unauthenticated",
+      profile_id: mismatch === "profile" ? "other" : "popup",
+      actor: {
+        id: "c:alice",
+        type: mismatch === "kind" ? "silicon" : "carbon",
+      },
+      profiles: [],
+    };
+    const f = fixture([response(200, value)]);
+    await assert.rejects(
+      f.completeBrowserLogin(
+        "popup",
+        "carbon",
+        f.currentSession(),
+        new AbortController().signal,
+      ),
+      (e: any) => e.code === "identity_changed",
+    );
+    assert.equal(f.calls[0].headers.get("X-DM-Profile"), "popup");
+    assert.equal(f.currentSession().profile_id, "profile");
+  });
+}
+test("popup completion verifies its pinned profile and fences a concurrent selection", async () => {
+  const value = {
+    authenticated: true,
+    profile_id: "popup",
+    actor: { id: "si:new", type: "silicon" },
+    profiles: [],
+  };
+  const f = fixture([
+    () => {
+      f.setSession({ ...f.session, profile_id: "new-selection" });
+      return response(200, value);
+    },
+  ]);
+  await assert.rejects(
+    f.completeBrowserLogin(
+      "popup",
+      "silicon",
+      f.currentSession(),
+      new AbortController().signal,
+    ),
+    (e: any) => e.code === "context_changed",
+  );
+  assert.equal(f.currentSession().profile_id, "new-selection");
+  assert.equal(f.calls[0].headers.get("X-DM-Profile"), "popup");
+});
+test("popup completion never requests credentials after the initiating selection changes", async () => {
+  const f = fixture([]),
+    previous = f.currentSession();
+  f.setSession({ ...previous });
+  await assert.rejects(
+    f.completeBrowserLogin(
+      "popup",
+      "carbon",
+      previous,
+      new AbortController().signal,
+    ),
+    (e: any) => e.code === "context_changed",
+  );
+  assert.equal(f.calls.length, 0);
+});
+test("verified popup completion selects only the returned pinned account", async () => {
+  const value = {
+    authenticated: true,
+    profile_id: "popup",
+    actor: { id: "si:new", type: "silicon" },
+    profiles: [],
+  };
+  const f = fixture([response(200, value)]);
+  await f.completeBrowserLogin(
+    "popup",
+    "silicon",
+    f.currentSession(),
+    new AbortController().signal,
+  );
+  assert.equal(f.currentSession().profile_id, "popup");
+  assert.equal(f.calls[0].headers.get("X-DM-Profile"), "popup");
+});
+test("temporary popup status failure retains the old tab and permits exact-profile retry", async () => {
+  const value = {
+    authenticated: true,
+    profile_id: "popup",
+    actor: { id: "si:new", type: "silicon" },
+    profiles: [],
+  };
+  const f = fixture([failure(503), response(200, value)]),
+    previous = f.currentSession(),
+    signal = new AbortController().signal;
+  await assert.rejects(
+    f.completeBrowserLogin("popup", "silicon", previous, signal),
+    (e: any) => e.retryable,
+  );
+  assert.equal(f.currentSession(), previous);
+  await f.completeBrowserLogin("popup", "silicon", previous, signal);
+  assert.equal(f.currentSession().profile_id, "popup");
+  assert.deepEqual(
+    f.calls.map((c) => c.headers.get("X-DM-Profile")),
+    ["popup", "popup"],
   );
 });

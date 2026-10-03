@@ -33,8 +33,10 @@ async function fixture(t: TestContext, saved = false) {
     keyStatus: 200,
     discoveryStatus: 200,
     loginStatus: 200,
+    loginActor: { id: "c:test-alice", type: "carbon" },
     meStatus: 200,
     beforeMeReply: undefined as (() => Promise<void>) | undefined,
+    beforeLoginReply: undefined as (() => Promise<void>) | undefined,
     consentStatus: 200,
     loginOrganizations: ["test-org"],
     key: rootKey,
@@ -63,7 +65,7 @@ async function fixture(t: TestContext, saved = false) {
         access_token: "test-access",
         refresh_token: "test-refresh",
         expires_in: 3600,
-        actor: { id: "c:test-alice", type: "carbon" },
+        actor: state.loginActor,
         organization_id: "test-org",
         organization_ids: state.loginOrganizations,
       };
@@ -99,6 +101,7 @@ async function fixture(t: TestContext, saved = false) {
       };
     }
     if (req.url === "/api/v1/auth/me") await state.beforeMeReply?.();
+    if (req.url === "/api/v1/auth/login") await state.beforeLoginReply?.();
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ type: "response", data }));
   });
@@ -176,7 +179,20 @@ async function fixture(t: TestContext, saved = false) {
       { environment_id: environment, ...(slt === undefined ? {} : { slt }) },
       profile,
     );
-  return { gateway, browser, calls, state, request, enter };
+  return {
+    gateway,
+    browser,
+    calls,
+    state,
+    request,
+    enter,
+    restart: async () => {
+      const config = gateway.config;
+      await gateway.close();
+      gateway = new Gateway(config);
+      await gateway.initialize();
+    },
+  };
 }
 
 test("first entry requests a test identity without exposing the root key or switching production", async (t) => {
@@ -621,4 +637,256 @@ test("an IAM login can save only one organization and rejects legacy multi-org r
   assert.equal(good.status, 200);
   assert.equal(good.value.organization_id, "test-org");
   assert.equal(good.value.profiles.length, 2);
+});
+
+async function navigateLogin(
+  f: Awaited<ReturnType<typeof fixture>>,
+  path: string,
+) {
+  return fetch(new URL(path, f.gateway.config.origin), {
+    redirect: "manual",
+    headers: { Cookie: f.gateway.sessions.cookie(f.browser.id).split(";")[0] },
+  });
+}
+async function startLogin(
+  f: Awaited<ReturnType<typeof fixture>>,
+  kind: "carbon" | "silicon",
+  popup = true,
+) {
+  const response = await navigateLogin(
+    f,
+    `/auth/login?identity_kind=${kind}&profile_id=${production}${popup ? `&popup_nonce=${"a".repeat(64)}` : ""}`,
+  );
+  assert.equal(response.status, 303);
+  const target = new URL(response.headers.get("location")!);
+  assert.equal(target.searchParams.get("identity_kind"), kind);
+  assert.equal(target.searchParams.get("display"), popup ? "popup" : null);
+  const callback = new URL(target.searchParams.get("redirect_uri")!);
+  assert(callback.searchParams.get("state"));
+  callback.searchParams.set("slt", "callback-test-slt");
+  return callback;
+}
+for (const kind of ["carbon", "silicon"] as const) {
+  for (const popup of [true, false]) {
+    test(`${kind} ${popup ? "popup" : "full-page fallback"} binds callback and returns only the saved profile`, async (t) => {
+      const f = await fixture(t);
+      f.state.loginActor = {
+        id: kind === "carbon" ? "c:new-alice" : "si:new-alice",
+        type: kind,
+      };
+      const callback = await startLogin(f, kind, popup);
+      const result = await navigateLogin(f, callback.href);
+      assert.equal(result.status, 303);
+      const target = new URL(result.headers.get("location")!);
+      const stored = (await f.gateway.sessions.read(f.browser.id))!.value;
+      assert.equal(stored.profiles.length, 2);
+      assert.equal(
+        stored.profiles.find((p) => p.profile_id === stored.selected)?.actor
+          .type,
+        kind,
+      );
+      assert.equal(stored.flow?.completed, stored.selected);
+      assert.equal(
+        target.searchParams.get("profile_id"),
+        popup ? stored.selected : null,
+      );
+      assert.equal(
+        target.searchParams.get("nonce"),
+        popup ? "a".repeat(64) : null,
+      );
+      assert.equal(
+        target.searchParams.get("iam_popup"),
+        popup ? "complete" : null,
+      );
+      assert(!target.href.includes("slt"));
+      assert(!target.href.includes("access"));
+    });
+  }
+}
+test("popup rejects mismatched returned identity without replacing the previous account", async (t) => {
+  const f = await fixture(t);
+  const callback = await startLogin(f, "silicon");
+  const result = await navigateLogin(f, callback.href);
+  assert.equal(result.status, 403);
+  const saved = (await f.gateway.sessions.read(f.browser.id))!.value;
+  assert.equal(saved.selected, production);
+  assert.equal(saved.profiles.length, 1);
+});
+for (const status of [429, 503]) {
+  test(`popup ${status} retains the callback attempt and replays the same exchange key`, async (t) => {
+    const f = await fixture(t);
+    const callback = await startLogin(f, "carbon");
+    f.state.loginStatus = status;
+    const result = await navigateLogin(f, callback.href);
+    assert.equal(result.status, 503);
+    assert.equal(result.headers.get("referrer-policy"), "no-referrer");
+    const text = await result.text();
+    assert(text.includes("Retry sign-in"));
+    assert(!text.includes("callback-test-slt"));
+    const saved = (await f.gateway.sessions.read(f.browser.id))!.value;
+    assert.equal(saved.selected, production);
+    assert(saved.flow);
+    f.state.loginStatus = 200;
+    assert.equal((await navigateLogin(f, callback.href)).status, 303);
+    const exchanges = f.calls.filter((c) => c.path === "/api/v1/auth/login");
+    assert.equal(exchanges.length, 2);
+    assert.equal(
+      exchanges[0].headers["idempotency-key"],
+      exchanges[1].headers["idempotency-key"],
+    );
+    assert.deepEqual(exchanges[0].body, exchanges[1].body);
+  });
+}
+test("account switch away and back invalidates a pending popup before any token exchange", async (t) => {
+  const f = await fixture(t, true);
+  const callback = await startLogin(f, "carbon");
+  assert.equal(
+    (await f.request("/api/profiles/select", { profile_id: testProfile }))
+      .status,
+    200,
+  );
+  assert.equal(
+    (
+      await f.request(
+        "/api/profiles/select",
+        { profile_id: production },
+        testProfile,
+      )
+    ).status,
+    200,
+  );
+  assert.equal((await navigateLogin(f, callback.href)).status, 400);
+  assert(!f.calls.some((c) => c.path === "/api/v1/auth/login"));
+});
+test("popup rejects malformed kind, nonce, duplicate fields and stale initiating profile", async (t) => {
+  const f = await fixture(t);
+  for (const query of [
+    "identity_kind=robot",
+    "popup_nonce=" + "a".repeat(64),
+    "identity_kind=carbon&popup_nonce=short",
+    "identity_kind=carbon&identity_kind=silicon",
+    "identity_kind=carbon&profile_id=bad",
+  ])
+    assert.equal((await navigateLogin(f, "/auth/login?" + query)).status, 400);
+  assert.equal(
+    (
+      await navigateLogin(
+        f,
+        `/auth/login?identity_kind=carbon&profile_id=${testProfile}`,
+      )
+    ).status,
+    409,
+  );
+  assert.equal(f.calls.length, 0);
+});
+test("completed popup callback replays after restart without issuing another login", async (t) => {
+  const f = await fixture(t);
+  const callback = await startLogin(f, "carbon");
+  const first = await navigateLogin(f, callback.href);
+  assert.equal(first.status, 303);
+  const destination = first.headers.get("location");
+  await f.restart();
+  const replay = await navigateLogin(f, callback.href);
+  assert.equal(replay.status, 303);
+  assert.equal(replay.headers.get("location"), destination);
+  assert.equal(
+    f.calls.filter((c) => c.path === "/api/v1/auth/login").length,
+    1,
+  );
+  callback.searchParams.set("slt", "different-slt");
+  assert.equal((await navigateLogin(f, callback.href)).status, 409);
+  assert.equal(
+    f.calls.filter((c) => c.path === "/api/v1/auth/login").length,
+    1,
+  );
+});
+test("nonce cancellation prevents a delayed callback from exchanging credentials", async (t) => {
+  const f = await fixture(t);
+  const callback = await startLogin(f, "carbon");
+  assert.equal(
+    (await f.request("/api/login/cancel", { nonce: "a".repeat(64) })).status,
+    200,
+  );
+  assert.equal((await navigateLogin(f, callback.href)).status, 400);
+  assert.equal(
+    (await f.gateway.sessions.read(f.browser.id))!.value.selected,
+    production,
+  );
+  assert(!f.calls.some((c) => c.path === "/api/v1/auth/login"));
+});
+test("late cancellation restores initiating selection and never reactivates completed login", async (t) => {
+  const f = await fixture(t);
+  const callback = await startLogin(f, "carbon");
+  assert.equal((await navigateLogin(f, callback.href)).status, 303);
+  const completed = (await f.gateway.sessions.read(f.browser.id))!.value
+    .selected;
+  assert.notEqual(completed, production);
+  assert.equal(
+    (await f.request("/api/login/cancel", { nonce: "a".repeat(64) })).status,
+    200,
+  );
+  const saved = (await f.gateway.sessions.read(f.browser.id))!.value;
+  assert.equal(saved.selected, production);
+  assert.equal(saved.profiles.length, 2);
+  assert.equal((await navigateLogin(f, callback.href)).status, 400);
+});
+test("cancelling an older popup cannot cancel a newer attempt", async (t) => {
+  const f = await fixture(t);
+  await startLogin(f, "carbon");
+  const started = await navigateLogin(
+    f,
+    `/auth/login?identity_kind=carbon&popup_nonce=${"b".repeat(64)}`,
+  );
+  const callback = new URL(
+    new URL(started.headers.get("location")!).searchParams.get("redirect_uri")!,
+  );
+  callback.searchParams.set("slt", "callback-test-slt");
+  assert.equal(
+    (await f.request("/api/login/cancel", { nonce: "a".repeat(64) })).status,
+    200,
+  );
+  assert.equal((await navigateLogin(f, callback.href)).status, 303);
+});
+test("cancellation waits for an in-flight exchange then restores selection atomically", async (t) => {
+  const f = await fixture(t);
+  const callback = await startLogin(f, "carbon");
+  let entered!: () => void, release!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.beforeLoginReply = async () => {
+    entered();
+    await released;
+  };
+  const completion = navigateLogin(f, callback.href);
+  await waiting;
+  const cancellation = f.request("/api/login/cancel", {
+    nonce: "a".repeat(64),
+  });
+  release();
+  assert.equal((await completion).status, 303);
+  assert.equal((await cancellation).status, 200);
+  const saved = (await f.gateway.sessions.read(f.browser.id))!.value;
+  assert.equal(saved.selected, production);
+  assert.equal(saved.flow, undefined);
+  assert.equal((await navigateLogin(f, callback.href)).status, 400);
+});
+test("completed callback cannot reactivate a session after logout", async (t) => {
+  const f = await fixture(t),
+    callback = await startLogin(f, "carbon");
+  assert.equal((await navigateLogin(f, callback.href)).status, 303);
+  const selected = (await f.gateway.sessions.read(f.browser.id))!.value
+    .selected!;
+  assert.equal(
+    (await f.request("/api/logout", { profile_id: selected }, selected)).status,
+    200,
+  );
+  assert.equal((await navigateLogin(f, callback.href)).status, 400);
+  assert.equal(
+    (await f.gateway.sessions.read(f.browser.id))!.value.selected,
+    production,
+  );
 });

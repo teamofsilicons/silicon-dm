@@ -40,7 +40,15 @@ export type BrowserSession = {
   selected?: string;
   production_profile_id?: string;
   profiles: Profile[];
-  flow?: { state: string; deadline: number };
+  flow?: {
+    state: string;
+    deadline: number;
+    identity_kind?: Actor["type"];
+    popup_nonce?: string;
+    selected?: string;
+    input?: string;
+    completed?: string;
+  };
 };
 export type Browser = { id: string; value: BrowserSession; upgrade?: boolean };
 export class GatewayError extends Error {

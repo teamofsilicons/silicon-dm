@@ -1,3 +1,4 @@
+import { completeIamPopup, openIamPopup, type IdentityKind } from "./iam-popup";
 import { TingAuthorization } from "./TingAuthorization";
 import {
   ErrorBoundary,
@@ -15,6 +16,9 @@ import {
   ApiError,
   api,
   getConfig,
+  completeBrowserLogin,
+  cancelBrowserLogin,
+  currentSession,
   getSession,
   login,
   exitTesting,
@@ -129,6 +133,7 @@ export default function App() {
     setSession(await getSession());
   }
   onMount(() => {
+    if (completeIamPopup()) return;
     void Promise.all([getConfig(), getSession()])
       .then(([c, s]) => {
         setConfig(c);
@@ -175,7 +180,7 @@ export default function App() {
           <Show
             when={session().authenticated && session().profile_id}
             keyed
-            fallback={<SignIn config={config()} />}
+            fallback={<SignIn config={config()} done={setSession} />}
           >
             {(_profile: string) => (
               <Workspace
@@ -194,13 +199,122 @@ export default function App() {
           subtitle="Choose your organizations securely in IAM."
           close={() => setAdd()}
         >
-          <SignIn compact config={config()} />
+          <SignIn
+            compact
+            config={config()}
+            done={(value) => {
+              setSession(value);
+              setAdd();
+            }}
+          />
         </Modal>
       </Show>
     </ErrorBoundary>
   );
 }
-function SignIn(props: { compact?: boolean; config?: AppConfig }) {
+function SignIn(props: {
+  compact?: boolean;
+  config?: AppConfig;
+  done: (value: Session) => void;
+}) {
+  const [busy, setBusy] = createSignal(false),
+    [error, setError] = createSignal<unknown>();
+  const [verification, setVerification] = createSignal<{
+    profile: string;
+    kind: IdentityKind;
+    previous: Session;
+    controller: AbortController;
+  }>();
+  let pending: AbortController | undefined, pendingNonce: string | undefined;
+  let mounted = true,
+    navigationGeneration = 0;
+  async function cancelPending() {
+    pending?.abort();
+    pending = undefined;
+    const nonce = pendingNonce;
+    setVerification();
+    if (nonce) await cancelBrowserLogin(nonce);
+    if (pendingNonce === nonce) pendingNonce = undefined;
+  }
+  async function fullPage(event: MouseEvent, kind: IdentityKind) {
+    event.preventDefault();
+    const generation = ++navigationGeneration;
+    const previous = currentSession();
+    const destination = iamLoginHref(kind, undefined, previous.profile_id);
+    setBusy(true);
+    setError();
+    try {
+      await cancelPending();
+      if (!mounted || generation !== navigationGeneration) return;
+      if (currentSession() !== previous)
+        throw new Error(
+          "The selected account changed. Choose your sign-in option again.",
+        );
+      location.assign(destination);
+    } catch (error) {
+      if (mounted && generation === navigationGeneration) {
+        setError(error);
+        setBusy(false);
+      }
+    }
+  }
+  async function verifyLogin(
+    attempt: NonNullable<ReturnType<typeof verification>>,
+  ) {
+    setBusy(true);
+    setError();
+    try {
+      const verified = await completeBrowserLogin(
+        attempt.profile,
+        attempt.kind,
+        attempt.previous,
+        attempt.controller.signal,
+      );
+      pendingNonce = undefined;
+      pending = undefined;
+      props.done(verified);
+      setVerification();
+    } catch (error) {
+      if (!attempt.controller.signal.aborted) {
+        setError(error);
+        if (!(error instanceof ApiError && error.retryable)) setVerification();
+      }
+    } finally {
+      if (!attempt.controller.signal.aborted) setBusy(false);
+    }
+  }
+  onCleanup(() => {
+    mounted = false;
+    navigationGeneration++;
+    void cancelPending().catch(() => {});
+  });
+  async function signIn(kind: IdentityKind) {
+    if (busy()) return;
+    navigationGeneration++;
+    const previous = currentSession();
+    const controller = new AbortController();
+    pending = controller;
+    setBusy(true);
+    setError();
+    setVerification();
+    try {
+      const profile = await openIamPopup((nonce) => {
+        pendingNonce = nonce;
+        return iamLoginHref(kind, nonce, previous.profile_id);
+      }, controller.signal);
+      const attempt = { profile, kind, previous, controller };
+      setVerification(attempt);
+      await verifyLogin(attempt);
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        await cancelPending().catch(() => {});
+        setError(error);
+        setBusy(false);
+      }
+    } finally {
+      if (!controller.signal.aborted) setBusy(false);
+    }
+  }
   const [testSecret, setTestSecret] = createSignal("");
   const [testIdentity, setTestIdentity] = createSignal("");
   const [testError, setTestError] = createSignal<unknown>();
@@ -221,11 +335,18 @@ function SignIn(props: { compact?: boolean; config?: AppConfig }) {
       setTestBusy(false);
     }
   }
-  const iamLoginHref = () => {
+  const iamLoginHref = (
+    kind: IdentityKind,
+    nonce?: string,
+    profile = currentSession().profile_id,
+  ) => {
     const url = new URL(
       props.config?.iam_login_url || "/auth/login",
       window.location.origin,
     );
+    url.searchParams.set("identity_kind", kind);
+    if (nonce) url.searchParams.set("popup_nonce", nonce);
+    if (profile) url.searchParams.set("profile_id", profile);
     return url.href;
   };
   const form = () => (
@@ -236,13 +357,49 @@ function SignIn(props: { compact?: boolean; config?: AppConfig }) {
         <p class="muted auth-intro">A shared space for your conversations.</p>
       </Show>
       <div class="stack">
-        <a class="button primary full" href={iamLoginHref()}>
+        <button
+          class="button primary full"
+          disabled={busy()}
+          onClick={() => void signIn("carbon")}
+        >
           <img class="button-mark" src="/brand/mark.svg" alt="" />
-          Continue with IAM
-          <Icon name="chevron" size={15} />
-        </a>
+          Continue as Carbon
+        </button>
+        <button
+          class="button full"
+          disabled={busy()}
+          onClick={() => void signIn("silicon")}
+        >
+          Continue as Silicon
+        </button>
+        <Notice error={error()} />
+        <Show when={verification()}>
+          {(attempt) => (
+            <button
+              class="button full"
+              disabled={busy()}
+              onClick={() => void verifyLogin(attempt())}
+            >
+              Retry saved sign-in
+            </button>
+          )}
+        </Show>
         <p class="footnote">
-          Sign in or create your identity securely with IAM.
+          If popups are unavailable, continue in this tab as{" "}
+          <a
+            href={iamLoginHref("carbon")}
+            onClick={(event) => void fullPage(event, "carbon")}
+          >
+            Carbon
+          </a>{" "}
+          or{" "}
+          <a
+            href={iamLoginHref("silicon")}
+            onClick={(event) => void fullPage(event, "silicon")}
+          >
+            Silicon
+          </a>
+          .
         </p>
         <details class="test-signin">
           <summary>Use a testing environment</summary>
@@ -1566,7 +1723,16 @@ function Workspace(props: {
           </div>
         </header>
         <div class="delivery-status" role="status">
-          <TingAuthorization session={workspaceSession} enabled={() => { setDeliveryEnabled(true); setDeliveryUncertain(false); setNotice("Ting delivery authorized. Sign in to Ting with this account to receive updates."); }} />
+          <TingAuthorization
+            session={workspaceSession}
+            enabled={() => {
+              setDeliveryEnabled(true);
+              setDeliveryUncertain(false);
+              setNotice(
+                "Ting delivery authorized. Sign in to Ting with this account to receive updates.",
+              );
+            }}
+          />
           <span>
             {tingStatus()?.message ||
               "Loading message history and checking Ting delivery…"}
