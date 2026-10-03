@@ -102,6 +102,7 @@ impl LocalRuntime {
         let id = info.testing_environment_id.context(
             "DM did not validate a testing environment; no production fallback is allowed",
         )?;
+        store::check_discovery(&info, base_url, Some(id), None)?;
         let name = info
             .testing_environment
             .as_ref()
@@ -265,25 +266,55 @@ impl LocalRuntime {
         let session = store::session_key(options.profile, options.testing_environment_id);
         let lock = self.store.profile_lock(&session).await?;
         let config = self.store.load()?;
+        if let Some(previous) = config.profiles.get(&session)
+            && (store::normalized_backend(&previous.base_url)?
+                != store::normalized_backend(options.base_url)?
+                || previous.name != options.profile
+                || previous.testing_environment_id != options.testing_environment_id)
+        {
+            bail!("profile belongs to another backend or data world; choose a new profile");
+        }
         let mut client = crate::Client::new(options.base_url)?;
         if let Some(id) = options.testing_environment_id {
             let key = config
                 .testing_keys
                 .get(&id)
                 .ok_or_else(|| anyhow::anyhow!("import the testing key before login"))?;
-            if key.base_url.trim_end_matches('/') != options.base_url.trim_end_matches('/') {
+            if store::normalized_backend(&key.base_url)?
+                != store::normalized_backend(options.base_url)?
+            {
                 bail!("testing key belongs to another backend");
             }
             client = client.with_test_key(&key.key)?;
         }
+        let info = client.iam().await?;
+        store::check_discovery(
+            &info,
+            options.base_url,
+            options.testing_environment_id,
+            None,
+        )?;
+        if let Some(generation) = info.testing_generation {
+            client = client.with_testing_generation(generation)?;
+        }
         let tokens = client
             .login(options.short_lived_token, options.idempotency_key)
             .await?;
-        self.store.update(|config| {
+        store::validate_tokens(&tokens)?;
+        self.store.update(|current| {
+            if let Some(id) = options.testing_environment_id {
+                let old = config.testing_keys.get(&id).context("original testing key is missing")?;
+                let new = current.testing_keys.get(&id).context("testing key was removed during login")?;
+                if old.key != new.key || store::normalized_backend(&old.base_url)? != store::normalized_backend(&new.base_url)? {
+                    bail!("testing credentials changed while login was in flight; retry in the original world");
+                }
+            }
+            let config = current;
             if let Some(previous) = config.profiles.get(&session)
                 && (previous.tokens.actor != tokens.actor
                     || previous.tokens.organization_id != tokens.organization_id
-                    || previous.base_url.trim_end_matches('/') != options.base_url.trim_end_matches('/')) {
+                    || store::normalized_backend(&previous.base_url)? != store::normalized_backend(options.base_url)?
+                    || previous.testing_environment_id != options.testing_environment_id) {
                 bail!("profile belongs to another actor, organization or backend; choose a new profile");
             }
             let device_id = config.profiles.get(&session).map_or_else(|| Uuid::new_v4().to_string(), |p| p.device_id.clone());
@@ -292,7 +323,7 @@ impl LocalRuntime {
                 webhook_url: config.profiles.get(&session).and_then(|p| p.webhook_url.clone()), device_id,
                 expires_at: store::now().saturating_add(tokens.expires_in.max(0) as u64),
                 refresh_started_at: None,
-                testing_environment_id: options.testing_environment_id, enabled: true,
+                testing_environment_id: options.testing_environment_id, testing_generation: info.testing_generation, enabled: true,
             });
             Ok(())
         })?;
@@ -306,20 +337,29 @@ impl LocalRuntime {
     /// Missing or revoked credentials return authenticated:false; network errors remain errors.
     pub async fn login_status(&self, name: &str, test: Option<Uuid>) -> Result<Value> {
         let config = self.store.load()?;
-        if store::profile(&config, name, test).is_err() {
+        let key = store::session_key(name, test);
+        if !config
+            .profiles
+            .get(&key)
+            .is_some_and(|profile| profile.enabled)
+        {
             return Ok(
                 serde_json::json!({"authenticated":false,"profile":name,"testing_environment_id":test}),
             );
         }
-        let key = store::session_key(name, test);
+        let original = store::profile(&config, name, test)?.clone();
+        let original_config = config;
         let result = async {
             for attempt in 0..2 {
                 let (config, profile) = self.store.fresh_profile(&key).await?;
+                store::check_current(&config,&key,&original_config,&original)?;
+                store::verify_world(&config,&profile).await?;
                 match store::client(&config, &profile)?.me().await {
                     Err(crate::Error::Api { status: 401, .. }) if attempt == 0 => {
                         // Access can be invalidated before its advertised expiry. Only
                         // invalidate this generation; a concurrent renewal wins.
                         self.store.update(|config| {
+                            store::check_current(config,&key,&original_config,&original)?;
                             if let Some(current) = config.profiles.get_mut(&key)
                                 && current.tokens.access_token == profile.tokens.access_token
                             {
@@ -330,8 +370,12 @@ impl LocalRuntime {
                     }
                     result => {
                         let identity = result?;
+                        if identity.actor != profile.tokens.actor || identity.organization_id != profile.tokens.organization_id {
+                            bail!("DM status changed the immutable actor or organization; saved context was retained");
+                        }
+                        store::check_current(&self.store.load()?,&key,&original_config,&original)?;
                         return Ok::<_, anyhow::Error>(serde_json::json!({"authenticated":true,"profile":name,"testing_environment_id":test,
-                            "actor":identity.actor,"organization_id":identity.organization_id,"reconsent_required":identity.reconsent_required,"identity":identity,"webhook_url":profile.webhook_url}));
+                            "testing_generation":profile.testing_generation,"base_url":profile.base_url,"actor":identity.actor,"organization_id":identity.organization_id,"reconsent_required":identity.reconsent_required,"identity":identity,"webhook_url":profile.webhook_url}));
                     }
                 }
             }
@@ -419,6 +463,9 @@ impl LocalRuntime {
 }
 
 #[cfg(test)]
+mod context_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::{
@@ -427,6 +474,12 @@ mod tests {
         routing::{get, post},
     };
     use serde_json::json;
+
+    async fn discovery(headers: HeaderMap) -> Json<Value> {
+        Json(
+            json!({"app_id":"dm","iam_base_url":"https://iam.example","api_base_url":format!("http://{}",headers["host"].to_str().unwrap())}),
+        )
+    }
 
     #[test]
     fn silicon_callback_hosts_are_loopback_only() -> Result<()> {
@@ -466,8 +519,7 @@ mod tests {
                 Json(json!({"actor":{"type":"silicon","id":"si:cos"},"organization_id":"tos",
                     "principal_id":"principal","session_id":null,"org_role":null,"capabilities":[]}))
             }))
-            .route("/api/v1/iam", get(|| async { Json(json!({"app_id":"dm","iam_base_url":"https://iam.example",
-                "api_base_url":"https://dm.example/api/v1"})) }))
+            .route("/api/v1/iam", get(discovery))
             .route("/status", get(|| async { Json(json!({"running":true,"incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false},"host":{"shared":true}})) }))
             .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -569,6 +621,7 @@ mod tests {
 
         // A saved file alone is not evidence that its credentials are still valid.
         let app = Router::new()
+            .route("/api/v1/iam", get(discovery))
             .route(
                 "/api/v1/auth/me",
                 get(|| async { StatusCode::UNAUTHORIZED }),
@@ -576,7 +629,8 @@ mod tests {
             .route(
                 "/api/v1/auth/refresh",
                 post(|| async { StatusCode::UNAUTHORIZED }),
-            );
+            )
+            .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         assert_eq!(
@@ -594,6 +648,7 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = calls.clone();
         let app = Router::new()
+            .route("/api/v1/iam", get(discovery))
             .route("/api/v1/auth/refresh", post(move |Json(body): Json<Value>| {
                 let calls = observed.clone();
                 async move {
@@ -649,6 +704,7 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let observed = calls.clone();
         let app = Router::new()
+            .route("/api/v1/iam", get(discovery))
             .route("/api/v1/auth/refresh", post(move |headers: HeaderMap, Json(body): Json<Value>| {
                 let calls = observed.clone();
                 async move {

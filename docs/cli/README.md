@@ -5,6 +5,12 @@ an outgoing durable command relay. Ting owns incoming connections, delivery
 queues, retries and local webhook destinations. Production and testing logins are
 separate within each profile.
 
+Saved profiles pin one canonical account, organization, API and sandbox generation.
+`login status --json` verifies the live identity and data world; refresh cannot
+switch them. After a sandbox clean, or when an older profile has no saved
+generation, log in explicitly again. Queued requests remain available for review
+and explicit resubmission rather than being moved to a new sandbox generation.
+
 ## Install and discover
 
 Install a matching release with `honeycomb install 'dm'`. For this checkout,

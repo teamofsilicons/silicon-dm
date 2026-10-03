@@ -684,6 +684,9 @@ async fn submit(
                 let generation = info
                     .testing_generation
                     .context("testing generation unavailable")?;
+                if profile.testing_generation != Some(generation) {
+                    bail!("saved profile belongs to another testing generation; log in again before queueing new work");
+                }
                 context.queue.adopt_generation(&session, Some(generation))
             }
             .await;
@@ -1059,6 +1062,12 @@ async fn execute_request(context: RuntimeContext, request: RelayRequest) {
             };
             return;
         };
+        if profile.testing_generation != Some(generation) {
+            let _ = context.queue.finish(request.request_id, None, Some(&json!({
+                "code":"testing_generation_changed","message":"The saved login belongs to another sandbox generation; log in again and inspect this retained command before explicitly resubmitting."
+            })));
+            return;
+        }
         if context
             .queue
             .adopt_generation(&session, Some(generation))
@@ -1146,7 +1155,7 @@ mod tests {
         let profile: store::Profile = serde_json::from_value(json!({
             "name":"default","base_url":base,"webhook_url":format!("{base}/events"),
             "device_id":"outgoing-device","expires_at":store::now()+3600,
-            "testing_environment_id":testing,"enabled":true,
+            "testing_environment_id":testing,"testing_generation":testing.map(|_|1),"enabled":true,
             "tokens":{"access_token":"fixture","refresh_token":"fixture-refresh","token_type":"Bearer","expires_in":3600,
                 "scope":"dm","actor":{"type":"carbon","id":"c:bob"},"organization_id":"tos"}
         }))?;

@@ -32,7 +32,7 @@ async fn send_guard_precedes_queue_and_override_warns_only_after_delivery() -> R
             "expires_at":4102444800u64, "tokens":{
                 "access_token":"test-access", "refresh_token":"test-refresh", "token_type":"Bearer",
                 "expires_in":1800, "scope":"dm", "organization_id":"org",
-                "actor":{"type":sender,"id":"si:sender"}
+                "actor":{"type":sender,"id":if sender=="carbon" {"c:sender"}else{"si:sender"}}
             }
         }))?;
         store.update(|config| {

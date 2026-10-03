@@ -127,7 +127,7 @@ impl Fixture {
         runtime.store.update(|config|{
             config.profiles.insert(store::session_key("fixture",test),serde_json::from_value(json!({
                 "name":"fixture","base_url":origin,"device_id":"device","enabled":true,"expires_at":4_000_000_000_u64,
-                "testing_environment_id":test,"tokens":{"access_token":"fixture-dm-access","refresh_token":"fixture-dm-rotating-refresh",
+                "testing_environment_id":test,"testing_generation":test.map(|_|1),"tokens":{"access_token":"fixture-dm-access","refresh_token":"fixture-dm-rotating-refresh",
                 "token_type":"Bearer","expires_in":3600,"scope":"dm","member":{"type":"silicon","id":"si:cos"},"organization_id":"tos"}}))?);
             if let Some(id)=test {config.testing_keys.insert(id,store::TestKey {key:"dddddddddddddddddddddddddddddddd".into(),base_url:origin.clone()});}
             Ok(())

@@ -36,6 +36,19 @@ Login saves its tokens before starting the outgoing relay, so a launch failure c
 be recovered with `start()` without consuming another SLT. Use `start_with()` and
 an explicit `DaemonCommand` executable path when `dm-relay` is not on PATH.
 
+Login verifies DM's discovery response against the selected API and data world.
+The saved account pins the canonical Carbon/Silicon actor, organization, backend
+and testing generation. Refresh rotates credentials within that context only;
+`login_status()` verifies both discovery and `/auth/me` against it. A response or
+local configuration change cannot silently replace the account while a request
+is in flight. Status adds the public `base_url` and `testing_generation` fields
+and never includes tokens.
+
+Legacy sandbox profiles without a saved generation require an explicit new DM
+login. A clean or restore also requires login for the new generation. Queued
+requests remain on disk; old generation commands require inspection and explicit
+resubmission. Production profiles remain separate and never adopt test authority.
+
 `LoginOptions.webhook_url` must be `None`. The old `runtime.webhook(...)` method
 returns migration guidance. Do not configure a legacy DM callback and assume it
 understands Ting batches.
