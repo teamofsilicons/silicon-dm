@@ -360,6 +360,14 @@ export async function getSession(): Promise<Session> {
   const revision = sessionRevision;
   return adoptSession(await api<Session>("/api/session"), revision);
 }
+export async function cancelBrowserLogin(nonce: string): Promise<void> {
+  await api("/api/login/cancel", {
+    method: "POST",
+    body: { nonce },
+    keepalive: true,
+  });
+}
+
 /** Verify the exact popup context before selecting it in this tab. */
 export async function completeBrowserLogin(
   profileId: string,

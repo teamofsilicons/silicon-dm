@@ -92,9 +92,9 @@ export function openIamPopup(
     window.addEventListener("message", receive);
     signal.addEventListener("abort", abort, { once: true });
     Promise.resolve()
-      .then(() => start(nonce))
+      .then(() => (settled ? undefined : start(nonce)))
       .then((url) => {
-        if (!settled) popup.location.href = url;
+        if (!settled && url) popup.location.href = url;
       })
       .catch((error) =>
         finish(

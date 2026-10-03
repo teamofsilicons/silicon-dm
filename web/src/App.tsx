@@ -17,6 +17,7 @@ import {
   api,
   getConfig,
   completeBrowserLogin,
+  cancelBrowserLogin,
   currentSession,
   getSession,
   login,
@@ -224,21 +225,42 @@ function SignIn(props: {
     previous: Session;
     controller: AbortController;
   }>();
-  let pending: AbortController | undefined;
+  let pending: AbortController | undefined, pendingNonce: string | undefined;
+  async function cancelPending() {
+    pending?.abort();
+    pending = undefined;
+    const nonce = pendingNonce;
+    setVerification();
+    if (nonce) await cancelBrowserLogin(nonce);
+    if (pendingNonce === nonce) pendingNonce = undefined;
+  }
+  async function fullPage(event: MouseEvent, kind: IdentityKind) {
+    event.preventDefault();
+    setBusy(true);
+    setError();
+    try {
+      await cancelPending();
+      location.assign(iamLoginHref(kind));
+    } catch (error) {
+      setError(error);
+      setBusy(false);
+    }
+  }
   async function verifyLogin(
     attempt: NonNullable<ReturnType<typeof verification>>,
   ) {
     setBusy(true);
     setError();
     try {
-      props.done(
-        await completeBrowserLogin(
-          attempt.profile,
-          attempt.kind,
-          attempt.previous,
-          attempt.controller.signal,
-        ),
+      const verified = await completeBrowserLogin(
+        attempt.profile,
+        attempt.kind,
+        attempt.previous,
+        attempt.controller.signal,
       );
+      pendingNonce = undefined;
+      pending = undefined;
+      props.done(verified);
       setVerification();
     } catch (error) {
       if (!attempt.controller.signal.aborted) {
@@ -249,7 +271,9 @@ function SignIn(props: {
       if (!attempt.controller.signal.aborted) setBusy(false);
     }
   }
-  onCleanup(() => pending?.abort());
+  onCleanup(() => {
+    void cancelPending().catch(() => {});
+  });
   async function signIn(kind: IdentityKind) {
     if (busy()) return;
     const previous = currentSession();
@@ -259,15 +283,19 @@ function SignIn(props: {
     setError();
     setVerification();
     try {
-      const profile = await openIamPopup(
-        (nonce) => iamLoginHref(kind, nonce, previous.profile_id),
-        controller.signal,
-      );
+      const profile = await openIamPopup((nonce) => {
+        pendingNonce = nonce;
+        return iamLoginHref(kind, nonce, previous.profile_id);
+      }, controller.signal);
       const attempt = { profile, kind, previous, controller };
       setVerification(attempt);
       await verifyLogin(attempt);
     } catch (error) {
-      if (!controller.signal.aborted) setError(error);
+      if (!controller.signal.aborted) {
+        await cancelPending().catch(() => {});
+        setError(error);
+        setBusy(false);
+      }
     } finally {
       if (!controller.signal.aborted) setBusy(false);
     }
@@ -341,13 +369,23 @@ function SignIn(props: {
             </button>
           )}
         </Show>
-        <Show when={!busy()}>
-          <p class="footnote">
-            If popups are unavailable, continue in this tab as{" "}
-            <a href={iamLoginHref("carbon")}>Carbon</a> or{" "}
-            <a href={iamLoginHref("silicon")}>Silicon</a>.
-          </p>
-        </Show>
+        <p class="footnote">
+          If popups are unavailable, continue in this tab as{" "}
+          <a
+            href={iamLoginHref("carbon")}
+            onClick={(event) => void fullPage(event, "carbon")}
+          >
+            Carbon
+          </a>{" "}
+          or{" "}
+          <a
+            href={iamLoginHref("silicon")}
+            onClick={(event) => void fullPage(event, "silicon")}
+          >
+            Silicon
+          </a>
+          .
+        </p>
         <details class="test-signin">
           <summary>Use a testing environment</summary>
           <form class="stack" onSubmit={(event) => void enterTest(event)}>

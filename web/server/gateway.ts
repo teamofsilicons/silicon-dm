@@ -329,6 +329,35 @@ export class Gateway {
         res.end();
         return true;
       }
+      if (path === "/api/login/cancel" && method === "POST") {
+        const body = await requestJson(req),
+          id = this.sessions.cookieId(req);
+        if (
+          typeof body.nonce !== "string" ||
+          !/^[a-f0-9]{64}$/.test(body.nonce)
+        )
+          throw new GatewayError(
+            400,
+            "invalid_login",
+            "A login cancellation requires its popup nonce.",
+          );
+        if (id)
+          await this.sessions.locked(id, async () => {
+            const browser = await this.sessions.read(id),
+              flow = browser?.value.flow;
+            if (!browser || !flow || flow.popup_nonce !== body.nonce) return;
+            if (flow.completed && browser.value.selected === flow.completed)
+              browser.value.selected = browser.value.profiles.some(
+                (p) => p.profile_id === flow.selected,
+              )
+                ? flow.selected
+                : undefined;
+            delete browser.value.flow;
+            await this.sessions.save(browser);
+          });
+        json(res, { cancelled: true });
+        return true;
+      }
       if (path === "/api/login" && method === "POST") {
         this.authRate(req);
         const body = await requestJson(req);

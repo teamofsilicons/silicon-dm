@@ -36,6 +36,7 @@ async function fixture(t: TestContext, saved = false) {
     loginActor: { id: "c:test-alice", type: "carbon" },
     meStatus: 200,
     beforeMeReply: undefined as (() => Promise<void>) | undefined,
+    beforeLoginReply: undefined as (() => Promise<void>) | undefined,
     consentStatus: 200,
     loginOrganizations: ["test-org"],
     key: rootKey,
@@ -100,6 +101,7 @@ async function fixture(t: TestContext, saved = false) {
       };
     }
     if (req.url === "/api/v1/auth/me") await state.beforeMeReply?.();
+    if (req.url === "/api/v1/auth/login") await state.beforeLoginReply?.();
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ type: "response", data }));
   });
@@ -796,5 +798,95 @@ test("completed popup callback replays after restart without issuing another log
   assert.equal(
     f.calls.filter((c) => c.path === "/api/v1/auth/login").length,
     1,
+  );
+});
+test("nonce cancellation prevents a delayed callback from exchanging credentials", async (t) => {
+  const f = await fixture(t);
+  const callback = await startLogin(f, "carbon");
+  assert.equal(
+    (await f.request("/api/login/cancel", { nonce: "a".repeat(64) })).status,
+    200,
+  );
+  assert.equal((await navigateLogin(f, callback.href)).status, 400);
+  assert.equal(
+    (await f.gateway.sessions.read(f.browser.id))!.value.selected,
+    production,
+  );
+  assert(!f.calls.some((c) => c.path === "/api/v1/auth/login"));
+});
+test("late cancellation restores initiating selection and never reactivates completed login", async (t) => {
+  const f = await fixture(t);
+  const callback = await startLogin(f, "carbon");
+  assert.equal((await navigateLogin(f, callback.href)).status, 303);
+  const completed = (await f.gateway.sessions.read(f.browser.id))!.value
+    .selected;
+  assert.notEqual(completed, production);
+  assert.equal(
+    (await f.request("/api/login/cancel", { nonce: "a".repeat(64) })).status,
+    200,
+  );
+  const saved = (await f.gateway.sessions.read(f.browser.id))!.value;
+  assert.equal(saved.selected, production);
+  assert.equal(saved.profiles.length, 2);
+  assert.equal((await navigateLogin(f, callback.href)).status, 400);
+});
+test("cancelling an older popup cannot cancel a newer attempt", async (t) => {
+  const f = await fixture(t);
+  await startLogin(f, "carbon");
+  const started = await navigateLogin(
+    f,
+    `/auth/login?identity_kind=carbon&popup_nonce=${"b".repeat(64)}`,
+  );
+  const callback = new URL(
+    new URL(started.headers.get("location")!).searchParams.get("redirect_uri")!,
+  );
+  callback.searchParams.set("slt", "callback-test-slt");
+  assert.equal(
+    (await f.request("/api/login/cancel", { nonce: "a".repeat(64) })).status,
+    200,
+  );
+  assert.equal((await navigateLogin(f, callback.href)).status, 303);
+});
+test("cancellation waits for an in-flight exchange then restores selection atomically", async (t) => {
+  const f = await fixture(t);
+  const callback = await startLogin(f, "carbon");
+  let entered!: () => void, release!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.state.beforeLoginReply = async () => {
+    entered();
+    await released;
+  };
+  const completion = navigateLogin(f, callback.href);
+  await waiting;
+  const cancellation = f.request("/api/login/cancel", {
+    nonce: "a".repeat(64),
+  });
+  release();
+  assert.equal((await completion).status, 303);
+  assert.equal((await cancellation).status, 200);
+  const saved = (await f.gateway.sessions.read(f.browser.id))!.value;
+  assert.equal(saved.selected, production);
+  assert.equal(saved.flow, undefined);
+  assert.equal((await navigateLogin(f, callback.href)).status, 400);
+});
+test("completed callback cannot reactivate a session after logout", async (t) => {
+  const f = await fixture(t),
+    callback = await startLogin(f, "carbon");
+  assert.equal((await navigateLogin(f, callback.href)).status, 303);
+  const selected = (await f.gateway.sessions.read(f.browser.id))!.value
+    .selected!;
+  assert.equal(
+    (await f.request("/api/logout", { profile_id: selected }, selected)).status,
+    200,
+  );
+  assert.equal((await navigateLogin(f, callback.href)).status, 400);
+  assert.equal(
+    (await f.gateway.sessions.read(f.browser.id))!.value.selected,
+    production,
   );
 });
