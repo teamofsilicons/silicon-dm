@@ -77,10 +77,13 @@ export function TingAuthorization(props: {
                 required
               />
             </label>
-            <button type="button" onClick={() => flow.reset()}>
+            <button class="button" type="button" onClick={() => flow.reset()}>
               Cancel
             </button>
-            <button disabled={state().busy || !state().code.trim()}>
+            <button
+              class="button primary"
+              disabled={state().busy || !state().code.trim()}
+            >
               {state().busy ? "Connecting…" : "Complete authorization"}
             </button>
           </form>
