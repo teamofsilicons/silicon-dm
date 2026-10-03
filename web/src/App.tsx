@@ -226,6 +226,8 @@ function SignIn(props: {
     controller: AbortController;
   }>();
   let pending: AbortController | undefined, pendingNonce: string | undefined;
+  let mounted = true,
+    navigationGeneration = 0;
   async function cancelPending() {
     pending?.abort();
     pending = undefined;
@@ -236,14 +238,24 @@ function SignIn(props: {
   }
   async function fullPage(event: MouseEvent, kind: IdentityKind) {
     event.preventDefault();
+    const generation = ++navigationGeneration;
+    const previous = currentSession();
+    const destination = iamLoginHref(kind, undefined, previous.profile_id);
     setBusy(true);
     setError();
     try {
       await cancelPending();
-      location.assign(iamLoginHref(kind));
+      if (!mounted || generation !== navigationGeneration) return;
+      if (currentSession() !== previous)
+        throw new Error(
+          "The selected account changed. Choose your sign-in option again.",
+        );
+      location.assign(destination);
     } catch (error) {
-      setError(error);
-      setBusy(false);
+      if (mounted && generation === navigationGeneration) {
+        setError(error);
+        setBusy(false);
+      }
     }
   }
   async function verifyLogin(
@@ -272,10 +284,13 @@ function SignIn(props: {
     }
   }
   onCleanup(() => {
+    mounted = false;
+    navigationGeneration++;
     void cancelPending().catch(() => {});
   });
   async function signIn(kind: IdentityKind) {
     if (busy()) return;
+    navigationGeneration++;
     const previous = currentSession();
     const controller = new AbortController();
     pending = controller;
