@@ -43,7 +43,7 @@ values in template parameters, committed files, shell arguments, or outputs.
 
 | Field | Required value |
 | --- | --- |
-| `DM_IAM_APP_ID` | Canonical IAM app identifier, `tos>dm` |
+| `DM_IAM_APP_ID` | Canonical IAM app identifier, `dm` |
 | `DM_IAM_APP_SECRET` | Registered IAM application credential |
 | `DM_IAM_WEBHOOK_SECRET` | Registered webhook signing secret |
 | `DM_IAM_WEBHOOK_KEY_VERSION` | Positive **JSON integer** matching the IAM signing version |
