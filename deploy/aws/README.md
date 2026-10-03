@@ -54,7 +54,9 @@ values in template parameters, committed files, shell arguments, or outputs.
 
 Bootstrap reads secrets through the host instance role. It creates `dm_runtime`
 with no DDL/role-management privileges in production and `dm_testing` with
-`CREATE ON DATABASE` in the distinct testing database. The latter owns only
+`CREATE, TEMPORARY ON DATABASE` in the distinct testing database. `TEMPORARY`
+allows the schema migrations' transaction-local identifier mapping tables; it
+is granted only to `dm_testing`, never `PUBLIC` or the production role. The latter owns only
 schemas it creates for isolated environments. RDS manages each database master
 credential. Only bootstrap uses master credentials, applies the embedded
 production migrations, and grants the runtime privileges from
