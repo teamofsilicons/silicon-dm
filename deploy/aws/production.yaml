@@ -632,7 +632,7 @@ Resources:
             REVOKE CREATE ON SCHEMA public FROM PUBLIC;
             """ % (role, role, role, role, database, database, role)
                 if testing:
-                    sql += 'GRANT CREATE ON DATABASE ' + database + ' TO ' + role + ';\n'
+                    sql += 'GRANT CREATE, TEMPORARY ON DATABASE ' + database + ' TO ' + role + ';\n'
                 sql += 'COMMIT;\n'
                 subprocess.run(['psql', '-X', '--set', 'ON_ERROR_STOP=1'], input=sql, text=True,
                                env=environment, check=True)

@@ -58,7 +58,7 @@ GRANT CONNECT ON DATABASE %s TO %s;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 """ % (role, role, role, role, database, database, role)
     if testing:
-        sql += 'GRANT CREATE ON DATABASE ' + database + ' TO ' + role + ';\n'
+        sql += 'GRANT CREATE, TEMPORARY ON DATABASE ' + database + ' TO ' + role + ';\n'
     sql += 'COMMIT;\n'
     print('Configuring restricted database role: ' + role, flush=True)
     command(['psql', '-X', '--set', 'ON_ERROR_STOP=1'], environment, sql)

@@ -15,6 +15,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  bootstrap-grants:
+    name: Restricted database bootstrap grants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: python3 deploy/aws/test_bootstrap_grants.py
+      - run: bash -n deploy/aws/bootstrap.sh
+      - run: python3 deploy/aws/render.py && git diff --exit-code -- deploy/aws/production.yaml
+
   rust:
     name: Rust quality gate
     runs-on: ubuntu-latest

@@ -71,7 +71,9 @@ A zero exit and the final completion message mean that it has:
    role-management, database-creation, replication, or RLS-bypass privileges.
 3. Applied production migrations as the production master and the canonical
    restricted grants. Test schemas are still created/migrated only through DM's
-   isolated environment lifecycle, with `CREATE ON DATABASE` for `dm_testing`.
+   isolated environment lifecycle, with `CREATE, TEMPORARY ON DATABASE` for
+   `dm_testing` only. Temporary mapping tables are required by schema migrations;
+   this does not grant temporary-table privileges to `PUBLIC` or production.
 4. Written a separate Secrets Manager JSON document containing restricted
    database URLs and the runtime app/provider settings. It does not include
    either RDS master password.
