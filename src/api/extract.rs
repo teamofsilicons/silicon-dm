@@ -19,6 +19,7 @@ use crate::{
 
 static ORG_ID: HeaderName = HeaderName::from_static("x-org-id");
 static OBO_PROOF: HeaderName = HeaderName::from_static("x-iam-obo-access-proof");
+static OBO_TOKEN: HeaderName = HeaderName::from_static("x-iam-obo-access-token");
 static IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
 static IF_MATCH: HeaderName = HeaderName::from_static("if-match");
 
@@ -90,14 +91,6 @@ impl FromRequestParts<AppState> for Authenticated {
         if context.organization_id != organization_id {
             return Err(AppError::Forbidden);
         }
-        // A verified request renews background authority for this same account.
-        // Failing before a mutation preserves its idempotent retry boundary.
-        state.ting_credentials()?.remember(&context).await?;
-        // Every member receives DM updates through Ting; enroll on first contact.
-        crate::infrastructure::ting_auto_enrollment::spawn_ensure(
-            state.ting_auto_enrollment(),
-            context.clone(),
-        );
         // Resolve decoded addresses before exact-token authorization. The internal key
         // is passed to handlers only after tenant-scoped lookup succeeds.
         if let Ok(Path(mut parameters)) =
@@ -356,6 +349,9 @@ pub(super) fn realtime_bearer(headers: &HeaderMap) -> AppResult<SecretString> {
     if optional_single_header(headers, &OBO_PROOF)
         .map_err(|_| AppError::Unauthorized)?
         .is_some()
+        || optional_single_header(headers, &OBO_TOKEN)
+            .map_err(|_| AppError::Unauthorized)?
+            .is_some()
     {
         return Err(AppError::Unauthorized);
     }

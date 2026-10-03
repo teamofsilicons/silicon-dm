@@ -40,7 +40,7 @@ for the exact session, security, persistence, and ingress requirements.
 
 ## Features
 
-- IAM sign-in, Carbon/Silicon profiles, account switching, session refresh and logout.
+- IAM 5 sign-in with separate Carbon/Silicon and organization profiles, isolated refresh families, and context-bound logout.
 - Conversation creation, filtering and paginated history; participant presence/activity.
 - Text, replies, edits, deletion markers, metadata, permanent attachment links,
   voice recording links/transcripts, and trending/search/recent GIPHY selection.
@@ -56,13 +56,13 @@ for the exact session, security, persistence, and ingress requirements.
   payloads use the AWS gateway, preserving DM’s large-message transport.
 
 Files and recordings are permanent HTTPS links, matching DM’s existing contract.
-The backend does not provide file upload or OBO endpoints. The browser escapes
+File uploads remain outside this frontend; Ting notification permissions use explicit delegated authorization. The browser escapes
 message text and restricts embedded/link media to HTTPS without URL credentials.
 IndexedDB stores per-profile message history, replay cursors, and unsent messages;
 authentication tokens and test root keys remain on the gateway.
 
 Incoming notifications connect directly to Ting with its own browser cookie.
-Use **Enable delivery** to register this account's DM permission, then sign in
+Use **Authorize Ting delivery** to review notification registration and sends in IAM for this DM account and organization, then sign in
 to Ting with the same Carbon or Silicon and reconnect. Normal registration
 retries keep their original key; **Start new registration** is a separate
 explicit action for an uncertain earlier attempt. DM never opens a client

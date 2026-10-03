@@ -436,65 +436,55 @@ async fn http_routes_scope_cursors_and_leases_and_deduplicate_enrollment() -> Re
         204
     );
 
+    // An ordinary login must never silently enroll the account or mint OBO tokens.
     let key = Uuid::new_v4().to_string();
-    for _ in 0..2 {
-        let reply: Value = request(
+    for actor in ["c:alice", "c:bob"] {
+        let response = request(
             reqwest::Method::POST,
             "/api/v1/delivery/registration",
-            "c:bob",
+            actor,
         )
         .header("Idempotency-Key", &key)
         .json(&json!({"type":"delivery_registration","data":{}}))
         .send()
-        .await?
-        .error_for_status()?
-        .json()
         .await?;
-        assert_eq!(reply["data"]["for"], "c:bob");
+        assert_eq!(response.status(), 428);
+        assert_eq!(
+            response.json::<Value>().await?["data"]["error"]["code"],
+            "ting_authorization_required"
+        );
     }
-    assert_eq!(identity.0.load(Ordering::SeqCst), 1);
-    request(
-        reqwest::Method::POST,
-        "/api/v1/delivery/registration",
-        "c:alice",
-    )
-    .header("Idempotency-Key", &key)
-    .json(&json!({"type":"delivery_registration","data":{}}))
-    .send()
-    .await?
-    .error_for_status()?;
-    assert_eq!(identity.0.load(Ordering::SeqCst), 2);
+    assert_eq!(identity.0.load(Ordering::SeqCst), 0);
     assert_eq!(
         request(
             reqwest::Method::POST,
             "/api/v1/delivery/registration",
             "c:bob"
         )
-        .header("Idempotency-Key", Uuid::new_v4().to_string())
+        .header("Idempotency-Key", &key)
         .json(&json!({"type":"delivery_registration","data":{"for":"c:alice"}}))
         .send()
         .await?
         .status(),
         422
     );
-    assert_eq!(identity.0.load(Ordering::SeqCst), 2);
-    let uncertain = Uuid::new_v4().to_string();
-    for status in [503, 409] {
-        assert_eq!(
-            request(
-                reqwest::Method::POST,
-                "/api/v1/delivery/registration",
-                "unavailable"
-            )
-            .header("Idempotency-Key", &uncertain)
-            .json(&json!({"type":"delivery_registration","data":{}}))
-            .send()
-            .await?
-            .status(),
-            status
-        );
-    }
-    assert_eq!(identity.0.load(Ordering::SeqCst), 3);
+    let status = request(
+        reqwest::Method::GET,
+        "/api/v1/delivery/authorization",
+        "c:bob",
+    )
+    .send()
+    .await?
+    .error_for_status()?
+    .json::<Value>()
+    .await?;
+    assert_eq!(status["data"]["status"], "authorization_required");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ting_enrollment_receipts")
+            .fetch_one(store.pool())
+            .await?,
+        0
+    );
     server.abort();
     store.pool().close().await;
     Ok(())

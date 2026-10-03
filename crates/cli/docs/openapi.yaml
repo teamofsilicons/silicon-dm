@@ -18,6 +18,155 @@ tags:
   - {name: Operations, description: Deployment health probes}
   - {name: Delivery, description: Explicit Ting recipient enrollment and authoritative HTTP recovery}
 paths:
+  /api/v1/delivery/authorization:
+    get:
+      operationId: getTingAuthorization
+      tags: [Delivery]
+      summary: Read locally stored Ting authorization
+      parameters:
+        - {$ref: '#/components/parameters/OrgId'}
+        - {$ref: '#/components/parameters/TestingKey'}
+        - {$ref: '#/components/parameters/TestingGeneration'}
+      responses:
+        '200':
+          description: Public authorization status; access and refresh tokens remain encrypted on the server.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: delivery_authorization}
+                  data: {type: object}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    post:
+      operationId: authorizeTing
+      tags: [Delivery]
+      summary: Request separate IAM approval for Ting notifications
+      parameters:
+        - {$ref: '#/components/parameters/OrgId'}
+        - {$ref: '#/components/parameters/TestingKey'}
+        - {$ref: '#/components/parameters/TestingGeneration'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [type, data]
+              properties:
+                type: {type: string, const: delivery_authorization}
+                data: {type: object, additionalProperties: false}
+      responses:
+        '200':
+          description: Public authorization status; access and refresh tokens remain encrypted on the server.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: delivery_authorization}
+                  data: {type: object}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/delivery/authorization/complete:
+    post:
+      operationId: completeTingAuthorization
+      tags: [Delivery]
+      summary: Redeem reviewed permission and register the recipient
+      parameters:
+        - {$ref: '#/components/parameters/OrgId'}
+        - {$ref: '#/components/parameters/TestingKey'}
+        - {$ref: '#/components/parameters/TestingGeneration'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [type, data]
+              properties:
+                type: {type: string, const: delivery_authorization_complete}
+                data:
+                  type: object
+                  additionalProperties: false
+                  required: [authorization_id, authorization_code]
+                  properties:
+                    authorization_id: {type: string, format: uuid}
+                    authorization_code: {type: string, minLength: 1, maxLength: 4096}
+      responses:
+        '200':
+          description: Public authorization status; access and refresh tokens remain encrypted on the server.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: delivery_authorization_complete}
+                  data: {type: object}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/delivery/authorization/disconnect:
+    post:
+      operationId: disconnectTingAuthorization
+      tags: [Delivery]
+      summary: Delete DM delegated credentials
+      parameters:
+        - {$ref: '#/components/parameters/OrgId'}
+        - {$ref: '#/components/parameters/TestingKey'}
+        - {$ref: '#/components/parameters/TestingGeneration'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [type, data]
+              properties:
+                type: {type: string, const: delivery_authorization_disconnect}
+                data: {type: object, additionalProperties: false}
+      responses:
+        '200':
+          description: Public authorization status; access and refresh tokens remain encrypted on the server.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: delivery_authorization_disconnect}
+                  data: {type: object}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /api/v1/delivery/registration:
     post:
       operationId: registerTingDelivery
@@ -25,11 +174,11 @@ paths:
       summary: Explicitly enroll the authenticated recipient for Ting notifications.
       description: >-
         Registers or reconnects the authenticated actor's dm recipient grant in Ting using
-        their current IAM consent. Requires the approved external subscriptions.register scope
-        and self.identity.read. This is not a Ting login or webhook registration. Completed
+        a dedicated subscriptions.register token from separate IAM approval. Ordinary
+        login scopes never grant notification permission; missing/revoked approval returns 428. This is not a Ting login or webhook registration. Completed
         Idempotency-Key retries return the cached public subscription without reactivating a
         later revocation. An in-flight or uncertain previous result returns 409; a new explicit
-        registration requires a new key. No user tokens or proofs are persisted.
+        registration requires a new key. Dedicated OBO credentials are encrypted server-side.
       parameters:
         - {$ref: '#/components/parameters/OrgId'}
         - {$ref: '#/components/parameters/TestingKey'}

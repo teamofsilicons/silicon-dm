@@ -302,6 +302,43 @@ impl Client {
     pub async fn me(&self) -> Result<Identity> {
         self.json(self.request(Method::GET, "auth/me")?).await
     }
+    /// Starts separate IAM approval for DM's Ting registration and sends.
+    pub async fn authorize_delivery(&self, key: &str) -> Result<Value> {
+        self.json(
+            self.request(Method::POST, "delivery/authorization")?
+                .header("Idempotency-Key", key)
+                .json(&json!({})),
+        )
+        .await
+    }
+    /// Redeems the one-time consent code; dedicated tokens remain on the server.
+    pub async fn complete_delivery_authorization(
+        &self,
+        id: Uuid,
+        code: &str,
+        key: &str,
+    ) -> Result<Value> {
+        self.json(
+            self.request(Method::POST, "delivery/authorization/complete")?
+                .header("Idempotency-Key", key)
+                .json(&json!({"authorization_id":id,"authorization_code":code})),
+        )
+        .await
+    }
+    /// Reads local stored authorization; receivers still verify every request.
+    pub async fn delivery_authorization(&self) -> Result<Value> {
+        self.json(self.request(Method::GET, "delivery/authorization")?)
+            .await
+    }
+    /// Deletes DM's delegated credentials. Global revocation is managed in IAM.
+    pub async fn disconnect_delivery_authorization(&self, key: &str) -> Result<Value> {
+        self.json(
+            self.request(Method::POST, "delivery/authorization/disconnect")?
+                .header("Idempotency-Key", key)
+                .json(&json!({})),
+        )
+        .await
+    }
     /// Explicitly enrolls this recipient's DM grant in Ting. Reuse the key on retry.
     pub async fn register_delivery(&self, key: &str) -> Result<DeliveryRegistration> {
         self.json(

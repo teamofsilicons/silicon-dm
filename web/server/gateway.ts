@@ -7,6 +7,7 @@ import {
   GatewayError,
   Sessions,
   constantEqual,
+  publicProfile,
   selectProfile,
   uuidPattern,
 } from "./session.ts";
@@ -365,6 +366,15 @@ export class Gateway {
             "login_required",
             "Select an available browser profile.",
           );
+        // Verify the target before changing the durable default. An upstream
+        // outage must not make the next page load select a rejected switch.
+        const verified = await this.auth.describe(id, requested);
+        if (!verified.authenticated || !("actor" in verified))
+          throw new GatewayError(
+            401,
+            "login_required",
+            "Sign in to this browser profile.",
+          );
         await this.sessions.locked(id, async () => {
           const browser = await this.sessions.read(id);
           if (!browser)
@@ -373,11 +383,27 @@ export class Gateway {
               "login_required",
               "Sign in to continue.",
             );
-          selectProfile(browser, requested);
+          const target = selectProfile(browser, requested);
+          // A concurrent logout, replacement or testing-context change may
+          // have happened while the identity request was in flight.
+          if (
+            target.auth_required ||
+            verified.profile_id !== target.profile_id ||
+            verified.actor.id !== target.actor.id ||
+            verified.actor.type !== target.actor.type ||
+            verified.organization_id !== target.organization_id ||
+            verified.testing_environment_id !== target.testing_environment_id
+          )
+            throw new GatewayError(
+              409,
+              "profile_changed",
+              "This profile changed while it was being verified. Retry the switch.",
+            );
           browser.value.selected = requested;
           await this.sessions.save(browser);
+          verified.profiles = browser.value.profiles.map(publicProfile);
         });
-        json(res, await this.auth.describe(id, requested));
+        json(res, verified);
         return true;
       }
       if (path === "/api/refresh" && method === "POST") {

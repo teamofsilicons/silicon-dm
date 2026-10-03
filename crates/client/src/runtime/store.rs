@@ -27,12 +27,146 @@ pub struct Profile {
     pub refresh_started_at: Option<u64>,
     #[serde(default)]
     pub testing_environment_id: Option<Uuid>,
+    /// Verified sandbox generation. Legacy sandbox profiles must sign in again.
+    #[serde(default)]
+    pub testing_generation: Option<i64>,
     /// Local opt-in state; logging out retains durable inbox/outbox records.
     #[serde(default = "enabled")]
     pub enabled: bool,
 }
 fn enabled() -> bool {
     true
+}
+pub(crate) fn normalized_backend(base: &str) -> Result<String> {
+    Ok(Client::new(base)?.base.to_string())
+}
+pub(crate) fn validate_tokens(tokens: &Tokens) -> Result<()> {
+    let (prefix, limit) = match tokens.actor.actor_type {
+        crate::ActorType::Carbon => ("c:", 30),
+        crate::ActorType::Silicon => ("si:", 50),
+    };
+    let handle = tokens.actor.id.strip_prefix(prefix).unwrap_or_default();
+    let valid = |s: &str, max| {
+        (3..=max).contains(&s.len())
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
+    };
+    if !valid(handle, limit)
+        || !valid(&tokens.organization_id, 50)
+        || tokens.access_token.is_empty()
+        || tokens.refresh_token.is_empty()
+        || tokens.token_type != "Bearer"
+        || tokens.expires_in <= 0
+        || tokens
+            .scope
+            .split_whitespace()
+            .any(|scope| scope.starts_with("obo:"))
+    {
+        bail!(
+            "DM session requires one canonical actor and organization with ordinary credentials; log in again"
+        );
+    }
+    Ok(())
+}
+impl Profile {
+    pub(crate) fn validate(&self, key: &str) -> Result<()> {
+        validate_tokens(&self.tokens)?;
+        normalized_backend(&self.base_url)?;
+        if self.name.is_empty()
+            || key != session_key(&self.name, self.testing_environment_id)
+            || !matches!(
+                (self.testing_environment_id, self.testing_generation),
+                (None, None)
+            ) && !matches!((self.testing_environment_id,self.testing_generation), (Some(id),Some(generation)) if !id.is_nil() && generation > 0)
+        {
+            bail!(
+                "profile does not match its saved account or data world; log in again in the original profile"
+            );
+        }
+        Ok(())
+    }
+    pub(crate) fn same_context(&self, other: &Self) -> Result<bool> {
+        Ok(self.name == other.name
+            && normalized_backend(&self.base_url)? == normalized_backend(&other.base_url)?
+            && self.tokens.actor == other.tokens.actor
+            && self.tokens.organization_id == other.tokens.organization_id
+            && self.testing_environment_id == other.testing_environment_id
+            && self.testing_generation == other.testing_generation
+            && self.device_id == other.device_id
+            && other.enabled)
+    }
+}
+
+pub(crate) fn check_discovery(
+    info: &crate::IamInfo,
+    base: &str,
+    test: Option<Uuid>,
+    generation: Option<i64>,
+) -> Result<()> {
+    if info.app_id != "dm"
+        || normalized_backend(&info.api_base_url)? != normalized_backend(base)?
+        || info.testing_environment_id != test
+        || match test {
+            None => info.testing_generation.is_some(),
+            Some(id) => id.is_nil() || !info.testing_generation.is_some_and(|g| g > 0),
+        }
+        || generation.is_some_and(|g| info.testing_generation != Some(g))
+    {
+        bail!(
+            "DM discovery does not match the original backend, testing environment and generation; log in again in its original context"
+        );
+    }
+    Ok(())
+}
+pub(crate) async fn verify_world(config: &Config, profile: &Profile) -> Result<()> {
+    let mut discovery = Client::new(&profile.base_url)?;
+    if let Some(id) = profile.testing_environment_id {
+        let key = config
+            .testing_keys
+            .get(&id)
+            .context("test key is missing")?;
+        if normalized_backend(&key.base_url)? != normalized_backend(&profile.base_url)? {
+            bail!("testing key belongs to a different backend URL")
+        }
+        discovery = discovery.with_test_key(&key.key)?;
+    }
+    let info = discovery.iam().await?;
+    check_discovery(
+        &info,
+        &profile.base_url,
+        profile.testing_environment_id,
+        profile.testing_generation,
+    )
+}
+pub(crate) fn check_current(
+    config: &Config,
+    key: &str,
+    original_config: &Config,
+    original: &Profile,
+) -> Result<()> {
+    let current = config.profiles.get(key).context("profile was removed")?;
+    current.validate(key)?;
+    if !original.same_context(current)? {
+        bail!(
+            "saved account context changed while the request was in flight; retry in its original context"
+        )
+    }
+    if let Some(id) = original.testing_environment_id {
+        let old = original_config
+            .testing_keys
+            .get(&id)
+            .context("original test key is missing")?;
+        let new = config
+            .testing_keys
+            .get(&id)
+            .context("test key was removed")?;
+        if old.key != new.key
+            || normalized_backend(&old.base_url)? != normalized_backend(&new.base_url)?
+        {
+            bail!("testing credentials changed while the request was in flight")
+        }
+    }
+    Ok(())
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TestKey {
@@ -254,9 +388,13 @@ pub fn session_key(name: &str, test: Option<Uuid>) -> String {
     )
 }
 pub fn profile<'a>(config: &'a Config, name: &str, test: Option<Uuid>) -> Result<&'a Profile> {
-    config.profiles.get(&session_key(name,test)).filter(|p|p.enabled).with_context(||format!("profile {name} is not logged in for {}; run dm {}--profile {name} login --token-file -",test.map_or("production".into(),|id|id.to_string()),test.map_or(String::new(),|id|format!("--test {id} "))))
+    let key = session_key(name, test);
+    let profile = config.profiles.get(&key).filter(|p|p.enabled).with_context(||format!("profile {name} is not logged in for {}; run dm {}--profile {name} login --token-file -",test.map_or("production".into(),|id|id.to_string()),test.map_or(String::new(),|id|format!("--test {id} "))))?;
+    profile.validate(&key)?;
+    Ok(profile)
 }
 pub fn client(config: &Config, profile: &Profile) -> Result<Client> {
+    profile.validate(&session_key(&profile.name, profile.testing_environment_id))?;
     let mut client = Client::new(&profile.base_url)?
         .with_telemetry(
             config.telemetry_enabled
@@ -279,12 +417,15 @@ pub fn client(config: &Config, profile: &Profile) -> Result<Client> {
             .testing_keys
             .get(&id)
             .context("test key is missing; run dm environments import-key")?;
-        if Client::new(&key.base_url).is_err()
-            || key.base_url.trim_end_matches('/') != profile.base_url.trim_end_matches('/')
-        {
+        if normalized_backend(&key.base_url)? != normalized_backend(&profile.base_url)? {
             bail!("testing key belongs to a different backend URL")
         }
         client = client.with_test_key(&key.key)?;
+        client = client.with_testing_generation(
+            profile
+                .testing_generation
+                .context("log in again to bind this sandbox generation")?,
+        )?;
     }
     Ok(client)
 }
@@ -334,12 +475,16 @@ impl Store {
             .filter(|p| p.enabled)
             .context("profile is logged out")?
             .clone();
+        profile.validate(key)?;
         if profile.expires_at > now() + margin && profile.refresh_started_at.is_none() {
             return Ok((config, profile));
         }
         let lock = self.profile_lock(key).await?;
+        let original_config = config;
+        let original = profile;
         for _ in 0..2 {
             let config = self.load()?;
+            check_current(&config, key, &original_config, &original)?;
             let profile = config
                 .profiles
                 .get(key)
@@ -349,8 +494,10 @@ impl Store {
             if profile.expires_at > now() + margin && profile.refresh_started_at.is_none() {
                 return Ok((config, profile));
             }
+            verify_world(&config, &profile).await?;
             let started_at = profile.refresh_started_at.unwrap_or_else(now);
             self.update(|c| {
+                check_current(c, key, &config, &profile)?;
                 if let Some(current) = c.profiles.get_mut(key)
                     && current.tokens.refresh_token == profile.tokens.refresh_token
                 {
@@ -370,8 +517,17 @@ impl Store {
             let tokens = refresher
                 .refresh(&profile.tokens.refresh_token, &refresh_key)
                 .await?;
+            validate_tokens(&tokens)?;
+            if tokens.actor != profile.tokens.actor
+                || tokens.organization_id != profile.tokens.organization_id
+            {
+                bail!(
+                    "DM refresh changed the immutable actor or organization; original credentials and pending requests were retained"
+                );
+            }
             let expires_at = started_at.saturating_add(tokens.expires_in.max(0) as u64);
             self.update(|c| {
+                check_current(c, key, &config, &profile)?;
                 if let Some(current) = c.profiles.get_mut(key)
                     && current.tokens.refresh_token == profile.tokens.refresh_token
                 {
@@ -382,6 +538,7 @@ impl Store {
                 Ok(())
             })?;
             let config = self.load()?;
+            check_current(&config, key, &original_config, &original)?;
             let profile = config.profiles.get(key).context("profile removed")?.clone();
             if profile.expires_at > now() + 60 {
                 FileExt::unlock(&lock)?;

@@ -20,7 +20,9 @@ Start Ting's installed shared service using its installation guidance. DM's
 dm iam --json
 dm login --token-file -
 dm login status --json
-dm delivery register
+dm delivery authorize
+# Approve in IAM, then complete using the one-time code.
+dm delivery complete AUTHORIZATION_ID --code-file -
 ```
 
 Request a DM-bound IAM short-lived token for the displayed `app_id` (`dm`).

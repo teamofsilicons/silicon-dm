@@ -5,6 +5,12 @@ an outgoing durable command relay. Ting owns incoming connections, delivery
 queues, retries and local webhook destinations. Production and testing logins are
 separate within each profile.
 
+Saved profiles pin one canonical account, organization, API and sandbox generation.
+`login status --json` verifies the live identity and data world; refresh cannot
+switch them. After a sandbox clean, or when an older profile has no saved
+generation, log in explicitly again. Queued requests remain available for review
+and explicit resubmission rather than being moved to a new sandbox generation.
+
 ## Install and discover
 
 Install a matching release with `honeycomb install 'dm'`. For this checkout,
@@ -31,7 +37,9 @@ retry keys go to stderr. `--json` selects compact output.
 dm iam --json
 dm --profile writer login --token-file -
 dm --profile writer login status --json
-dm --profile writer delivery register
+dm --profile writer delivery authorize
+# Open the returned IAM URL and approve the exact permissions.
+dm --profile writer delivery complete AUTHORIZATION_ID --code-file -
 dm --profile writer delivery login --token-file -
 dm --profile writer webhook http://localhost:9000/tings --all-apps --secret-file /private/callback-secret
 dm --profile writer delivery status
@@ -39,8 +47,15 @@ dm --profile writer delivery status
 
 DM login takes a DM-bound IAM SLT. Ting login takes a separate **Ting-bound SLT**
 for the same typed member and organization; DM tokens cannot authenticate a Ting
-receiver. `delivery register` is the explicit IAM-consented grant allowing DM to
-send this recipient tings. Login, status and reconnect never silently enroll it.
+receiver. `delivery authorize` requests separate approval for registration and sends;
+`delivery complete` exchanges its one-time code and registers this recipient. Login,
+status and reconnect never grant OBO permission. Tokens stay encrypted on DM.
+`delivery authorization-status` reads local state; `delivery disconnect-authorization`
+stops DM delegation locally. Revoke the actual grant in IAM to stop every issued token.
+Authorization starts persist their encrypted request before contacting IAM. Retry an
+uncertain start with the same operation key, including after refreshing the login;
+the retained original request is replayed without creating permission automatically.
+An expired request needs a new explicit start.
 An uncertain registration prints its retry key before I/O; retry with that exact
 `--idempotency-key`, not a new registration. An uncertain Ting login reuses the
 same SLT and key; the default login key is stable for that SLT.

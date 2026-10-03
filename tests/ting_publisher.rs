@@ -3,9 +3,8 @@
 mod support;
 
 use async_trait::async_trait;
-use futures::{SinkExt as _, StreamExt as _};
 use secrecy::{ExposeSecret as _, SecretString};
-use serde_json::{Value, json};
+
 use silicon_dm::{
     AppError, AppResult,
     application::{
@@ -32,8 +31,7 @@ use std::{
     time::Duration,
 };
 use time::OffsetDateTime;
-use tokio::{net::TcpListener, time::timeout};
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -161,8 +159,7 @@ fn auth(org: &OrganizationId, actor: &ActorRef, token: &str) -> AuthContext {
     clippy::too_many_lines,
     reason = "one fixture follows immutable originator authority through outages, revocation and ambiguous sends"
 )]
-async fn only_the_verified_originator_can_publish_and_fresh_authority_recovers_pending_work()
--> TestResult {
+async fn legacy_login_and_recipient_tokens_never_become_delegated_send_authority() -> TestResult {
     let fixture = support::TestDatabase::start().await?;
     let database = DatabaseSettings {
         url: SecretString::from(fixture.url.clone()),
@@ -219,46 +216,6 @@ async fn only_the_verified_originator_can_publish_and_fresh_authority_recovers_p
         base_url: format!("http://{}", listener.local_addr()?).parse()?,
         request_timeout: Duration::from_secs(2),
     };
-    let expected_body = claim.request_body.clone();
-    let server = tokio::spawn(async move {
-        let mut sends = 0;
-        while sends < 4 {
-            let (stream, _) = timeout(Duration::from_secs(5), listener.accept()).await??;
-            let mut socket = accept_async(stream).await?;
-            socket
-                .send(Message::Text(
-                    json!({"op":"ready","protocol":"v1","receiver_id":"fixture-receiver"})
-                        .to_string()
-                        .into(),
-                ))
-                .await?;
-            loop {
-                let frame = timeout(Duration::from_secs(5), socket.next())
-                    .await?
-                    .ok_or("socket ended")??;
-                let Message::Text(frame) = frame else {
-                    return Err("unexpected frame".into());
-                };
-                let request: Value = serde_json::from_str(&frame)?;
-                sends += 1;
-                assert_eq!(request["body"], expected_body);
-                assert_eq!(
-                    request["proof_token"],
-                    format!("local-fixture-proof-{sends}")
-                );
-                if sends == 3 {
-                    socket.close(None).await?;
-                    break;
-                }
-                let body: Value = serde_json::from_str(&expected_body)?;
-                socket.send(Message::Text(json!({"op":"accepted","request_id":request["request_id"],"status":"accepted","id":"accepted-fixture-ting","key":body["key"],"created_at":"2026-09-22T10:00:00Z","silent":false}).to_string().into())).await?;
-                if sends == 4 {
-                    return Ok::<_, Box<dyn Error + Send + Sync>>(());
-                }
-            }
-        }
-        Ok(())
-    });
     let cancellation = CancellationToken::new();
     let socket = TingSocket::start(&settings, cancellation.clone());
     let key = SecretString::from("publisher-cache-fixture-app-secret");
@@ -291,91 +248,22 @@ async fn only_the_verified_originator_can_publish_and_fresh_authority_recovers_p
             .is_empty()
     );
 
-    let stale = auth(&org, &alice, "oat-originator-revoked");
-    identity.register(stale.clone())?;
-    cache.remember(&stale).await?;
-    identity.mode.store(2, Ordering::SeqCst);
+    let fresh = auth(&org, &alice, "oat-originator-with-legacy-consent");
+    identity.register(fresh.clone())?;
+    cache.remember(&fresh).await?;
     assert!(matches!(
         publisher.publish(&claim).await,
         Err(TingFailure::OriginatorAuthenticationRequired)
     ));
     assert!(
-        cache.candidates(&org, &alice).await?.is_empty(),
-        "definitively revoked token is removed"
-    );
-    assert_eq!(
-        cache.candidates(&org, &bob).await?.len(),
-        1,
-        "another account remains untouched"
-    );
-
-    let fresh = auth(&org, &alice, "oat-originator-fresh");
-    identity.register(fresh.clone())?;
-    cache.remember(&fresh).await?;
-    identity.mode.store(1, Ordering::SeqCst);
-    assert!(matches!(
-        publisher.publish(&claim).await,
-        Err(TingFailure::AuthorityUnavailable)
-    ));
-    assert_eq!(
-        cache.candidates(&org, &alice).await?.len(),
-        1,
-        "IAM outage is not revocation"
-    );
-    identity.mode.store(0, Ordering::SeqCst);
-    assert_eq!(publisher.publish(&claim).await?.id, "accepted-fixture-ting");
-
-    for mismatch in [3, 4] {
-        identity.mode.store(mismatch, Ordering::SeqCst);
-        assert!(matches!(
-            publisher.publish(&claim).await,
-            Err(TingFailure::OriginatorAuthenticationRequired)
-        ));
-        assert!(
-            cache.candidates(&org, &alice).await?.is_empty(),
-            "mismatched actor or org cannot authorize a handoff"
-        );
-        cache.remember(&fresh).await?;
-    }
-    identity.mode.store(0, Ordering::SeqCst);
-    assert_eq!(publisher.publish(&claim).await?.id, "accepted-fixture-ting");
-    assert!(matches!(
-        publisher.publish(&claim).await,
-        Err(TingFailure::Transport)
-    ));
-    assert_eq!(
-        cache.candidates(&org, &alice).await?.len(),
-        1,
-        "uncertain Ting response preserves valid IAM authority"
-    );
-    assert_eq!(publisher.publish(&claim).await?.id, "accepted-fixture-ting");
-    cancellation.cancel();
-    server.await??;
-    let proofs = identity.proofs.lock().map_err(|_| "proof lock")?;
-    assert_eq!(proofs.len(), 4);
-    let keys: BTreeSet<_> = proofs.iter().map(|(_, key, _)| key).collect();
-    assert_eq!(
-        keys.len(),
-        4,
-        "every caller retry uses a fresh proof exchange attempt"
-    );
-    assert!(
-        proofs
-            .iter()
-            .all(|(body, _, actor)| body == &claim.request_body && actor == &alice)
-    );
-    assert!(
         identity
             .authenticated
             .lock()
             .map_err(|_| "auth lock")?
-            .iter()
-            .all(|token| token.starts_with("oat-originator-"))
+            .is_empty()
     );
-    assert_eq!(
-        identity.refresh_calls.load(Ordering::SeqCst),
-        0,
-        "clients retain refresh rotation ownership"
-    );
+    assert!(identity.proofs.lock().map_err(|_| "proof lock")?.is_empty());
+    assert_eq!(identity.refresh_calls.load(Ordering::SeqCst), 0);
+    cancellation.cancel();
     Ok(())
 }

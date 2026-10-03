@@ -12,3 +12,6 @@ coverage/
 
 # Native Honeycomb payloads are delivered in the release archive.
 /targets/
+
+# Exclude dependency directories and local worktree dependency links.
+**/node_modules

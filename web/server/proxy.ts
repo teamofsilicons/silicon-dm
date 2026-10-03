@@ -4,7 +4,7 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import type { Config } from "./config.ts";
-import { Auth, headersFor } from "./auth.ts";
+import { Auth, headersFor, responseJson } from "./auth.ts";
 import { GatewayError } from "./session.ts";
 
 const id = "[0-9a-fA-F-]{36}";
@@ -18,6 +18,9 @@ const allowed: [RegExp, string[]][] = [
   [/^iam$/, ["GET"]],
   [/^sync$/, ["GET"]],
   [/^delivery\/registration$/, ["POST"]],
+  [/^delivery\/authorization$/, ["GET", "POST"]],
+  [/^delivery\/authorization\/complete$/, ["POST"]],
+  [/^delivery\/authorization\/disconnect$/, ["POST"]],
   [/^presence\/devices\/[A-Za-z0-9_.:-]{1,200}$/, ["PUT", "DELETE"]],
   [/^auth\/me$/, ["GET"]],
   [/^groups$/, ["GET", "POST"]],
@@ -242,7 +245,21 @@ export async function proxy(
         "The backend returned an unexpected redirect.",
       );
     }
-    if (response.status === 401) await auth.expire(browser.id, profile);
+    if (response.status === 401) {
+      // Feature consent can fail separately from the application login. Only a
+      // known login rejection expires this profile; preserve the streamed body.
+      const error = await responseJson(response.clone()).catch(() => undefined);
+      const code = (error?.error as { code?: string } | undefined)?.code;
+      if (
+        [
+          "unauthorized",
+          "access_token_expired",
+          "token_expired",
+          "login_required",
+        ].includes(code || "")
+      )
+        await auth.expire(browser.id, profile);
+    }
     responseHeaders(res);
     res.statusCode = response.status;
     for (const name of [

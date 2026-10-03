@@ -20,6 +20,9 @@ pub enum AppError {
     /// Authenticated principal lacks authority.
     #[error("operation is not permitted")]
     Forbidden,
+    /// Separate Ting permission is absent or revoked. DM login remains valid.
+    #[error("Authorize Ting delivery separately in IAM, then complete the authorization in DM")]
+    TingAuthorizationRequired,
     /// Requested aggregate does not exist in the caller's scope.
     #[error("resource not found")]
     NotFound,
@@ -91,6 +94,7 @@ impl AppError {
         match self {
             Self::Unauthorized => "unauthorized",
             Self::Forbidden => "forbidden",
+            Self::TingAuthorizationRequired => "ting_authorization_required",
             Self::NotFound => "not_found",
             Self::Validation(_) => "validation_error",
             Self::ResponseTooLarge(_) => "response_too_large",
@@ -113,7 +117,9 @@ impl AppError {
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::ResponseTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Conflict(_) | Self::SyncResetRequired(_) => StatusCode::CONFLICT,
-            Self::PreconditionRequired(_) => StatusCode::PRECONDITION_REQUIRED,
+            Self::PreconditionRequired(_) | Self::TingAuthorizationRequired => {
+                StatusCode::PRECONDITION_REQUIRED
+            }
             Self::DependencyUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,

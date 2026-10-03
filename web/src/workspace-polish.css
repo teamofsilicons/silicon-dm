@@ -1,0 +1,242 @@
+:root {
+  --ink: #242b36;
+  --muted: #647286;
+  --line: #e3e8ef;
+  --blue: #2468d5;
+  background: #f7f9fc;
+  color: var(--ink);
+}
+.sidebar {
+  background: #f7f9fc;
+}
+.sidebar-brand {
+  height: 88px;
+}
+.workspace-selector {
+  background: #fff;
+  border-radius: 12px;
+  padding: 15px 12px;
+}
+.workspace-selector select {
+  min-height: 32px;
+  box-shadow: none;
+}
+.workspace-selector label {
+  font-size: 10px;
+}
+.environment-label {
+  font-size: 11px;
+}
+.sidebar nav button {
+  border-radius: 10px;
+  font-size: 13px;
+  gap: 12px;
+}
+.sidebar nav button.selected {
+  background: #e9f1fe;
+  color: #245ba7;
+  font-weight: 500;
+}
+.sidebar nav button:hover {
+  background: #edf2f9;
+}
+.sidebar-note strong,
+.sidebar-note span,
+.account-link small {
+  font-size: 11px;
+}
+.topbar {
+  background: #fff;
+  height: 64px;
+}
+.breadcrumb,
+.connection {
+  font-size: 12px;
+}
+.conversation-pane {
+  background: #fafbfd;
+  width: 308px;
+}
+.conversation-title {
+  padding: 26px 22px 18px;
+}
+.conversation-title h1 {
+  font-size: 23px;
+  letter-spacing: -0.7px;
+}
+.conversation-search input {
+  font-size: 13px;
+  padding-left: 34px;
+}
+.conversation-search > svg {
+  top: 13px;
+}
+.conversation-list {
+  padding: 4px 12px;
+}
+.conversation-list > button {
+  padding: 15px 11px;
+  border-radius: 12px;
+  margin-bottom: 6px;
+}
+.conversation-list > button.selected {
+  background: #edf3fe;
+  border-color: #dce6f7;
+}
+.conversation-line strong {
+  font-size: 13px;
+}
+.conversation-line time,
+.conversation-footer {
+  font-size: 11px;
+}
+.conversation-preview {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.conversation-kind {
+  font-size: 10px;
+  color: #677c98;
+  margin-top: 6px;
+}
+.chat-header {
+  background: #fff;
+}
+.messages-scroll {
+  background: #fff;
+  padding-top: 22px;
+}
+.day-divider {
+  font-size: 11px;
+  color: #6d7b8e;
+}
+.message-meta,
+.receipt-status {
+  font-size: 11px;
+  color: #65768b;
+}
+.message-meta strong {
+  font-size: 12px;
+}
+.actor-kind {
+  min-height: 18px;
+  padding: 0 6px;
+  font-size: 9px;
+}
+.message-bubble {
+  background: #f6f8fb;
+  border-color: var(--line);
+  border-radius: 4px 14px 14px;
+  padding: 14px 17px;
+}
+.message-row.own .message-bubble {
+  background: #edf3fe;
+  border-color: #dce6f7;
+}
+.message-text {
+  font-size: 14px;
+}
+.composer {
+  border-radius: 14px;
+  border-color: #d8e0eb;
+  box-shadow: 0 3px 12px #26304c04;
+}
+.composer:focus-within {
+  border-color: #7ba4e5;
+  box-shadow: 0 0 0 3px #2468d50b;
+}
+.icon-button,
+.avatar {
+  border-radius: 9px;
+}
+.avatar {
+  background: #edf3fc;
+  border-color: #dce6f7;
+}
+.silicon-avatar {
+  background: #f0edfa;
+  border-color: #e4def3;
+}
+.notice {
+  border-radius: 10px;
+}
+.ting-authorization form {
+  display: grid;
+  gap: 12px;
+  max-width: 500px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+}
+.ting-authorization form p {
+  margin: 0;
+}
+.ting-authorization form label {
+  display: grid;
+  gap: 7px;
+}
+.ting-authorization form .button {
+  justify-self: start;
+}
+dialog {
+  border-color: var(--line);
+  border-radius: 18px;
+  box-shadow: 0 20px 64px #18294320;
+}
+dialog::backdrop {
+  background: #19253b38;
+  backdrop-filter: blur(3px);
+}
+.auth-panel {
+  background: #fafbfd;
+}
+.auth-card {
+  max-width: 430px;
+  padding: 30px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 6px 24px #1c355b05;
+}
+.auth-card h2 {
+  font-size: 32px;
+  letter-spacing: -1.1px;
+}
+.auth-card .footnote,
+.auth-footer,
+.auth-foot {
+  font-size: 12px;
+}
+.auth-art {
+  background: #eef3fc;
+}
+@media (max-width: 850px) {
+  .conversation-pane {
+    width: 275px;
+  }
+}
+@media (max-width: 600px) {
+  .conversation-pane {
+    width: 100%;
+  }
+  .conversation-title {
+    padding: 20px 18px 14px;
+  }
+  .conversation-search input {
+    font-size: 16px;
+  }
+  .auth-card {
+    max-width: 100%;
+    padding: 24px;
+  }
+  .auth-footer {
+    font-size: 11px;
+  }
+  .connection {
+    font-size: 11px;
+  }
+  .ting-authorization form {
+    max-width: 100%;
+  }
+}

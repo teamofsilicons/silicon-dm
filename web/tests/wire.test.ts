@@ -218,3 +218,12 @@ test("created notifications and legacy creation deliveries stay separate from co
     assert.equal(frame.delivery_id, undefined);
   }
 });
+
+
+test("separate Ting consent has explicit envelopes and never uses login exchange", () => {
+  assert.equal(httpType("POST", "/api/dm/delivery/authorization"), "delivery_authorization");
+  assert.deepEqual(encodeRequest("POST", "/api/dm/delivery/authorization/complete", { authorization_id: "request-id", authorization_code: "one-time-code" }), {
+    type: "delivery_authorization_complete", data: { authorization_id: "request-id", authorization_code: "one-time-code" }
+  });
+  assert.equal(httpType("POST", "/api/dm/delivery/authorization/disconnect"), "delivery_authorization_disconnect");
+});

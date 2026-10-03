@@ -3,11 +3,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use uuid::Uuid;
 
 use crate::{
     AppError,
-    application::ports::{AuthenticationRequest, IdentityProvider},
+    application::ports::IdentityProvider,
     infrastructure::{
         postgres::TingDeliveryClaim,
         ting::{TingAcceptance, TingFailure, TingPublisher, TingSocket},
@@ -16,10 +15,10 @@ use crate::{
 };
 
 /// Each attempt revalidates only credentials belonging to its immutable originator.
-/// Clients retain exclusive refresh-token ownership; this publisher never rotates
-/// a session or borrows another logged-in account's authority.
+/// The broker rotates only dedicated OBO credentials. It never rotates an
+/// ordinary login or borrows another account's grant.
 pub struct AuthenticatedTingPublisher {
-    credentials: TingCredentialCache,
+    credentials: super::ting_authorization::TingAuthorization,
     identity: Arc<dyn IdentityProvider>,
     socket: TingSocket,
 }
@@ -33,7 +32,7 @@ impl AuthenticatedTingPublisher {
         socket: TingSocket,
     ) -> Self {
         Self {
-            credentials,
+            credentials: super::ting_authorization::TingAuthorization(credentials),
             identity,
             socket,
         }
@@ -47,54 +46,28 @@ impl TingPublisher for AuthenticatedTingPublisher {
             .originator
             .as_ref()
             .ok_or(TingFailure::OriginatorAuthenticationRequired)?;
-        let candidates = self
-            .credentials
-            .candidates(&claim.organization_id, originator)
-            .await
-            .map_err(|_| TingFailure::AuthorityUnavailable)?;
-        for candidate in candidates {
-            let context = match self
-                .identity
-                .authenticate(AuthenticationRequest::Bearer {
-                    token: &candidate.token,
-                    organization_id: &claim.organization_id,
-                })
-                .await
-            {
-                Ok(context)
-                    if context.actor == *originator
-                        && context.organization_id == claim.organization_id =>
-                {
-                    context
-                }
-                Ok(_) | Err(AppError::Unauthorized | AppError::Forbidden) => {
-                    self.credentials
-                        .forget(&claim.organization_id, originator, &candidate.digest)
-                        .await
-                        .map_err(|_| TingFailure::AuthorityUnavailable)?;
-                    continue;
-                }
-                Err(_) => return Err(TingFailure::AuthorityUnavailable),
-            };
-            let authority = match self
-                .identity
-                .issue_ting_send_proof(&context, &claim.request_body, &Uuid::new_v4().to_string())
-                .await
-            {
-                Ok(authority) => authority,
-                Err(AppError::Unauthorized | AppError::Forbidden) => {
-                    self.credentials
-                        .forget(&claim.organization_id, originator, &candidate.digest)
-                        .await
-                        .map_err(|_| TingFailure::AuthorityUnavailable)?;
-                    continue;
-                }
-                Err(_) => return Err(TingFailure::AuthorityUnavailable),
-            };
-            // No in-memory resend: an uncertain acceptance keeps the unchanged
-            // durable body/key for a later attempt with a fresh one-use proof.
-            return self.socket.send(&claim.request_body, authority).await;
+        let body: serde_json::Value =
+            serde_json::from_str(&claim.request_body).map_err(|_| TingFailure::InvalidRequest)?;
+        if body["org_id"] != claim.organization_id.as_str()
+            || body["type"] != format!("{}.sync.changed", self.credentials.0.context.app_id)
+        {
+            return Err(TingFailure::InvalidRequest);
         }
-        Err(TingFailure::OriginatorAuthenticationRequired)
+        let authority = self
+            .credentials
+            .authority(
+                self.identity.as_ref(),
+                &claim.organization_id,
+                originator,
+                "tings.send",
+            )
+            .await
+            .map_err(|error| match error {
+                AppError::TingAuthorizationRequired
+                | AppError::Unauthorized
+                | AppError::Forbidden => TingFailure::OriginatorAuthenticationRequired,
+                _ => TingFailure::AuthorityUnavailable,
+            })?;
+        self.socket.send(&claim.request_body, authority).await
     }
 }

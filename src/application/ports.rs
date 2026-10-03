@@ -65,6 +65,37 @@ pub trait IdentityProvider: Send + Sync {
         Err(crate::AppError::DependencyUnavailable { dependency: "ting" })
     }
 
+    /// Starts explicit Ting endpoint consent as the requesting application.
+    async fn authorize_ting(
+        &self,
+        _request: &silicon_iam_client::models::OboAuthorizationRequest,
+        _key: &str,
+    ) -> AppResult<silicon_iam_client::models::OboConsentDetail> {
+        Err(crate::AppError::DependencyUnavailable { dependency: "iam" })
+    }
+    /// Reads the original application's pending consent context.
+    async fn ting_authorization(
+        &self,
+        _id: uuid::Uuid,
+    ) -> AppResult<silicon_iam_client::models::OboConsentDetail> {
+        Err(crate::AppError::DependencyUnavailable { dependency: "iam" })
+    }
+    /// Exchanges or rotates only dedicated Ting OBO credentials.
+    async fn ting_tokens(
+        &self,
+        _request: silicon_iam_client::models::OboTokenRequest,
+        _key: &str,
+    ) -> AppResult<silicon_iam_client::models::OboTokenResponse> {
+        Err(crate::AppError::DependencyUnavailable { dependency: "iam" })
+    }
+    /// Verifies paired provider testing credentials against this exact environment.
+    async fn validate_ting_context(
+        &self,
+        _testing: Option<&silicon_iam_client::models::OboTestingContext>,
+    ) -> AppResult<()> {
+        Err(crate::AppError::DependencyUnavailable { dependency: "iam" })
+    }
+
     /// Authenticates exact webhook bytes and binds the event to this IAM plane.
     ///
     /// # Errors

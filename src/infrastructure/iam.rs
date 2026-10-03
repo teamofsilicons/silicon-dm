@@ -389,38 +389,59 @@ impl IamClient {
 
 #[async_trait]
 impl IdentityProvider for IamClient {
-    async fn issue_ting_send_proof(
+    async fn authorize_ting(
         &self,
-        context: &AuthContext,
-        request_body: &str,
-        attempt_key: &str,
-    ) -> AppResult<super::ting::TingSendAuthority> {
-        super::ting_proof::issue(
-            &self.client,
-            &self.app_id,
-            self.environment_id,
-            context,
-            request_body,
-            attempt_key,
-        )
-        .await
+        request: &models::OboAuthorizationRequest,
+        key: &str,
+    ) -> AppResult<models::OboConsentDetail> {
+        self.client
+            .obo()
+            .authorize(
+                request,
+                &Mutation::with_key(
+                    IdempotencyKey::parse(key)
+                        .map_err(|_| AppError::validation("invalid authorization key"))?,
+                ),
+            )
+            .await
+            .map_err(map_error)
     }
-
-    async fn register_ting_delivery(
+    async fn ting_authorization(&self, id: Uuid) -> AppResult<models::OboConsentDetail> {
+        self.client.obo().authorization(id).await.map_err(map_error)
+    }
+    async fn ting_tokens(
         &self,
-        context: &AuthContext,
-        settings: &crate::config::TingSettings,
-        exchange_attempt_key: &str,
-    ) -> AppResult<serde_json::Value> {
-        super::ting_enrollment::register(
-            &self.client,
-            settings,
-            &self.app_id,
-            self.environment_id,
-            context,
-            exchange_attempt_key,
-        )
-        .await
+        request: models::OboTokenRequest,
+        key: &str,
+    ) -> AppResult<models::OboTokenResponse> {
+        let mutation = Mutation::with_key(
+            IdempotencyKey::parse(key)
+                .map_err(|_| AppError::validation("invalid authorization key"))?,
+        );
+        if let Some(refresh) = request.refresh_token {
+            self.client
+                .obo()
+                .refresh(&refresh, &mutation)
+                .await
+                .map_err(map_ting_error)
+        } else if let (Some(id), Some(code)) =
+            (request.authorization_id, request.authorization_code)
+        {
+            self.client
+                .obo()
+                .exchange_code(id, &code, &mutation)
+                .await
+                .map_err(map_ting_error)
+        } else {
+            Err(AppError::validation("unsupported Ting credential exchange"))
+        }
+    }
+    async fn validate_ting_context(
+        &self,
+        testing: Option<&models::OboTestingContext>,
+    ) -> AppResult<()> {
+        super::ting_enrollment::validate_testing_context(&self.client, self.environment_id, testing)
+            .await
     }
 
     async fn authenticate(&self, request: AuthenticationRequest<'_>) -> AppResult<AuthContext> {
@@ -598,6 +619,17 @@ fn iam_actor(actor: &models::ActorRef) -> AppResult<ActorRef> {
 }
 
 #[allow(clippy::needless_pass_by_value)] // Function adapter consumes map_err's owned SDK error.
+fn map_ting_error(error: silicon_iam_client::Error) -> AppError {
+    if error.api().is_some_and(|api| {
+        api.code != "invalid_client" && matches!(api.status, 400 | 401 | 403 | 404 | 410)
+    }) {
+        AppError::TingAuthorizationRequired
+    } else {
+        map_error(error)
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
 fn map_error(error: silicon_iam_client::Error) -> AppError {
     if let Some(api) = error.api() {
         if api.code == "invalid_client" {

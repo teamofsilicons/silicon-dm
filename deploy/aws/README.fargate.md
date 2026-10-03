@@ -21,9 +21,9 @@ exports `dm-deployment-backend` and `dm-deployment-gateway` artifacts containing
 Docker image archives, revision/version/platform metadata, and `SHA256SUMS`.
 Verify those checksums and the expected commit, authenticate `crane` to ECR, then
 run `crane push backend.tar <ecr-repository>:<release-tag>` to copy the archive;
-no local Docker daemon is needed. The
-workflow has no AWS credentials and performs no registry push or deployment.
-It does not build the separate migration/bootstrap image.
+no local Docker daemon is needed. The matching `dm-deployment-bootstrap`
+artifact contains the migration/bootstrap image built from that exact runtime.
+The workflow has no AWS credentials and performs no registry push or deployment.
 
 Build both images from the reviewed checkout. `BACKEND_IMAGE` must identify
 the immutable ARM64 backend image containing the reviewed binaries.

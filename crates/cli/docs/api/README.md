@@ -74,6 +74,10 @@ mean the full migration is deployed or real Ting delivery is verified.
 
 | Method and path | Request type/data | Result |
 | --- | --- | --- |
+| `POST /delivery/authorization` | `delivery_authorization`, `{}`; required `Idempotency-Key` | IAM authorization ID and review URL |
+| `POST /delivery/authorization/complete` | `delivery_authorization_complete`, `{authorization_id, authorization_code}` | Stores separately approved credentials and registers recipient |
+| `GET /delivery/authorization` | No body | Local authorization status |
+| `POST /delivery/authorization/disconnect` | `delivery_authorization_disconnect`, `{}` | Deletes DM delegated credentials; global revocation remains in IAM |
 | `POST /delivery/registration` | `delivery_registration`, `{}`; required `Idempotency-Key` | Confirmed public Ting subscription `{id, app_id, for, active}` |
 | `GET /sync` | Optional `cursor`, `limit` (1–100), or `reset=true` | `sync` envelope with `{events, cursor, has_more, upper_sequence, testing_environment_id, testing_generation}` |
 | `PUT /presence/devices/{device_id}` | `renew_presence`, `{activity?: string or null}` | `renew_presence` envelope with `{presence, lease_expires_at, activity_expires_at}` |
@@ -82,7 +86,8 @@ mean the full migration is deployed or real Ting delivery is verified.
 Every operation requires a current DM bearer credential and `X-Org-ID`. Testing
 writes also bind the current `X-Testing-Environment-Generation` from `/iam`.
 Registration always targets the authenticated actor; it requires their approved
-Ting registration scope and consent. It is an explicit action because it may
+separately approved Ting registration token. Ordinary DM login cannot provide it;
+missing or revoked permission returns `428 ting_authorization_required`. It is an explicit action because it may
 reactivate a recipient grant. It does not create a Ting login or local webhook.
 Confirmed retries replay DM's cached response. An in-flight or uncertain
 registration returns 409; a new explicit registration uses a new key.

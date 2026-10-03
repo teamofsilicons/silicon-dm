@@ -26,7 +26,7 @@ fn state(directory: &std::path::Path, base: &str, test: Option<Uuid>) -> Result<
     let store = Store::new(directory)?;
     let profile: Profile = serde_json::from_value(json!({
         "name":"default","base_url":base,"device_id":"fixture-device","expires_at":4102444800u64,
-        "testing_environment_id":test,"tokens":{"access_token":"dm-fixture-access","refresh_token":"dm-fixture-refresh",
+        "testing_environment_id":test,"testing_generation":test.map(|_|1),"tokens":{"access_token":"dm-fixture-access","refresh_token":"dm-fixture-refresh",
             "token_type":"Bearer","expires_in":3600,"scope":"dm","organization_id":"tos","actor":{"type":"carbon","id":"c:bob"}}
     }))?;
     store.update(|config| {

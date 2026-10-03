@@ -173,6 +173,7 @@ impl LocalRuntime {
         );
         let client = store::client(&config, &profile)?;
         let info = client.iam().await?;
+        store::check_discovery(&info, &profile.base_url, test, profile.testing_generation)?;
         ensure!(
             info.testing_environment_id == test,
             "DM did not confirm the selected testing environment"
@@ -192,6 +193,7 @@ impl LocalRuntime {
                 && identity.organization_id == profile.tokens.organization_id,
             "DM profile identity or organization changed; log in explicitly again"
         );
+        store::check_current(&self.store.load()?, &key, &config, &profile)?;
         Ok(Selection {
             directory: self.store.ting_profile(&key, info.testing_generation)?,
             dm_api_url: profile.base_url.trim_end_matches('/').to_owned(),
