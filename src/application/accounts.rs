@@ -94,7 +94,9 @@ impl Directory<'_> {
         }
         if own_token
             && let Some(cutoff) = stored.revoked_before
-            && context.issued_at.is_none_or(|issued| issued < cutoff)
+            && context
+                .issued_at
+                .is_none_or(|issued| issued_before(issued, cutoff))
         {
             let at = cutoff.format(&Rfc3339).unwrap_or_default();
             return Err(AppError::unauthenticated(
@@ -349,5 +351,35 @@ impl Directory<'_> {
                 target.display_id(),
             ),
         ))
+    }
+}
+
+/// Whether a token issued at `issued` (its `iat`, whole seconds) certainly predates a
+/// sign-in cutoff (the webhook's `occurred_at`, sub-second). A token issued in the same
+/// second as the cutoff is given the benefit of the doubt: a Silicon that rotates its STK
+/// and signs straight back in must not be refused, and sensitive routes still ask
+/// Silicon Accounts live.
+fn issued_before(issued: OffsetDateTime, cutoff: OffsetDateTime) -> bool {
+    issued + time::Duration::SECOND <= cutoff
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::datetime;
+
+    use super::issued_before;
+
+    #[test]
+    fn sign_in_cutoffs_compare_at_the_precision_of_iat() {
+        let cutoff = datetime!(2026-10-10 12:00:00.700 UTC);
+        assert!(issued_before(datetime!(2026-10-10 11:59:59 UTC), cutoff));
+        assert!(
+            !issued_before(datetime!(2026-10-10 12:00:00 UTC), cutoff),
+            "same second: maybe after the cutoff, so accepted"
+        );
+        assert!(!issued_before(datetime!(2026-10-10 12:00:01 UTC), cutoff));
+        let whole = datetime!(2026-10-10 12:00:00 UTC);
+        assert!(issued_before(datetime!(2026-10-10 11:59:59 UTC), whole));
+        assert!(!issued_before(whole, whole));
     }
 }

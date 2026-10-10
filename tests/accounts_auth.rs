@@ -151,8 +151,8 @@ async fn sign_outs_cut_off_older_tokens_except_dms_own_revocation() -> Result<()
     expect_status(&app.get("/api/v1/me", &earlier).await?, StatusCode::OK)?;
 
     // DM revoked one refresh family itself (one machine's `dm logout`): nothing else ends.
-    let at =
-        time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
+    let event = time::OffsetDateTime::now_utc();
+    let at = event.format(&time::format_description::well_known::Rfc3339)?;
     let (headers, body) = webhook(
         "membership.signed_out",
         &json!({"uuid": "a8K", "membership_id": "dm:a8K", "reason": "app_revoked"}),
@@ -171,11 +171,24 @@ async fn sign_outs_cut_off_older_tokens_except_dms_own_revocation() -> Result<()
     let refused = app.get("/api/v1/me", &earlier).await?;
     assert_eq!(refused.0, StatusCode::UNAUTHORIZED);
     assert_eq!(refused.1["error"]["code"], "session_revoked");
-    // A sign-in after the event works.
+    // A sign-in after the event works, even one in the same second (iat has whole seconds:
+    // a Silicon that rotates its STK and signs straight back in is not refused).
+    let same_second = app.accounts.token_with(
+        &ada,
+        &json!({"iat": event.unix_timestamp(), "nbf": event.unix_timestamp() - 1}),
+    );
+    expect_status(&app.get("/api/v1/me", &same_second).await?, StatusCode::OK)?;
     let later = app
         .accounts
         .token_with(&ada, &json!({"iat": now() + 1, "nbf": now() - 1}));
     expect_status(&app.get("/api/v1/me", &later).await?, StatusCode::OK)?;
+    // One second earlier is certainly before the sign-out.
+    let second_before = app.accounts.token_with(
+        &ada,
+        &json!({"iat": event.unix_timestamp() - 1, "nbf": event.unix_timestamp() - 2}),
+    );
+    let refused = app.get("/api/v1/me", &second_before).await?;
+    assert_eq!(refused.1["error"]["code"], "session_revoked");
     app.close().await
 }
 
