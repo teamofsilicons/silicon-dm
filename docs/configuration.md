@@ -1,42 +1,40 @@
 # Configure DM
 
-DM ships defaults for ordinary use. Change the relevant setting explicitly when
-your host, callback, or backend needs different behavior.
+DM ships defaults for ordinary use. Change a setting explicitly when your machine or deployment
+needs something else.
 
-## Local state and profiles
+## The CLI
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `SILICON_HOME` | OS home | Parent for `.silicon-dm` private state |
-| `dm config home LOCATION` | Unset | Persist a different existing home directory |
-| `--profile NAME` | Selected default | Independent account session |
-| `--test UUID` / `SILICON_DM_TEST` | Production | Previously saved sandbox |
-| `--app-secret-file FILE` / `DM_TEST_APP_SECRET` | Unset | Automatic IAM test environment selection |
-| `ISI` | Unset | Optional Silicon routing identity |
-| `DM_API_URL` | Production DM backend | Backend for login and automatic sandbox selection |
-| `--wait-seconds` | 30 | Foreground wait; timeout keeps durable work queued. `messages send` does not wait unless given this or `--wait` |
+| `DM_API_URL` / `dm login --api-url` | `https://backend.dm.teamofsilicons.com` | The DM service a profile signs in to (remembered by the profile) |
+| `ACCOUNTS_URL` / `dm login --accounts-url` | `https://accounts.teamofsilicons.com` | The Silicon Accounts that signs DM in (remembered by the profile) |
+| `DM_APP_ID` | `dm` | DM's app id at Silicon Accounts; only for a development app |
+| `SILICON_DM_HOME` | unset | An explicit, absolute state directory (takes precedence) |
+| `dm config home LOCATION` | unset | Keep state under `LOCATION/.silicon-dm` |
+| `SILICON_HOME` | the OS home | Parent of `.silicon-dm` when nothing above is set |
+| `SILICON_DM_RELAY_HOME` | `~/.silicon-dm/relay` of the OS user | Where the shared relay keeps its files |
+| `--profile NAME` / `dm profiles use` | `default` | Which signed-in account a command uses |
+| `--wait-seconds N` | 30 | How long a command waits for the relay; on timeout the request stays queued |
+| `dm config telemetry false` / `DM_TELEMETRY_ENABLED=false` | on | Diagnostics ([what they contain](telemetry.md)) |
 
-Keep state on a durable local disk. It includes credentials and SQLite queues;
-use one daemon per state directory. Normal installation uses one shared directory
-and one backend connection for all profiles. Independent directories intentionally
-have independent runtimes.
+Plain `http` URLs are accepted only for this machine (`localhost`, `*.localhost`, loopback
+addresses). Keep the state directory on a durable local disk: it holds the sign-ins and the
+outgoing queue. One relay serves every state directory of the operating-system user.
 
-## Callback delivery
+`dm accounts --json` shows the values in effect without signing in. Setting `SILICON_DM_TEST` or
+`DM_TEST_APP_SECRET` (test environments, retired) makes every networked command refuse with
+`testing_environments_retired`, so a home that still selects a test environment never reaches the
+live service.
 
-`dm webhook URL` attaches the selected profile. `--secret-file FILE` adds an
-optional bearer secret stored privately. Callback responses must acknowledge the
-matching delivery ID. `dm unhook` detaches delivery without deleting queued events.
-Use test callback URLs for sandbox integrations. HTTPS is required except for
-local loopback callback addresses.
+## Installing and updating
 
-## Updates
+Silicon Apps installs and updates the CLI: `silicon-apps install dm` (development releases:
+`silicon-apps install 'dm>dev'`). DM never replaces its own executable. A running relay keeps
+serving after an update; the next `dm` command from the new version replaces an older relay, and
+queued requests survive. Rust programs manage `silicon-dm-client` as an ordinary dependency.
 
-Honeycomb owns CLI installation and update policy. Use `honeycomb install 'dm'`.
-DM's daemon handles relay delivery and never replaces the CLI. Legacy `dm updates`
-commands report this guidance. Manage Rust dependencies through your project.
-Restart a running daemon after upgrading to load the new code; durable queues persist.
-
-## Backend configuration
+## The service
 
 See `.env.example` for every setting. Sign-in is Silicon Accounts only:
 
@@ -51,25 +49,21 @@ See `.env.example` for every setting. Sign-in is Silicon Accounts only:
 | `DM_PROOF_ISSUERS` | no | Apps whose User verification proofs DM accepts, per scope (`dm.messages.write=interface,…`); empty accepts none |
 | `DM_TING_URL` | no | Ting delivery; unset means clients sync with `GET /api/v1/sync` |
 
-Plain `http` is accepted only for this machine (localhost and loopback addresses).
-Database, Giphy, body-size, connection pool, timeout and worker settings are unchanged.
-Attachments are external links; no upload credentials are required.
-
-No Space Station SDK, telemetry exporter, or analytics integration is installed
-by this change.
+Plain `http` is accepted only for this machine. Database, Giphy, body-size, connection pool,
+timeout and worker settings are unchanged. Attachments are external links; no upload credentials
+are required. DM's sign-in setup at Silicon Accounts needs `device_flow` and `public_client` turned
+on for the CLI, and requires no account details (email and timezone are optional).
 
 ## Bug report notifications
 
-Set `DM_POSTMARK_SERVER_TOKEN` on the API service to enable report submissions.
-The default `DM_POSTMARK_EMAIL_URL` is `https://api.postmarkapp.com/email`.
-Verify `dm@teamofsilicons.com` as a Postmark sender. Reports notify
-`saketdev12@gmail.com`, `shubhastro2@gmails.com`, and `bugs@teamofsilicons.com`,
-matching the product specification. Each authenticated actor may submit ten new
-reports per hour. Retries with the same idempotency key do not create another report.
+Set `DM_POSTMARK_SERVER_TOKEN` on the API service to send report notifications. The default
+`DM_POSTMARK_EMAIL_URL` is `https://api.postmarkapp.com/email`. Verify `dm@teamofsilicons.com`
+as a Postmark sender. Reports notify `saketdev12@gmail.com`, `shubhastro2@gmails.com` and
+`bugs@teamofsilicons.com`, matching the product specification. Each account may submit ten new
+reports per hour; retries with the same idempotency key do not create another report.
 
-The API returns `202` after the report is durable. Its worker retries Postmark
-failures with backoff, up to an hour between attempts. A process crash after
-Postmark accepts but before the transaction commits can deliver a duplicate
-notification; the report ID identifies it. Sandbox reports are immediately marked
-`simulated` and never enter the production notification transport. No mail token
-is distributed in the SDK or CLI. See the [Postmark email API](https://postmarkapp.com/developer/api/email-api).
+The API returns `202` once the report is stored. Its worker retries Postmark failures with
+backoff, up to an hour between attempts. A process crash after Postmark accepts but before the
+transaction commits can deliver a duplicate notification; the report id identifies it. Outside
+production, without a Postmark token, reports are stored and marked `simulated`. No mail token is
+distributed in the client or CLI.

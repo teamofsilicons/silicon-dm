@@ -177,6 +177,24 @@ pub fn render(options: &DocsArgs) -> Result<Value> {
 mod tests {
     use super::*;
     #[test]
+    fn packaged_guides_name_neither_retired_services_nor_account_groupings() {
+        for guide in GUIDES {
+            let content = guide.content.to_lowercase();
+            for word in [
+                "honeycomb",
+                " iam ",
+                "iam-",
+                "organization",
+                "x-org-id",
+                "human",
+                "ai agent",
+                "user account",
+            ] {
+                assert!(!content.contains(word), "{} mentions {word:?}", guide.topic);
+            }
+        }
+    }
+    #[test]
     fn every_advertised_guide_can_be_selected() {
         for guide in GUIDES {
             assert!(

@@ -1,227 +1,102 @@
-# Deploying Silicon DM
+# Deploying the DM service
 
-This runbook covers the backend image, databases, IAM callback, and client
-release. The Fargate deployment is defined in
-[`deploy/aws/fargate.yaml`](../deploy/aws/fargate.yaml), with the migration task
-and operating details in [the Fargate guide](../deploy/aws/README.fargate.md).
-The general Docker commands below explain the underlying migration/runtime
-steps. Fargate uses an explicitly invoked one-off bootstrap task before the
-services are activated. See [manual verification](manual-backend-verification.md)
-for historical results. The [0.10.1 candidate release record](release-0.10.0.md) separates current test evidence from pending production rollout gates.
+This runbook covers the backend image, the database, the Silicon Accounts webhook and the client
+release. The Fargate deployment is defined in [`deploy/aws/fargate.yaml`](../deploy/aws/fargate.yaml),
+with the migration task and operating details in [the Fargate guide](../deploy/aws/README.fargate.md).
+Moving an existing deployment to DM 0.15 (Silicon Accounts) is a coordinated change: follow
+[the cutover runbook](migration/cutover.md).
 
 ## AWS deployment
 
-The Fargate template runs private ARM64 API and worker tasks behind a dedicated
-Application Load Balancer in the existing production VPC. Separate encrypted
-RDS PostgreSQL instances hold production and testing data. The stack owns its
-security groups, task roles, CloudWatch logs, and rate-limiting WAF. Namecheap
-points `backend.dm` at the load balancer, and an ACM DNS-validation record
-permits certificate renewal.
+The Fargate template runs private ARM64 API and worker tasks behind a dedicated Application Load
+Balancer in the production VPC, with an encrypted RDS PostgreSQL instance. The stack owns its
+security groups, task roles, CloudWatch logs and rate-limiting WAF; `backend.dm` points at the
+load balancer. The alternate [EC2 template](../deploy/aws/production.yaml) and
+[EC2 guide](../deploy/aws/README.md) remain available.
 
-The API has 2 vCPU and 8 GiB; the worker has 0.5 vCPU and 4 GiB. Both initially
-run one task. The databases are single-AZ, with seven-day production backups
-and one-day testing backups. Check regional Fargate capacity before deploying,
-including the extra tasks needed during rolling replacement. The alternate
-[EC2 template](../deploy/aws/production.yaml) and [EC2 guide](../deploy/aws/README.md)
-remain available; EC2 uses a separate regional vCPU quota.
-
-Build and push reviewed ARM64 runtime and bootstrap images to
-`silicon-dm-production` in ECR. The runtime image includes the AWS RDS CA bundle;
-the bootstrap image adds the migration tools. Pass their immutable digests,
-issued certificate ARN, app-secret ARN, VPC, and public/private subnets to a
-CloudFormation change set for `silicon-dm-production` in `us-east-1`. Inspect the
-proposed resources before execution. Initially set `RuntimeDesiredCount=0`, run
-the bootstrap task, verify exit code 0 and its restricted runtime-secret output,
-then set the count to 1. The migration task rejects changes to existing database
-credentials or the testing encryption key; credential rotation requires a
-separate coordinated procedure.
-
-For the 0.10.1 Ting cutover, set both API and worker desired counts to zero
-and wait for their old tasks to stop before running the bootstrap migration.
-Migration 0033 sunsets the old delivery contracts; old and new delivery workers
-must not overlap. Apply all migrations through 0035 and the runtime grants, then
-start the 0.10.1 API and worker together. Hold public CLI updates until this
-backend cutover is ready. This transition requires a coordinated interruption;
-the ordinary rolling replacement procedure below applies to compatible updates.
-
-Use ordinary rollback for updates that replace ECS task definitions;
-`--disable-rollback` rejects replacement resources.
-
-Later task replacements drain existing targets while clients reconnect and
-replay. Fargate allows a 120-second container stop timeout; DM's shutdown deadline
-is 110 seconds. An interrupted request remains subject to durable idempotent
-retry. Credentials belong in Secrets Manager, never image layers, template
-parameters, DNS records, or command arguments. Runtime tasks receive individual
-restricted secret values through their execution role and have no AWS task role.
+Build and push reviewed ARM64 runtime and bootstrap images to `silicon-dm-production` in ECR and
+pass their immutable digests to a CloudFormation change set. Inspect it before execution. Start
+with `RuntimeDesiredCount=0`, run the bootstrap (migration) task, check it exited 0, then raise
+the count. Credentials belong in Secrets Manager, never in image layers, template parameters or
+command arguments. Fargate allows a 120-second stop timeout; DM's shutdown deadline is 110 s.
 
 ## Required configuration
 
-The public origin is `https://backend.dm.teamofsilicons.com`. Register the exact
-callback `https://backend.dm.teamofsilicons.com/webhook/` in IAM. The canonical
-application ID is `dm`; there is no OBO endpoint registration.
-
-Keep runtime configuration in Secrets Manager. Fargate task definitions refer to
-individual secret keys. For a host-managed Docker deployment, use private
-environment files and do not source them as shell code: canonical IAM IDs contain
-`>`, and secrets can contain shell metacharacters. Docker's `--env-file` reads
-values without executing them.
-
-Use separate configuration for the migrator and runtime:
+The public origin is `https://backend.dm.teamofsilicons.com`. DM's app at Silicon Accounts (`dm`)
+needs its webhook at `https://backend.dm.teamofsilicons.com/webhook/` (every update, including
+custodian changes) and, for the CLI, `device_flow` and `public_client` turned on.
 
 | Setting | Migration process | API and worker |
 | --- | --- | --- |
 | `DM_ENVIRONMENT` | `production` | `production` |
-| `DM_DATABASE_URL` | Production database, object-owning migration role | Same database, restricted runtime role |
-| `DM_BIND_ADDR` | Not needed | `0.0.0.0:8080` inside the container |
-| `DM_PUBLIC_BASE_URL` | Not needed | `https://backend.dm.teamofsilicons.com/api/v1` |
-| `DM_IAM_BASE_URL` | Not needed | `https://backend.iam.teamofsilicons.com` |
-| `DM_IAM_APP_ID` | Not needed | `dm` |
-| `DM_IAM_APP_SECRET` | Not needed | Registered application secret |
-| `DM_IAM_WEBHOOK_SECRET` | Not needed | Registered callback signing secret |
-| `DM_IAM_WEBHOOK_KEY_VERSION` | Not needed | Exact signing version returned by IAM |
-| `DM_GIPHY_API_KEY` | Not needed | Valid application Giphy key |
-| `DM_TEST_DATABASE_URL` | Not used | Separate testing database and schema-owning role, if enabled |
-| `DM_TEST_KEY_ENCRYPTION_KEY` | Not used | Stable base64-encoded 32-byte key, if testing is enabled |
+| `DM_DATABASE_URL` | Object-owning migration role | Same database, restricted runtime role |
+| `DM_BIND_ADDR` | not needed | `0.0.0.0:8080` |
+| `DM_PUBLIC_BASE_URL` | not needed | `https://backend.dm.teamofsilicons.com/api/v1` |
+| `ACCOUNTS_URL` | not needed (`dm-migrate link-identities` uses it) | `https://accounts.teamofsilicons.com` |
+| `ACCOUNTS_API_URL` | optional | Optional server-to-server origin |
+| `DM_APP_ID` | not needed | `dm` |
+| `DM_APP_SECRET` | not needed | DM's app secret |
+| `DM_ACCOUNTS_WEBHOOK_SECRET` | not needed | The app webhook secret (`whsec_…`) |
+| `DM_DATA_KEY` | not needed | 32 random bytes, base64; stable and backed up |
+| `DM_PROOF_ISSUERS` | not needed | Apps allowed per proof scope (for example Silicon Interface) |
+| `DM_TING_URL` | not needed | Unset until Ting accepts Silicon Accounts proofs |
+| `DM_GIPHY_API_KEY` | not needed | Giphy key |
 
-Production database URLs must include exactly one `sslmode=verify-full` query
-parameter and use a host matching the database certificate. Install any required
-trusted CA in the image or configure the database driver's certificate options;
-do not disable verification to work around certificate errors. Other production
-upstream URLs must use HTTPS. [`.env.example`](../.env.example) lists pool,
-timeout, delivery, and provider settings with their defaults.
-
-The testing database must be distinct from production. Its role needs
-`CREATE ON DATABASE` and owns the schemas created for individual environments.
-Test schemas migrate lazily when initialized through DM; do not run the
-production migrator against that database. Keep the encryption key stable
-across every API and worker replica and back it up with the databases.
-Replacing it does not re-encrypt existing environment credentials.
+Production database URLs must include exactly one `sslmode=verify-full` and a host matching the
+certificate; never disable verification. Other production upstream URLs use HTTPS.
+[`.env.example`](../.env.example) lists pool, timeout, delivery and provider settings.
 
 ## Build and migrate
 
-Build the release image from the reviewed checkout:
-
 ```sh
-docker build --tag silicon-dm:0.2.0 .
-docker image inspect silicon-dm:0.2.0 --format '{{.Id}}'
-```
-
-Record the resulting image ID or registry digest for the deployment. The image
-contains `dm-api`, `dm-worker`, and `dm-migrate`; it runs as UID/GID 10001.
-The container filesystem holds no message database or local CLI state.
-
-Back up the production database before upgrading. For the first deployment,
-provision the production database and its distinct migration/runtime roles.
-The following file paths are examples to replace with the host's private files:
-
-```sh
-docker run --rm \
-  --env-file /secure/silicon-dm/migration.env \
-  silicon-dm:0.2.0 dm-migrate
-```
-
-Run [the runtime grants](../deploy/runtime-grants.sql) as the migration role,
-using a private PostgreSQL connection configuration such as a service file:
-
-```sh
+docker build --tag silicon-dm:0.15.0 .
+docker run --rm --env-file /secure/silicon-dm/migration.env silicon-dm:0.15.0 dm-migrate
 psql 'service=dm_migrator' --set ON_ERROR_STOP=1 \
   --set runtime_role=dm_runtime --file deploy/runtime-grants.sql
 ```
 
-The grants permit DM table operations and migration-journal reads while
-excluding historical Hook records. They also establish defaults for later
-tables. The production journal is `public._sqlx_migrations`; a mismatch is an
-error to investigate, not permission to rewrite existing migration history.
-
-For upgrades from a version without persistent draft counters, discard old
-client draft version tokens and reload drafts. Migration 0014 backfills live
-drafts under a write lock, but cannot reconstruct the versions of drafts
-deleted before the counter table existed.
+The image contains `dm-api`, `dm-worker` and `dm-migrate` and runs as UID/GID 10001. Back up the
+database before upgrading. `dm-migrate` only applies migrations; `dm-migrate link-identities` and
+`draft-identity-mapping` re-key identities from before Silicon Accounts at cutover. The journal is
+`public._sqlx_migrations`; a mismatch is an error to investigate, never permission to rewrite
+history. Use private `--env-file`s; never source them as shell code.
 
 ## Start the runtime and configure ingress
 
-Start API and worker with the runtime configuration. A host-managed deployment
-can express these same settings through its service manager:
-
 ```sh
 docker run --detach --name silicon-dm-api --restart unless-stopped \
-  --env-file /secure/silicon-dm/runtime.env \
-  --publish 127.0.0.1:8080:8080 \
-  silicon-dm:0.2.0 dm-api
-
+  --env-file /secure/silicon-dm/runtime.env --publish 127.0.0.1:8080:8080 silicon-dm:0.15.0 dm-api
 docker run --detach --name silicon-dm-worker --restart unless-stopped \
-  --env-file /secure/silicon-dm/runtime.env \
-  silicon-dm:0.2.0 dm-worker
+  --env-file /secure/silicon-dm/runtime.env silicon-dm:0.15.0 dm-worker
 ```
-
-The API also runs its own delivery pump for sockets connected to that process.
-The standalone worker performs durable delivery maintenance; it does not own
-another API process's WebSocket connections. Multiple replicas share the same
-production database and testing configuration. Account for every replica's
-connection pools when sizing PostgreSQL.
-
-Configure the ingress to route these paths unchanged:
 
 | Path | Required handling |
 | --- | --- |
-| `/api/v1/*` | HTTPS REST requests; preserve authorization, organization, idempotency, version, and testing headers |
-| `/api/v1/ws` | WebSocket upgrade, query parameters, and negotiated subprotocol; no response buffering |
-| `/webhook/` | POST with exact original body bytes and IAM signature headers; preserve the trailing slash |
-| `/live`, `/ready` | HTTP probes; successful result is 204 |
+| `/api/v1/*` | HTTPS requests; preserve `Authorization`, `Idempotency-Key`, `If-Match` and `x-dm-contract-version` |
+| `/api/v1/sync` | Long-poll: allow responses up to 45 s without buffering |
+| `/webhook/` | POST with the exact original body bytes and the `X-Accounts-*` headers; keep the trailing slash |
+| `/live`, `/ready` | Probes; success is 204 |
 
-Do not parse and re-encode webhook JSON at the proxy. Do not cache authenticated
-responses or strip `Cache-Control: no-store`. WebSocket inactivity limits must
-allow the application's 30-second pings and 120-second heartbeat policy; use an
-ingress timeout above 120 seconds. Redact credentials, WebSocket authentication
-subprotocols, testing root headers, and raw IAM test webhook bodies from logs.
+Do not parse and re-encode webhook JSON at the proxy, cache authenticated responses or strip
+`Cache-Control: no-store`. Redact credentials from logs. Align body limits with
+`DM_MAX_HTTP_BODY_BYTES` (128 MiB by default). Replacing an image never deletes data; rolling back
+code requires checking schema compatibility.
 
-Align ingress body limits with `DM_MAX_HTTP_BODY_BYTES` (128 MiB by default).
-The logical text limit is 100 million Unicode characters; UTF-8 and JSON encoding
-can require more bytes. Increase the explicit body/frame limits only with
-adequate process memory and request timeouts. The backend separately limits
-auth bodies to 16 KiB and IAM webhooks to 1 MiB.
+## Acceptance after a deployment
 
-Allow at least `DM_SHUTDOWN_TIMEOUT_SECONDS` for graceful shutdown. Do not delete
-databases, encrypted environment metadata, or CLI queues when replacing an
-image. Rollback of code requires checking schema compatibility; forward
-migrations are not automatically reversed by starting an older image.
+1. `/live` and `/ready` through the public origin answer 204.
+2. `GET /api/v1/accounts` names the expected Silicon Accounts and app id.
+3. A Carbon signs in on the website or with `dm login`; a Silicon with
+   `silicon-accounts login --app dm -q | dm login --slt-stdin`; both pass `dm login status --json`.
+4. The Carbon sends to a Silicon it looks after; the Silicon reads it with `dm inbox` and marks
+   it read; the Carbon sees `read_at`.
+5. `POST /v1/apps/dm/webhook/test` at Silicon Accounts arrives (`dm.accounts_webhook_receipts`).
+6. GIF trending and search work with the configured key.
+7. Record the image digest, migration version and observed outcomes (no secrets).
 
-## Manual deployment acceptance
+## Client release
 
-Perform these actions individually after ingress and the runtime are ready:
-
-1. Read `/live` and `/ready` through the public HTTPS origin and verify 204.
-   Readiness covers DM database/schema access; it does not prove IAM or Giphy.
-2. Use the installed IAM CLI to obtain a fresh SLT with explicit IAM organization selection for the
-   registered app. Log in through the DM CLI with a reachable local callback,
-   and check `whoami`. Keep production and testing profiles separate.
-3. Pair a new DM sandbox with an IAM testing environment. Sign in both intended
-   recipients, send a message, observe the callback ACK and Delivered receipt,
-   then explicitly mark it Read. Reconnect and inspect durable replay behavior.
-4. Request Giphy trending and search with the configured real key. Inspect
-   provider results and the null next cursor; discovery currently returns up to
-   25 results without pagination.
-5. Activate the registered production webhook in IAM. Trigger an authorized
-   change on a designated test account, inspect DM receipt and IAM delivery
-   status, and verify session revalidation. Exercise the signed test envelope
-   separately against the paired sandbox. See [IAM integration](iam.md) for
-   signer versions and environment binding.
-6. Confirm the tested deployment image, migration version, probe results, and
-   manually observed outcomes in a deployment record. Keep secret values and
-   raw signed test envelopes out of that record.
-
-The local temporary webhook tunnel used during development is stopped. It is
-not a deployment dependency; replace its URL on the IAM test application before
-expecting further test callbacks. Production uses the registered public URL.
-
-## Rust package and CLI release
-
-Prior client and CLI releases are on crates.io; 0.10.1 remains a candidate until
-its release gates pass. For each new release, publish
-`silicon-dm-protocol`, then `silicon-dm-client`, then `silicon-dm-cli`, whose manifest depends on that
-client version. Use the appropriate crates.io owner account and review the
-package contents and release version before publication.
-
-Build a Honeycomb archive using [the release guide](honeycomb-release.md).
-Honeycomb owns installation and updates; DM does not run Cargo or replace itself.
-Rust libraries remain normal project dependencies.
+Publish `silicon-dm-protocol`, then `silicon-dm-client`, to crates.io for Rust integrations. The
+`dm` command is distributed only through Silicon Apps: the release workflow builds one archive per
+target with `apps.yaml`, and the archives are uploaded with `silicon-apps upload`. Silicon Apps
+installs and updates it; DM never replaces itself.

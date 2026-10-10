@@ -40,6 +40,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check the CLI's packaged guides match docs/
+        run: python3 scripts/sync-cli-docs.py --check
+
       - name: Check all targets
         run: cargo check --locked --workspace --all-targets --all-features
 
