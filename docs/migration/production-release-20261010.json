@@ -1,0 +1,41 @@
+{
+  "app_id": "dm",
+  "date": "2026-10-10",
+  "scope": "Parallel Accounts app rollout; existing IAM Silicons, custody, stores, services and clients preserved",
+  "public_api": "https://api.dm.teamofsilicons.com",
+  "public_website": "https://dm.teamofsilicons.com",
+  "legacy_api": "https://backend.dm.teamofsilicons.com",
+  "runtime_source": "5bb4619290efcc89d0ebcbe9ff850fb639a11c9c",
+  "ui_source": "5e688abecf94c76526f9be451de847ad32d8be8c",
+  "cli_source": "637e1f72bf02e304c93349cb9c74f7e970461316",
+  "cli_version": "0.15.0",
+  "cli_native_manifest": "pending",
+  "public_github_releases": [],
+  "crates_published": [
+    "silicon-dm-protocol",
+    "silicon-dm-client"
+  ],
+  "authenticated_browser": {
+    "authenticated": true,
+    "authMethod": "genuine CLI session in existing BFF sealed-cookie format",
+    "pageErrors": [],
+    "themes": [
+      "light",
+      "dark"
+    ],
+    "viewports": [
+      "desktop",
+      "mobile"
+    ],
+    "spacing": "1.5rem"
+  },
+  "webhook_signed_ping": "delivered",
+  "temporary_fixture": {
+    "uuid": "6af7bf6a-2fec-4f09-a502-c11447b8f4ac",
+    "account_deletion": "held for coordinator-requested Remind verification",
+    "android_device": "removed; access revoked; session ended; owned emulator stopped"
+  },
+  "evidence_directory": ".migration/live/parallel/dm/",
+  "pr": "https://github.com/teamofsilicons/silicon-dm/pull/11",
+  "merge": "pending final branch CI"
+}
