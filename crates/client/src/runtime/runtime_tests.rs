@@ -358,3 +358,38 @@ async fn another_account_never_takes_over_a_profile_with_queued_requests() -> Re
     assert_eq!(runtime.logout("default").await?["signed_out"], false);
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_sign_in_file_and_its_directory_are_owner_only_and_replaced_atomically() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new().await?;
+    fixture.sign_in(0)?;
+    let state = fixture.store()?;
+    state.fresh_profile(&store::session_key("default")).await?;
+    let directory = state.directory();
+    let mode = |path: &std::path::Path| -> Result<u32> {
+        Ok(std::fs::metadata(path)?.permissions().mode() & 0o777)
+    };
+    assert_eq!(mode(&directory)?, 0o700);
+    assert_eq!(mode(&directory.join("config.json"))?, 0o600);
+    assert_eq!(mode(&directory.join("config.lock"))?, 0o600);
+    let lock = std::fs::read_dir(&directory)?
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().starts_with("refresh-"))
+        .context("refresh lock")?;
+    assert_eq!(mode(&lock.path())?, 0o600);
+    // No temporary file is left behind by the atomic replace.
+    assert!(
+        std::fs::read_dir(&directory)?
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+    );
+    // A symbolic link in place of the file is refused.
+    let target = fixture.root.path().join("elsewhere.json");
+    std::fs::write(&target, "{}")?;
+    std::fs::remove_file(directory.join("config.json"))?;
+    std::os::unix::fs::symlink(&target, directory.join("config.json"))?;
+    assert!(state.load().is_err());
+    Ok(())
+}

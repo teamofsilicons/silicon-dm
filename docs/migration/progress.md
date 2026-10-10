@@ -215,7 +215,8 @@ What changed:
 | e2b38fe | Move the DM client and CLI to Silicon Accounts |
 | 9ba6733 | Read allow-list entries as the service sends them |
 | 5140793 | Rewrite the DM guides for Silicon Accounts and Silicon Apps |
-| (last) | Record stage 2 results, decisions and the CLI cutover |
+| e390858 | Record stage 2 results, decisions and the CLI cutover |
+| (last) | Test that the stored sign-in stays owner-only and atomic |
 
 ### Tests (from the worktree with the brief's Rust env)
 
@@ -224,7 +225,7 @@ What changed:
 | `cargo fmt --all -- --check` | ok |
 | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | ok |
 | `cargo deny --all-features check` | advisories ok, bans ok, licenses ok, sources ok |
-| `DM_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5460/postgres cargo test --locked --workspace --all-features` | **163 passed, 0 failed** (service 44 + 3 + 6 + 5 + 2 + 6 + 6 + 6 + 4 + 7 + 6; CLI unit 6, accounts 8, discovery 1, em_dash 1, home 2, message_length 1, receive 3, state 4; client 35 + http_contract 4; protocol 3) |
+| `DM_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5460/postgres cargo test --locked --workspace --all-features` | **163 passed, 0 failed** (service 44 + 3 + 6 + 5 + 2 + 6 + 6 + 6 + 4 + 7 + 6; CLI unit 6, accounts 8, discovery 1, em_dash 1, home 2, message_length 1, receive 3, state 4; client 35 + http_contract 4; protocol 3); afterwards a 36th client test (file modes, atomic replace, symbolic link refused) passes too |
 | `python3 scripts/sync-cli-docs.py --check` | `crates/cli/docs matches 18 canonical files` |
 | `npx --yes @redocly/cli@2.49.0 lint openapi.yaml` | valid (4 problems explicitly ignored, as before) |
 | `cd docs-site && npm ci && npm run build && npm run check` | 17 pages built and verified |
@@ -240,7 +241,7 @@ test key not written back; damaged state kept aside; retired commands and flags)
 inbox lines with hydration, `--mark-delivered`, inaccessible, saved-cursor resume, `--watch` until SIGTERM exit 0),
 `src/command_tests.rs` (documented forms parse, removed ones do not, every visible help page has a description and no
 retired words), client `runtime_tests.rs` (legacy profile, damaged file, eight concurrent refreshes rotating once,
-refused refresh, unreachable Accounts, account takeover refused, revoke forms), `accounts.rs` unit tests (refusal
+refused refresh, unreachable Accounts, account takeover refused, revoke forms, 0700/0600 modes with no temporary file left and a symbolic link refused), `accounts.rs` unit tests (refusal
 codes, URLs, non-`slt_` input never sent), `tests/http_contract.rs` (Bearer/Proof/contract header, custodian and
 allow-list routes, owners idempotency, sync long-poll query, errors with hints, Ting hydration without ACKs).
 
