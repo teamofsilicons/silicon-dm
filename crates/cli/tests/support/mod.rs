@@ -386,15 +386,7 @@ impl Home {
         command
     }
     pub async fn run(&self, args: &[&str]) -> Run {
-        Run::from(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(45),
-                self.command(args).output(),
-            )
-            .await
-            .expect("dm exits within 45 seconds")
-            .expect("dm runs"),
-        )
+        Self::finish(self.command(args).spawn().expect("dm starts")).await
     }
     pub async fn run_with_stdin(&self, args: &[&str], input: &str) -> Run {
         use tokio::io::AsyncWriteExt;
@@ -407,12 +399,33 @@ impl Home {
             .await
             .expect("write stdin");
         drop(stdin);
-        Run::from(
-            tokio::time::timeout(std::time::Duration::from_secs(45), child.wait_with_output())
-                .await
-                .expect("dm exits within 45 seconds")
-                .expect("dm runs"),
-        )
+        Self::finish(child).await
+    }
+    async fn finish(mut child: tokio::process::Child) -> Run {
+        use tokio::io::AsyncReadExt;
+        let mut stdout = child.stdout.take().expect("stdout");
+        let mut stderr = child.stderr.take().expect("stderr");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let done = tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            tokio::try_join!(
+                async {
+                    let status = child.wait().await?;
+                    eprintln!("dm process exited: {status}; waiting for output pipes to close");
+                    Ok::<_, std::io::Error>(status)
+                },
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err),
+            )
+        })
+        .await
+        .expect("dm exits and closes its pipes within 45 seconds")
+        .expect("dm runs");
+        Run::from(std::process::Output {
+            status: done.0,
+            stdout: out,
+            stderr: err,
+        })
     }
     pub fn config(&self) -> Value {
         serde_json::from_slice(&std::fs::read(self.state().join("config.json")).expect("config"))
