@@ -11,12 +11,12 @@ The API uses 2 vCPU and 8 GiB; the worker uses 0.5 vCPU and 4 GiB. Rolling
 deployments temporarily permit two tasks per service. Validate regional Fargate
 quota and current usage before provisioning. Both services use private subnets
 with public IP assignment disabled. They require the existing outbound NAT or
-appropriate VPC endpoints plus outbound connectivity to IAM and Giphy.
+appropriate VPC endpoints plus outbound connectivity to Silicon Accounts and Giphy.
 
 ## Images
 
 The manual [deployment image workflow](../../.github/workflows/deployment-images.yml) builds the backend runtime
-(including the RDS CA wrapper) and browser gateway on native ARM64 runners. It
+(including the RDS CA wrapper) and the website's server image on native ARM64 runners. It
 exports `dm-deployment-backend` and `dm-deployment-gateway` artifacts containing
 Docker image archives, revision/version/platform metadata, and `SHA256SUMS`.
 Verify those checksums and the expected commit, authenticate `crane` to ECR, then
@@ -48,6 +48,35 @@ the DM ECR repository and supply digest-pinned URIs as `BackendImageUri` and
 `Dockerfile.bootstrap.dockerignore` permits only `bootstrap-task.py` and the
 canonical `runtime-grants.sql` through the repository's restrictive build context.
 
+## Silicon Accounts settings
+
+DM signs every account in with Silicon Accounts. The non-secret settings are stack parameters,
+passed to the API and worker as environment variables:
+
+| Parameter | Variable | Default |
+| --- | --- | --- |
+| `AccountsUrl` | `ACCOUNTS_URL` | `https://accounts.teamofsilicons.com` (exactly the `iss` of its tokens) |
+| `AccountsApiUrl` | `ACCOUNTS_API_URL` | empty: DM calls `AccountsUrl` |
+| `AppId` | `DM_APP_ID` | `dm` |
+| `ProofIssuers` | `DM_PROOF_ISSUERS` | Silicon Interface (`interface`) for the five DM proof scopes |
+| `TingUrl` | `DM_TING_URL` | empty: Ting delivery off; clients read the sync feed |
+
+The application secret (`AppSecretArn`) is a JSON object with these fields:
+
+| Field | Value |
+| --- | --- |
+| `DM_APP_SECRET` | DM's app secret at Silicon Accounts |
+| `DM_ACCOUNTS_WEBHOOK_SECRET` | The app webhook signing secret (`whsec_…`) |
+| `DM_DATA_KEY` | `openssl rand -base64 32`; keep it stable and backed up (sync cursors and stored proofs depend on it) |
+| `DM_GIPHY_API_KEY` | Giphy application key |
+| `DM_RUNTIME_DATABASE_PASSWORD` | Independently generated production runtime password |
+| `DM_SPACE_STATION_TABLE_KEY`, `DM_POSTMARK_SERVER_TOKEN` | Optional, see below |
+
+Bootstrap validates these fields (the webhook secret must start with `whsec_`, the data key must
+decode to 32 bytes) and publishes the runtime secret the tasks read: the app secret, webhook
+secret, data key, provider keys and the restricted database URL. DM's webhook at Silicon Accounts
+is the stack output `WebhookUrl` (`https://backend.dm.teamofsilicons.com/webhook/`).
+
 ## Initial deployment
 
 Supply the same VPC, subnet, certificate, application-secret, database-engine,
@@ -64,19 +93,19 @@ platform version `1.4.0`. Inspect its specific task ARN until it stops. Read its
 exit code and `/silicon-dm/production/bootstrap` CloudWatch log stream.
 A zero exit and the final completion message mean that it has:
 
-1. Read only the three approved secret ARNs: app configuration, production
-   master, and testing master.
-2. Connected to both RDS hosts with authenticated `sslmode=verify-full` and the
-   baked-in RDS CA; configured `dm_runtime` and `dm_testing` without superuser,
+1. Read only the two approved secret ARNs: app configuration and production
+   master.
+2. Connected to the production RDS host with authenticated `sslmode=verify-full`
+   and the baked-in RDS CA; configured `dm_runtime` without superuser,
    role-management, database-creation, replication, or RLS-bypass privileges.
 3. Applied production migrations as the production master and the canonical
-   restricted grants. Test schemas are still created/migrated only through DM's
-   isolated environment lifecycle, with `CREATE, TEMPORARY ON DATABASE` for
-   `dm_testing` only. Temporary mapping tables are required by schema migrations;
-   this does not grant temporary-table privileges to `PUBLIC` or production.
-4. Written a separate Secrets Manager JSON document containing restricted
-   database URLs and the runtime app/provider settings. It does not include
-   either RDS master password.
+   restricted grants.
+4. Written a separate Secrets Manager JSON document containing the restricted
+   database URL and the runtime Silicon Accounts and provider settings. It does
+   not include the RDS master password.
+
+The testing RDS instance from the test-environment era is retained with its data;
+neither bootstrap nor the tasks use it.
 
 Role creation uses explicit restricted attributes. On an existing role, bootstrap
 checks those attributes and changes only the password inside a transaction with
@@ -94,28 +123,30 @@ execution role only pulls images and writes logs.
 
 After bootstrap succeeds, execute a reviewed update with
 `RuntimeDesiredCount=1`. Verify both services reach steady state and the API
-IP targets pass `/ready` with 204. Perform public HTTPS, login, message replay,
-Giphy, and real signed IAM callback checks individually as described in
+IP targets pass `/ready` with 204. Perform public HTTPS, sign-in, sync feed,
+Giphy, and real signed Silicon Accounts webhook checks individually as described in
 [`docs/deployment.md`](../../docs/deployment.md). A service reaching steady
 state is infrastructure evidence, not end-to-end application verification.
 
 Before any database mutations, bootstrap verifies that an already initialized
-runtime secret still matches both database URLs/passwords and the testing
-encryption key. It rejects changes to those values; ordinary bootstrap is not
+runtime secret still matches the database URL (and so the runtime password) and
+`DM_DATA_KEY`. It rejects changes to those values; ordinary bootstrap is not
 a password-rotation mechanism. Use a separately reviewed rotation/re-encryption
 procedure rather than overwriting credentials or clearing the runtime secret.
+The keys a DM 0.14 bootstrap published for its earlier sign-in, test
+environments and installer (`RETIRED` in `bootstrap-task.py`) are carried over
+unchanged and unused, so the 0.14 task definitions can still start during a
+rollback; remove them once the rollback window has closed
+([the cutover runbook](../../docs/migration/cutover.md)).
 
 Use ordinary rollback for updates that replace task definitions. CloudFormation
 rejects replacement resources when an update uses `--disable-rollback`; reserve
 that preservation option for initial provisioning or a reviewed recovery that
 does not replace resources.
 
-For the 0.10.1 Ting cutover, stop both old API and worker tasks and wait for
-both services to drain before running the new bootstrap/migrator task. Apply
-migrations through 0034 and runtime grants, inspect successful completion, then
-start the new API and worker together. Do not overlap the old and new delivery
-workers or publish automatic CLI updates ahead of this backend cutover. See
-[the deployment guide](../../docs/deployment.md) for the coordinated procedure.
+The move to Silicon Accounts (DM 0.15) is a coordinated cutover: stop both old
+services, migrate, re-key identities, then start the new API and worker together.
+Follow [the cutover runbook](../../docs/migration/cutover.md).
 
 For compatible upgrades, run the new bootstrap/migrator task and inspect its
 successful completion before deploying new API/worker task definitions. Verify
@@ -133,9 +164,9 @@ inspection rules or sampled request capture.
 Fargate allows at most 120 seconds for `StopTimeout`, so DM's graceful-shutdown
 deadline is 110 seconds and the task stop timeout is 120 seconds. A request
 that uses the entire REST allowance can still be interrupted during shutdown;
-clients must retry using the same durable idempotency key. WebSockets reconnect
-and replay committed deliveries. These containers do not need a writable root
-filesystem or a Fargate-unsupported `tmpfs` option.
+clients must retry using the same durable idempotency key. Sync long-polls last
+at most 30 seconds and clients resume from their cursor. These containers do not
+need a writable root filesystem or a Fargate-unsupported `tmpfs` option.
 
 ## Recovering an incomplete EC2 stack without recreating RDS
 
@@ -210,14 +241,3 @@ the root filesystem read-only. The spool survives a process restart within the
 task; unsent diagnostics can be lost when the task is replaced. It contains no
 message payloads or authentication credentials. Message durability is independent
 of this best-effort telemetry spool.
-
-## Honeycomb participant configuration
-
-Add `DM_HONEYCOMB_SERVICE_TOKEN` and `DM_HONEYCOMB_BASE_URL` to the deployment's
-application secret to enable shared test lifecycle control and activity reporting.
-Provision a dedicated shared credential through the service secret stores and
-register the DM backend in Honeycomb's participant registry. Reuse that credential
-on later deployments; bootstrap preserves an existing runtime credential if omitted
-and refuses an implicit rotation. End users only provide their test app secret.
-Both API and worker task definitions load these fields from the runtime secret.
-Migration 0022 precedes the API rollout. See [the participant contract](../../docs/honeycomb-lifecycle.md).

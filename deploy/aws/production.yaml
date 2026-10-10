@@ -16,16 +16,38 @@ Parameters:
     Type: String
   AppSecretArn:
     Type: String
-    Description: Secrets Manager secret holding the IAM application and webhook credentials.
+    Description: Secrets Manager secret holding DM's Silicon Accounts app secret, webhook secret, data key, provider keys and the runtime database password.
   BackendImageUri:
     Type: String
     Description: Immutable ECR image URI, tagged with the commit it was built from.
   PublicHostName:
     Type: String
     Default: backend.dm.teamofsilicons.com
-  IamBaseUrl:
+  AccountsUrl:
     Type: String
-    Default: https://backend.iam.teamofsilicons.com/
+    Default: https://accounts.teamofsilicons.com
+    AllowedPattern: ^https://[^/\s]+$
+    Description: Silicon Accounts public origin, exactly the iss of its tokens (no trailing slash).
+  AccountsApiUrl:
+    Type: String
+    Default: ""
+    AllowedPattern: ^(https://[^\s]+)?$
+    Description: Optional server-to-server Silicon Accounts origin; empty uses AccountsUrl.
+  AppId:
+    Type: String
+    Default: dm
+    AllowedPattern: ^[a-z][a-z0-9_-]*$
+    Description: DM's app id at Silicon Accounts.
+  ProofIssuers:
+    Type: String
+    Default: dm.conversations.read=interface,dm.messages.read=interface,dm.messages.write=interface,dm.receipts.write=interface,dm.drafts.write=interface
+    AllowedPattern: ^[a-z0-9._=,-]*$
+    Description: Apps whose User verification proofs DM accepts, per scope (scope=app,...); empty accepts none.
+  TingUrl:
+    Type: String
+    Default: ""
+    AllowedPattern: ^(https://[^/\s]+)?$
+    Description: Ting origin; empty keeps Ting delivery off and clients read DM's sync feed.
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
@@ -157,6 +179,8 @@ Resources:
         - Key: Environment
           Value: production
 
+  # Retained: it held the test environments, which DM 0.15 no longer runs. Nothing
+  # reads or writes it any more; its data stays until a Carbon decides otherwise.
   TestingDatabase:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Snapshot
@@ -252,7 +276,6 @@ Resources:
                 Resource:
                   - !Ref AppSecretArn
                   - !GetAtt Database.MasterUserSecret.SecretArn
-                  - !GetAtt TestingDatabase.MasterUserSecret.SecretArn
               - Effect: Allow
                 Action:
                   - logs:CreateLogStream
@@ -484,17 +507,19 @@ Resources:
             export AWS_DEFAULT_REGION='${AWS::Region}'
             APP_SECRET_ARN='${AppSecretArn}'
             DB_SECRET_ARN='${Database.MasterUserSecret.SecretArn}'
-            TEST_DB_SECRET_ARN='${TestingDatabase.MasterUserSecret.SecretArn}'
             export DB_HOST='${Database.Endpoint.Address}'
-            export TEST_DB_HOST='${TestingDatabase.Endpoint.Address}'
             export BACKEND_IMAGE='${BackendImageUri}'
             export PUBLIC_HOST='${PublicHostName}'
-            export IAM_BASE_URL='${IamBaseUrl}'
+            export ACCOUNTS_URL='${AccountsUrl}'
+            export ACCOUNTS_API_URL='${AccountsApiUrl}'
+            export APP_ID='${AppId}'
+            export PROOF_ISSUERS='${ProofIssuers}'
+            export TING_URL='${TingUrl}'
             STACK_ID='${AWS::StackId}'
             SIGNAL_ID=$(hostname)
             cleanup() {
               result=$?
-              rm -f /etc/silicon-dm/{app,master,test-master}.json /etc/silicon-dm/migration.env
+              rm -f /etc/silicon-dm/{app,master}.json /etc/silicon-dm/migration.env
               status=FAILURE
               if [ "$result" -eq 0 ]; then status=SUCCESS; fi
               aws cloudformation signal-resource --stack-name "$STACK_ID" --logical-resource-id AutoScalingGroup \
@@ -532,7 +557,6 @@ Resources:
             docker pull "$BACKEND_IMAGE"
             aws secretsmanager get-secret-value --secret-id "$APP_SECRET_ARN" --query SecretString --output text > /etc/silicon-dm/app.json
             aws secretsmanager get-secret-value --secret-id "$DB_SECRET_ARN" --query SecretString --output text > /etc/silicon-dm/master.json
-            aws secretsmanager get-secret-value --secret-id "$TEST_DB_SECRET_ARN" --query SecretString --output text > /etc/silicon-dm/test-master.json
             
             cat > /opt/silicon-dm/runtime-grants.sql <<'DM_RUNTIME_GRANTS'
             \if :{?runtime_role}
@@ -570,27 +594,29 @@ Resources:
             # Parse secret JSON as data. Credentials never appear in shell commands, user
             # data, process arguments, or logs. Passwords are URL encoded for SQLx.
             python3 <<'PYTHON'
-            import base64, json, os, pathlib, subprocess, urllib.parse
+            import base64, binascii, json, os, pathlib, subprocess, urllib.parse
             root = pathlib.Path('/etc/silicon-dm')
             app = json.loads((root / 'app.json').read_text())
-            required = ['DM_IAM_APP_ID', 'DM_IAM_APP_SECRET', 'DM_IAM_WEBHOOK_SECRET',
-                        'DM_GIPHY_API_KEY', 'DM_TEST_KEY_ENCRYPTION_KEY',
-                        'DM_RUNTIME_DATABASE_PASSWORD', 'DM_TEST_DATABASE_PASSWORD']
+            required = ['DM_APP_SECRET', 'DM_ACCOUNTS_WEBHOOK_SECRET', 'DM_DATA_KEY',
+                        'DM_GIPHY_API_KEY', 'DM_RUNTIME_DATABASE_PASSWORD']
             for key in required:
                 value = app.get(key)
                 if not isinstance(value, str) or not value.strip() or any(c in value for c in '\r\n\x00'):
                     raise SystemExit('Missing or invalid Secrets Manager field: ' + key)
                 if value.startswith('REPLACE_'):
                     raise SystemExit('Incomplete Secrets Manager field: ' + key)
+            if not app['DM_ACCOUNTS_WEBHOOK_SECRET'].strip().startswith('whsec_'):
+                raise SystemExit('DM_ACCOUNTS_WEBHOOK_SECRET must be the webhook secret from Silicon Accounts (whsec_...)')
             try:
-                key_bytes = base64.b64decode(app['DM_TEST_KEY_ENCRYPTION_KEY'], validate=True)
-            except ValueError:
-                raise SystemExit('DM_TEST_KEY_ENCRYPTION_KEY is not valid base64') from None
+                key_bytes = base64.b64decode(app['DM_DATA_KEY'].strip(), validate=True)
+            except (binascii.Error, ValueError):
+                raise SystemExit('DM_DATA_KEY must be standard base64 (openssl rand -base64 32)') from None
             if len(key_bytes) != 32:
-                raise SystemExit('DM_TEST_KEY_ENCRYPTION_KEY must encode 32 bytes')
-            version = app.get('DM_IAM_WEBHOOK_KEY_VERSION')
-            if type(version) is not int or version < 1:
-                raise SystemExit('DM_IAM_WEBHOOK_KEY_VERSION must be a positive integer')
+                raise SystemExit('DM_DATA_KEY must encode exactly 32 bytes')
+            for key in ['DM_SPACE_STATION_TABLE_KEY', 'DM_POSTMARK_SERVER_TOKEN']:
+                value = app.get(key, '')
+                if not isinstance(value, str) or any(c in value for c in '\r\n\x00'):
+                    raise SystemExit('Invalid optional Secrets Manager field: ' + key)
             ca = '/opt/silicon-dm/aws-rds-global-bundle.pem'
             ssl = 'sslmode=verify-full&sslrootcert=' + ca
             
@@ -602,7 +628,7 @@ Resources:
                 path.write_text(''.join(k + '=' + str(v) + '\n' for k, v in values.items()))
                 path.chmod(0o600)
             
-            def configure_database(master_file, host, database, role, password, testing=False):
+            def configure_database(master_file, host, database, role, password):
                 credentials = json.loads((root / master_file).read_text())
                 environment = dict(os.environ, PGHOST=host, PGPORT='5432', PGDATABASE=database,
                     PGUSER=credentials['username'], PGPASSWORD=credentials['password'],
@@ -631,54 +657,49 @@ Resources:
             REVOKE ALL ON DATABASE %s FROM PUBLIC;
             GRANT CONNECT ON DATABASE %s TO %s;
             REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+            COMMIT;
             """ % (role, role, role, role, database, database, role)
-                if testing:
-                    sql += 'GRANT CREATE, TEMPORARY ON DATABASE ' + database + ' TO ' + role + ';\n'
-                sql += 'COMMIT;\n'
                 subprocess.run(['psql', '-X', '--set', 'ON_ERROR_STOP=1'], input=sql, text=True,
                                env=environment, check=True)
-                if not testing:
-                    write_env('migration.env', {
-                        'DM_ENVIRONMENT': 'production',
-                        'DM_DATABASE_URL': database_url(credentials['username'], credentials['password'], host, database),
-                        'DM_DATABASE_MAX_CONNECTIONS': 2,
-                        'DM_DATABASE_ACQUIRE_TIMEOUT_SECONDS': 15,
-                        'DM_DATABASE_STATEMENT_TIMEOUT_SECONDS': 300,
-                        'DM_LOG_FILTER': 'silicon_dm=info',
-                    })
-                    subprocess.run(['docker', 'run', '--rm', '--read-only', '--cap-drop', 'ALL',
-                        '--security-opt', 'no-new-privileges', '--tmpfs', '/tmp:size=16m,mode=1777',
-                        '--volume', ca + ':' + ca + ':ro', '--env-file', str(root / 'migration.env'),
-                        os.environ['BACKEND_IMAGE'], 'dm-migrate'], check=True)
-                    subprocess.run(['psql', '-X', '--set', 'ON_ERROR_STOP=1', '--set', 'runtime_role=' + role,
-                                    '--file', '/opt/silicon-dm/runtime-grants.sql'], env=environment, check=True)
+                write_env('migration.env', {
+                    'DM_ENVIRONMENT': 'production',
+                    'DM_DATABASE_URL': database_url(credentials['username'], credentials['password'], host, database),
+                    'DM_DATABASE_MAX_CONNECTIONS': 2,
+                    'DM_DATABASE_ACQUIRE_TIMEOUT_SECONDS': 15,
+                    'DM_DATABASE_STATEMENT_TIMEOUT_SECONDS': 300,
+                    'DM_LOG_FILTER': 'silicon_dm=info',
+                })
+                subprocess.run(['docker', 'run', '--rm', '--read-only', '--cap-drop', 'ALL',
+                    '--security-opt', 'no-new-privileges', '--tmpfs', '/tmp:size=16m,mode=1777',
+                    '--volume', ca + ':' + ca + ':ro', '--env-file', str(root / 'migration.env'),
+                    os.environ['BACKEND_IMAGE'], 'dm-migrate'], check=True)
+                subprocess.run(['psql', '-X', '--set', 'ON_ERROR_STOP=1', '--set', 'runtime_role=' + role,
+                                '--file', '/opt/silicon-dm/runtime-grants.sql'], env=environment, check=True)
             
             configure_database('master.json', os.environ['DB_HOST'], 'silicon_dm', 'dm_runtime', app['DM_RUNTIME_DATABASE_PASSWORD'])
-            # Test schemas migrate lazily through their isolated environment lifecycle.
-            configure_database('test-master.json', os.environ['TEST_DB_HOST'], 'silicon_dm_test', 'dm_testing', app['DM_TEST_DATABASE_PASSWORD'], testing=True)
             values = {
                 'DM_ENVIRONMENT': 'production',
                 'DM_BIND_ADDR': '0.0.0.0:8080',
                 'DM_PUBLIC_BASE_URL': 'https://' + os.environ['PUBLIC_HOST'] + '/api/v1',
                 'DM_DATABASE_URL': database_url('dm_runtime', app['DM_RUNTIME_DATABASE_PASSWORD'], os.environ['DB_HOST'], 'silicon_dm'),
-                'DM_TEST_DATABASE_URL': database_url('dm_testing', app['DM_TEST_DATABASE_PASSWORD'], os.environ['TEST_DB_HOST'], 'silicon_dm_test'),
                 'DM_DATABASE_MAX_CONNECTIONS': 16,
                 'DM_DATABASE_MIN_CONNECTIONS': 1,
-                'DM_TEST_DATABASE_MAX_CONNECTIONS': 4,
                 'DM_DATABASE_ACQUIRE_TIMEOUT_SECONDS': 10,
                 'DM_DATABASE_STATEMENT_TIMEOUT_SECONDS': 60,
                 'DM_REQUEST_TIMEOUT_SECONDS': 120,
                 'DM_SHUTDOWN_TIMEOUT_SECONDS': 130,
                 'DM_MAX_HTTP_BODY_BYTES': 134217728,
-                'DM_IAM_BASE_URL': os.environ['IAM_BASE_URL'],
-                'DM_IAM_APP_ID': app['DM_IAM_APP_ID'],
-                'DM_IAM_APP_SECRET': app['DM_IAM_APP_SECRET'],
-                'DM_IAM_WEBHOOK_SECRET': app['DM_IAM_WEBHOOK_SECRET'],
-                'DM_IAM_WEBHOOK_KEY_VERSION': version,
-                'DM_TEST_KEY_ENCRYPTION_KEY': app['DM_TEST_KEY_ENCRYPTION_KEY'],
-                'DM_HONEYCOMB_SERVICE_TOKEN': app.get('DM_HONEYCOMB_SERVICE_TOKEN', ''),
-                'DM_HONEYCOMB_BASE_URL': app.get('DM_HONEYCOMB_BASE_URL', ''),
-                'DM_GIPHY_API_KEY': app['DM_GIPHY_API_KEY'],
+                'ACCOUNTS_URL': os.environ['ACCOUNTS_URL'],
+                'ACCOUNTS_API_URL': os.environ['ACCOUNTS_API_URL'],
+                'DM_APP_ID': os.environ['APP_ID'],
+                'DM_APP_SECRET': app['DM_APP_SECRET'].strip(),
+                'DM_ACCOUNTS_WEBHOOK_SECRET': app['DM_ACCOUNTS_WEBHOOK_SECRET'].strip(),
+                'DM_DATA_KEY': app['DM_DATA_KEY'].strip(),
+                'DM_PROOF_ISSUERS': os.environ['PROOF_ISSUERS'],
+                'DM_TING_URL': os.environ['TING_URL'],
+                'DM_GIPHY_API_KEY': app['DM_GIPHY_API_KEY'].strip(),
+                'DM_SPACE_STATION_TABLE_KEY': app.get('DM_SPACE_STATION_TABLE_KEY', '').strip(),
+                'DM_POSTMARK_SERVER_TOKEN': app.get('DM_POSTMARK_SERVER_TOKEN', '').strip(),
                 'DM_LOG_FILTER': 'info,silicon_dm=info',
             }
             write_env('api.env', values)
@@ -707,7 +728,7 @@ Resources:
             done
             systemctl daemon-reload
             systemctl enable --now silicon-dm-container-network silicon-dm-api silicon-dm-worker
-            for attempt in $(seq 1 120); do
+            for _ in $(seq 1 120); do
               if [ "$(curl --silent --max-time 5 --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8080/ready)" = 204 ] \
                 && systemctl is-active --quiet silicon-dm-worker; then
                 exit 0

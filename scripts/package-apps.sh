@@ -17,7 +17,7 @@
 # SILICON_APPS to its path). scripts/package-apps.sh --help lists every option.
 set -euo pipefail
 
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 for candidate in "${PYTHON:-}" python3 python; do
   [ -n "$candidate" ] || continue
   if command -v "$candidate" >/dev/null 2>&1 &&
