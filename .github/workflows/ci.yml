@@ -37,6 +37,11 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
       - name: Check the shell entry points
         run: bash -n scripts/package-apps.sh && sh -n scripts/install.sh
+      - name: Check the local end-to-end scripts parse (running them needs a Silicon Accounts stack)
+        run: |
+          python3 -m py_compile scripts/dev_accounts.py scripts/dev_ting_stub.py tests/e2e/accounts_e2e.py
+          bash -n scripts/dev-accounts.sh scripts/dev-accounts-stop.sh scripts/e2e-accounts.sh
+          python3 scripts/dev_accounts.py --help > /dev/null
 
   rust:
     name: Rust quality gate

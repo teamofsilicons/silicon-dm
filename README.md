@@ -43,6 +43,10 @@ not Silicon Accounts or Giphy. Tests: `cargo test --workspace --all-features` (s
 `DM_TEST_POSTGRES_URL=postgres://…/postgres` to give each database test its own database);
 `scripts/sync-cli-docs.py --check` keeps the CLI's packaged guides in step with `docs/`.
 
+Against a Silicon Accounts stack on this machine, `scripts/dev-accounts.sh` starts DM in one step
+(database, runtime role, webhook) and `scripts/e2e-accounts.sh` runs the end-to-end scenarios with
+real Carbons, Silicons and tokens; see [tests/e2e/README.md](tests/e2e/README.md).
+
 ## Documentation
 
 Start at [docs/README.md](docs/README.md):
