@@ -375,6 +375,13 @@ impl Home {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        // Winsock loads its providers beneath SystemRoot even for loopback requests.
+        // Keep this OS setting while isolating all application credentials and config.
+        #[cfg(windows)]
+        command.env(
+            "SystemRoot",
+            std::env::var_os("SystemRoot").expect("SystemRoot"),
+        );
         command
     }
     pub async fn run(&self, args: &[&str]) -> Run {
@@ -416,14 +423,20 @@ impl Home {
 }
 impl Drop for Home {
     fn drop(&mut self) {
-        let _ = std::process::Command::new(env!("CARGO_BIN_EXE_dm"))
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_dm"));
+        command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", self.dir.path())
             .env("SILICON_DM_HOME", self.state())
             .env("SILICON_DM_RELAY_HOME", self.dir.path().join("relay"))
-            .args(["daemon", "stop"])
-            .output();
+            .args(["daemon", "stop"]);
+        #[cfg(windows)]
+        command.env(
+            "SystemRoot",
+            std::env::var_os("SystemRoot").expect("SystemRoot"),
+        );
+        let _ = command.output();
     }
 }
 
