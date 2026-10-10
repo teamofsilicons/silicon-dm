@@ -114,3 +114,76 @@ decided where they were silent. The root `decisions.md` is the historical (IAM-e
   updates from `GET /api/v1/sync?wait=N` (long-poll on Postgres `LISTEN dm_delivery`, N ≤ 30). With Ting configured,
   enrolment uses a User verification proof (receiving app `ting`, scope `tings.subscribe`) and sends use one cached App
   verification proof (scope `tings.send`); recipients are addressed by uuid + current id, with no organization.
+
+### Further decisions made while building and testing (stage 1)
+
+- **Names and photos come from DM's user base, never from lookups.** Silicon Accounts never returns a display name or
+  photo to an app's lookup (`GET /v1/accounts/{uuid}` answers `{uuid, kind, id, status, custodian}`); an app reads them
+  from its user base (`GET /v1/apps/dm/users/{uuid}`), which follows consent. DM reads it once when it first sees an
+  account sign in (or when the cached row has no name yet, at most once a minute per process), only fills rows no
+  `account.updated` event has described, and relies on `account.updated` afterwards. Accounts that never signed in to
+  DM show only their id. Verified against the shared local stack.
+- **Deleted accounts are anonymised** in DM's cache (name and photo dropped, current id cleared). They stay in direct
+  conversations as `{"deleted": true, "id": <uuid>}`; such a conversation is addressed by the uuid, stays readable and
+  takes no new messages (409 `recipient_deleted`). Lookups of deleted accounts are 404 at Accounts, so DM learns of
+  deletions from `account.deleted` only.
+- **No group deletion route.** A group ends when its members leave; the last owner hands ownership on first
+  (409 `last_owner`).
+- **Custodians may decline invitations for their Silicons, never accept them** (accepting is the Silicon's own act);
+  a custodian's own Silicons invited by the custodian join at once.
+- **Superseded conversations** are not listed; the canonical conversation names them in `supersedes`; a superseded
+  conversation's address is its UUID. `link-identities` flattens supersession chains (a conversation superseded at the
+  upgrade and its canonical superseded by the re-key both point at the final one), so a 409 never names a superseded
+  conversation.
+- **Unmapped IAM-era ids stay as stored** (no prefix), are rendered with `"legacy": true`, stay readable through their
+  stored address, and are listed by `link-identities` as `unmatched`. `iam_membership_projections` is not re-keyed: it
+  is kept as history and resolves principal UUIDs in mapping files.
+- **Ting handoffs from before the cutover:** a request body prepared by the IAM-era worker is discarded
+  (`prepared_before_accounts_cutover`); a handoff whose recipient is an unlinked IAM-era identity is discarded
+  (`recipient_without_account`). Discards do not count towards a claim batch (bounded at 500 per claim), so a legacy
+  backlog never stalls new handoffs. The pre-existing unbounded retention of accepted handoffs is noted, not changed.
+- **Proof refresh without an idempotency key:** `silicon-accounts-client` 0.4.0's `refresh_proof` takes none, and a
+  used refresh token revokes the proof, so Ting re-enrolment (the only refresh) runs one at a time per account across
+  every DM process (a Postgres session advisory lock); the App verification proof for sends is cached behind a mutex
+  and replaced 60 s before it expires.
+- **Limits:** 100 new direct conversations per account per hour (`first_contact_limit`); Accounts lookups budgeted at
+  550/min (under the 600/min per app); cached id → uuid answers trusted for 10 minutes before `lookup_by_id`; Ting
+  enrolment re-checked at most every 10 minutes per process; JWKS refetches on an unknown `kid` at most once per 30 s
+  (the first download does not count).
+- **Reports** are stored and marked `simulated` outside production when Postmark is not configured.
+- **Versions:** service, client and CLI 0.15.0, protocol 0.13.0. The protocol crate keeps the contract-3 route type
+  names (`iam`, `auth/*`, `delivery/registration`, testing environments) so the 0.14 client keeps working until the CLI
+  stage; the service no longer serves those routes.
+- **The 0.14 client's Ting sandbox login** (IAM test environments) is refused locally with a clear message (the IAM
+  client crate is gone); its three tests now assert the refusal. Everything else in the client and CLI moves to
+  Silicon Accounts in the CLI stage.
+- **Tests removed with retired features:** IAM sessions and directory, testing environments, WebSocket delivery
+  (including the WebSocket frame case of `wire_contract`), IAM-era Ting credentials and authorisation. The Docker-only
+  historical migration tests (which failed at baseline without Docker) are replaced by the upgrade test on a dataset
+  written by the 0.14.1 code (`tests/fixtures/legacy-0038.sql`). Their behaviours are covered again by
+  `messaging_flow`, `accounts_*`, `link_identities` and `ting_delivery`.
+- **Operator copy:** `dm-migrate link-identities` and `draft-identity-mapping` name IAM in their help and messages
+  because they are the cutover tools; no Carbon- or Silicon-facing surface mentions it.
+- **Deploy templates** (`deploy/aws/*.yaml`) still pass the old variables; the ship stage switches them using the list
+  in [cutover.md](cutover.md). CI's container smoke test already boots with the Accounts variables.
+
+### Decisions made while finishing stage 1 (second session, 2026-10-10)
+
+The first session's work was found uncommitted and complete; it was reviewed, re-tested and committed as it was,
+with these additions:
+
+- **Sign-out cutoffs compare at the precision of `iat`.** A token's `iat` has whole seconds and the webhook's
+  `occurred_at` has milliseconds, so a token is refused only when it was certainly issued before the cutoff
+  (`iat + 1 s <= cutoff`). A Silicon that rotates its STK and signs straight back in within the same second is not
+  locked out; the at most one-second window of older tokens is closed on the sensitive routes, which introspect.
+- **`GET /api/v1/sync` accepts `dm.messages.read` proofs.** The feed only references messages the account can already
+  read, and with Ting off by default it is the only way an app acting for an account (Silicon Interface) learns about
+  new messages without polling every conversation. Presence, GIFs, reports, groups changes, invitations, the
+  allow-list and `/me` still need the account's own token.
+- **No account-grouping words in API surfaces.** The OpenAPI document, API guide and contract discovery say "its
+  custodian and the custodian's other Silicons" instead of "circle", and describe older three-part group ids by
+  example (`g:tos:product-design`) instead of `g:{org}:{slug}`. The contract discovery keeps the literal retired paths
+  (including `/api/v1/iam`) in `retired_routes`, because old clients need to see why those paths now answer 404.
+- **The local test stack's `dm` webhook** was pointed at the local service only while the live checks ran and was
+  restored to its earlier setup (`http://127.0.0.1:9593/dm/webhooks`, every update) afterwards; the stored secret was
+  never rotated. No other app's setup was touched.

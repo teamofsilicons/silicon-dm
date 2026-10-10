@@ -815,3 +815,21 @@ Sandbox generation adoption archives pending callbacks. An in-flight HTTP
 completion may update only a still-pending row, in the same transaction that
 queues any Delivered receipt. A late success or failure cannot revive archived
 work. Callback requests already transmitted before adoption may still arrive.
+
+## D-059 — Silicon Accounts identity, personal accounts and contract 4
+
+**Status:** Accepted; supersedes D-052 and D-054, the IAM portion of D-046, and
+every earlier record's assumption that requests are scoped to an organization
+
+DM 0.15 authenticates every request with a Silicon Accounts access token issued
+to the app `dm`, verified locally against the published keys, and accepts User
+verification proofs from configured apps on the conversation, message, receipt,
+draft and sync routes. Accounts are keyed by their permanent uuid and shown by
+their current id. There are no organizations, roles or tags: a Silicon is
+reachable by its custodian, the custodian's other Silicons and its allow-list;
+groups have co-equal owners and invitations that must be accepted. Testing
+environments and the IAM webhook are retired; the Accounts webhook at
+`/webhook/` replaces it. Ting delivery is off unless configured, and clients
+sync over HTTP. Existing data is kept: IAM-era identities are re-keyed at
+cutover by `dm-migrate link-identities`. The full record of choices is in
+`docs/migration/decisions.md`.
