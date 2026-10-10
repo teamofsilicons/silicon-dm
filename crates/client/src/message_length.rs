@@ -29,6 +29,17 @@ pub async fn check(
     if !needs_check(actor, message) {
         return Ok(false);
     }
+    // Sending to an account id names the recipient's kind: c: is a Carbon.
+    if let Some(kind) = ActorType::of_id(&conversation)
+        && !conversation.contains("::")
+        && !conversation.starts_with("g:")
+    {
+        let carbon = kind == ActorType::Carbon;
+        if carbon && !allow_long {
+            bail!(BLOCKED);
+        }
+        return Ok(carbon);
+    }
     let conversation = if uuid::Uuid::parse_str(&conversation).is_ok() {
         match client.group(&conversation).await {
             Ok(group) => group.id,
@@ -80,10 +91,7 @@ mod tests {
     use serde_json::json;
 
     fn actor(actor_type: ActorType) -> Actor {
-        Actor {
-            actor_type,
-            id: "si:test".into(),
-        }
+        Actor::new(actor_type, "si:test")
     }
 
     #[test]

@@ -156,6 +156,11 @@ fn pooled_client(
 ) -> Result<crate::Client> {
     Ok(store::client(config, profile)?.with_http_client(context.http.get()))
 }
+/// How the relay describes incoming updates: it only sends; reading is the sync feed.
+fn incoming_delivery() -> Value {
+    json!({"code":"sync_feed","provider":"dm","forwarding":false,
+        "message":"This relay only sends. Read new messages with dm inbox --watch (or dm sync --wait 30)."})
+}
 // Count MiB of encoded queued work, not just tasks. Deserialization and HTTP
 // serialization need additional memory. A larger single item takes the entire
 // budget so it can progress, but cannot overlap another outgoing request.
@@ -187,10 +192,13 @@ fn bearer(token: &str) -> blake3::Hash {
     blake3::hash(format!("Bearer {token}").as_bytes())
 }
 
+/// A DM relay that only sends. Relays of DM 0.11 to 0.14 described themselves as
+/// `delivery_moved_to_ting`; they are recognized so a newer client can replace them.
 fn outgoing_only_status(status: &Value) -> bool {
-    status["incoming_delivery"]["code"] == "delivery_moved_to_ting"
-        && status["incoming_delivery"]["provider"] == "ting"
-        && status["incoming_delivery"]["forwarding"] == false
+    let incoming = &status["incoming_delivery"];
+    incoming["forwarding"] == false
+        && ((incoming["code"] == "sync_feed" && incoming["provider"] == "dm")
+            || (incoming["code"] == "delivery_moved_to_ting" && incoming["provider"] == "ting"))
 }
 
 fn shared_status(status: &Value) -> bool {
@@ -421,6 +429,7 @@ async fn attach_home(host: &Arc<Host>, directory: PathBuf) -> Result<Arc<Tenant>
     }
     let queue = queue::Queue::open(&state)?;
     queue.expire_transient_commands()?;
+    queue.retire_test_environment_requests()?;
     let port = host.port;
     let token = state.update(|config| {
         config.relay_port = port;
@@ -569,17 +578,23 @@ fn home_status(host: &Host, tenant: &Tenant) -> Response {
             );
         }
     };
-    let profiles: BTreeMap<_, _> = config.profiles.iter().map(|(key, profile)| {
-        (key, json!({"state":if profile.enabled { "outgoing_only" } else { "logged_out" },
-            "member_id":profile.tokens.actor.id,"testing_environment_id":profile.testing_environment_id,
-            "incoming_delivery":"delivery_moved_to_ting"}))
-    }).collect();
+    let profiles: BTreeMap<_, _> = config
+        .profiles
+        .values()
+        .map(|profile| {
+            let account = profile.account.as_ref();
+            (
+                profile.name.clone(),
+                json!({"state":if profile.signed_in() { "outgoing_only" } else { "signed_out" },
+                    "uuid":account.map(|a| a.uuid.as_str()),"id":account.map(|a| a.id.as_str()),
+                    "kind":account.map(|a| a.kind.as_str())}),
+            )
+        })
+        .collect();
     match context.queue.stats() {
         Ok(queues) => Json(json!({"running":true,"pid":std::process::id(),"version":env!("CARGO_PKG_VERSION"),
-            "profiles":profiles,"queues":queues,"incoming_delivery":{
-                "code":"delivery_moved_to_ting","provider":"ting","forwarding":false,
-                "message":"Configure the local listening endpoint with Ting. Retained legacy DM inbox records are not forwarded."
-            },"host":{"shared":true,"port":host.port,"directory":host.home,"homes":host.homes().len()}})).into_response(),
+            "profiles":profiles,"queues":queues,"incoming_delivery":incoming_delivery(),
+            "host":{"shared":true,"port":host.port,"directory":host.home,"homes":host.homes().len()}})).into_response(),
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR,"storage_error","local database unavailable")
     }
 }
@@ -648,7 +663,7 @@ async fn submit(
             return error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
-                "expected request_id, profile, optional testing_environment_id, and typed request; run dm relay submit --help",
+                "expected request_id, profile and a typed request; run dm relay submit --help",
             );
         }
     };
@@ -662,42 +677,19 @@ async fn submit(
             );
         }
     };
-    if store::profile(&config, &request.profile, request.testing_environment_id).is_err() {
+    if request.testing_environment_id.is_some() {
         return error(
             StatusCode::BAD_REQUEST,
-            "profile_missing",
-            "log in to this profile and testing environment first",
+            "testing_environments_retired",
+            "test environments were retired with the move to Silicon Accounts; submit the request without testing_environment_id",
         );
     }
-    // Capture the current generation before acknowledging a new test mutation.
-    // An offline, never-bound send cannot be relabeled after a clean.
-    if request.testing_environment_id.is_some() && request.request.is_mutation() {
-        let session = store::session_key(&request.profile, request.testing_environment_id);
-        if context.queue.generation(&session).ok().flatten().is_none() {
-            let discovery = async {
-                let profile =
-                    store::profile(&config, &request.profile, request.testing_environment_id)?;
-                let info = store::client(&config, profile)?.iam().await?;
-                if info.testing_environment_id != request.testing_environment_id {
-                    bail!("testing environment mismatch");
-                }
-                let generation = info
-                    .testing_generation
-                    .context("testing generation unavailable")?;
-                if profile.testing_generation != Some(generation) {
-                    bail!("saved profile belongs to another testing generation; log in again before queueing new work");
-                }
-                context.queue.adopt_generation(&session, Some(generation))
-            }
-            .await;
-            if discovery.is_err() {
-                return error(
-                    StatusCode::CONFLICT,
-                    "testing_generation_unavailable",
-                    "Cannot queue this test mutation until HTTP discovery confirms the sandbox generation. Retry after the sandbox is ready.",
-                );
-            }
-        }
+    if let Err(problem) = store::profile(&config, &request.profile) {
+        let message = problem.downcast_ref::<store::SessionError>().map_or_else(
+            || format!("{problem:#}"),
+            |reason| format!("{} {}", reason.message, reason.hint),
+        );
+        return error(StatusCode::BAD_REQUEST, "profile_missing", &message);
     }
     let queued = context.queue.enqueue(&request, &envelope.data);
     let request_id = request.request_id;
@@ -773,11 +765,12 @@ fn client_error(error: &crate::Error) -> Value {
             status,
             code,
             message,
+            hint,
             body,
             request_id,
             retry_after,
         } => {
-            json!({"status":status,"code":code,"message":message,"body":body,"request_id":request_id,"retry_after":retry_after})
+            json!({"status":status,"code":code,"message":message,"hint":hint,"body":body,"request_id":request_id,"retry_after":retry_after})
         }
         _ => {
             json!({"code":"transport_error","message":"DM request did not complete"})
@@ -865,21 +858,13 @@ async fn maintenance(host: Arc<Host>) {
             let Ok(config) = context.store.load() else {
                 continue;
             };
-            for (key, profile) in config.profiles.iter().filter(|(_, p)| p.enabled) {
+            for (key, profile) in config.profiles.iter().filter(|(_, p)| p.signed_in()) {
                 backends.insert(profile.base_url.clone());
                 // Refresh at 80% of the token's lifetime, at most five minutes early.
-                let lifetime = profile.tokens.expires_in.max(0) as u64;
+                let lifetime = profile.tokens.as_ref().map_or(0, |t| t.expires_in);
                 let margin = (lifetime / 5).clamp(60, 300);
                 if profile.expires_at <= now + margin {
-                    let http = context.http.get();
-                    if context
-                        .store
-                        .fresh_profile_within(key, margin, Some(&http))
-                        .await
-                        .is_ok()
-                    {
-                        context.http.touch();
-                    }
+                    let _ = context.store.fresh_profile_within(key, margin).await;
                 }
             }
             upload_diagnostics(context, &config).await;
@@ -901,7 +886,7 @@ async fn maintenance(host: Arc<Host>) {
                 let Ok(config) = tenant.context.store.load() else {
                     continue;
                 };
-                for profile in config.profiles.values().filter(|p| p.enabled) {
+                for profile in config.profiles.values().filter(|p| p.signed_in()) {
                     if let Ok(client) = pooled_client(&tenant.context, &config, profile) {
                         let _ = client
                             .with_source("daemon")
@@ -924,7 +909,7 @@ async fn upload_diagnostics(context: &RuntimeContext, config: &store::Config) {
         let profile = config
             .profiles
             .get(&diagnostic.session)
-            .filter(|p| p.enabled);
+            .filter(|p| p.signed_in());
         if let Some(profile) = profile
             && let Ok(client) = pooled_client(context, config, profile)
         {
@@ -968,7 +953,7 @@ fn retry_or_finish(context: &RuntimeContext, request: &RelayRequest, detail: &Va
 fn expire_attempted_token(state: &store::Store, session: &str, attempted_token: &str) {
     let _ = state.update(|config| {
         if let Some(profile) = config.profiles.get_mut(session)
-            && profile.tokens.access_token == attempted_token
+            && profile.access_token() == Some(attempted_token)
         {
             profile.expires_at = 0;
         }
@@ -977,143 +962,67 @@ fn expire_attempted_token(state: &store::Store, session: &str, attempted_token: 
 }
 
 async fn execute_request(context: RuntimeContext, request: RelayRequest) {
-    let session = store::session_key(&request.profile, request.testing_environment_id);
-    // A refresh that fails in transit is retried once at once on a new
-    // connection; a dropped pooled connection must not cost a backoff.
-    let refreshed = match context
-        .store
-        .fresh_profile_within(&session, 60, Some(&context.http.get()))
-        .await
-    {
-        // A dropped connection or a momentary backend/IAM failure (5xx, 429)
-        // is retried once at once; a rejected login is not.
-        Err(error)
-            if error
-                .downcast_ref::<crate::Error>()
-                .is_some_and(crate::Error::retryable) =>
-        {
+    if request.testing_environment_id.is_some() {
+        let _ = context.queue.finish(request.request_id, None, Some(&json!({
+            "code":"testing_environments_retired","message":"This request names a test environment; test environments were retired with the move to Silicon Accounts, so it was not sent."
+        })));
+        return;
+    }
+    let session = store::session_key(&request.profile);
+    // A refresh that fails in transit (or a passing Silicon Accounts failure) is retried
+    // once at once; a sign-in Silicon Accounts no longer accepts is not.
+    let refreshed = match context.store.fresh_profile_within(&session, 60).await {
+        Err(error) if passing(&error) => {
             context.http.reset();
-            context
-                .store
-                .fresh_profile_within(&session, 60, Some(&context.http.get()))
-                .await
+            context.store.fresh_profile_within(&session, 60).await
         }
         other => other,
     };
     let (config, profile) = match refreshed {
         Ok(p) => p,
-        Err(_) => {
-            let message = if transient_request(&request) {
-                "This activity could not be authenticated; log in again before submitting a current activity."
-            } else {
-                "log in again to resume this profile's pending requests"
+        Err(error) => {
+            let mut detail = match error.downcast_ref::<store::SessionError>() {
+                Some(reason) => json!({"code":"authentication_required","reason":reason.code,
+                    "message":reason.message,"hint":reason.hint}),
+                None => json!({"code":"authentication_required","message":format!("{error:#}")}),
             };
-            retry_or_finish(
-                &context,
-                &request,
-                &json!({"code":"authentication_required","message":message}),
-            );
+            detail["message"] = json!(if transient_request(&request) {
+                format!(
+                    "This activity could not be authenticated: {}",
+                    detail["message"].as_str().unwrap_or_default()
+                )
+            } else {
+                format!(
+                    "{} Pending requests resume after the profile signs in again.",
+                    detail["message"].as_str().unwrap_or_default()
+                )
+            });
+            retry_or_finish(&context, &request, &detail);
             return;
         }
     };
-    let mut client = match pooled_client(&context, &config, &profile) {
+    let client = match pooled_client(&context, &config, &profile) {
         Ok(c) => c,
         Err(_) => {
             retry_or_finish(
                 &context,
                 &request,
                 &json!({
-                    "code":"configuration_error","message":"The profile's HTTP client could not be configured; check its backend URL and testing credentials."
+                    "code":"configuration_error","message":"The profile's HTTP client could not be configured; check its DM API URL (dm profiles list)."
                 }),
             );
             return;
         }
     };
-    // Refresh sandbox authority through HTTP for every write attempt. A socket
-    // is no longer a prerequisite, and an old command must never adopt a new
-    // generation after a clean or restore.
-    if request.testing_environment_id.is_some() && request.request.is_mutation() {
-        let info = match client.iam().await {
-            Ok(info) => info,
-            Err(error) => {
-                if error.unauthorized() {
-                    expire_attempted_token(&context.store, &session, &profile.tokens.access_token);
-                }
-                retry_or_finish(&context, &request, &client_error(&error));
-                return;
-            }
-        };
-        if info.testing_environment_id != request.testing_environment_id {
-            let _ = context.queue.finish(request.request_id, None, Some(&json!({
-                "code":"testing_environment_mismatch","message":"HTTP discovery returned another data plane; select the original sandbox before explicitly resubmitting."
-            })));
-            return;
-        }
-        let Some(generation) = info.testing_generation.filter(|generation| *generation > 0) else {
-            let detail = json!({
-                "code":"awaiting_testing_generation","message":"The selected sandbox's HTTP discovery generation is unavailable."
-            });
-            let _ = if transient_request(&request) {
-                context
-                    .queue
-                    .finish(request.request_id, None, Some(&detail))
-            } else {
-                context.queue.defer_until_ready(request.request_id, &detail)
-            };
-            return;
-        };
-        if profile.testing_generation != Some(generation) {
-            let _ = context.queue.finish(request.request_id, None, Some(&json!({
-                "code":"testing_generation_changed","message":"The saved login belongs to another sandbox generation; log in again and inspect this retained command before explicitly resubmitting."
-            })));
-            return;
-        }
-        if context
-            .queue
-            .adopt_generation(&session, Some(generation))
-            .is_err()
-        {
-            retry_or_finish(
-                &context,
-                &request,
-                &json!({
-                    "code":"storage_error","message":"The sandbox generation could not be recorded locally."
-                }),
-            );
-            return;
-        }
-        if request.testing_generation != Some(generation) {
-            let _ = context.queue.finish(request.request_id, None, Some(&json!({
-                "code":"testing_generation_changed","message":"The queued command belongs to another or unknown sandbox generation; inspect it before explicitly resubmitting."
-            })));
-            return;
-        }
-    }
-    if let Some(generation) = request.testing_generation {
-        match client.clone().with_testing_generation(generation) {
-            Ok(bound) => client = bound,
-            Err(error) => {
-                let _ = context
-                    .queue
-                    .finish(request.request_id, None, Some(&client_error(&error)));
-                return;
-            }
-        }
-    }
-    let mut outcome = request
-        .request
-        .execute_with_device(&client, &profile.device_id)
-        .await;
+    let device = profile.device_id.clone();
+    let mut outcome = request.request.execute_with_device(&client, &device).await;
     // Mutations carry a stable idempotency key, so repeating one after a
     // transport failure is safe; the second attempt uses a fresh connection.
     if matches!(outcome, Err(crate::Error::Transport(_))) {
         context.http.reset();
         outcome = request
             .request
-            .execute_with_device(
-                &client.with_http_client(context.http.get()),
-                &profile.device_id,
-            )
+            .execute_with_device(&client.with_http_client(context.http.get()), &device)
             .await;
     }
     match outcome {
@@ -1122,8 +1031,10 @@ async fn execute_request(context: RuntimeContext, request: RelayRequest) {
             let _ = context.queue.finish(request.request_id, Some(&value), None);
         }
         Err(error) => {
-            if error.unauthorized() {
-                expire_attempted_token(&context.store, &session, &profile.tokens.access_token);
+            if error.unauthorized()
+                && let Some(token) = profile.access_token()
+            {
+                expire_attempted_token(&context.store, &session, token);
             }
             let detail = client_error(&error);
             // Read failures are returned for the caller to retry. An
@@ -1141,6 +1052,15 @@ async fn execute_request(context: RuntimeContext, request: RelayRequest) {
     }
 }
 
+fn passing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::Error>()
+        .is_some_and(crate::Error::retryable)
+        || error
+            .downcast_ref::<crate::accounts::SignInError>()
+            .is_some_and(crate::accounts::SignInError::is_retryable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1149,16 +1069,20 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    fn fixture_store(base: &str, testing: Option<Uuid>) -> Result<store::Store> {
+    /// A signed-in profile (`c:bob`, uuid `B0b`) whose access token is good for an hour.
+    pub(super) fn fixture_profile(base: &str) -> Result<store::Profile> {
+        Ok(serde_json::from_value(json!({
+            "format":2,"name":"default","base_url":base,"accounts_url":"http://127.0.0.1:9",
+            "app_id":"dm","device_id":"outgoing-device","expires_at":store::now()+3600,"enabled":true,
+            "account":{"uuid":"B0b","kind":"carbon","id":"c:bob"},
+            "tokens":{"access_token":"fixture","refresh_token":"sar_fixture-refresh","expires_in":3600}
+        }))?)
+    }
+
+    fn fixture_store(base: &str) -> Result<store::Store> {
         let root = std::env::temp_dir().join(format!("dm-outgoing-runtime-{}", Uuid::new_v4()));
         let state = store::Store::new(&root)?.with_relay_home(root.join("shared-relay"))?;
-        let profile: store::Profile = serde_json::from_value(json!({
-            "name":"default","base_url":base,"webhook_url":format!("{base}/events"),
-            "device_id":"outgoing-device","expires_at":store::now()+3600,
-            "testing_environment_id":testing,"testing_generation":testing.map(|_|1),"enabled":true,
-            "tokens":{"access_token":"fixture","refresh_token":"fixture-refresh","token_type":"Bearer","expires_in":3600,
-                "scope":"dm","actor":{"type":"carbon","id":"c:bob"},"organization_id":"tos"}
-        }))?;
+        let profile = fixture_profile(base)?;
         let port = std::net::TcpListener::bind("127.0.0.1:0")?
             .local_addr()?
             .port();
@@ -1167,41 +1091,29 @@ mod tests {
             config.relay_port = port;
             config
                 .profiles
-                .insert(store::session_key("default", testing), profile);
-            if let Some(id) = testing {
-                config.testing_keys.insert(
-                    id,
-                    store::TestKey {
-                        key: "a".repeat(32),
-                        base_url: base.into(),
-                    },
-                );
-            }
+                .insert(store::session_key("default"), profile);
             Ok(())
         })?;
         Ok(state)
     }
 
-    fn command(testing: Option<Uuid>, generation: Option<i64>) -> RelayRequest {
-        RelayRequest {
-            request_id: Uuid::new_v4(),
-            profile: "default".into(),
-            testing_environment_id: testing,
-            testing_generation: generation,
-            request: crate::relay::Operation::CreateConversation {
+    fn command() -> RelayRequest {
+        RelayRequest::new(
+            "default",
+            crate::relay::Operation::CreateConversation {
                 participant_ids: vec!["c:alice".into(), "c:bob".into()],
                 idempotency_key: "stable-outgoing-key".into(),
             },
-        }
+        )
     }
 
-    fn activity(testing: Option<Uuid>, generation: Option<i64>) -> RelayRequest {
-        RelayRequest {
-            request: crate::relay::Operation::SetPresence {
+    fn activity() -> RelayRequest {
+        RelayRequest::new(
+            "default",
+            crate::relay::Operation::SetPresence {
                 activity: Some(crate::Activity::Typing),
             },
-            ..command(testing, generation)
-        }
+        )
     }
 
     #[tokio::test]
@@ -1233,7 +1145,7 @@ mod tests {
                 }
             }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let state = fixture_store(&format!("http://{}", listener.local_addr()?), None)?;
+        let state = fixture_store(&format!("http://{}", listener.local_addr()?))?;
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
         let context = RuntimeContext {
             queue: queue::Queue::open(&state)?,
@@ -1243,9 +1155,10 @@ mod tests {
             http: Arc::new(Pool::new()?),
             wake: Arc::default(),
         };
-        let presence = activity(None, None);
-        let send = RelayRequest {
-            request: crate::relay::Operation::SendMessage {
+        let presence = activity();
+        let send = RelayRequest::new(
+            "default",
+            crate::relay::Operation::SendMessage {
                 conversation_id: "c:alice::c:bob".into(),
                 message: crate::MessageCreate {
                     text: Some("durable message".into()),
@@ -1253,8 +1166,7 @@ mod tests {
                 },
                 idempotency_key: "following-send".into(),
             },
-            ..command(None, None)
-        };
+        );
         context
             .queue
             .enqueue(&presence, &serde_json::to_value(&presence)?)?;
@@ -1291,43 +1203,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_activity_finishes_on_auth_configuration_and_discovery_failures() -> Result<()>
-    {
-        for case in [
-            "logged_out",
-            "refresh_unavailable",
-            "invalid_url",
-            "missing_test_key",
-            "discovery_unavailable",
-            "generation_unavailable",
-        ] {
-            let environment = Uuid::new_v4();
-            let router = Router::new().route("/api/v1/iam", get(move || async move {
-                if case == "generation_unavailable" {
-                    Json(json!({"type":"iam","data":{"app_id":"dm","iam_base_url":"http://localhost",
-                        "api_base_url":"http://localhost","testing_environment_id":environment,"testing_generation":null}})).into_response()
-                } else {
-                    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"type":"error","data":{"error":{
-                        "code":"discovery_unavailable","message":"fixture discovery failure"
-                    }}}))).into_response()
-                }
-            })).fallback(|| async { StatusCode::SERVICE_UNAVAILABLE });
+    async fn transient_activity_finishes_on_sign_in_and_configuration_failures() -> Result<()> {
+        for case in ["signed_out", "refresh_unavailable", "invalid_url"] {
+            let router = Router::new().fallback(|| async { StatusCode::SERVICE_UNAVAILABLE });
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            let state = fixture_store(
-                &format!("http://{}", listener.local_addr()?),
-                Some(environment),
-            )?;
+            let state = fixture_store(&format!("http://{}", listener.local_addr()?))?;
             let server = tokio::spawn(async move { axum::serve(listener, router).await });
-            let session = store::session_key("default", Some(environment));
+            let session = store::session_key("default");
             state.update(|config| {
-                let profile = config.profiles.get_mut(&session).unwrap();
+                let profile = config
+                    .profiles
+                    .get_mut(&session)
+                    .context("fixture profile")?;
                 match case {
-                    "logged_out" => profile.enabled = false,
+                    "signed_out" => profile.clear_sign_in(None),
+                    // Accounts at 127.0.0.1:9 refuses connections: the refresh cannot happen.
                     "refresh_unavailable" => profile.expires_at = 0,
                     "invalid_url" => profile.base_url = "invalid URL".into(),
-                    "missing_test_key" => {
-                        config.testing_keys.clear();
-                    }
                     _ => {}
                 }
                 Ok(())
@@ -1340,9 +1232,8 @@ mod tests {
                 http: Arc::new(Pool::new()?),
                 wake: Arc::default(),
             };
-            context.queue.adopt_generation(&session, Some(1))?;
-            let presence = activity(Some(environment), Some(1));
-            let following = command(Some(environment), Some(1));
+            let presence = activity();
+            let following = command();
             context
                 .queue
                 .enqueue(&presence, &serde_json::to_value(&presence)?)?;
@@ -1350,7 +1241,10 @@ mod tests {
                 .queue
                 .enqueue(&following, &serde_json::to_value(&following)?)?;
             execute_request(context.clone(), presence.clone()).await;
-            let result = context.queue.result(presence.request_id)?.unwrap();
+            let result = context
+                .queue
+                .result(presence.request_id)?
+                .context("result")?;
             assert_eq!(result.state, "failed", "{case}");
             assert!(result.error.is_some(), "{case}");
             let candidates = context.queue.request_candidates()?;
@@ -1366,89 +1260,85 @@ mod tests {
 
     #[tokio::test]
     async fn late_unauthorized_response_expires_only_the_attempted_token() -> Result<()> {
-        for testing in [None, Some(Uuid::new_v4())] {
-            for replace_token in [false, true] {
-                let entered = Arc::new(tokio::sync::Notify::new());
-                let released = Arc::new(tokio::sync::Notify::new());
-                let entered_handler = entered.clone();
-                let released_handler = released.clone();
-                let path = if testing.is_some() {
-                    "/api/v1/iam"
+        for replace_token in [false, true] {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let released = Arc::new(tokio::sync::Notify::new());
+            let entered_handler = entered.clone();
+            let released_handler = released.clone();
+            let router = Router::new().route(
+                "/api/v1/conversations",
+                axum::routing::any(move |headers: HeaderMap| {
+                    let entered = entered_handler.clone();
+                    let released = released_handler.clone();
+                    async move {
+                        assert_eq!(headers["authorization"], "Bearer fixture");
+                        entered.notify_one();
+                        released.notified().await;
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({"type":"error","data":{"error":{
+                                "code":"token_expired","message":"fixture expired token"
+                            }}})),
+                        )
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let state = fixture_store(&format!("http://{}", listener.local_addr()?))?;
+            let server = tokio::spawn(async move { axum::serve(listener, router).await });
+            let context = RuntimeContext {
+                queue: queue::Queue::open(&state)?,
+                store: state.clone(),
+                payload_budget: Arc::new(Semaphore::new(PAYLOAD_BUDGET_MIB as usize)),
+                workers: Arc::new(Semaphore::new(WORKERS)),
+                http: Arc::new(Pool::new()?),
+                wake: Arc::default(),
+            };
+            let session = store::session_key("default");
+            let request = command();
+            context
+                .queue
+                .enqueue(&request, &serde_json::to_value(&request)?)?;
+            let attempt = tokio::spawn(execute_request(context.clone(), request.clone()));
+            tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+            let refreshed_expiry = store::now() + 7200;
+            if replace_token {
+                state.update(|config| {
+                    let profile = config.profiles.get_mut(&session).context("fixture")?;
+                    let tokens = profile.tokens.as_mut().context("tokens")?;
+                    tokens.access_token = "new-login-token".into();
+                    tokens.refresh_token = "sar_new-login-refresh".into();
+                    profile.expires_at = refreshed_expiry;
+                    Ok(())
+                })?;
+            }
+            released.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), attempt).await??;
+            let saved = state.load()?.profiles[&session].clone();
+            assert_eq!(
+                saved.expires_at,
+                if replace_token { refreshed_expiry } else { 0 }
+            );
+            assert_eq!(
+                saved.access_token(),
+                Some(if replace_token {
+                    "new-login-token"
                 } else {
-                    "/api/v1/conversations"
-                };
-                let router = Router::new().route(
-                    path,
-                    axum::routing::any(move |headers: HeaderMap| {
-                        let entered = entered_handler.clone();
-                        let released = released_handler.clone();
-                        async move {
-                            assert_eq!(headers["authorization"], "Bearer fixture");
-                            entered.notify_one();
-                            released.notified().await;
-                            (
-                                StatusCode::UNAUTHORIZED,
-                                Json(json!({"type":"error","data":{"error":{
-                                    "code":"unauthorized","message":"fixture expired token"
-                                }}})),
-                            )
-                        }
-                    }),
-                );
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-                let state = fixture_store(&format!("http://{}", listener.local_addr()?), testing)?;
-                let server = tokio::spawn(async move { axum::serve(listener, router).await });
-                let context = RuntimeContext {
-                    queue: queue::Queue::open(&state)?,
-                    store: state.clone(),
-                    payload_budget: Arc::new(Semaphore::new(PAYLOAD_BUDGET_MIB as usize)),
-                    workers: Arc::new(Semaphore::new(WORKERS)),
-                    http: Arc::new(Pool::new()?),
-                    wake: Arc::default(),
-                };
-                let session = store::session_key("default", testing);
-                let generation = testing.map(|_| 1);
-                context.queue.adopt_generation(&session, generation)?;
-                let request = command(testing, generation);
+                    "fixture"
+                })
+            );
+            assert_eq!(
                 context
                     .queue
-                    .enqueue(&request, &serde_json::to_value(&request)?)?;
-                let attempt = tokio::spawn(execute_request(context.clone(), request.clone()));
-                tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
-                let refreshed_expiry = store::now() + 7200;
-                if replace_token {
-                    state.update(|config| {
-                        let profile = config.profiles.get_mut(&session).unwrap();
-                        profile.tokens.access_token = "new-login-token".into();
-                        profile.tokens.refresh_token = "new-login-refresh".into();
-                        profile.expires_at = refreshed_expiry;
-                        Ok(())
-                    })?;
-                }
-                released.notify_one();
-                tokio::time::timeout(Duration::from_secs(2), attempt).await??;
-                let saved = state.load()?.profiles[&session].clone();
-                assert_eq!(
-                    saved.expires_at,
-                    if replace_token { refreshed_expiry } else { 0 }
-                );
-                assert_eq!(
-                    saved.tokens.access_token,
-                    if replace_token {
-                        "new-login-token"
-                    } else {
-                        "fixture"
-                    }
-                );
-                assert_eq!(
-                    context.queue.result(request.request_id)?.unwrap().state,
-                    "pending"
-                );
-                server.abort();
-                let _ = server.await;
-                drop(context);
-                std::fs::remove_dir_all(state.directory())?;
-            }
+                    .result(request.request_id)?
+                    .context("result")?
+                    .state,
+                "pending"
+            );
+            server.abort();
+            let _ = server.await;
+            drop(context);
+            std::fs::remove_dir_all(state.directory())?;
         }
         Ok(())
     }
@@ -1494,7 +1384,7 @@ mod tests {
                         json!({"running":true})
                     } else {
                         json!({"running":true,"pid":123,"version":env!("CARGO_PKG_VERSION"),"profiles":{},"queues":{},
-                            "incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false},
+                            "incoming_delivery":{"code":"sync_feed","provider":"dm","forwarding":false},
                             "host":{"shared":true,"port":port}})
                     };
                     Json(json!({"type":"relay_status","data":value}))
@@ -1507,7 +1397,7 @@ mod tests {
                     StatusCode::NO_CONTENT
                 }
             }));
-        let state = fixture_store("http://localhost", None)?;
+        let state = fixture_store("http://localhost")?;
         state.update(|config| {
             config.relay_port = port;
             Ok(())
@@ -1546,8 +1436,8 @@ mod tests {
     async fn every_home_shares_one_relay_on_a_fallback_port_with_private_queues() -> Result<()> {
         let root = std::env::temp_dir().join(format!("dm-shared-relay-{}", Uuid::new_v4()));
         let shared = root.join("shared-relay");
-        let first = fixture_store("http://localhost", None)?.with_relay_home(&shared)?;
-        let second = fixture_store("http://localhost", None)?.with_relay_home(&shared)?;
+        let first = fixture_store("http://localhost")?.with_relay_home(&shared)?;
+        let second = fixture_store("http://localhost")?.with_relay_home(&shared)?;
         let occupied = std::net::TcpListener::bind("127.0.0.1:0")?;
         let busy = occupied.local_addr()?.port();
         first.update(|config| {
@@ -1570,7 +1460,7 @@ mod tests {
         assert!(run(second.clone()).await.is_err(), "only one relay may run");
 
         // Each home's bearer reaches only its own queue.
-        let request = command(None, None);
+        let request = command();
         let second_relay = store::relay(&second.load()?)?;
         second_relay.submit(&request).await?;
         assert!(second_relay.result(request.request_id).await.is_ok());
@@ -1598,7 +1488,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_newer_client_replaces_an_older_shared_relay() -> Result<()> {
-        let state = fixture_store("http://localhost", None)?;
+        let state = fixture_store("http://localhost")?;
         let shared = state.relay_home()?;
         // Stand in for an older shared relay: it holds the host lock and
         // publishes its record until it is asked to stop.
@@ -1656,7 +1546,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_older_per_home_relay_is_stopped_when_its_home_attaches() -> Result<()> {
-        let state = fixture_store("http://localhost", None)?;
+        let state = fixture_store("http://localhost")?;
         let held = store::secure_open(&state.directory().join("daemon.lock"))?;
         held.try_lock_exclusive()?;
         let held = Arc::new(Mutex::new(Some(held)));
@@ -1712,7 +1602,7 @@ mod tests {
                     return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"type":"error","data":{"error":{"code":"retry","message":"fixture retry"}}}))).into_response();
                 }
                 Json(json!({"type":"conversation","data":{
-                    "id":"c:alice::c:bob","org_id":"tos","participants":[],"last_message":null,
+                    "id":"c:alice::c:bob","participants":[],"last_message":null,
                     "created_at":"2026-09-22T00:00:00Z","updated_at":"2026-09-22T00:00:00Z"
                 }})).into_response()
             }
@@ -1724,7 +1614,7 @@ mod tests {
             async move { counter.fetch_add(1, Ordering::SeqCst); StatusCode::NOT_FOUND }
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let state = fixture_store(&format!("http://{}", listener.local_addr()?), None)?;
+        let state = fixture_store(&format!("http://{}", listener.local_addr()?))?;
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
         let queue = queue::Queue::open(&state)?;
         let legacy = json!({"type":"message.created","data":{"message-id":"000","conversation_id":"c:alice::c:bob",
@@ -1736,7 +1626,7 @@ mod tests {
             "INSERT INTO inbox(session,delivery_id,actor,sequence,frame) VALUES('default:production',?1,'c:bob',1,?2)",
             rusqlite::params![Uuid::nil().to_string(), legacy.to_string()],
         )?;
-        let request = command(None, None);
+        let request = command();
         queue.enqueue(&request, &serde_json::to_value(&request)?)?;
         let relay = store::relay(&state.load()?)?;
         let daemon_state = state.clone();
@@ -1756,10 +1646,7 @@ mod tests {
         .await??;
         assert_eq!(sends.load(Ordering::SeqCst), 2);
         assert_eq!(unexpected.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            final_status["incoming_delivery"]["code"],
-            "delivery_moved_to_ting"
-        );
+        assert_eq!(final_status["incoming_delivery"]["code"], "sync_feed");
         assert_eq!(final_status["incoming_delivery"]["forwarding"], false);
         assert_eq!(
             final_status["queues"]["retained_legacy_pending_deliveries"],
@@ -1779,22 +1666,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_discovery_rejects_stale_sandbox_commands_before_the_mutation() -> Result<()> {
-        let environment = Uuid::new_v4();
+    async fn requests_for_retired_test_environments_are_refused_without_a_request() -> Result<()> {
         let mutations = Arc::new(AtomicUsize::new(0));
         let counter = mutations.clone();
-        let router = Router::new().route("/api/v1/iam", get(move || async move {
-            Json(json!({"type":"iam","data":{"app_id":"dm","iam_base_url":"http://localhost",
-                "api_base_url":"http://localhost","testing_environment_id":environment,"testing_generation":2}}))
-        })).fallback(move || {
+        let router = Router::new().fallback(move || {
             let counter = counter.clone();
-            async move { counter.fetch_add(1, Ordering::SeqCst); StatusCode::NOT_FOUND }
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                StatusCode::NOT_FOUND
+            }
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let state = fixture_store(
-            &format!("http://{}", listener.local_addr()?),
-            Some(environment),
-        )?;
+        let state = fixture_store(&format!("http://{}", listener.local_addr()?))?;
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
         let context = RuntimeContext {
             queue: queue::Queue::open(&state)?,
@@ -1804,17 +1687,19 @@ mod tests {
             http: Arc::new(Pool::new()?),
             wake: Arc::default(),
         };
-        let request = command(Some(environment), Some(1));
+        let mut request = command();
+        request.testing_environment_id = Some(Uuid::new_v4());
+        assert!(
+            context
+                .queue
+                .enqueue(&request, &serde_json::to_value(&request)?)
+                .is_err()
+        );
+        // A row an older release queued for a test environment is failed, never sent.
         context
             .queue
-            .adopt_generation(&store::session_key("default", Some(environment)), Some(1))?;
-        context
-            .queue
-            .enqueue(&request, &serde_json::to_value(&request)?)?;
+            .enqueue(&command(), &serde_json::to_value(command())?)?;
         execute_request(context.clone(), request.clone()).await;
-        let result = context.queue.result(request.request_id)?.unwrap();
-        assert_eq!(result.state, "failed");
-        assert_eq!(result.error.unwrap()["code"], "testing_generation_changed");
         assert_eq!(mutations.load(Ordering::SeqCst), 0);
         server.abort();
         let _ = server.await;

@@ -1,82 +1,55 @@
-//! DM's adapter inside a generic Ting consumer. This module never accepts a
-//! webhook batch, dispatches callbacks, or records Ting/DM delivered/read ACKs.
+//! DM's adapter inside a generic Ting consumer, for when the DM service hands its updates
+//! to Ting (`DM_TING_URL` configured). This module never accepts a webhook batch,
+//! dispatches callbacks, or records Ting/DM delivered/read ACKs.
 //!
-//! Before calling it, the consumer must authenticate its configured callback
-//! secret and `Ting-Webhook-Id`, then load that hook's persisted typed recipient
-//! binding. Ting's local webhook deliberately omits `for`; raw JSON alone cannot
-//! authenticate its recipient. Durable deduplication and unrelated applications
-//! remain the generic consumer's work.
+//! DM's Ting items are references, not content: `{"type": "dm.sync.changed", "for":
+//! {"uuid", "id"}, "key": <delivery id>, "data": {"schema_version": 2, "event",
+//! "conversation_id", "message_id", "delivery_id", "delivery_sequence"}, "metadata":
+//! {"isi"?}}`. Validate them with [`validate_batch`] against the account the consumer's hook
+//! belongs to, then fetch each message through DM's HTTP API
+//! ([`Client::hydrate_ting_batch`]) under the account's current permissions.
+//!
+//! Before calling it, the consumer must authenticate its configured callback secret and
+//! `Ting-Webhook-Id`, then load that hook's persisted [`TingReceiverContext`]. Ting's local
+//! webhook may omit `for`, so raw JSON alone cannot authenticate its recipient. Durable
+//! deduplication and unrelated applications remain the generic consumer's work.
+//!
+//! While the DM service has no Ting configured (the default), nothing arrives this way:
+//! read the sync feed instead (`GET /api/v1/sync?wait=30`, `dm inbox --watch`).
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{Actor, ActorType, Client, Error, Identity, Message, Result};
+use crate::{ActorType, Client, Error, Me, Message, Result};
 
 const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BATCH_ITEMS: usize = 100;
+/// The reference schema DM 0.15 (contract 4) publishes.
+pub const REFERENCE_SCHEMA_VERSION: u8 = 2;
 
-/// Trusted generic-consumer hook binding, never assembled from webhook JSON.
-/// Match this to current `Client::me()` and `Client::iam()` before hydration.
+/// The account a consumer's Ting hook belongs to, stored by the consumer when it attached
+/// the hook; never assembled from webhook JSON. Match it to the current `Client::me()`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TingReceiverContext {
+    /// The producer app (`dm`); its items have type `{app_id}.sync.changed`.
     pub app_id: String,
-    /// DM's organization selector, retained in DM reference data and HTTP calls.
-    pub organization_id: String,
-    /// Canonical Ting organization from this recipient's authenticated `/v1/orgs`.
-    /// Required for full inbox objects; local webhook items omit their outer org.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ting_organization_id: Option<String>,
-    pub actor: Actor,
-    pub testing_environment_id: Option<Uuid>,
-    pub testing_generation: Option<i64>,
+    /// The recipient's permanent Silicon Accounts uuid (compared exactly).
+    pub account_uuid: String,
+    /// The recipient's current public id, for display and for older `for` strings.
+    pub account_id: String,
+    pub kind: ActorType,
 }
-
 impl TingReceiverContext {
-    /// Binds the canonical Ting organization using this recipient's authenticated
-    /// `/v1/orgs` response. Never pass organizations taken from callback JSON.
-    pub fn with_ting_organizations(
-        mut self,
-        authenticated_orgs: &Value,
-    ) -> std::result::Result<Self, TingBatchError> {
-        self.ting_organization_id = Some(resolve_ting_organization(
-            &self.organization_id,
-            authenticated_orgs,
-        )?);
-        Ok(self)
+    /// The receiver context of the account behind `me` for producer `app_id`.
+    pub fn for_account(app_id: impl Into<String>, me: &Me) -> Option<Self> {
+        Some(Self {
+            app_id: app_id.into(),
+            account_uuid: me.account.uuid.clone()?,
+            account_id: me.account.id.clone(),
+            kind: me.account.actor_type,
+        })
     }
-}
-
-/// Resolves a DM organization ID or handle against an authenticated Ting org
-/// list. Missing or ambiguous mappings fail; a display name is never authority.
-pub fn resolve_ting_organization(
-    organization: &str,
-    authenticated_orgs: &Value,
-) -> std::result::Result<String, TingBatchError> {
-    if !bounded_text(organization, 255) {
-        return Err(TingBatchError::InvalidOrganization);
-    }
-    let items = authenticated_orgs["items"]
-        .as_array()
-        .ok_or(TingBatchError::InvalidOrganization)?;
-    let mut selected = None;
-    for item in items {
-        let id = item["id"]
-            .as_str()
-            .filter(|id| bounded_text(id, 255))
-            .ok_or(TingBatchError::InvalidOrganization)?;
-        let handle = item["handle"]
-            .as_str()
-            .filter(|handle| bounded_text(handle, 255))
-            .ok_or(TingBatchError::InvalidOrganization)?;
-        if id == organization || handle == organization {
-            if selected.is_some() {
-                return Err(TingBatchError::InvalidOrganization);
-            }
-            selected = Some(id.to_owned());
-        }
-    }
-    selected.ok_or(TingBatchError::InvalidOrganization)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,7 +73,6 @@ pub enum DmEventKind {
 struct ReferenceData {
     schema_version: u8,
     event: DmEventKind,
-    org_id: String,
     conversation_id: String,
     message_id: String,
     delivery_id: Uuid,
@@ -113,7 +85,6 @@ pub struct DmTingReference {
     pub index: usize,
     pub ting_id: String,
     pub event: DmEventKind,
-    pub organization_id: String,
     pub conversation_id: String,
     pub message_id: String,
     pub delivery_id: Uuid,
@@ -124,11 +95,11 @@ pub struct DmTingReference {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TingRejection {
     InvalidReference,
-    WrongOrganization,
     WrongRecipient,
-    WrongEnvironment,
-    GenerationMismatch,
     InvalidMetadata,
+    /// A reference from before Silicon Accounts (schema 1, organization-scoped); DM no longer
+    /// produces them and they cannot be matched to an account.
+    LegacyReference,
 }
 
 /// One outcome per input item. Ignored/rejected items are not acknowledged.
@@ -142,11 +113,6 @@ pub enum TingItem {
         ting_id: Option<String>,
         reason: TingRejection,
     },
-    StaleGeneration {
-        index: usize,
-        ting_id: String,
-        generation: Option<i64>,
-    },
     Reference(DmTingReference),
 }
 
@@ -156,20 +122,18 @@ pub enum TingBatchError {
     TooLarge,
     #[error("Ting webhook must contain a JSON object with a tings array")]
     InvalidBatch,
-    #[error("trusted Ting hook binding does not match the authenticated DM identity")]
+    #[error("the hook's stored account does not match the account DM authenticated")]
     InvalidReceiver,
-    #[error("authenticated Ting organizations do not uniquely identify the DM organization")]
-    InvalidOrganization,
 }
 
-/// Validates references without I/O. `identity` must come from authenticated DM
-/// `me()`; receiver binding and callback authentication belong to the consumer.
+/// Validates references without I/O. `me` must come from an authenticated DM `me()`;
+/// receiver binding and callback authentication belong to the consumer.
 pub fn validate_batch(
     raw: &[u8],
     receiver: &TingReceiverContext,
-    identity: &Identity,
+    me: &Me,
 ) -> std::result::Result<Vec<TingItem>, TingBatchError> {
-    validate_receiver(receiver, identity)?;
+    validate_receiver(receiver, me)?;
     if raw.len() > MAX_BATCH_BYTES {
         return Err(TingBatchError::TooLarge);
     }
@@ -196,24 +160,13 @@ pub fn validate_batch(
 
 fn validate_receiver(
     receiver: &TingReceiverContext,
-    identity: &Identity,
+    me: &Me,
 ) -> std::result::Result<(), TingBatchError> {
-    let paired = match (receiver.testing_environment_id, receiver.testing_generation) {
-        (None, None) => true,
-        (Some(id), Some(generation)) => !id.is_nil() && generation > 0,
-        _ => false,
-    };
-    // Actor type comes from verified DM identity, never from a guessed ID prefix.
-    if !paired
-        || !bounded_text(&receiver.app_id, 255)
-        || !bounded_text(&receiver.organization_id, 255)
-        || receiver
-            .ting_organization_id
-            .as_ref()
-            .is_some_and(|id| !bounded_text(id, 255))
-        || !bounded_text(&receiver.actor.id, 255)
-        || receiver.actor != identity.actor
-        || receiver.organization_id != identity.organization_id
+    // Account kind and uuid come from verified DM identity, never from a guessed id prefix.
+    if !bounded_text(&receiver.app_id, 255)
+        || !bounded_text(&receiver.account_uuid, 255)
+        || me.account.uuid.as_deref() != Some(receiver.account_uuid.as_str())
+        || me.account.actor_type != receiver.kind
     {
         return Err(TingBatchError::InvalidReceiver);
     }
@@ -233,28 +186,32 @@ fn validate_item(index: usize, item: &Value, receiver: &TingReceiverContext) -> 
     let Some(ting_id) = ting_id else {
         return rejected(TingRejection::InvalidReference);
     };
-    // Full inbox objects may include `for`; local webhook items omit it.
-    if item
-        .get("for")
-        .is_some_and(|target| target.as_str() != Some(receiver.actor.id.as_str()))
+    // Organization-scoped references were produced before Silicon Accounts.
+    if item.get("org_id").is_some()
+        || item.pointer("/data/org_id").is_some()
+        || item.pointer("/data/schema_version").and_then(Value::as_u64) == Some(1)
     {
-        return rejected(TingRejection::WrongRecipient);
+        return rejected(TingRejection::LegacyReference);
     }
-    if item.get("org_id").is_some_and(|org| {
-        receiver.ting_organization_id.is_none()
-            || org.as_str() != receiver.ting_organization_id.as_deref()
-    }) {
-        return rejected(TingRejection::WrongOrganization);
+    // Inbox objects carry `for` ({uuid, id}); local webhook items may omit it.
+    if let Some(target) = item.get("for") {
+        let matches = match target {
+            Value::Object(object) => {
+                object.get("uuid").and_then(Value::as_str) == Some(receiver.account_uuid.as_str())
+            }
+            Value::String(id) => *id == receiver.account_uuid,
+            _ => false,
+        };
+        if !matches {
+            return rejected(TingRejection::WrongRecipient);
+        }
     }
     let Ok(data) =
         serde_json::from_value::<ReferenceData>(item.get("data").cloned().unwrap_or(Value::Null))
     else {
         return rejected(TingRejection::InvalidReference);
     };
-    if data.org_id != receiver.organization_id {
-        return rejected(TingRejection::WrongOrganization);
-    }
-    if data.schema_version != 1
+    if data.schema_version != REFERENCE_SCHEMA_VERSION
         || data.delivery_id.is_nil()
         || data.delivery_sequence < 1
         || crate::validate_conversation_id(&data.conversation_id).is_err()
@@ -263,42 +220,20 @@ fn validate_item(index: usize, item: &Value, receiver: &TingReceiverContext) -> 
     {
         return rejected(TingRejection::InvalidReference);
     }
-    let Some(metadata) = item.get("metadata").and_then(Value::as_object) else {
-        return rejected(TingRejection::InvalidMetadata);
+    let empty = serde_json::Map::new();
+    let metadata = match item.get("metadata") {
+        None | Some(Value::Null) => &empty,
+        Some(Value::Object(metadata)) => metadata,
+        Some(_) => return rejected(TingRejection::InvalidMetadata),
     };
-    if metadata.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "testing_environment_id" | "testing_generation" | "isi"
-        )
-    }) {
+    if metadata.keys().any(|key| key != "isi") {
         return rejected(TingRejection::InvalidMetadata);
-    }
-    if metadata.get("testing_environment_id") != Some(&json!(receiver.testing_environment_id)) {
-        return rejected(TingRejection::WrongEnvironment);
-    }
-    let Some(generation) = metadata.get("testing_generation") else {
-        return rejected(TingRejection::InvalidMetadata);
-    };
-    if generation != &json!(receiver.testing_generation) {
-        if receiver.testing_generation.is_some_and(|current| {
-            generation
-                .as_i64()
-                .is_some_and(|value| value > 0 && value < current)
-        }) {
-            return TingItem::StaleGeneration {
-                index,
-                ting_id: ting_id.to_owned(),
-                generation: generation.as_i64(),
-            };
-        }
-        return rejected(TingRejection::GenerationMismatch);
     }
     let isi = match metadata.get("isi") {
         None => None,
         Some(value) => match value.as_str() {
             Some(isi)
-                if receiver.actor.actor_type == ActorType::Silicon
+                if receiver.kind == ActorType::Silicon
                     && bounded_text(isi, 255)
                     && !isi
                         .chars()
@@ -313,7 +248,6 @@ fn validate_item(index: usize, item: &Value, receiver: &TingReceiverContext) -> 
         index,
         ting_id: ting_id.to_owned(),
         event: data.event,
-        organization_id: data.org_id,
         conversation_id: data.conversation_id,
         message_id: data.message_id,
         delivery_id: data.delivery_id,
@@ -345,10 +279,10 @@ pub enum HydratedTingItem {
 }
 
 impl Client {
-    /// Validates a generic consumer's batch against fresh DM identity/discovery,
-    /// then fetches recognized messages through normal authenticated HTTP GETs.
-    /// Deleted messages remain ordinary DM tombstones; 403/404 are inaccessible.
-    /// This method never dispatches callbacks, changes receipts or ACKs a Ting.
+    /// Validates a generic consumer's batch against the account DM authenticates now, then
+    /// fetches recognized messages through normal authenticated HTTP GETs. Deleted messages
+    /// remain ordinary DM tombstones; 403/404 are inaccessible. This method never
+    /// dispatches callbacks, changes receipts or ACKs a Ting.
     pub async fn hydrate_ting_batch(
         &self,
         raw: &[u8],
@@ -357,22 +291,8 @@ impl Client {
         if raw.len() > MAX_BATCH_BYTES {
             return Err(Error::Configuration(TingBatchError::TooLarge.to_string()));
         }
-        if self.organization.as_deref() != Some(receiver.organization_id.as_str()) {
-            return Err(Error::Configuration(
-                TingBatchError::InvalidReceiver.to_string(),
-            ));
-        }
-        let identity = self.me().await?;
-        let info = self.iam().await?;
-        if info.app_id != receiver.app_id
-            || info.testing_environment_id != receiver.testing_environment_id
-            || info.testing_generation != receiver.testing_generation
-            || self.testing_generation != receiver.testing_generation
-            || self.test_key.is_some() != receiver.testing_environment_id.is_some()
-        {
-            return Err(Error::Configuration("Ting hook binding or DM client belongs to another environment/generation; refresh IAM discovery and the consumer binding".into()));
-        }
-        let items = validate_batch(raw, receiver, &identity)
+        let me = self.me().await?;
+        let items = validate_batch(raw, receiver, &me)
             .map_err(|error| Error::Configuration(error.to_string()))?;
         let mut hydrated = Vec::with_capacity(items.len());
         for item in items {
@@ -385,10 +305,7 @@ impl Client {
                     .message(&reference.conversation_id, &reference.message_id)
                     .await
                 {
-                    Ok(message)
-                        if message.id == reference.message_id
-                            && message.conversation_id == reference.conversation_id =>
-                    {
+                    Ok(message) if message.id == reference.message_id => {
                         HydratedTingItem::Message {
                             reference,
                             message: Box::new(message),
@@ -414,258 +331,178 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Actor, Delivery};
+    use serde_json::json;
 
-    fn context() -> (TingReceiverContext, Identity) {
-        let actor = Actor {
-            actor_type: ActorType::Silicon,
-            id: "si:cos".into(),
+    fn context() -> (TingReceiverContext, Me) {
+        let me = Me {
+            account: Actor::new(ActorType::Silicon, "si:cos").with_uuid("K1E"),
+            custodian: None,
+            custodian_of: Vec::new(),
+            scopes: Vec::new(),
+            via_app: None,
+            delivery: Delivery::default(),
         };
         (
-            TingReceiverContext {
-                app_id: "dm".into(),
-                organization_id: "tos".into(),
-                ting_organization_id: None,
-                actor: actor.clone(),
-                testing_environment_id: None,
-                testing_generation: None,
-            },
-            Identity {
-                actor,
-                organization_id: "tos".into(),
-                principal_id: "si:cos".into(),
-                session_id: None,
-                org_role: None,
-                capabilities: Vec::new(),
-                reconsent_required: false,
-            },
+            TingReceiverContext::for_account("dm", &me).expect("uuid"),
+            me,
         )
     }
 
     fn event() -> Value {
         let id = Uuid::new_v4();
-        json!({"id":"msg_123", "type":"dm.sync.changed", "created_at":"2026-09-22T10:00:00Z", "key":id,
-            "metadata":{"testing_environment_id":null,"testing_generation":null,"isi":"planner"},
-            "data":{"schema_version":1,"event":"message.created","org_id":"tos","conversation_id":"c:alice::si:cos",
+        json!({"id":"msg_123", "type":"dm.sync.changed", "created_at":"2026-10-10T10:00:00Z", "key":id,
+            "metadata":{"isi":"planner"},
+            "data":{"schema_version":2,"event":"message.created","conversation_id":"c:alice::si:cos",
                 "message_id":"000","delivery_id":id,"delivery_sequence":1}})
     }
 
-    fn validate(item: Value, receiver: &TingReceiverContext, identity: &Identity) -> TingItem {
+    fn validate(item: Value, receiver: &TingReceiverContext, me: &Me) -> TingItem {
         validate_batch(
-            &serde_json::to_vec(&json!({"tings":[item]})).unwrap(),
+            &serde_json::to_vec(&json!({"tings":[item]})).unwrap_or_default(),
             receiver,
-            identity,
+            me,
         )
-        .unwrap()
+        .unwrap_or_default()
         .remove(0)
     }
 
     #[test]
-    fn local_callback_uses_trusted_typed_binding_and_leaves_other_apps_unclaimed() {
-        let (receiver, identity) = context();
+    fn references_bind_to_the_account_uuid_and_leave_other_apps_unclaimed() {
+        let (receiver, me) = context();
         let mut other = event();
         other["type"] = json!("remind.sync.changed");
         let items = validate_batch(
-            &serde_json::to_vec(&json!({"tings":[event(),other]})).unwrap(),
+            &serde_json::to_vec(&json!({"tings":[event(),other]})).unwrap_or_default(),
             &receiver,
-            &identity,
+            &me,
         )
-        .unwrap();
+        .unwrap_or_default();
         assert!(
             matches!(&items[0],TingItem::Reference(reference) if reference.isi.as_deref()==Some("planner") && reference.delivery_sequence==1)
         );
         assert!(matches!(items[1], TingItem::Unrelated { index: 1 }));
-        let mut wrong_kind = receiver.clone();
-        wrong_kind.actor.actor_type = ActorType::Carbon;
+        let mut addressed = event();
+        addressed["for"] = json!({"uuid":"K1E","id":"si:cos"});
         assert!(matches!(
-            validate_batch(b"{\"tings\":[]}", &wrong_kind, &identity),
+            validate(addressed, &receiver, &me),
+            TingItem::Reference(_)
+        ));
+        for wrong in [
+            json!({"uuid":"k1e","id":"si:cos"}),
+            json!({"id":"si:cos"}),
+            json!("si:cos"),
+        ] {
+            let mut item = event();
+            item["for"] = wrong;
+            assert!(matches!(
+                validate(item, &receiver, &me),
+                TingItem::Rejected {
+                    reason: TingRejection::WrongRecipient,
+                    ..
+                }
+            ));
+        }
+        let mut wrong_kind = receiver.clone();
+        wrong_kind.kind = ActorType::Carbon;
+        assert!(matches!(
+            validate_batch(b"{\"tings\":[]}", &wrong_kind, &me),
             Err(TingBatchError::InvalidReceiver)
         ));
-        let mut wrong_recipient = event();
-        wrong_recipient["for"] = json!("c:alice");
+        let mut wrong_account = receiver;
+        wrong_account.account_uuid = "other".into();
         assert!(matches!(
-            validate(wrong_recipient, &receiver, &identity),
-            TingItem::Rejected {
-                reason: TingRejection::WrongRecipient,
-                ..
-            }
+            validate_batch(b"{\"tings\":[]}", &wrong_account, &me),
+            Err(TingBatchError::InvalidReceiver)
         ));
     }
 
     #[test]
-    fn schema_tenant_key_and_metadata_are_validated_before_hydration() {
-        let (receiver, identity) = context();
+    fn schema_key_and_metadata_are_validated_before_hydration() {
+        let (receiver, me) = context();
         for (pointer, value) in [
-            ("/data/schema_version", json!(2)),
+            ("/data/schema_version", json!(3)),
             ("/data/delivery_sequence", json!(0)),
             ("/data/conversation_id", json!("https://evil.invalid")),
             ("/data/message_id", json!("../secret")),
             ("/data/event", json!("other.event")),
             ("/key", json!(Uuid::new_v4())),
-            ("/data/org_id", json!("other")),
-            ("/metadata/testing_environment_id", json!(Uuid::new_v4())),
             ("/metadata/isi", json!("bad@route")),
+            ("/metadata", json!("not an object")),
         ] {
             let mut candidate = event();
-            *candidate.pointer_mut(pointer).unwrap() = value;
+            *candidate.pointer_mut(pointer).unwrap_or(&mut Value::Null) = value;
             assert!(
                 matches!(
-                    validate(candidate, &receiver, &identity),
+                    validate(candidate, &receiver, &me),
                     TingItem::Rejected { .. }
                 ),
                 "{pointer}"
             );
         }
-        let mut payload = event();
-        payload["data"]["message"] = json!("message content is not the reference schema");
+        let mut extra = event();
+        extra["metadata"]["testing_generation"] = json!(1);
         assert!(matches!(
-            validate(payload, &receiver, &identity),
-            TingItem::Rejected {
-                reason: TingRejection::InvalidReference,
-                ..
-            }
-        ));
-        let mut missing = event();
-        missing["metadata"]
-            .as_object_mut()
-            .unwrap()
-            .remove("testing_generation");
-        assert!(matches!(
-            validate(missing, &receiver, &identity),
+            validate(extra, &receiver, &me),
             TingItem::Rejected {
                 reason: TingRejection::InvalidMetadata,
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn inbox_outer_org_uses_authenticated_canonical_mapping_and_keeps_dm_reference_scope() {
-        let (receiver, identity) = context();
-        let canonical = Uuid::new_v4().to_string();
-        let organizations =
-            json!({"items":[{"id":canonical,"handle":"tos","name":"Display name"}]});
-        let mut inbox = event();
-        inbox["org_id"] = json!(canonical);
-        inbox["for"] = json!(identity.actor.id);
+        let mut payload = event();
+        payload["data"]["message"] = json!("message content is not the reference schema");
         assert!(matches!(
-            validate(inbox.clone(), &receiver, &identity),
+            validate(payload, &receiver, &me),
             TingItem::Rejected {
-                reason: TingRejection::WrongOrganization,
+                reason: TingRejection::InvalidReference,
                 ..
             }
         ));
-        let receiver = receiver.with_ting_organizations(&organizations).unwrap();
+        let mut bare = event();
+        bare.as_object_mut().map(|o| o.remove("metadata"));
         assert!(matches!(
-            validate(inbox.clone(), &receiver, &identity),
+            validate(bare, &receiver, &me),
             TingItem::Reference(_)
         ));
-        // Local webhook items remain valid without their stripped outer org.
-        assert!(matches!(
-            validate(event(), &receiver, &identity),
-            TingItem::Reference(_)
-        ));
-        for wrong in [json!("tos"), json!(Uuid::new_v4()), Value::Null] {
-            inbox["org_id"] = wrong;
+    }
+
+    #[test]
+    fn organization_scoped_references_from_before_silicon_accounts_are_rejected() {
+        let (receiver, me) = context();
+        let mut outer = event();
+        outer["org_id"] = json!("tos");
+        let mut inner = event();
+        inner["data"]["org_id"] = json!("tos");
+        let mut first_schema = event();
+        first_schema["data"]["schema_version"] = json!(1);
+        for item in [outer, inner, first_schema] {
             assert!(matches!(
-                validate(inbox.clone(), &receiver, &identity),
+                validate(item, &receiver, &me),
                 TingItem::Rejected {
-                    reason: TingRejection::WrongOrganization,
+                    reason: TingRejection::LegacyReference,
                     ..
                 }
             ));
         }
-        inbox["org_id"] = json!(canonical);
-        inbox["data"]["org_id"] = json!(canonical);
-        assert!(matches!(
-            validate(inbox, &receiver, &identity),
-            TingItem::Rejected {
-                reason: TingRejection::WrongOrganization,
-                ..
-            }
-        ));
-        assert_eq!(
-            resolve_ting_organization(&canonical, &organizations).unwrap(),
-            canonical
-        );
-    }
-
-    #[test]
-    fn organization_binding_rejects_missing_ambiguous_and_malformed_authority() {
-        let canonical = Uuid::new_v4().to_string();
-        for organizations in [
-            json!({}),
-            json!({"items":[]}),
-            json!({"items":[{"id":canonical,"name":"tos","handle":"other"}]}),
-            json!({"items":[{"id":"","handle":"tos"}]}),
-            json!({"items":[{"id":canonical,"handle":"tos"},{"id":"other","handle":"tos"}]}),
-            json!({"items":[{"id":canonical,"handle":"tos"},{"id":"tos","handle":"other"}]}),
-        ] {
-            assert!(matches!(
-                resolve_ting_organization("tos", &organizations),
-                Err(TingBatchError::InvalidOrganization)
-            ));
-        }
-    }
-
-    #[test]
-    fn stale_generation_is_distinct_from_another_environment_or_future_generation() {
-        let (mut receiver, identity) = context();
-        let environment = Uuid::new_v4();
-        receiver.testing_environment_id = Some(environment);
-        receiver.testing_generation = Some(2);
-        let mut candidate = event();
-        candidate["metadata"]["testing_environment_id"] = json!(environment);
-        candidate["metadata"]["testing_generation"] = json!(1);
-        assert!(matches!(
-            validate(candidate.clone(), &receiver, &identity),
-            TingItem::StaleGeneration {
-                generation: Some(1),
-                ..
-            }
-        ));
-        let mut wrong_org = candidate.clone();
-        wrong_org["data"]["org_id"] = json!("other");
-        assert!(matches!(
-            validate(wrong_org, &receiver, &identity),
-            TingItem::Rejected {
-                reason: TingRejection::WrongOrganization,
-                ..
-            }
-        ));
-        candidate["metadata"]["testing_generation"] = json!(3);
-        assert!(matches!(
-            validate(candidate.clone(), &receiver, &identity),
-            TingItem::Rejected {
-                reason: TingRejection::GenerationMismatch,
-                ..
-            }
-        ));
-        candidate["metadata"]["testing_environment_id"] = json!(Uuid::new_v4());
-        assert!(matches!(
-            validate(candidate, &receiver, &identity),
-            TingItem::Rejected {
-                reason: TingRejection::WrongEnvironment,
-                ..
-            }
-        ));
     }
 
     #[test]
     fn batch_limits_and_shape_are_enforced_without_item_processing() {
-        let (receiver, identity) = context();
+        let (receiver, me) = context();
         for invalid in [b"[]".as_slice(), b"{}", b"{\"tings\":null}", b"{"] {
             assert!(matches!(
-                validate_batch(invalid, &receiver, &identity),
+                validate_batch(invalid, &receiver, &me),
                 Err(TingBatchError::InvalidBatch)
             ));
         }
         assert!(matches!(
-            validate_batch(&vec![b' '; MAX_BATCH_BYTES + 1], &receiver, &identity),
+            validate_batch(&vec![b' '; MAX_BATCH_BYTES + 1], &receiver, &me),
             Err(TingBatchError::TooLarge)
         ));
-        let too_many = serde_json::to_vec(&json!({"tings":vec![Value::Null;101]})).unwrap();
+        let too_many =
+            serde_json::to_vec(&json!({"tings":vec![Value::Null;101]})).unwrap_or_default();
         assert!(matches!(
-            validate_batch(&too_many, &receiver, &identity),
+            validate_batch(&too_many, &receiver, &me),
             Err(TingBatchError::TooLarge)
         ));
     }

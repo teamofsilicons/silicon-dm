@@ -38,10 +38,22 @@ Restart a running daemon after upgrading to load the new code; durable queues pe
 
 ## Backend configuration
 
-See `.env.example` and [deployment](deployment.md) for database, testing database,
-IAM, Giphy, body-size, connection pool, timeout, and worker settings. The testing
-database must differ from production, and the encryption key must stay stable
-across replicas. Attachments are external links; no upload credentials are required.
+See `.env.example` for every setting. Sign-in is Silicon Accounts only:
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `ACCOUNTS_URL` | yes | Silicon Accounts origin; exactly the `iss` of its tokens |
+| `ACCOUNTS_API_URL` | no | Where DM calls Silicon Accounts server to server (default `ACCOUNTS_URL`) |
+| `DM_APP_ID` | no | DM's app id in Silicon Accounts (default `dm`) |
+| `DM_APP_SECRET` | yes | DM's app secret |
+| `DM_ACCOUNTS_WEBHOOK_SECRET` | yes | The app webhook signing secret (`whsec_…`); webhooks arrive at `/webhook/` |
+| `DM_DATA_KEY` | yes | 32 random bytes, base64: keys sync cursors and the encryption of stored proofs. Keep it stable and backed up |
+| `DM_PROOF_ISSUERS` | no | Apps whose User verification proofs DM accepts, per scope (`dm.messages.write=interface,…`); empty accepts none |
+| `DM_TING_URL` | no | Ting delivery; unset means clients sync with `GET /api/v1/sync` |
+
+Plain `http` is accepted only for this machine (localhost and loopback addresses).
+Database, Giphy, body-size, connection pool, timeout and worker settings are unchanged.
+Attachments are external links; no upload credentials are required.
 
 No Space Station SDK, telemetry exporter, or analytics integration is installed
 by this change.

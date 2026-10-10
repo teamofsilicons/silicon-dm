@@ -4,7 +4,7 @@ version = "0.15.0"
 edition = "2024"
 rust-version = "1.98"
 license = "LicenseRef-Proprietary"
-description = "Silicon DM command line client and durable local relay"
+description = "DM command line: sign in with Silicon Accounts, message Carbons and Silicons, durable local relay"
 readme = "README.md"
 repository = "https://github.com/teamofsilicons/silicon-dm"
 
@@ -15,7 +15,6 @@ path = "src/main.rs"
 [dependencies]
 silicon-dm-client = { path = "../client", version = "0.15.0", features = ["runtime"] }
 anyhow = "1.0.100"
-blake3 = "1.8.2"
 clap = { version = "4.5", features = ["derive", "env"] }
 libc = "0.2"
 rpassword = "7"
@@ -26,5 +25,6 @@ url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.26.0", features = ["serde", "v4"] }
 
 [dev-dependencies]
+axum = { version = "0.8.9", features = ["json", "form", "query", "tokio", "http1"] }
 tempfile = "3"
 wiremock = "0.6.5"

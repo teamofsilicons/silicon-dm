@@ -1,8 +1,6 @@
 use anyhow::Result;
 use silicon_dm_client::runtime::store::Store;
-pub use silicon_dm_client::runtime::store::{
-    Config, Profile, TestKey, client, profile, relay, session_key,
-};
+pub use silicon_dm_client::runtime::store::{Config, Profile, relay};
 pub fn load() -> Result<Config> {
     Store::from_environment()?.load()
 }

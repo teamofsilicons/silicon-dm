@@ -35,10 +35,7 @@ mod tests {
 
     #[test]
     fn replacement_preserves_existing_whitespace_and_other_punctuation() {
-        let actor = Actor {
-            actor_type: ActorType::Silicon,
-            id: "si:writer".into(),
-        };
+        let actor = Actor::new(ActorType::Silicon, "si:writer");
         for (input, expected) in [
             ("hello—world", "hello - world"),
             ("hello —world", "hello - world"),
