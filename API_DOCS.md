@@ -40,13 +40,14 @@ need, and only from apps DM is configured to trust:
 | Scope | Routes |
 | --- | --- |
 | `dm.conversations.read` | list conversations, read a group |
-| `dm.messages.read` | read messages and bundles |
+| `dm.messages.read` | read messages and bundles, follow the sync feed |
 | `dm.messages.write` | start conversations, send, edit and delete messages |
 | `dm.receipts.write` | delivered and read receipts |
 | `dm.drafts.write` | read, save and discard drafts |
 
-Messages sent with a proof record the app that sent them. Everything else (groups, allow-lists,
-`/me`, sync) needs the account's own DM token: 403 `proof_not_accepted`.
+Messages sent with a proof record the app that sent them. Everything else (group changes,
+invitations, allow-lists, presence, GIFs, reports, `/me`) needs the account's own DM token:
+403 `proof_not_accepted`.
 
 ## Accounts and ids
 

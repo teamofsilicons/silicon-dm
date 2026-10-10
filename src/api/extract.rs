@@ -83,7 +83,9 @@ pub(crate) fn route_requirement(method: &Method, path: &str) -> AuthRequirement 
     let read = *method == Method::GET;
     let proof_scope = match operation {
         "conversations" | "group" if read => Some("dm.conversations.read"),
-        "messages" | "message" | "bundle" if read => Some("dm.messages.read"),
+        // The sync feed only references messages the account can already read, so an app
+        // that may read them can follow new ones (Ting is off by default).
+        "messages" | "message" | "bundle" | "sync" if read => Some("dm.messages.read"),
         "create_conversation" | "message.create" | "message.updated" | "message.deleted" => {
             Some("dm.messages.write")
         }
@@ -544,13 +546,15 @@ mod tests {
             scope(Method::PUT, "/api/v1/conversations/x/draft"),
             Some("dm.drafts.write")
         );
+        assert_eq!(scope(Method::GET, "/api/v1/sync"), Some("dm.messages.read"));
         for (method, path) in [
             (Method::POST, "/api/v1/groups"),
             (Method::PATCH, "/api/v1/groups/g:team"),
             (Method::GET, "/api/v1/me"),
             (Method::POST, "/api/v1/allow-list"),
             (Method::PUT, "/api/v1/presence/devices/laptop"),
-            (Method::GET, "/api/v1/sync"),
+            (Method::GET, "/api/v1/presence/c:ada"),
+            (Method::GET, "/api/v1/gifs/recent"),
         ] {
             assert_eq!(scope(method.clone(), path), None, "{method} {path}");
         }

@@ -177,7 +177,9 @@ paths:
         returned cursor (it is bound to the account) and continue while `has_more` is true.
         With `wait`, an empty page is held open up to that many seconds and returns as soon as
         something new arrives. A 409 `sync_reset_required` means: get a reset cursor, refresh
-        conversations and messages, then continue from that cursor.
+        conversations and messages, then continue from that cursor. Proofs need scope
+        `dm.messages.read`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
       parameters:
         - {$ref: '#/components/parameters/Cursor'}
         - {$ref: '#/components/parameters/Limit'}
