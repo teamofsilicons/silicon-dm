@@ -77,6 +77,18 @@ impl Directory<'_> {
     /// `session_revoked` / `account_deleted` (401), or storage failures.
     pub async fn admit(&self, context: &AuthContext) -> AppResult<StoredAccount> {
         let store = &self.state.store;
+        let retired: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM accounts_uuid128_map WHERE old_uuid=$1)",
+        )
+        .bind(context.actor.id.as_str())
+        .fetch_one(store.pool())
+        .await?;
+        if retired {
+            return Err(AppError::unauthenticated(
+                "session_revoked",
+                "This account identity was migrated. Sign in to DM again.",
+            ));
+        }
         let (stored, inserted) = store
             .record_authentication(
                 context.actor.id.as_str(),

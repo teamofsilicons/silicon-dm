@@ -27,7 +27,14 @@ pub(crate) async fn resolve_conversation_path(
     value: &str,
     create: bool,
 ) -> AppResult<(Uuid, ConversationAccess)> {
-    let id = if Uuid::parse_str(value).is_ok() || value.starts_with("g:") || value.contains("::") {
+    // Account UUIDs and conversation UUIDs share a representation. A visible
+    // existing conversation wins; otherwise resolve the UUID through Accounts.
+    if let Ok(id) = Uuid::parse_str(value)
+        && let Some(access) = state.store.conversation_access(&context.actor, id).await?
+    {
+        return Ok((id, access));
+    }
+    let id = if value.starts_with("g:") || value.contains("::") {
         resolve_address(state, value).await?
     } else {
         recipient_conversation(state, context, value, create).await?
@@ -221,6 +228,6 @@ pub(crate) async fn start_conversation(
 /// Whether a path segment names one account (as opposed to a conversation address).
 #[must_use]
 pub(crate) fn names_one_account(value: &str) -> bool {
-    !(Uuid::parse_str(value).is_ok() || value.starts_with("g:") || value.contains("::"))
+    !(value.starts_with("g:") || value.contains("::"))
         && (value.contains(':') || is_account_uuid(value))
 }

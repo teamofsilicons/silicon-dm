@@ -471,3 +471,7 @@ realistic documents: the parameter files name exactly the template's parameters.
 ## Recovery completion — Next.js website (2026-10-10)
 
 The web stage is now implemented and locally verified; see [web-verification.md](web-verification.md) for exact evidence, product coverage and release limits. Real backend/CLI checks151/151, frontend units44, TypeScript/lint/standalone build passed. Generic browser checks24 plus the corrected full product journey2/2 passed. Added a separate AWS website stack with the old gateway/state retained for rollback. No production actions performed.
+
+## UUID128 compatibility and checked backfill — 10 October 2026
+
+Added canonical UUID acceptance, an explicit identity-column mapping consumer with transactional dry-run/apply/reapply and a retired-subject fence. Populated clone verification preserved resource IDs, provider paths, native credentials and signed bodies; 18 accounts and 4 encrypted proof grants migrated. See [uuid128.md](uuid128.md) for the cutover sequence and evidence. Production and original checkouts remain untouched.

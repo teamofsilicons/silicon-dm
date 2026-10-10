@@ -71,10 +71,12 @@ pub struct OrganizationId(String);
 /// The partition of everything created from DM 0.15 on (IAM handles never contain `@`).
 pub const ACCOUNTS_PARTITION: &str = "@accounts";
 
-/// Whether `value` has the shape of a Silicon Accounts uuid (`a-z`, `A-Z`, `0-9`, 3+).
+/// Whether `value` is a canonical UUID or a legacy Accounts alphanumeric key.
 #[must_use]
 pub fn is_account_uuid(value: &str) -> bool {
-    (3..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    ((3..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        || (value.len() == 36
+            && uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == value))
 }
 
 /// A typed actor reference returned by the public API.
@@ -280,5 +282,22 @@ mod address_tests {
             assert!(invalid.parse::<ActorId>()?.address_parts().is_err());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod uuid128_tests {
+    #[test]
+    fn accepts_canonical_accounts_uuid_alongside_legacy_keys() {
+        for valid in ["a8K", "a750a68a-1bc2-4b3f-888e-0349c9d7289a"] {
+            assert!(super::is_account_uuid(valid));
+        }
+        for invalid in [
+            "c:ada",
+            "a750a68a-1bc2-4b3f-888e-0349c9d7289z",
+            "not-an-account",
+        ] {
+            assert!(!super::is_account_uuid(invalid));
+        }
     }
 }

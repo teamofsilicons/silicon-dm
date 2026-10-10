@@ -482,3 +482,51 @@ async fn discovery_needs_no_sign_in_and_names_accounts() -> Result<(), BoxError>
     }
     app.close().await
 }
+
+#[tokio::test]
+async fn canonical_uuid128_accounts_sign_in_and_message_each_other() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let ada = TestAccount::carbon("a750a68a-1bc2-4b3f-888e-0349c9d7289a", "c:uuid-ada");
+    let bea = TestAccount::carbon("b750a68a-1bc2-4b3f-888e-0349c9d7289b", "c:uuid-bea");
+    app.accounts.add_accounts(&[&ada, &bea]).await;
+    let me = app.get("/api/v1/me", &app.accounts.token(&ada)).await?;
+    expect_status(&me, StatusCode::OK)?;
+    assert_eq!(me.1["account"]["uuid"], ada.uuid);
+    let sent = app
+        .call(
+            Method::POST,
+            "/api/v1/messages",
+            Some(&app.accounts.token(&ada)),
+            Some(json!({"recipient_id":bea.uuid,"message":"Canonical UUID delivery"})),
+            &[("idempotency-key", "uuid128-message".to_owned())],
+        )
+        .await?;
+    expect_status(&sent, StatusCode::ACCEPTED)?;
+    assert_eq!(sent.1["sender"]["uuid"], ada.uuid);
+    let history = app
+        .get(
+            &format!("/api/v1/conversations/{}/messages", ada.uuid),
+            &app.accounts.token(&bea),
+        )
+        .await?;
+    expect_status(&history, StatusCode::OK)?;
+    assert_eq!(history.1["items"][0]["message"], "Canonical UUID delivery");
+    app.close().await
+}
+
+#[tokio::test]
+async fn retired_uuid_tokens_cannot_recreate_the_old_account() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let ada = TestAccount::carbon("a8K", "c:retired-ada");
+    app.accounts.add_account(&ada).await;
+    sqlx::query("INSERT INTO accounts_uuid128_map(old_uuid,new_uuid,kind,mapping_sha256) VALUES($1,$2,'carbon','test')")
+        .bind(&ada.uuid).bind("a750a68a-1bc2-4b3f-888e-0349c9d7289a").execute(app.state.store.pool()).await?;
+    let result = app.get("/api/v1/me", &app.accounts.token(&ada)).await?;
+    expect_status(&result, StatusCode::UNAUTHORIZED)?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts WHERE uuid=$1")
+        .bind(&ada.uuid)
+        .fetch_one(app.state.store.pool())
+        .await?;
+    assert_eq!(count, 0);
+    app.close().await
+}

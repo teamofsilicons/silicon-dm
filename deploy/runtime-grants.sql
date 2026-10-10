@@ -28,3 +28,6 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA dm
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO :"runtime_role";
 ALTER DEFAULT PRIVILEGES IN SCHEMA dm_private
     REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
+-- Only the coordinated cutover operator may retire or remap identities.
+REVOKE INSERT, UPDATE, DELETE ON dm.accounts_uuid128_map FROM :"runtime_role";

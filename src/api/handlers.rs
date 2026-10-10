@@ -473,7 +473,7 @@ pub(super) async fn send_to_recipient(
         .store
         .resolve_message_input(conversation_id, &mut input)
         .await?;
-    if !super::access::names_one_account(&recipient) {
+    if recipient == conversation_id.to_string() || !super::access::names_one_account(&recipient) {
         input
             .as_object_mut()
             .ok_or_else(|| AppError::validation("message must be an object"))?
