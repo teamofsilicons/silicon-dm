@@ -761,7 +761,21 @@ async fn execute(profile: &str, request: Operation, wait: u64) -> Result<Value> 
             && (result.state != "pending" || tokio::time::Instant::now() >= deadline)
         {
             if result.state == "pending" {
-                eprintln!("Request remains durably queued. Inspect: dm relay result {request_id}")
+                // Say why it is still waiting when an attempt failed (signed out, the
+                // service unreachable…), so nobody has to inspect it to find out.
+                match result
+                    .error
+                    .as_ref()
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                {
+                    Some(reason) => eprintln!(
+                        "Request remains durably queued; its last attempt: {reason} Inspect: dm relay result {request_id}"
+                    ),
+                    None => eprintln!(
+                        "Request remains durably queued. Inspect: dm relay result {request_id}"
+                    ),
+                }
             }
             let failed = result.state == "failed";
             let mut value = serde_json::Map::new();

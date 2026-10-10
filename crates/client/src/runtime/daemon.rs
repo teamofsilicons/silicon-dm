@@ -987,18 +987,27 @@ async fn execute_request(context: RuntimeContext, request: RelayRequest) {
                     "message":reason.message,"hint":reason.hint}),
                 None => json!({"code":"authentication_required","message":format!("{error:#}")}),
             };
-            detail["message"] = json!(if transient_request(&request) {
-                format!(
-                    "This activity could not be authenticated: {}",
-                    detail["message"].as_str().unwrap_or_default()
-                )
+            let message = detail["message"].as_str().unwrap_or_default().to_owned();
+            if transient_request(&request) {
+                detail["message"] = json!(format!(
+                    "This activity could not be authenticated: {message}"
+                ));
+                let _ = context
+                    .queue
+                    .finish(request.request_id, None, Some(&detail));
+            } else if request.request.is_mutation() {
+                // A change waits for the same account's next sign-in and is sent then.
+                detail["message"] = json!(format!(
+                    "{message} Pending requests resume after the profile signs in again."
+                ));
+                let _ = context.queue.retry(request.request_id, &detail);
             } else {
-                format!(
-                    "{} Pending requests resume after the profile signs in again.",
-                    detail["message"].as_str().unwrap_or_default()
-                )
-            });
-            retry_or_finish(&context, &request, &detail);
+                // A read is answered now: kept pending, the caller would only learn why
+                // after its wait ran out, and nobody needs the answer after a new sign-in.
+                let _ = context
+                    .queue
+                    .finish(request.request_id, None, Some(&detail));
+            }
             return;
         }
     };
@@ -1256,6 +1265,70 @@ mod tests {
             drop(context);
             std::fs::remove_dir_all(state.directory())?;
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reads_answer_at_once_when_the_sign_in_ended_and_changes_wait_for_it() -> Result<()> {
+        let router = Router::new().fallback(|| async { StatusCode::SERVICE_UNAVAILABLE });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let state = fixture_store(&format!("http://{}", listener.local_addr()?))?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let session = store::session_key("default");
+        // What a refused refresh leaves behind: the profile is signed out, with the reason.
+        state.update(|config| {
+            let profile = config
+                .profiles
+                .get_mut(&session)
+                .context("fixture profile")?;
+            profile.clear_sign_in(Some(store::EndedSignIn {
+                reason: "refresh_refused".into(),
+                message: "The sign-in this refresh token belongs to was revoked (access_removed)."
+                    .into(),
+                at: store::now(),
+            }));
+            Ok(())
+        })?;
+        let context = RuntimeContext {
+            queue: queue::Queue::open(&state)?,
+            store: state.clone(),
+            payload_budget: Arc::new(Semaphore::new(PAYLOAD_BUDGET_MIB as usize)),
+            workers: Arc::new(Semaphore::new(WORKERS)),
+            http: Arc::new(Pool::new()?),
+            wake: Arc::default(),
+        };
+        let read = RelayRequest::new("default", crate::relay::Operation::Me);
+        let change = command();
+        for request in [&read, &change] {
+            context
+                .queue
+                .enqueue(request, &serde_json::to_value(request)?)?;
+            execute_request(context.clone(), request.clone()).await;
+        }
+        let answered = context.queue.result(read.request_id)?.context("read")?;
+        assert_eq!(answered.state, "failed");
+        let error = answered.error.context("the read says why")?;
+        assert_eq!(error["code"], "authentication_required");
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("access_removed")),
+            "{error}"
+        );
+        let waiting = context.queue.result(change.request_id)?.context("change")?;
+        assert_eq!(
+            waiting.state, "pending",
+            "a change is sent after the next sign-in"
+        );
+        assert!(waiting.error.is_some_and(|error| {
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("resume after the profile signs in"))
+        }),);
+        server.abort();
+        let _ = server.await;
+        drop(context);
+        std::fs::remove_dir_all(state.directory())?;
         Ok(())
     }
 
