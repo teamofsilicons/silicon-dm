@@ -51,7 +51,7 @@ subtle = "2.6.1"
 sha2 = "0.10.9"
 thiserror = "2.0.17"
 time = { version = "0.3.55", features = ["formatting", "macros", "parsing", "serde"] }
-tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.53.2", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.17", features = ["rt"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tower = "0.5.2"

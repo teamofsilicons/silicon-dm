@@ -363,6 +363,7 @@ impl Home {
     pub fn command(&self, args: &[&str]) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_dm"));
         command
+            .kill_on_drop(true)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", self.dir.path())
@@ -385,7 +386,15 @@ impl Home {
         command
     }
     pub async fn run(&self, args: &[&str]) -> Run {
-        Run::from(self.command(args).output().await.expect("dm runs"))
+        Run::from(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(45),
+                self.command(args).output(),
+            )
+            .await
+            .expect("dm exits within 45 seconds")
+            .expect("dm runs"),
+        )
     }
     pub async fn run_with_stdin(&self, args: &[&str], input: &str) -> Run {
         use tokio::io::AsyncWriteExt;
@@ -398,7 +407,12 @@ impl Home {
             .await
             .expect("write stdin");
         drop(stdin);
-        Run::from(child.wait_with_output().await.expect("dm runs"))
+        Run::from(
+            tokio::time::timeout(std::time::Duration::from_secs(45), child.wait_with_output())
+                .await
+                .expect("dm exits within 45 seconds")
+                .expect("dm runs"),
+        )
     }
     pub fn config(&self) -> Value {
         serde_json::from_slice(&std::fs::read(self.state().join("config.json")).expect("config"))
