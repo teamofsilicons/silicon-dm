@@ -614,6 +614,17 @@ Resources:
         - Name: RUNTIME_SECRET_ARN
           Value:
             Ref: RuntimeSecret
+        # The cutover commands (draft-identity-mapping, link-identities) check uuids
+        # with Silicon Accounts as DM's app.
+        - Name: ACCOUNTS_URL
+          Value:
+            Ref: AccountsUrl
+        - Name: ACCOUNTS_API_URL
+          Value:
+            Ref: AccountsApiUrl
+        - Name: DM_APP_ID
+          Value:
+            Ref: AppId
         - Name: AWS_DEFAULT_REGION
           Value:
             Ref: AWS::Region

@@ -148,10 +148,32 @@ The move to Silicon Accounts (DM 0.15) is a coordinated cutover: stop both old
 services, migrate, re-key identities, then start the new API and worker together.
 Follow [the cutover runbook](../../docs/migration/cutover.md).
 
-For compatible upgrades, run the new bootstrap/migrator task and inspect its
-successful completion before deploying new API/worker task definitions. Verify
+For compatible upgrades, run only the migrations (`migrate`, below) and inspect
+its successful completion before deploying new API/worker task definitions. Verify
 migration compatibility with the old running version beforehand. Secret rotations
 need new tasks to consume the new values; running tasks do not reread Secrets Manager.
+
+## One-off commands
+
+The bootstrap image's entrypoint is `bootstrap-task.py`, so a command override picks
+what the one-off task does. [`run-bootstrap-task.py`](run-bootstrap-task.py) starts it
+in the app security group (the only place that reaches the database) with the stack's
+own outputs, waits, prints the task's log and exits with its exit code:
+
+```sh
+python3 deploy/aws/run-bootstrap-task.py --stack "$STACK" status     # applied migrations
+python3 deploy/aws/run-bootstrap-task.py --stack "$STACK" migrate    # migrations and grants only
+python3 deploy/aws/run-bootstrap-task.py --stack "$STACK"            # the full bootstrap
+python3 deploy/aws/run-bootstrap-task.py --stack "$STACK" draft-identity-mapping
+python3 deploy/aws/run-bootstrap-task.py --stack "$STACK" --mapping mapping.csv link-identities --dry-run
+```
+
+`migrate` neither changes the runtime password nor republishes the runtime secret: use
+it for ordinary schema upgrades. `draft-identity-mapping` and `link-identities` are the
+cutover's re-key steps ([the cutover runbook](../../docs/migration/cutover.md)); they
+check uuids with Silicon Accounts as DM's app. `--print-only` shows the request without
+starting anything. Find the stack name with
+`aws cloudformation describe-stacks --query "Stacks[?Outputs[?OutputKey=='ClusterName' && OutputValue=='silicon-dm-production']].StackName"`.
 
 ## Shutdown and large requests
 
@@ -212,8 +234,9 @@ ASG readiness signal to bypass the failed EC2 resource.
 ## Validation
 
 `cfn-lint deploy/aws/fargate.yaml` and AWS `validate-template` validate the
-infrastructure structure. Also compile-check `bootstrap-task.py` without running
-it. Runtime verification is performed manually against the real selected task,
+infrastructure structure. `python3 -m unittest discover -s deploy/aws -p 'test_*.py'`
+tests the bootstrap commands, the runtime secret and the one-off task runner without
+AWS, and checks that both templates carry every setting the service requires. Runtime verification is performed manually against the real selected task,
 service, databases, and public endpoint. No automated application test scenarios
 are required by this deployment workflow.
 

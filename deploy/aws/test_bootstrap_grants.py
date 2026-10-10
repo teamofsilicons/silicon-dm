@@ -1,10 +1,12 @@
 """Exercise both provisioning SQL generators without AWS, passwords, or DB access."""
 import ast
+import importlib.util
 import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 
@@ -20,26 +22,32 @@ def bootstrap_source(kind):
 class BootstrapGrants(unittest.TestCase):
     def generated(self, kind):
         """(SQL statements, other commands) that configure_database issues."""
-        function = next(n for n in ast.parse(bootstrap_source(kind)).body
-                        if isinstance(n, ast.FunctionDef) and n.name == "configure_database")
         sql, commands = [], []
 
         def command(arguments, environment=None, sql_text=None, **kwargs):
             text = sql_text if sql_text is not None else kwargs.get("input")
             (sql if text else commands).append(text or arguments)
 
+        if kind == "ecs":
+            spec = importlib.util.spec_from_file_location("bootstrap_task_grants", HERE / "bootstrap-task.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            master = {"username": "fixture-admin", "password": "synthetic"}
+            with mock.patch.object(module, "command", command):
+                module.configure_database(master, "fixture-host", "silicon_dm", "dm_runtime", "synthetic")
+            return "\n".join(sql), commands
+        function = next(n for n in ast.parse(bootstrap_source(kind)).body
+                        if isinstance(n, ast.FunctionDef) and n.name == "configure_database")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             master = {"username": "fixture-admin", "password": "synthetic"}
             (root / "master.json").write_text(json.dumps(master))
             scope = {"os": SimpleNamespace(environ={"BACKEND_IMAGE": "fixture-image"}),
-                     "json": json, "root": root, "CA": "fixture-ca", "ca": "fixture-ca",
-                     "command": lambda arguments, environment, sql=None: command(arguments, environment, sql),
+                     "json": json, "root": root, "ca": "fixture-ca",
                      "subprocess": SimpleNamespace(run=command),
                      "database_url": lambda *args: "fixture-db", "write_env": lambda *args: None}
             exec(compile(ast.Module(body=[function], type_ignores=[]), "configure_database", "exec"), scope)
-            scope["configure_database"](master if kind == "ecs" else "master.json", "fixture-host",
-                                        "silicon_dm", "dm_runtime", "synthetic")
+            scope["configure_database"]("master.json", "fixture-host", "silicon_dm", "dm_runtime", "synthetic")
         return "\n".join(sql), commands
 
     def test_production_role_receives_only_database_connect(self):
