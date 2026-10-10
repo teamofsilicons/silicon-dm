@@ -101,7 +101,8 @@ async fn handler(State(requests): State<Requests>, request: Request) -> Response
             "custodian_of":[],"scopes":[],"via_app":null,"delivery":delivery()})
         }
         "/api/v1/allow-list" => {
-            json!({"silicon":account("silicon","si:cos","K1E"),"items":[account("carbon","c:bob","B0b")]})
+            json!({"silicon":account("silicon","si:cos","K1E"),"items":[{"account":account("carbon","c:bob","B0b"),
+                "added_by":account("carbon","c:ada","Ada"),"added_at":"2026-10-10T10:00:00Z"}]})
         }
         "/api/v1/conversations" => json!({"items":[
             {"id":"c:ada::si:cos","participants":[account("carbon","c:ada","Ada"),account("silicon","si:cos","K1E")],
@@ -211,7 +212,11 @@ async fn custodian_allow_list_group_and_invitation_routes_use_their_contract() -
     let groups = client.groups(&Default::default()).await?;
     assert_eq!(groups.items.len(), 1);
     let list = client.allow(&["c:bob".into()], Some("si:cos")).await?;
-    assert_eq!(list.items[0].uuid.as_deref(), Some("B0b"));
+    assert_eq!(list.items[0].account.uuid.as_deref(), Some("B0b"));
+    assert_eq!(
+        list.items[0].added_by.as_ref().map(|a| a.id.as_str()),
+        Some("c:ada")
+    );
     let owners = client
         .add_group_owners("g:design", &["c:bob".into()], "owner-key")
         .await?;

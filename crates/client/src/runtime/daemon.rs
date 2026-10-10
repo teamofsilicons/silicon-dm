@@ -772,9 +772,10 @@ fn client_error(error: &crate::Error) -> Value {
         } => {
             json!({"status":status,"code":code,"message":message,"hint":hint,"body":body,"request_id":request_id,"retry_after":retry_after})
         }
-        _ => {
-            json!({"code":"transport_error","message":"DM request did not complete"})
+        crate::Error::Transport(_) => {
+            json!({"code":"transport_error","message":format!("The DM service could not be reached: {error}")})
         }
+        other => json!({"code":other.code(),"message":other.to_string()}),
     }
 }
 async fn outbox(context: RuntimeContext) {

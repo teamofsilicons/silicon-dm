@@ -633,7 +633,16 @@ pub struct SignInDiscovery {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AllowList {
     pub silicon: Actor,
-    pub items: Vec<Actor>,
+    pub items: Vec<AllowListEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+/// One allowed account, who allowed it (the Silicon or its custodian) and when.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AllowListEntry {
+    pub account: Actor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_by: Option<Actor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<String>,
 }

@@ -677,6 +677,8 @@ paths:
       operationId: addOwners
       tags: [Groups]
       summary: Make members co-equal owners (owners). Sensitive.
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody: {$ref: '#/components/requestBodies/GroupMembers'}
       responses:
         '200': {$ref: '#/components/responses/GroupResult'}
@@ -687,6 +689,8 @@ paths:
       operationId: removeOwners
       tags: [Groups]
       summary: Stop members being owners (owners); a group always keeps one (409 `last_owner`). Sensitive.
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody: {$ref: '#/components/requestBodies/GroupMembers'}
       responses:
         '200': {$ref: '#/components/responses/GroupResult'}
@@ -1223,8 +1227,15 @@ components:
       required: [silicon, items]
       properties:
         silicon: {$ref: '#/components/schemas/AccountRef'}
-        items: {type: array, items: {$ref: '#/components/schemas/AccountRef'}}
+        items: {type: array, items: {$ref: '#/components/schemas/AllowListEntry'}}
         note: {type: string}
+    AllowListEntry:
+      type: object
+      required: [account, added_at]
+      properties:
+        account: {$ref: '#/components/schemas/AccountRef'}
+        added_by: {$ref: '#/components/schemas/AccountRef', description: The Silicon or its custodian.}
+        added_at: {type: string, format: date-time}
     ConversationAddress:
       type: string
       description: >-
@@ -1514,7 +1525,7 @@ components:
     DraftInput:
       type: object
       properties:
-        message: {type: string, maxLength: 100000000}
+        message_content: {type: string, maxLength: 100000000}
         attachments: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/Attachment'}}
         voice: {$ref: '#/components/schemas/VoiceAttachment'}
         voice_transcript: {type: [string, 'null'], maxLength: 100000000}
@@ -1532,7 +1543,7 @@ components:
         member_id: {type: string, description: The owner's current id.}
         member_uuid: {type: string}
         version: {type: integer, minimum: 1, description: Send the returned version with the next save.}
-        message: {type: string}
+        message_content: {type: string}
         attachments: {type: array, items: {$ref: '#/components/schemas/Attachment'}}
         voice: {$ref: '#/components/schemas/StoredVoiceAttachment'}
         voice_transcript: {type: [string, 'null']}
