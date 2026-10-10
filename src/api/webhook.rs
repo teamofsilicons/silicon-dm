@@ -35,6 +35,48 @@ pub async fn receive(
     if state.store.webhook_event_seen(&event.event_id).await? {
         return Ok(StatusCode::NO_CONTENT);
     }
+    let mut identities = Vec::new();
+    match &event.event {
+        AccountEvent::IdChanged { uuid, .. }
+        | AccountEvent::Deleted { uuid }
+        | AccountEvent::SignedOut { uuid, .. }
+        | AccountEvent::AccessRemoved { uuid } => identities.push(uuid.as_str()),
+        AccountEvent::Updated { uuid, account, .. } => {
+            identities.push(uuid.as_str());
+            if let Some(account) = account {
+                identities.push(account.uuid.as_str());
+                if let Some((custodian, _)) = &account.custodian {
+                    identities.push(custodian.as_str());
+                }
+            }
+        }
+        AccountEvent::CustodianChanged { uuid, to } => {
+            identities.push(uuid.as_str());
+            if let Some((custodian, _)) = to {
+                identities.push(custodian.as_str());
+            }
+        }
+        AccountEvent::Ping | AccountEvent::Unknown => {}
+    }
+    let retired: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM accounts_uuid128_map WHERE old_uuid=ANY($1))",
+    )
+    .bind(identities)
+    .fetch_one(state.store.pool())
+    .await?;
+    if retired {
+        state
+            .store
+            .record_webhook_event(
+                &event.event_id,
+                &event.event_type,
+                None,
+                event.occurred_at,
+                "ignored",
+            )
+            .await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let occurred_at = event.occurred_at.unwrap_or_else(OffsetDateTime::now_utc);
     let (account, outcome) = apply(&state, &event, occurred_at).await?;
     state

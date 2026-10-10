@@ -570,3 +570,43 @@ async fn a_deleted_account_keeps_its_messages_and_loses_what_was_only_its_own()
     assert_eq!(status, "deleted");
     app.close().await
 }
+
+#[tokio::test]
+async fn retired_webhook_subjects_and_nested_custodians_cannot_return() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let owner = TestAccount::carbon("a750a68a-1bc2-4b3f-888e-0349c9d7289a", "c:owner");
+    let silicon = TestAccount::silicon("b750a68a-1bc2-4b3f-888e-0349c9d7289a", "si:worker", &owner);
+    app.accounts.add_accounts(&[&owner, &silicon]).await;
+    expect_status(
+        &app.get("/api/v1/me", &app.accounts.token(&silicon)).await?,
+        StatusCode::OK,
+    )?;
+    sqlx::query("INSERT INTO accounts_uuid128_map(old_uuid,new_uuid,kind,mapping_sha256) VALUES('OldRetired','c750a68a-1bc2-4b3f-888e-0349c9d7289a','carbon','test')").execute(app.state.store.pool()).await?;
+    for (kind, data) in [
+        ("membership.signed_out", json!({"uuid":"OldRetired"})),
+        (
+            "silicon.custodian_changed",
+            json!({"uuid":silicon.uuid,"to":{"uuid":"OldRetired","id":"c:retired"}}),
+        ),
+        (
+            "account.updated",
+            json!({"uuid":silicon.uuid,"account":{"uuid":silicon.uuid,"kind":"silicon","id":silicon.id,"version":999,"custodian":{"uuid":"OldRetired","id":"c:retired"}}}),
+        ),
+    ] {
+        let (headers, body) = webhook(kind, &data, &at(0));
+        assert_eq!(app.deliver(&headers, &body).await?, StatusCode::NO_CONTENT);
+        assert_eq!(app.deliver(&headers, &body).await?, StatusCode::NO_CONTENT);
+    }
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT custodian_uuid FROM accounts WHERE uuid=$1")
+            .bind(&silicon.uuid)
+            .fetch_one(app.state.store.pool())
+            .await?;
+    assert_eq!(current.as_deref(), Some(owner.uuid.as_str()));
+    let recreated: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE uuid='OldRetired')")
+            .fetch_one(app.state.store.pool())
+            .await?;
+    assert!(!recreated);
+    app.close().await
+}
