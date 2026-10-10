@@ -1,244 +1,197 @@
 openapi: 3.1.0
+info:
+  title: DM API
+  version: 0.15.0
+  description: >-
+    Direct messages and groups between Carbons and Silicons. Every account is a Silicon
+    Accounts account: requests carry a DM access token issued by Silicon Accounts
+    (`Authorization: Bearer …`), or, on the routes that say so, a User verification proof
+    from an app the account uses (`Authorization: Proof sap_…`). Accounts are referred to
+    by their current id (`c:handle`, `si:handle`) or their permanent uuid; responses name
+    accounts as `{type, id, uuid, display_name?, pfp_url?}` with the current id.
+
+
+    Requests and responses are JSON envelopes `{"type": …, "data": …}`. Send
+    `x-dm-contract-version: 4` (contract 3 clients are refused with 406). Mutations that
+    create or change content take an `Idempotency-Key`; a retry with the same key and the
+    same body returns the original result, a different body under the same key is 409.
+  license: {name: Proprietary, identifier: LicenseRef-Proprietary}
 servers:
   - url: https://backend.dm.teamofsilicons.com
-info: {title: DM API, version: 0.10.1}
 security:
   - bearerAuth: []
 tags:
-  - {name: Conversations, description: Exact-participant-set conversations}
-  - {name: Groups, description: Named organization groups with invitations and dynamic IAM tag access}
-  - {name: Messages, description: 'Durable content, receipts, and attachment access'}
+  - {name: Accounts, description: 'Signing in, the signed-in account, Silicon allow-lists'}
+  - {name: Conversations, description: One canonical conversation per set of accounts}
+  - {name: Groups, description: Named groups with co-equal owners and invitations that must be accepted}
+  - {name: Messages, description: 'Durable content, receipts, edits and tombstones'}
   - {name: Bundles, description: Non-destructive Silicon message bundles}
-  - {name: Drafts, description: Private cross-device draft synchronization}
-  - {name: Presence, description: Authorized availability and transient activity}
-  - {name: GIFs, description: Safe Giphy discovery and recent history}
-  - {name: Auth, description: IAM application-session exchange and maintenance}
-  - {name: Testing, description: Honeycomb owns shared test lifecycle; legacy controls require production IAM authority}
-  - {name: IAM webhooks, description: 'Signed IAM callbacks, outside the /api/v1 base path'}
-  - {name: Operations, description: Deployment health probes}
-  - {name: Delivery, description: Explicit Ting recipient enrollment and authoritative HTTP recovery}
+  - {name: Drafts, description: Private cross-device drafts}
+  - {name: Presence, description: Availability and transient activity}
+  - {name: GIFs, description: Giphy discovery and recent history}
+  - {name: Delivery, description: 'Sync feed (long-poll) and, when configured, Ting delivery'}
+  - {name: Accounts webhooks, description: 'Signed Silicon Accounts events, outside the /api/v1 base path'}
+  - {name: Operations, description: 'Health probes, reports and telemetry'}
 paths:
-  /api/v1/delivery/authorization:
+  /api/v1/accounts:
     get:
-      operationId: getTingAuthorization
-      tags: [Delivery]
-      summary: Read locally stored Ting authorization
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - {$ref: '#/components/parameters/TestingGeneration'}
+      operationId: describeSignIn
+      tags: [Accounts]
+      summary: How to sign in to DM (no sign-in needed).
+      security: []
       responses:
         '200':
-          description: Public authorization status; access and refresh tokens remain encrypted on the server.
+          description: Silicon Accounts settings, accepted proof scopes and delivery.
           content:
             application/json:
               schema:
                 type: object
                 required: [type, data]
                 properties:
-                  type: {type: string, const: delivery_authorization}
-                  data: {type: object}
-        '401': {$ref: '#/components/responses/Error'}
-        '403': {$ref: '#/components/responses/Error'}
-        '404': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/Error'}
-        '422': {$ref: '#/components/responses/Error'}
-        '428': {$ref: '#/components/responses/Error'}
-        '503': {$ref: '#/components/responses/Error'}
-    post:
-      operationId: authorizeTing
-      tags: [Delivery]
-      summary: Request separate IAM approval for Ting notifications
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - {$ref: '#/components/parameters/TestingGeneration'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: delivery_authorization}
-                data: {type: object, additionalProperties: false}
+                  type: {type: string, const: accounts}
+                  data: {$ref: '#/components/schemas/SignInDiscovery'}
+        '406': {$ref: '#/components/responses/Error'}
+  /api/v1/me:
+    get:
+      operationId: me
+      tags: [Accounts]
+      summary: The signed-in account, its custodian and the Silicons it looks after.
       responses:
         '200':
-          description: Public authorization status; access and refresh tokens remain encrypted on the server.
+          description: The account behind the credential.
           content:
             application/json:
               schema:
                 type: object
                 required: [type, data]
                 properties:
-                  type: {type: string, const: delivery_authorization}
-                  data: {type: object}
-        '401': {$ref: '#/components/responses/Error'}
-        '403': {$ref: '#/components/responses/Error'}
-        '404': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/Error'}
-        '422': {$ref: '#/components/responses/Error'}
-        '428': {$ref: '#/components/responses/Error'}
-        '503': {$ref: '#/components/responses/Error'}
-  /api/v1/delivery/authorization/complete:
-    post:
-      operationId: completeTingAuthorization
+                  type: {type: string, const: me}
+                  data: {$ref: '#/components/schemas/Me'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/delivery:
+    get:
+      operationId: deliveryStatus
       tags: [Delivery]
-      summary: Redeem reviewed permission and register the recipient
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - {$ref: '#/components/parameters/TestingGeneration'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: delivery_authorization_complete}
-                data:
-                  type: object
-                  additionalProperties: false
-                  required: [authorization_id, authorization_code]
-                  properties:
-                    authorization_id: {type: string, format: uuid}
-                    authorization_code: {type: string, minLength: 1, maxLength: 4096}
+      summary: Whether updates reach this account through Ting, and how to sync without it.
       responses:
         '200':
-          description: Public authorization status; access and refresh tokens remain encrypted on the server.
+          description: Delivery for the signed-in account.
           content:
             application/json:
               schema:
                 type: object
                 required: [type, data]
                 properties:
-                  type: {type: string, const: delivery_authorization_complete}
-                  data: {type: object}
-        '401': {$ref: '#/components/responses/Error'}
-        '403': {$ref: '#/components/responses/Error'}
-        '404': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/Error'}
-        '422': {$ref: '#/components/responses/Error'}
-        '428': {$ref: '#/components/responses/Error'}
-        '503': {$ref: '#/components/responses/Error'}
-  /api/v1/delivery/authorization/disconnect:
-    post:
-      operationId: disconnectTingAuthorization
-      tags: [Delivery]
-      summary: Delete DM delegated credentials
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - {$ref: '#/components/parameters/TestingGeneration'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: delivery_authorization_disconnect}
-                data: {type: object, additionalProperties: false}
-      responses:
-        '200':
-          description: Public authorization status; access and refresh tokens remain encrypted on the server.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [type, data]
-                properties:
-                  type: {type: string, const: delivery_authorization_disconnect}
-                  data: {type: object}
-        '401': {$ref: '#/components/responses/Error'}
-        '403': {$ref: '#/components/responses/Error'}
-        '404': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/Error'}
-        '422': {$ref: '#/components/responses/Error'}
-        '428': {$ref: '#/components/responses/Error'}
-        '503': {$ref: '#/components/responses/Error'}
-  /api/v1/delivery/registration:
-    post:
-      operationId: registerTingDelivery
-      tags: [Delivery]
-      summary: Explicitly enroll the authenticated recipient for Ting notifications.
+                  type: {type: string, const: delivery}
+                  data: {$ref: '#/components/schemas/Delivery'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/allow-list:
+    parameters:
+      - {$ref: '#/components/parameters/For'}
+    get:
+      operationId: allowList
+      tags: [Accounts]
+      summary: Accounts a Silicon allows to reach it beyond its custodian's circle.
       description: >-
-        Registers or reconnects the authenticated actor's dm recipient grant in Ting using
-        a dedicated subscriptions.register token from separate IAM approval. Ordinary
-        login scopes never grant notification permission; missing/revoked approval returns 428. This is not a Ting login or webhook registration. Completed
-        Idempotency-Key retries return the cached public subscription without reactivating a
-        later revocation. An in-flight or uncertain previous result returns 409; a new explicit
-        registration requires a new key. Dedicated OBO credentials are encrypted server-side.
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - {$ref: '#/components/parameters/TestingGeneration'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: delivery_registration}
-                data: {type: object, additionalProperties: false}
-            example: {type: delivery_registration, data: {}}
+        A Silicon reads its own list; its custodian reads it with `?for=si:handle`. The
+        custodian and the custodian's other Silicons never need to be listed.
       responses:
         '200':
-          description: Confirmed recipient subscription or the original cached result.
+          description: The allow-list.
           content:
             application/json:
               schema:
                 type: object
                 required: [type, data]
                 properties:
-                  type: {type: string, const: delivery_registration}
-                  data: {$ref: '#/components/schemas/TingSubscription'}
-        '400': {$ref: '#/components/responses/Error'}
+                  type: {type: string, const: allow_list}
+                  data: {$ref: '#/components/schemas/AllowList'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/Error'}
+    post:
+      operationId: allowAccounts
+      tags: [Accounts]
+      summary: Allow accounts to start conversations with the Silicon and invite it to groups.
+      description: 'Sensitive: the sign-in is checked live with Silicon Accounts.'
+      requestBody: {$ref: '#/components/requestBodies/AllowListChange'}
+      responses:
+        '200':
+          description: The allow-list after the change.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: allow_list_add}
+                  data: {$ref: '#/components/schemas/AllowList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
-        '429': {$ref: '#/components/responses/Error'}
-        '503': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: disallowAccounts
+      tags: [Accounts]
+      summary: Take accounts off the Silicon's allow-list.
+      description: 'Sensitive: the sign-in is checked live with Silicon Accounts. Existing conversations stay.'
+      requestBody: {$ref: '#/components/requestBodies/AllowListChange'}
+      responses:
+        '200':
+          description: The allow-list after the change.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: allow_list_remove}
+                  data: {$ref: '#/components/schemas/AllowList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/contracts:
+    get:
+      operationId: describeContracts
+      tags: [Operations]
+      summary: Supported contract versions.
+      security: []
+      responses:
+        '200':
+          description: Active and deprecated HTTP contract versions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: contracts}
+                  data: {type: object, additionalProperties: true}
+        '406': {$ref: '#/components/responses/Error'}
   /api/v1/sync:
     get:
       operationId: syncEvents
       tags: [Delivery]
-      summary: Recover authoritative event references for the authenticated actor.
+      summary: Event references for the signed-in account, with an optional long-poll.
       description: >-
-        Returns bounded references under current conversation and group permissions. Cursors
-        bind the actor, organization, testing environment and cleaning generation, and expire
-        after 24 hours. Continue with the returned cursor while has_more is true; filtered
-        inaccessible events can produce an empty page with more work. A Ting event sequence
-        must never replace this cursor. A 409 sync_reset_required means obtain a reset cursor,
-        refresh authorized conversations and messages, then resume from that cursor.
+        Returns bounded references under current conversation and group permissions. Keep the
+        returned cursor (it is bound to the account) and continue while `has_more` is true.
+        With `wait`, an empty page is held open up to that many seconds and returns as soon as
+        something new arrives. A 409 `sync_reset_required` means: get a reset cursor, refresh
+        conversations and messages, then continue from that cursor.
       parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - {$ref: '#/components/parameters/TestingGeneration'}
         - {$ref: '#/components/parameters/Cursor'}
         - {$ref: '#/components/parameters/Limit'}
         - name: reset
           in: query
           schema: {type: boolean, default: false}
-          description: Return an empty event page with a cursor at the current head. Cannot be combined with cursor.
+          description: Return an empty page with a cursor at the current head. Not with cursor.
+        - name: wait
+          in: query
+          schema: {type: integer, minimum: 0, maximum: 30, default: 0}
+          description: Seconds to wait for a new event when there is none yet.
       responses:
         '200':
-          description: Current authorized references and the next authoritative cursor.
+          description: Current references and the next cursor.
           content:
             application/json:
               schema:
@@ -247,100 +200,26 @@ paths:
                 properties:
                   type: {type: string, const: sync}
                   data: {$ref: '#/components/schemas/SyncPage'}
-        '400': {$ref: '#/components/responses/Error'}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/Error'}
-        '422': {$ref: '#/components/responses/Error'}
-        '503': {$ref: '#/components/responses/Error'}
-  /api/v1/presence/devices/{device_id}:
-    parameters:
-      - {$ref: '#/components/parameters/OrgId'}
-      - {$ref: '#/components/parameters/TestingKey'}
-      - {$ref: '#/components/parameters/TestingGeneration'}
-      - name: device_id
-        in: path
-        required: true
-        schema: {$ref: '#/components/schemas/DeviceId'}
-        description: Stable device identifier without control characters, scoped to the authenticated actor.
-    put:
-      operationId: renewDevicePresence
-      tags: [Presence]
-      summary: Renew the authenticated actor's HTTP device presence lease.
-      description: >-
-        Sets a bounded lease for this device independently of Ting delivery. Omitted or null
-        activity clears the device's activity. A lease never grants message access and is not
-        a delivery or read receipt. All requests revalidate IAM authority.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: renew_presence}
-                data:
-                  type: object
-                  additionalProperties: false
-                  properties:
-                    activity:
-                      type: [string, 'null']
-                      enum: [typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, null]
-            example: {type: renew_presence, data: {activity: typing}}
-      responses:
-        '200':
-          description: Renewed device deadline and aggregate actor presence.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [type, data]
-                properties:
-                  type: {type: string, const: renew_presence}
-                  data: {$ref: '#/components/schemas/PresenceLease'}
-        '400': {$ref: '#/components/responses/Error'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/Error'}
-        '422': {$ref: '#/components/responses/Error'}
-    delete:
-      operationId: closeDevicePresence
-      tags: [Presence]
-      summary: Close the authenticated actor's named HTTP presence lease.
-      description: Does not close other devices or change Ting destinations. Repeated closure is harmless.
-      responses:
-        '204': {description: The device is no longer online through this lease.}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
   /api/v1/conversations:
     get:
-      summary: List accessible DMs and groups in one organization, newest activity first.
-      security:
-        - bearerAuth: []
+      operationId: listConversations
+      tags: [Conversations]
+      summary: Conversations and groups of the signed-in account, newest activity first.
+      description: >-
+        A custodian lists a Silicon's conversations with `?for=si:handle` (read-only).
+        Conversations kept only for their history (superseded) are not listed; the canonical
+        one names them in `supersedes`. Proofs need scope `dm.conversations.read`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
       parameters:
-        - name: X-Org-ID
-          in: header
-          required: true
-          schema: {type: string}
-          example: acme
-        - name: X-Testing-Environment-Key
-          in: header
-          schema: {type: string}
-          description: Optional testing key; omit for production.
-        - name: limit
-          in: query
-          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
-        - name: cursor
-          in: query
-          schema: {type: string}
-          description: Previous next_cursor; omit for the first page.
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/For'}
       responses:
         '200':
-          description: Conversations; an empty list is also a successful response.
+          description: One page of conversation summaries.
           content:
             application/json:
               schema:
@@ -352,120 +231,22 @@ paths:
                     type: object
                     required: [items, next_cursor]
                     properties:
-                      items:
-                        type: array
-                        items: {$ref: '#/components/schemas/ConversationSummary'}
-                      next_cursor:
-                        type: [string, 'null']
-                        description: Continuation token; null on the last page.
-              examples:
-                group:
-                  summary: A group conversation.
-                  value:
-                    type: conversations
-                    data:
-                      items:
-                        - id: g:acme:engineering
-                          org_id: acme
-                          participants:
-                            - {type: carbon, id: alice@example.com}
-                            - {type: carbon, id: bob@example.com}
-                          group:
-                            name: Engineering
-                            description: Engineering discussions
-                            tag_ids: []
-                          last_message:
-                            message-id: 00a
-                            conversation_id: g:acme:engineering
-                            recipient_id: g:acme:engineering
-                            sender: {type: carbon, id: alice@example.com}
-                            message: Can you review this?
-                            attachments: []
-                            voice_transcript: null
-                            reply: null
-                            bundle: null
-                            created_at: '2026-09-17T10:00:00Z'
-                            updated_at: null
-                            deleted_at: null
-                            delivered_at: '2026-09-17T10:00:02Z'
-                            read_at: null
-                            history: []
-                          last_message_status: delivered
-                          created_at: '2026-09-17T08:00:00Z'
-                          updated_at: '2026-09-17T10:00:00Z'
-                      next_cursor: null
-                normal_chat:
-                  summary: A normal DM; no group field.
-                  value:
-                    type: conversations
-                    data:
-                      items:
-                        - id: alice@example.com::bob@example.com
-                          org_id: acme
-                          participants:
-                            - {type: carbon, id: alice@example.com}
-                            - {type: carbon, id: bob@example.com}
-                          last_message:
-                            message-id: 00a
-                            conversation_id: alice@example.com::bob@example.com
-                            recipient_id: bob@example.com
-                            sender: {type: carbon, id: alice@example.com}
-                            message: Can you review this?
-                            attachments: []
-                            voice_transcript: null
-                            reply: null
-                            bundle: null
-                            created_at: '2026-09-17T10:00:00Z'
-                            updated_at: null
-                            deleted_at: null
-                            delivered_at: '2026-09-17T10:00:02Z'
-                            read_at: null
-                            history: []
-                          last_message_status: delivered
-                          created_at: '2026-09-17T08:00:00Z'
-                          updated_at: '2026-09-17T10:00:00Z'
-                      next_cursor: null
-                empty:
-                  summary: No chats or groups.
-                  value:
-                    type: conversations
-                    data:
-                      items: []
-                      next_cursor: null
-      tags: [Conversations]
+                      items: {type: array, items: {$ref: '#/components/schemas/ConversationSummary'}}
+                      next_cursor: {type: [string, 'null']}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
     post:
-      summary: Create an empty conversation or return the existing conversation for the same participants.
-      description: 'The caller is included automatically. Duplicate IDs are collapsed; 2–100 unique
-
-        participants including the caller are required. Everyone must have verifiable
-
-        active membership in the selected organization. Offline members are allowed.
-
-        A conversation is shared: a member not having opened it does not create a new copy.
-
-        An existing conversation keeps its ID, history, and activity timestamps.
-
-        A different participant set creates a different conversation, not an invitation
-
-        into an existing one. No message is sent. This does not create a named group.'
-      security:
-        - bearerAuth: []
+      operationId: createConversation
+      tags: [Conversations]
+      summary: Start (or find) the one conversation of an exact set of accounts.
+      description: >-
+        Returns the existing canonical conversation when the set already talks. Anyone may
+        start a conversation with a Carbon (new contacts are rate limited); a Silicon only
+        with its custodian's circle and the accounts on its allow-list. Proofs need scope
+        `dm.messages.write`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
       parameters:
-        - name: X-Org-ID
-          in: header
-          required: true
-          schema: {type: string}
-          example: acme
-        - name: Idempotency-Key
-          in: header
-          required: true
-          description: Reuse for retries of the same request; different participants require a new key.
-          schema: {type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]{8,255}$'}
-          example: create-alice-bob-001
-        - name: X-Testing-Environment-Key
-          in: header
-          schema: {type: string}
-          description: Optional testing key; omit for production.
+        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
         content:
@@ -473,472 +254,609 @@ paths:
             schema:
               type: object
               required: [type, data]
-              additionalProperties: false
               properties:
                 type: {type: string, const: create_conversation}
                 data:
                   type: object
-                  required: [participant_ids]
                   additionalProperties: false
+                  required: [participant_ids]
                   properties:
                     participant_ids:
                       type: array
                       minItems: 1
-                      description: IAM account IDs; at least one must be someone other than the caller. Maximum 100 unique participants after including
-                        the caller.
-                      items: {type: string, minLength: 1, maxLength: 255}
-            examples:
-              normal_chat:
-                summary: Alice creates or retrieves her conversation with Bob.
-                value:
-                  type: create_conversation
-                  data:
-                    participant_ids: [bob@example.com]
-              multiple_members:
-                summary: Alice creates or retrieves a conversation with Bob and an agent.
-                value:
-                  type: create_conversation
-                  data:
-                    participant_ids: [bob@example.com, 'si:assistant']
-              unknown_member:
-                summary: If one requested member cannot be verified, the entire request fails with 422.
-                value:
-                  type: create_conversation
-                  data:
-                    participant_ids: [bob@example.com, missing@example.com]
+                      maxItems: 99
+                      items: {$ref: '#/components/schemas/AccountSelector'}
       responses:
         '201':
-          description: New or existing conversation. The current API uses 201 for both, including retries; there is no separate created flag.
+          description: The conversation.
           content:
             application/json:
               schema:
                 type: object
                 required: [type, data]
                 properties:
-                  type: {type: string, const: create_conversation}
-                  data: {$ref: '#/components/schemas/ConversationSummary'}
-              examples:
-                created:
-                  summary: No conversation exists for Alice and Bob; create one accessible to both.
-                  value:
-                    type: create_conversation
-                    data:
-                      id: alice@example.com::bob@example.com
-                      org_id: acme
-                      participants:
-                        - {type: carbon, id: alice@example.com}
-                        - {type: carbon, id: bob@example.com}
-                      last_message: null
-                      last_message_status: null
-                      created_at: '2026-09-17T10:00:00Z'
-                      updated_at: '2026-09-17T10:00:00Z'
-                already_exists:
-                  summary: Return an existing empty conversation, even if Bob has never opened it; preserve its timestamps.
-                  value:
-                    type: create_conversation
-                    data:
-                      id: alice@example.com::bob@example.com
-                      org_id: acme
-                      participants:
-                        - {type: carbon, id: alice@example.com}
-                        - {type: carbon, id: bob@example.com}
-                      last_message: null
-                      last_message_status: null
-                      created_at: '2026-09-16T08:00:00Z'
-                      updated_at: '2026-09-16T08:00:00Z'
-        '401':
-          description: Missing, invalid, or expired authentication; authenticate again.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ErrorResponse'}
-              example:
-                type: error
-                data:
-                  error: {code: unauthorized, message: authentication required}
-        '403':
-          description: Authenticated caller lacks authority or the organization does not match; no conversation is created.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ErrorResponse'}
-              example:
-                type: error
-                data:
-                  error: {code: forbidden, message: operation is not permitted}
-        '409':
-          description: Conflicting idempotency-key reuse or an in-progress retry. Correct the request/key, or retry the identical pending request later.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ErrorResponse'}
-              examples:
-                reused_key:
-                  value:
-                    type: error
-                    data:
-                      error: {code: conflict, message: idempotency key was already used with different request content}
-                in_progress:
-                  value:
-                    type: error
-                    data:
-                      error: {code: conflict, message: idempotent request is still in progress}
-        '422':
-          description: Invalid input/required headers, or any requested member is unknown, inactive, outside this organization, or not yet disclosed to
-            DM. No partial conversation is created. This does not prove an account does not exist in IAM.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ErrorResponse'}
-              examples:
-                unverified_member:
-                  summary: A requested member has no verifiable active organization membership in DM.
-                  value:
-                    type: error
-                    data:
-                      error: {code: validation_error, message: IAM has not supplied an active membership for this participant to DM; the recipient can sign
-                          in to refresh their membership}
-                empty_participants:
-                  value:
-                    type: error
-                    data:
-                      error: {code: validation_error, message: participant_ids must contain at least one member}
-                only_self:
-                  value:
-                    type: error
-                    data:
-                      error: {code: validation_error, message: a conversation requires at least two unique participants}
-                too_many_participants:
-                  value:
-                    type: error
-                    data:
-                      error: {code: validation_error, message: a conversation may contain at most 100 unique participants}
-        '500':
-          description: Internal failure; outcome may be uncertain. Retry with the same idempotency key.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ErrorResponse'}
-              example:
-                type: error
-                data:
-                  error: {code: internal_error, message: internal server error}
-        '503':
-          description: IAM is unavailable; retry with the same idempotency key once available.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ErrorResponse'}
-              example:
-                type: error
-                data:
-                  error: {code: dependency_unavailable, message: dependency iam is unavailable}
-      tags: [Conversations]
-  /internal/honeycomb/organizations/{org_id}/testing-environments/{environment_id}/operations/{operation_id}:
-    parameters:
-      - name: org_id
-        in: path
-        required: true
-        schema: {type: string}
-      - name: environment_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      - name: operation_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-    put:
-      tags: [Testing]
-      operationId: applyHoneycombLifecycle
-      summary: Apply a protected Honeycomb lifecycle instruction
-      description: Plain coordinator JSON, without the public DM envelope. Retry the identical instruction and operation ID. Completion follows test database
-        cleanup; failures remain fenced.
-      security:
-        - honeycombService: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/HoneycombOperation'}
-      responses:
-        '200':
-          description: Exact completed receipt or replay
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/HoneycombReceipt'}
-        '400': {description: Invalid instruction or path/body mismatch}
-        '401': {description: Missing or invalid service credential}
-        '409': {description: 'Stale revision, conflicting retry, or incompatible transition'}
-        '500': {description: Failed operation; inspect receipt and retry identical instruction}
-    get:
-      tags: [Testing]
-      operationId: getHoneycombLifecycleReceipt
-      summary: Recover a pending, completed or failed lifecycle receipt
-      security:
-        - honeycombService: []
-      responses:
-        '200':
-          description: Secret-free durable receipt
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/HoneycombReceipt'}
-        '401': {description: Missing or invalid service credential}
-        '404': {description: Unknown operation for the requested organization}
-  /api/v1/groups:
-    post:
-      tags: [Groups]
-      operationId: createGroup
-      summary: Create a group as an organization administrator or owner
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      responses:
-        '201':
-          description: Successful group operation
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: create_group}
+                  type: {type: string}
                   data: {$ref: '#/components/schemas/Conversation'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
-        default: {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+  /api/v1/messages:
+    post:
+      operationId: sendToRecipient
+      tags: [Messages]
+      summary: Send to an account, a group or a conversation address without looking it up first.
+      description: >-
+        A direct conversation with an account is created on first contact (reach rules as for
+        creating a conversation). Proofs need scope `dm.messages.write`; the issuing app is
+        recorded with the message.
+      security: [{bearerAuth: []}, {proofAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              additionalProperties: false
+              required: [type, data]
+              properties:
+                type: {type: string, const: message.create}
+                data:
+                  allOf:
+                    - {$ref: '#/components/schemas/MessageCreate'}
+                    - {required: [recipient_id]}
+            example: {type: message.create, data: {recipient_id: 'c:ada', message: hello}}
+      responses:
+        '202': {$ref: '#/components/responses/MessageAccepted'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+  /api/v1/conversations/{conversation_id}/messages:
+    parameters:
+      - {$ref: '#/components/parameters/ConversationId'}
+    get:
+      operationId: listMessages
+      tags: [Messages]
+      summary: Messages of a conversation, newest first.
+      description: Participants, and the custodian of a Silicon in it. Proofs need scope `dm.messages.read`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - name: include_bundled_members
+          in: query
+          schema: {type: boolean, default: false}
+          description: Also return the originals a bundle stands for.
+      responses:
+        '200':
+          description: One page of messages.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: messages}
+                  data:
+                    type: object
+                    required: [items, next_cursor]
+                    properties:
+                      items: {type: array, items: {$ref: '#/components/schemas/Message'}}
+                      next_cursor: {type: [string, 'null']}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+    post:
+      operationId: sendMessage
+      tags: [Messages]
+      summary: Send a message into a conversation.
+      description: >-
+        409 `conversation_superseded` names the conversation to use instead; 409
+        `recipient_deleted` when the other account was deleted. Custodians read a Silicon's
+        conversations but never send as it. Proofs need scope `dm.messages.write`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, data]
+              properties:
+                type: {type: string, const: message.create}
+                data: {$ref: '#/components/schemas/MessageCreate'}
+      responses:
+        '202': {$ref: '#/components/responses/MessageAccepted'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/conversations/{conversation_id}/messages/{message_id}:
+    parameters:
+      - {$ref: '#/components/parameters/ConversationId'}
+      - {$ref: '#/components/parameters/MessageId'}
+    get:
+      operationId: getMessage
+      tags: [Messages]
+      summary: One message, with its edit history.
+      security: [{bearerAuth: []}, {proofAuth: []}]
+      responses:
+        '200': {$ref: '#/components/responses/MessageResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: editMessage
+      tags: [Messages]
+      summary: Replace the content of your own message; routing never changes.
+      description: >-
+        The previous content goes to `history`. A tombstone cannot be edited (409). Proofs need
+        scope `dm.messages.write`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, data]
+              properties:
+                type: {type: string, const: message.updated}
+                data: {$ref: '#/components/schemas/MessageCreate'}
+      responses:
+        '200': {$ref: '#/components/responses/MessageResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteMessage
+      tags: [Messages]
+      summary: Turn a message into a content-free tombstone.
+      description: >-
+        The sender, or the custodian of a Silicon sender, may delete. Sensitive: the sign-in
+        is checked live with Silicon Accounts. Proofs need scope `dm.messages.write`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {$ref: '#/components/responses/MessageResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /api/v1/conversations/{conversation_id}/messages/{message_id}/receipts:
+    parameters:
+      - {$ref: '#/components/parameters/ConversationId'}
+      - {$ref: '#/components/parameters/MessageId'}
+    post:
+      operationId: recordReceipt
+      tags: [Messages]
+      summary: Record a delivered or read receipt for one device; receipts never move backwards.
+      description: Recipients only. Proofs need scope `dm.receipts.write`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, data]
+              properties:
+                type: {type: string, const: receipt}
+                data:
+                  type: object
+                  additionalProperties: false
+                  required: [status, device_id]
+                  properties:
+                    status: {type: string, enum: [delivered, read]}
+                    device_id: {$ref: '#/components/schemas/DeviceId'}
+      responses:
+        '200': {$ref: '#/components/responses/MessageResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/conversations/{conversation_id}/bundles:
+    parameters:
+      - {$ref: '#/components/parameters/ConversationId'}
+    post:
+      operationId: createBundle
+      tags: [Bundles]
+      summary: Show several of your messages as one display message (Silicons only).
+      description: Originals are kept and stay readable through the bundle.
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, data]
+              properties:
+                type: {type: string, const: create_bundle}
+                data: {$ref: '#/components/schemas/BundleCreate'}
+      responses:
+        '201':
+          description: The bundle.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string}
+                  data: {$ref: '#/components/schemas/Bundle'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/conversations/{conversation_id}/bundles/{bundle_id}:
+    parameters:
+      - {$ref: '#/components/parameters/ConversationId'}
+      - name: bundle_id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/BundleCode'}
+    get:
+      operationId: getBundle
+      tags: [Bundles]
+      summary: A bundle with the original messages it stands for.
+      security: [{bearerAuth: []}, {proofAuth: []}]
+      responses:
+        '200':
+          description: The bundle and its originals.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string}
+                  data: {$ref: '#/components/schemas/BundleDetail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/Error'}
+  /api/v1/conversations/{conversation_id}/draft:
+    parameters:
+      - {$ref: '#/components/parameters/ConversationId'}
+    get:
+      operationId: getDraft
+      tags: [Drafts]
+      summary: Your draft in a conversation (a custodian reads a Silicon's with `?for=`).
+      description: Proofs need scope `dm.drafts.write`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/For'}
+      responses:
+        '200': {$ref: '#/components/responses/DraftResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+    put:
+      operationId: saveDraft
+      tags: [Drafts]
+      summary: Save your draft; a send with the same content clears it.
+      description: Participants only. Proofs need scope `dm.drafts.write`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, data]
+              properties:
+                type: {type: string, const: put_draft}
+                data: {$ref: '#/components/schemas/DraftInput'}
+      responses:
+        '200': {$ref: '#/components/responses/DraftResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteDraft
+      tags: [Drafts]
+      summary: Discard your draft.
+      description: Proofs need scope `dm.drafts.write`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
+      responses:
+        '204': {description: The draft is gone.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+  /api/v1/groups:
+    post:
+      operationId: createGroup
+      tags: [Groups]
+      summary: Create a group; you become its first owner and the people you name are invited.
+      description: >-
+        Invitations must be accepted (a custodian's own Silicons join at once). A Silicon is
+        invited only by its custodian's circle or an account on its allow-list. New groups
+        get the id `g:{name-slug}` (`-2`, `-3` when taken).
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
               required: [type, data]
               properties:
                 type: {type: string, const: create_group}
                 data: {$ref: '#/components/schemas/GroupCreate'}
-      description: Creator is invited automatically. Groups have stable conversation UUIDs and full prior message history for new members. Private groups
-        admit invited members or members with any matching current IAM tag. Public groups automatically admit organization Carbons; Silicons always require
-        an explicit invitation. Only org_admin/org_owner (and canonical IAM admin/owner aliases) may create, update, invite or remove invitations. Group
-        administration does not itself grant history access.
+      responses:
+        '201': {$ref: '#/components/responses/ConversationResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /api/v1/groups/{group_id}:
+    parameters:
+      - {$ref: '#/components/parameters/GroupId'}
     get:
-      tags: [Groups]
       operationId: getGroup
-      summary: Read group settings, active participants and latest message
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - name: group_id
-          in: path
-          required: true
-          schema: {$ref: '#/components/schemas/ConversationAddress'}
-      responses:
-        '200':
-          description: Successful group operation
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: group}
-                  data: {$ref: '#/components/schemas/Conversation'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Error'}
-        '404': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/Error'}
-        '422': {$ref: '#/components/responses/Error'}
-        default: {$ref: '#/components/responses/Error'}
-    patch:
       tags: [Groups]
-      operationId: updateGroup
-      summary: Replace group settings with an exact current version
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - name: group_id
-          in: path
-          required: true
-          schema: {$ref: '#/components/schemas/ConversationAddress'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-        - name: If-Match
-          in: header
-          required: true
-          schema: {type: integer, minimum: 1}
+      summary: A group conversation with its owners, members and (for owners) pending invitations.
+      description: An invitee who has not accepted gets 403 `invitation_pending`. Proofs need scope `dm.conversations.read`.
+      security: [{bearerAuth: []}, {proofAuth: []}]
       responses:
-        '200':
-          description: Successful group operation
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: update_group}
-                  data: {$ref: '#/components/schemas/GroupDetails'}
+        '200': {$ref: '#/components/responses/ConversationResult'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/Error'}
-        '422': {$ref: '#/components/responses/Error'}
-        default: {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: updateGroup
+      tags: [Groups]
+      summary: Rename or describe the group (owners). Sensitive.
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/IfMatch'}
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              additionalProperties: false
               required: [type, data]
               properties:
                 type: {type: string, const: update_group}
                 data: {$ref: '#/components/schemas/GroupSettings'}
+      responses:
+        '200': {$ref: '#/components/responses/GroupResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /api/v1/groups/{group_id}/members:
+    parameters:
+      - {$ref: '#/components/parameters/GroupId'}
     post:
+      operationId: inviteMembers
       tags: [Groups]
-      operationId: inviteGroupMembers
-      summary: Add explicit invitations as an organization administrator or owner
+      summary: Invite accounts (owners).
       parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - name: group_id
-          in: path
-          required: true
-          schema: {$ref: '#/components/schemas/ConversationAddress'}
         - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody: {$ref: '#/components/requestBodies/GroupMembers'}
       responses:
-        '200':
-          description: Successful group operation
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: invite_group_members}
-                  data: {$ref: '#/components/schemas/GroupDetails'}
+        '200': {$ref: '#/components/responses/GroupResult'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
-        default: {$ref: '#/components/responses/Error'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: invite_group_members}
-                data: {$ref: '#/components/schemas/GroupMembers'}
     delete:
+      operationId: removeMembers
       tags: [Groups]
-      operationId: removeGroupMembers
-      summary: Remove explicit invitations; tag and public grants remain independent
+      summary: Remove members or withdraw invitations (owners; a custodian may remove its own Silicons). Sensitive.
       parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - name: group_id
-          in: path
-          required: true
-          schema: {$ref: '#/components/schemas/ConversationAddress'}
         - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody: {$ref: '#/components/requestBodies/GroupMembers'}
       responses:
-        '200':
-          description: Successful group operation
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: remove_group_members}
-                  data: {$ref: '#/components/schemas/GroupDetails'}
+        '200': {$ref: '#/components/responses/GroupResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/groups/{group_id}/owners:
+    parameters:
+      - {$ref: '#/components/parameters/GroupId'}
+    post:
+      operationId: addOwners
+      tags: [Groups]
+      summary: Make members co-equal owners (owners). Sensitive.
+      requestBody: {$ref: '#/components/requestBodies/GroupMembers'}
+      responses:
+        '200': {$ref: '#/components/responses/GroupResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: removeOwners
+      tags: [Groups]
+      summary: Stop members being owners (owners); a group always keeps one (409 `last_owner`). Sensitive.
+      requestBody: {$ref: '#/components/requestBodies/GroupMembers'}
+      responses:
+        '200': {$ref: '#/components/responses/GroupResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/groups/{group_id}/accept:
+    parameters:
+      - {$ref: '#/components/parameters/GroupId'}
+    post:
+      operationId: acceptInvitation
+      tags: [Groups]
+      summary: Accept your invitation and join the group.
+      responses:
+        '200': {$ref: '#/components/responses/ConversationResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/Error'}
+  /api/v1/groups/{group_id}/decline:
+    parameters:
+      - {$ref: '#/components/parameters/GroupId'}
+      - {$ref: '#/components/parameters/For'}
+    post:
+      operationId: declineInvitation
+      tags: [Groups]
+      summary: Decline your invitation (a custodian may decline for its Silicon with `?for=`).
+      responses:
+        '204': {description: The invitation is gone.}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
+  /api/v1/groups/{group_id}/leave:
+    parameters:
+      - {$ref: '#/components/parameters/GroupId'}
+    post:
+      operationId: leaveGroup
+      tags: [Groups]
+      summary: Leave a group; the last owner must hand ownership on first (409 `last_owner`).
+      responses:
+        '204': {description: You left the group.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
-        '422': {$ref: '#/components/responses/Error'}
-        default: {$ref: '#/components/responses/Error'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: remove_group_members}
-                data: {$ref: '#/components/schemas/GroupMembers'}
-  /api/v1/contracts:
+  /api/v1/invitations:
     get:
-      tags: [Operations]
-      operationId: discoverContracts
-      summary: Discover contract lifecycle and compatibility
-      security: []
+      operationId: listInvitations
+      tags: [Groups]
+      summary: Group invitations waiting for you (a custodian sees a Silicon's with `?for=`).
       parameters:
-        - {$ref: '#/components/parameters/TestingKey'}
+        - {$ref: '#/components/parameters/For'}
       responses:
         '200':
-          description: Contract versions and compatibility matrix for the selected plane
+          description: Pending invitations.
           content:
             application/json:
               schema:
                 type: object
                 required: [type, data]
                 properties:
-                  type: {type: string, const: contracts}
+                  type: {type: string, const: invitations}
                   data:
                     type: object
-                    required: [service, service_version, contracts, compatibility, delivery, retired_routes]
+                    required: [items]
                     properties:
-                      service: {type: string, const: silicon-dm}
-                      service_version: {type: string}
-                      contracts: {type: array, items: {type: object, additionalProperties: true}}
-                      compatibility:
-                        type: array
-                        items:
-                          type: object
-                          required: [http]
-                          properties: {http: {type: integer, const: 3}}
-                      delivery: {$ref: '#/components/schemas/DeliveryDiscovery'}
-                      retired_routes: {type: array, items: {type: string}}
-                    additionalProperties: true
+                      items: {type: array, items: {$ref: '#/components/schemas/Invitation'}}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/ws/shared:
-    get:
-      tags: [Delivery]
-      operationId: retiredSharedSocket
-      summary: Retired DM socket endpoint
-      deprecated: true
-      security: []
-      description: Returns 410 delivery_moved_to_ting without upgrading, including for old protocol headers. Enroll through DM delivery registration, receive Ting updates, and recover through DM HTTP sync. This route no longer authenticates socket subscriptions.
+        '403': {$ref: '#/components/responses/Error'}
+  /api/v1/presence/devices/{device_id}:
+    parameters:
+      - name: device_id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/DeviceId'}
+    put:
+      operationId: renewDevicePresence
+      tags: [Presence]
+      summary: Renew this device's presence lease, with an optional activity.
+      description: A lease never grants access to messages and is not a receipt.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, data]
+              properties:
+                type: {type: string, const: renew_presence}
+                data:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    activity:
+                      type: [string, 'null']
+                      enum: [typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, null]
       responses:
-        '410':
-          description: Delivery moved to Ting; use the returned discovery paths.
+        '200':
+          description: The renewed lease and the account's presence.
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/DeliveryRetirement'}
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: renew_presence}
+                  data: {$ref: '#/components/schemas/PresenceLease'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: closeDevicePresence
+      tags: [Presence]
+      summary: Close this device's presence lease.
+      responses:
+        '204': {description: The device is no longer online through this lease.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/presence/{account}:
+    parameters:
+      - name: account
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/AccountSelector'}
+    get:
+      operationId: getPresence
+      tags: [Presence]
+      summary: An account's presence, for the people it talks with and its custodian.
+      responses:
+        '200':
+          description: Presence.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {type: string, const: presence}
+                  data: {$ref: '#/components/schemas/Presence'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/Error'}
+  /api/v1/gifs/trending:
+    get:
+      operationId: listTrendingGifs
+      tags: [GIFs]
+      summary: Safe trending GIFs.
+      responses:
+        '200': {$ref: '#/components/responses/GifList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/gifs/search:
+    get:
+      operationId: searchGifs
+      tags: [GIFs]
+      summary: Search safe GIFs.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 50, pattern: '^[^\u0000-\u001F\u007F]{1,50}$'}
+      responses:
+        '200': {$ref: '#/components/responses/GifList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api/v1/gifs/recent:
+    get:
+      operationId: listRecentGifs
+      tags: [GIFs]
+      summary: Your last 20 GIFs.
+      responses:
+        '200': {$ref: '#/components/responses/GifList'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
   /api/v1/reports:
     post:
+      operationId: submitReport
       tags: [Operations]
-      operationId: submitBugReport
-      summary: Durably submit a report and queue a Postmark notification
-      description: Production retries notification delivery. Sandbox email is simulated. Reuse Idempotency-Key after an uncertain response. Ten new reports
-        per member per hour.
+      summary: Report a problem with DM.
       parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
         - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
@@ -946,7 +864,6 @@ paths:
           application/json:
             schema:
               type: object
-              additionalProperties: false
               required: [type, data]
               properties:
                 type: {type: string, const: report}
@@ -955,58 +872,44 @@ paths:
                   additionalProperties: false
                   required: [message, client_version]
                   properties:
-                    message: {type: string, minLength: 1, maxLength: 60000}
-                    pr:
-                      type: [string, 'null']
-                      format: uri
-                    client_version: {type: string, maxLength: 100}
+                    message: {type: string, minLength: 1, maxLength: 20000}
+                    pr: {type: [string, 'null'], format: uri}
+                    client_version: {type: string, minLength: 1, maxLength: 64}
       responses:
         '202':
-          description: Durable acknowledgement; notification is queued, sent or simulated
+          description: The report was stored (and is sent on, or simulated outside production).
           content:
             application/json:
               schema:
                 type: object
                 required: [type, data]
                 properties:
-                  type: {type: string, const: report}
+                  type: {type: string}
                   data:
                     type: object
                     required: [id, submitted, notification, repository]
                     properties:
                       id: {type: string, format: uuid}
-                      submitted: {type: boolean}
-                      notification:
-                        type: string
-                        enum: [queued, sent, simulated]
-                      repository: {type: string, format: uri}
+                      submitted: {type: boolean, const: true}
+                      notification: {type: string, enum: [queued, sent, failed, simulated]}
+                      repository: {type: string}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '409': {$ref: '#/components/responses/Error'}
-        '429': {$ref: '#/components/responses/Error'}
-        '503': {$ref: '#/components/responses/Error'}
-        default: {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /api/v1/telemetry:
     post:
-      tags: [Operations]
       operationId: recordDiagnostic
-      summary: Record a bounded diagnostic event without distributing the ingest key
-      description: X-DM-Telemetry off disables collection. Sandbox diagnostics remain in their own schema. Message content, URLs and secrets are excluded
-        from the accepted schema.
+      tags: [Operations]
+      summary: Record a bounded diagnostic event (no content, URLs or secrets).
       parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
         - in: header
           name: X-DM-Telemetry
-          schema:
-            type: string
-            enum: ['on', 'off']
+          schema: {type: string, enum: ['on', 'off']}
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              additionalProperties: false
               required: [type, data]
               properties:
                 type: {type: string, const: telemetry}
@@ -1015,1051 +918,108 @@ paths:
                   additionalProperties: false
                   required: [source, event, success, duration_ms]
                   properties:
-                    source:
-                      type: string
-                      enum: [cli, sdk, daemon, web]
-                    event:
-                      type: string
-                      enum: [command, connection, callback, queue, update, page_view, request, web_error]
+                    source: {type: string, enum: [cli, sdk, daemon, web]}
+                    event: {type: string, enum: [command, connection, callback, queue, update, page_view, request, web_error]}
                     success: {type: boolean}
                     duration_ms: {type: integer, minimum: 0, maximum: 604800000}
       responses:
-        '204': {description: Diagnostic accepted or opted out}
+        '204': {description: 'Accepted, or collection is off.'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '422': {$ref: '#/components/responses/Error'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/iam:
-    get:
-      tags: [Auth]
-      operationId: iamInformation
-      summary: Discover the public IAM application configuration
-      security: []
-      description: Available before login. Returns only public identifiers and URLs, never application secrets.
-      parameters:
-        - {$ref: '#/components/parameters/TestingKey'}
-      responses:
-        '200':
-          description: Public application configuration
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: iam}
-                  data:
-                    type: object
-                    required: [app_id, iam_base_url, api_base_url, delivery]
-                    properties:
-                      app_id: {type: string}
-                      iam_base_url: {type: string, format: uri}
-                      api_base_url: {type: string, format: uri}
-                      delivery: {$ref: '#/components/schemas/DeliveryDiscovery'}
-                      testing_environment_id:
-                        type: [string, 'null']
-                        format: uuid
-                      testing_generation:
-                        type: [integer, 'null']
-                      testing_environment:
-                        type: [object, 'null']
-                        additionalProperties: true
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
   /api/v1/ws:
     get:
+      operationId: retiredWebSocket
       tags: [Delivery]
-      operationId: retiredMemberSocket
-      summary: Retired DM socket endpoint
-      deprecated: true
+      summary: Retired. Answers 410 `delivery_moved`; use GET /api/v1/sync (or Ting).
       security: []
-      description: Returns 410 delivery_moved_to_ting without upgrading, including for old protocol headers. Enroll through DM delivery registration, receive Ting updates, and recover through DM HTTP sync. This route no longer authenticates socket subscriptions.
       responses:
-        '410':
-          description: Delivery moved to Ting; use the returned discovery paths.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/DeliveryRetirement'}
-  /api/v1/conversations/{conversation_id}/messages:
-    get:
-      tags: [Messages]
-      operationId: listMessages
-      summary: List durable conversation messages
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/ConversationId'}
-        - {$ref: '#/components/parameters/Cursor'}
-        - {$ref: '#/components/parameters/Limit'}
-        - name: include_bundled_members
-          in: query
-          schema: {type: boolean, default: false}
-          description: Include original messages hidden behind bundle display messages
-        - {$ref: '#/components/parameters/TestingKey'}
-      responses:
-        '200':
-          description: Messages in stable sequence order
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: messages}
-                  data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        items: {$ref: '#/components/schemas/Message'}
-                      next_cursor:
-                        type: [string, 'null']
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-    post:
-      tags: [Messages]
-      operationId: sendMessage
-      summary: Durably accept and queue a message
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/ConversationId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: message.create}
-                data: {$ref: '#/components/schemas/MessageCreate'}
-      responses:
-        '202':
-          description: Message durably accepted
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: message.create.successful}
-                  data: {$ref: '#/components/schemas/Message'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/conversations/{conversation_id}/messages/{message_id}/receipts:
-    post:
-      tags: [Messages]
-      operationId: recordMessageReceipt
-      summary: Record a monotonic device receipt
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/ConversationId'}
-        - name: message_id
-          in: path
-          required: true
-          schema: {$ref: '#/components/schemas/MessageReference'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: receipt}
-                data:
-                  type: object
-                  required: [status, device_id]
-                  properties:
-                    status:
-                      type: string
-                      enum: [delivered, read]
-                    device_id: {type: string, minLength: 1, maxLength: 255, pattern: '^[^\u0000-\u001F\u007F]{1,255}$'}
-      responses:
-        '200':
-          description: Aggregate receipt state
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: receipt}
-                  data: {$ref: '#/components/schemas/Message'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/conversations/{conversation_id}/bundles:
-    post:
-      tags: [Bundles]
-      operationId: createMessageBundle
-      summary: Bundle existing messages behind one display message
-      description: Only an authenticated Silicon may create a bundle. The operation is non-destructive; each original message remains stored and records
-        the created bundle ID.
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/ConversationId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: create_bundle}
-                data: {$ref: '#/components/schemas/BundleCreate'}
-      responses:
-        '201':
-          description: Bundle and display message created
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: create_bundle}
-                  data: {$ref: '#/components/schemas/Bundle'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/conversations/{conversation_id}/bundles/{bundle_id}:
-    get:
-      tags: [Bundles]
-      operationId: getMessageBundle
-      summary: Retrieve a bundle and its original messages
-      description: Expanded message payloads are limited to 128 MiB in aggregate. One individually legal oversized message is allowed when all remaining
-        message payloads total at most 16 MiB. Larger expansions return 413 response_too_large; retrieve originals individually by message ID.
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/ConversationId'}
-        - name: bundle_id
-          in: path
-          required: true
-          schema: {$ref: '#/components/schemas/BundleCode'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      responses:
-        '200':
-          description: Bundle with display and original messages
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: bundle}
-                  data: {$ref: '#/components/schemas/BundleDetail'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/conversations/{conversation_id}/draft:
-    get:
-      tags: [Drafts]
-      operationId: getDraft
-      summary: Get the current member's draft
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/ConversationId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      responses:
-        '200':
-          description: Current member's synchronized draft
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: draft}
-                  data: {$ref: '#/components/schemas/Draft'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '404': {description: No draft}
-        default: {$ref: '#/components/responses/Error'}
-    put:
-      tags: [Drafts]
-      operationId: putDraft
-      summary: Create or conditionally replace a draft
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/ConversationId'}
-        - name: If-Match
-          in: header
-          schema: {type: integer, minimum: 0}
-          description: Exact last observed draft version. Omit or send 0 only when creating a draft that does not yet exist. Versions continue increasing
-            across deletion and automatic clearing; use the returned version for the next save.
-        - {$ref: '#/components/parameters/TestingKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: put_draft}
-                data: {$ref: '#/components/schemas/DraftInput'}
-      responses:
-        '200':
-          description: Draft stored
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: put_draft}
-                  data: {$ref: '#/components/schemas/Draft'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '409':
-          description: Version conflict (draft_conflict). Returns an error code and recovery message alongside the current draft when one exists, or an error envelope when it was deleted after the supplied version
-            was observed.
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: error}
-                  data:
-                    anyOf:
-                      - allOf:
-                          - {$ref: '#/components/schemas/Draft'}
-                          - {$ref: '#/components/schemas/Error'}
-                      - {$ref: '#/components/schemas/Error'}
-        default: {$ref: '#/components/responses/Error'}
-    delete:
-      tags: [Drafts]
-      operationId: deleteDraft
-      summary: Delete the current member's draft
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/ConversationId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      responses:
-        '204': {description: Draft deleted}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/presence/{member_id}:
-    get:
-      tags: [Presence]
-      operationId: getPresence
-      summary: Get an authorized member's presence
-      security:
-        - bearerAuth: []
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - name: member_id
-          in: path
-          required: true
-          schema: {type: string}
-        - {$ref: '#/components/parameters/TestingKey'}
-      responses:
-        '200':
-          description: Presence
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: presence}
-                  data: {$ref: '#/components/schemas/Presence'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/gifs/trending:
-    get:
-      tags: [GIFs]
-      operationId: listTrendingGifs
-      summary: List safe trending GIFs
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      responses:
-        '200':
-          description: Trending Giphy results
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: gifs}
-                  data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        items: {$ref: '#/components/schemas/Gif'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/gifs/search:
-    get:
-      tags: [GIFs]
-      operationId: searchGifs
-      summary: Search safe GIF results
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - name: q
-          in: query
-          required: true
-          schema: {type: string, minLength: 1, maxLength: 50, pattern: '^[^\u0000-\u001F\u007F]{1,50}$'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      responses:
-        '200':
-          description: Giphy results
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: gifs}
-                  data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        items: {$ref: '#/components/schemas/Gif'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/gifs/recent:
-    get:
-      tags: [GIFs]
-      operationId: listRecentGifs
-      summary: List the current Carbon's recent GIFs
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      responses:
-        '200':
-          description: Current Carbon's last 20 GIFs
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: gifs}
-                  data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        maxItems: 20
-                        items: {$ref: '#/components/schemas/Gif'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/auth/login:
-    post:
-      tags: [Auth]
-      operationId: login
-      summary: Exchange an organization-bound IAM SLT
-      security: []
-      parameters:
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      description: Maximum JSON body 16 KiB. No separate Bearer/X-Org-ID header required. Repeat the exact body with the same Idempotency-Key after an uncertain
-        result. Credentials and backend app secrets must never be logged. The returned session is live-verified by IAM and has no-store/no-cache response
-        headers.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: login}
-                data: {$ref: '#/components/schemas/LoginInput'}
-      responses:
-        '200':
-          description: Verified application session
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: login}
-                  data: {$ref: '#/components/schemas/ApplicationSession'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/auth/refresh:
-    post:
-      tags: [Auth]
-      operationId: refreshSession
-      summary: Rotate a DM application refresh token
-      security: []
-      parameters:
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      description: Maximum JSON body 16 KiB. No separate Bearer/X-Org-ID header required. Repeat the exact body with the same Idempotency-Key after an uncertain
-        result. Credentials and backend app secrets must never be logged. The returned session is live-verified by IAM and has no-store/no-cache response
-        headers.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: refresh}
-                data: {$ref: '#/components/schemas/RefreshInput'}
-      responses:
-        '200':
-          description: Verified application session
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: refresh}
-                  data: {$ref: '#/components/schemas/ApplicationSession'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/auth/logout:
-    post:
-      tags: [Auth]
-      operationId: logout
-      summary: Revoke one application token or refresh family
-      security: []
-      parameters:
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      description: Maximum JSON body 16 KiB. No separate Bearer/X-Org-ID header required. Repeat the exact body with the same Idempotency-Key after an uncertain
-        result. Credentials and backend app secrets must never be logged. Use the current refresh token for full-family logout; an access token revokes
-        only itself.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: logout}
-                data: {$ref: '#/components/schemas/LogoutInput'}
-      responses:
-        '204': {description: Token revoked}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/auth/me:
-    get:
-      tags: [Auth]
-      operationId: currentIdentity
-      summary: Get current IAM identity and effective authority
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      responses:
-        '200':
-          description: Live introspected identity
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: me}
-                  data: {$ref: '#/components/schemas/Identity'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-  /api/v1/conversations/{conversation_id}/messages/{message_id}:
-    get:
-      tags: [Messages]
-      operationId: getMessage
-      summary: Get a message and its content and edit history
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/ConversationId'}
-        - {$ref: '#/components/parameters/MessageId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      responses:
-        '200':
-          description: Latest message or deletion tombstone
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: message}
-                  data: {$ref: '#/components/schemas/Message'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-    patch:
-      tags: [Messages]
-      operationId: editMessage
-      summary: Replace an authored message with optimistic concurrency
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/ConversationId'}
-        - {$ref: '#/components/parameters/MessageId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-        - {$ref: '#/components/parameters/MessageVersion'}
-      responses:
-        '200':
-          description: Latest message or deletion tombstone
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: message.updated}
-                  data: {$ref: '#/components/schemas/Message'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-        '409':
-          description: Version or idempotency conflict; fetch latest Message
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: error}
-                  data: {$ref: '#/components/schemas/Error'}
-      description: Only the sender can change the message. Idempotency keys prevent duplicate retries. Edits serialize in arrival order and preserve the
-        previous content in history; deletion sets deleted_at without adding history. Deleted messages cannot be edited.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: message.updated}
-                data: {$ref: '#/components/schemas/MessageCreate'}
-    delete:
-      tags: [Messages]
-      operationId: deleteMessage
-      summary: Publish an authored message deletion tombstone
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/ConversationId'}
-        - {$ref: '#/components/parameters/MessageId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-        - {$ref: '#/components/parameters/MessageVersion'}
-      responses:
-        '200':
-          description: Latest message or deletion tombstone
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: message.deleted}
-                  data: {$ref: '#/components/schemas/Message'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-        '409':
-          description: Version or idempotency conflict; fetch latest Message
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: error}
-                  data: {$ref: '#/components/schemas/Error'}
-      description: Only the sender can change the message. Idempotency keys prevent duplicate retries. Edits serialize in arrival order and preserve the
-        previous content in history; deletion sets deleted_at without adding history. Deleted messages cannot be edited.
-  /api/v1/testing-environments:
-    get:
-      tags: [Testing]
-      operationId: listTestingEnvironments
-      summary: List environments owned by production organization
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - name: include_deleted
-          in: query
-          schema: {type: boolean, default: false}
-      responses:
-        '200':
-          description: List environments owned by production organization
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: testing_environments}
-                  data: {$ref: '#/components/schemas/TestingEnvironmentList'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-      description: Lifecycle authority uses a production IAM application session. The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any current member may create/list/read environments.
-    post:
-      tags: [Testing]
-      operationId: createTestingEnvironment
-      summary: Create a DM environment paired with an imported IAM test app
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      responses:
-        '201':
-          description: Create a DM environment paired with an imported IAM test app
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: create_testing_environment}
-                  data: {$ref: '#/components/schemas/TestingEnvironmentWithKey'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-      description: Lifecycle authority uses a production IAM application session. The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any current member may create/list/read environments. Import the canonical
-        DM application through IAM CLI first, supplying its fresh test-only app secret. IAM production cannot back a DM test environment. Idempotency-Key
-        is required. Exact request replays return the original result; changed body or target with the same key returns409. Responses use Cache-Control:no-store.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: create_testing_environment}
-                data: {$ref: '#/components/schemas/TestingEnvironmentCreate'}
-  /api/v1/testing-environments/{environment_id}:
-    get:
-      tags: [Testing]
-      operationId: getTestingEnvironment
-      summary: Read environment metadata
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/EnvironmentId'}
-      responses:
-        '200':
-          description: Read environment metadata
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: testing_environment}
-                  data: {$ref: '#/components/schemas/TestingEnvironment'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-      description: Lifecycle authority uses a production IAM application session. The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any current member may create/list/read environments.
-    patch:
-      tags: [Testing]
-      operationId: updateTestingEnvironment
-      summary: Update environment name or description
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/EnvironmentId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      responses:
-        '200':
-          description: Update environment name or description
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: update_testing_environment}
-                  data: {$ref: '#/components/schemas/TestingEnvironment'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-      description: Lifecycle authority uses a production IAM application session. The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any current member may create/list/read environments. Idempotency-Key is
-        required. Exact request replays return the original result; changed body or target with the same key returns409. Responses use Cache-Control:no-store.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: update_testing_environment}
-                data: {$ref: '#/components/schemas/TestingEnvironmentUpdate'}
-    delete:
-      tags: [Testing]
-      operationId: deleteTestingEnvironment
-      summary: Delete environment with 30-day recovery window
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/EnvironmentId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      responses:
-        '204': {description: Delete environment with 30-day recovery window}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-      description: Lifecycle authority uses a production IAM application session. The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any current member may create/list/read environments. Idempotency-Key is
-        required. Exact request replays return the original result; changed body or target with the same key returns409. Responses use Cache-Control:no-store.
-  /api/v1/testing-environments/{environment_id}/key:
-    get:
-      tags: [Testing]
-      operationId: getTestingEnvironmentKey
-      summary: Retrieve current test root key
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/EnvironmentId'}
-      responses:
-        '200':
-          description: Retrieve current test root key
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: testing_environment_key}
-                  data: {$ref: '#/components/schemas/TestingEnvironmentKey'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-      description: Lifecycle authority uses a production IAM application session. The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any current member may create/list/read environments.
-  /api/v1/testing-environments/{environment_id}/rotate-key:
-    post:
-      tags: [Testing]
-      operationId: rotateTestingEnvironmentKey
-      summary: Rotate root key and disconnect existing sessions
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/EnvironmentId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      responses:
-        '200':
-          description: Rotate root key and disconnect existing sessions
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: rotate_testing_environment_key}
-                  data: {$ref: '#/components/schemas/TestingEnvironmentWithKey'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-      description: Lifecycle authority uses a production IAM application session. The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any current member may create/list/read environments. Idempotency-Key is
-        required. Exact request replays return the original result; changed body or target with the same key returns409. Responses use Cache-Control:no-store.
-  /api/v1/testing-environments/{environment_id}/restore:
-    post:
-      tags: [Testing]
-      operationId: restoreTestingEnvironment
-      summary: Recover retained data with a fresh root key
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/EnvironmentId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      responses:
-        '200':
-          description: Recover retained data with a fresh root key
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: restore_testing_environment}
-                  data: {$ref: '#/components/schemas/TestingEnvironmentWithKey'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-      description: Lifecycle authority uses a production IAM application session. The DM test key does not bypass production management authorization. Creator
-        or current organization administrator required for changes/key access; any current member may create/list/read environments. Idempotency-Key is
-        required. Exact request replays return the original result; changed body or target with the same key returns409. Responses use Cache-Control:no-store.
-  /api/v1/testing-environments/{environment_id}/clean:
-    post:
-      tags: [Testing]
-      operationId: cleanTestingEnvironment
-      summary: Erase test data while retaining environment and key
-      parameters:
-        - name: X-Org-ID
-          in: header
-          required: false
-          schema: {type: string}
-          description: Required when using production bearer authorization; unnecessary with test root key.
-        - {$ref: '#/components/parameters/EnvironmentId'}
-        - {$ref: '#/components/parameters/TestingKey'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      responses:
-        '204': {description: Erase test data while retaining environment and key}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
-      description: Authorize with this environment root key alone, or creator/admin production IAM session. The path ID and key must match. Removes all
-        message, draft, delivery, receipt, presence and webhook-receipt rows; retains environment metadata/key. Other environments and production are unchanged.
-        Idempotency-Key is required. Exact request replays return the original result; changed body or target with the same key returns409. Responses use
-        Cache-Control:no-store.
-      security:
-        - bearerAuth: []
-        - testingEnvironmentKey: []
+        '410': {$ref: '#/components/responses/Error'}
   /webhook/:
     post:
-      tags: [IAM webhooks]
-      operationId: receiveIamWebhook
-      summary: Receive signature-authenticated IAM events
+      operationId: receiveAccountsEvent
+      tags: [Accounts webhooks]
+      summary: Signed Silicon Accounts app events.
+      description: >-
+        The signature (`X-Accounts-Signature: v1=…`, HMAC-SHA256 of `{timestamp}.{raw body}`
+        with the app webhook secret, 5 minutes tolerance) is checked over the exact body.
+        Each `event_id` is applied once; later deliveries of older changes never move DM's
+        view back. Handled: `account.id_changed`, `account.updated`, `account.deleted`,
+        `membership.signed_out`, `membership.access_removed`, `silicon.custodian_changed`,
+        `ping`; other types are acknowledged and ignored.
       security: []
-      description: Backend-to-backend IAM callback. Exactly one of each signature header is required. Official SDK verifies exact bytes, five-minute signing-time
-        tolerance, key version, event identity and 1 MiB limit. Test envelopes are verified before matching the IAM key to an active DM test environment.
-        Root keys and raw bodies are never persisted. Duplicate event IDs are safe. Successful receipt durably prompts connected token revalidation; IAM
-        remains authoritative. A bounded redacted test-key hint selects candidates; exact SDK signature and environment binding are verified before initializing
-        runtimes. One authenticated IAM test event invalidates all active DM environments paired to that IAM realm, including inherited/overridden signer
-        versions. Invalid signatures cannot initialize a testing runtime.
       parameters:
-        - name: X-Silicon-IAM-Event-ID
-          in: header
-          required: true
-          schema: {type: string}
-        - name: X-Silicon-IAM-Timestamp
-          in: header
-          required: true
-          schema: {type: string}
-        - name: X-Silicon-IAM-Key-Version
-          in: header
-          required: true
-          schema: {type: string}
-        - name: X-Silicon-IAM-Signature
-          in: header
-          required: true
-          schema: {type: string}
+        - {in: header, name: X-Accounts-Timestamp, required: true, schema: {type: string}}
+        - {in: header, name: X-Accounts-Signature, required: true, schema: {type: string}}
       requestBody:
         required: true
         content:
           application/json:
-            schema: {type: object, additionalProperties: true, description: Exact IAM production event or signed testing envelope; see official IAM WebhookEvent
-                contract.}
+            schema: {$ref: '#/components/schemas/AccountsEvent'}
       responses:
-        '204': {description: Verified event committed or duplicate acknowledged}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
+        '204': {description: 'Applied, already applied, or ignored.'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
   /live:
     get:
+      operationId: liveness
       tags: [Operations]
-      operationId: live
+      summary: The process is running.
       security: []
-      summary: Process liveness
       responses:
-        '204': {description: Ready}
-        '503': {description: Dependency or migration unavailable}
+        '204': {description: Live.}
   /ready:
     get:
+      operationId: readiness
       tags: [Operations]
-      operationId: ready
+      summary: The database is reachable and migrated.
       security: []
-      summary: Database and migration readiness
       responses:
-        '204': {description: Ready}
-        '503': {description: Dependency or migration unavailable}
-  /api/v1/messages:
-    post:
-      tags: [Messages]
-      operationId: sendToRecipient
-      summary: Send to an authorized recipient without a conversation ID
-      parameters:
-        - {$ref: '#/components/parameters/OrgId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-        - {$ref: '#/components/parameters/TestingKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [type, data]
-              properties:
-                type: {type: string, const: message.create}
-                data: {$ref: '#/components/schemas/MessageCreate'}
-      responses:
-        '202':
-          description: Message durably accepted
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [type, data]
-                properties:
-                  type: {type: string, const: message.create.successful}
-                  data: {$ref: '#/components/schemas/Message'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        default: {$ref: '#/components/responses/Error'}
+        '204': {description: Ready.}
+        '503': {description: Not ready.}
 components:
   securitySchemes:
-    honeycombService: {type: http, scheme: bearer, description: 'Dedicated Honeycomb service credential, independent of test sessions.'}
-    bearerAuth: {type: http, scheme: bearer, bearerFormat: IAM application access token (oat_)}
-    testingEnvironmentKey:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        A DM access token issued by Silicon Accounts (EdDSA JWT, audience `dm`, issuer the
+        Silicon Accounts origin), verified against its published keys.
+    proofAuth:
       type: apiKey
       in: header
-      name: X-Testing-Environment-Key
-      description: 32-character DM testing root key. Selects an isolated data plane; normal actions still require its IAM user session.
+      name: Authorization
+      description: >-
+        `Proof sap_…`: a User verification proof another app (Silicon Interface) obtained for
+        the account, with receiving app `dm`. Accepted only on routes that list it, for the
+        scopes they name, and only from issuers DM is configured to trust.
   parameters:
-    TestingGeneration:
-      name: X-Testing-Environment-Generation
-      in: header
-      required: false
-      schema: {type: integer, minimum: 1}
-      description: Required for writes in a Honeycomb testing environment. Obtain from /api/v1/iam; stale generations fail with 409.
-    OrgId:
-      name: X-Org-ID
-      in: header
-      required: true
-      schema: {type: string}
     ConversationId:
       name: conversation_id
       in: path
       required: true
       schema: {$ref: '#/components/schemas/ConversationAddress'}
+    GroupId:
+      name: group_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/GroupId'}
+    MessageId:
+      name: message_id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/MessageReference'}
     IdempotencyKey:
       name: Idempotency-Key
       in: header
       required: true
       schema: {type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]{8,255}$'}
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema: {type: string, pattern: '^"?[1-9][0-9]*"?$'}
+      description: The group version you last read; a stale version is 409.
     Cursor:
       name: cursor
       in: query
@@ -2068,111 +1028,317 @@ components:
       name: limit
       in: query
       schema: {type: integer, minimum: 1, maximum: 100, default: 50}
-    TestingKey:
-      name: X-Testing-Environment-Key
-      in: header
-      required: false
-      schema: {type: string, pattern: '^(ask_[A-Za-z0-9_-]{43}|[A-Za-z0-9]{32})$'}
-      description: IAM test app secret for automatic discovery, or a legacy DM root key. Omit for production. Never send the IAM environment root key.
-    EnvironmentId:
-      name: environment_id
-      in: path
+    For:
+      name: for
+      in: query
+      schema: {type: string, examples: ['si:scout']}
+      description: Act as the custodian of this Silicon (its `si:` id or uuid); reads only, never sends as it.
+  requestBodies:
+    AllowListChange:
       required: true
-      schema: {type: string, format: uuid}
-    MessageId:
-      name: message_id
-      in: path
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [type, data]
+            properties:
+              type: {type: string, enum: [allow_list_add, allow_list_remove]}
+              data:
+                type: object
+                additionalProperties: false
+                required: [account_ids]
+                properties:
+                  account_ids:
+                    type: array
+                    minItems: 1
+                    maxItems: 100
+                    items: {$ref: '#/components/schemas/AccountSelector'}
+    GroupMembers:
       required: true
-      schema: {$ref: '#/components/schemas/MessageReference'}
-    MessageVersion:
-      name: If-Match
-      in: header
-      required: true
-      schema: {type: string, pattern: '^"?[1-9][0-9]*"?$'}
-      description: Exact observed positive message version, e.g. "1". PATCH replaces all message content. Missing/invalid versions are 422; a stale version
-        is 409.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [type, data]
+            properties:
+              type: {type: string}
+              data:
+                type: object
+                additionalProperties: false
+                required: [member_ids]
+                properties:
+                  member_ids:
+                    type: array
+                    minItems: 1
+                    maxItems: 100
+                    items: {$ref: '#/components/schemas/AccountSelector'}
   responses:
     Error:
-      description: Error
+      description: Refused, with a machine-readable code and an explanation.
       content:
         application/json:
-          schema:
-            type: object
-            additionalProperties: false
-            required: [type, data]
-            properties:
-              type: {type: string, const: error}
-              data: {$ref: '#/components/schemas/Error'}
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
     Unauthorized:
-      description: Authentication credentials are missing or invalid
+      description: >-
+        Missing or invalid credentials. Codes: `unauthorized`, `invalid_token`,
+        `token_expired`, `session_revoked`, `account_deleted`, `invalid_proof`.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    MessageAccepted:
+      description: Durably accepted (an idempotent retry returns the same message).
       content:
         application/json:
           schema:
             type: object
-            additionalProperties: false
             required: [type, data]
             properties:
-              type: {type: string, const: error}
-              data: {$ref: '#/components/schemas/Error'}
+              type: {type: string}
+              data: {$ref: '#/components/schemas/Message'}
+    MessageResult:
+      description: The message.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [type, data]
+            properties:
+              type: {type: string}
+              data: {$ref: '#/components/schemas/Message'}
+    DraftResult:
+      description: The draft.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [type, data]
+            properties:
+              type: {type: string}
+              data: {$ref: '#/components/schemas/Draft'}
+    ConversationResult:
+      description: The conversation.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [type, data]
+            properties:
+              type: {type: string}
+              data: {$ref: '#/components/schemas/Conversation'}
+    GroupResult:
+      description: The group after the change.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [type, data]
+            properties:
+              type: {type: string}
+              data: {$ref: '#/components/schemas/GroupDetails'}
+    GifList:
+      description: GIFs.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [type, data]
+            properties:
+              type: {type: string, const: gifs}
+              data:
+                type: object
+                required: [items]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/Gif'}}
   schemas:
-    DeliveryDiscovery:
+    AccountSelector:
+      type: string
+      description: An account's current id (`c:handle`, `si:handle`) or its permanent, case-sensitive uuid.
+      examples: ['c:ada', 'si:scout', 'zQo']
+    AccountRef:
       type: object
-      required: [transport, app_id, api_base_url, browser_origin, receiver_authentication, publisher_authority, registration_path, sync_path, presence_path, receipts_path, dm_websocket_supported]
+      required: [type, id]
       properties:
-        transport: {type: string, const: ting}
-        app_id: {type: string, const: 'ting'}
+        type: {type: string, enum: [carbon, silicon]}
+        id: {type: string, description: 'The current id; the uuid for a deleted account; the stored id for an identity from before Silicon Accounts.'}
+        uuid: {type: string, description: Permanent Silicon Accounts uuid (absent only for unlinked older identities).}
+        display_name: {type: string, description: What the account shared with DM by signing in.}
+        pfp_url: {type: string, format: uri}
+        deleted: {type: boolean, const: true, description: The account was deleted; its messages stay.}
+        legacy: {type: boolean, const: true, description: An identity from before Silicon Accounts that was never linked to an account.}
+      examples:
+        - {type: silicon, id: 'si:scout', uuid: K1E, display_name: Scout}
+    SignInDiscovery:
+      type: object
+      required: [app_id, accounts_url, api_base_url, contract_version, sign_in, proof_scopes, delivery]
+      properties:
+        app_id: {type: string, examples: [dm]}
+        accounts_url: {type: string, format: uri, description: Silicon Accounts origin and token issuer.}
         api_base_url: {type: string, format: uri}
-        browser_origin: {type: string, format: uri, const: 'https://ting.teamofsilicons.com'}
-        receiver_authentication: {type: string, const: ting_session}
-        publisher_authority: {type: string, const: originating_dm_session}
-        registration_path: {type: string, const: /api/v1/delivery/registration}
-        sync_path: {type: string, const: /api/v1/sync}
-        presence_path: {type: string, const: '/api/v1/presence/devices/{device_id}'}
-        receipts_path: {type: string, const: '/api/v1/conversations/{conversation_id}/messages/{message_id}/receipts'}
-        dm_websocket_supported: {type: boolean, const: false}
-    DeliveryRetirement:
-      type: object
-      required: [type, data]
-      properties:
-        type: {type: string, const: error}
-        data:
+        contract_version: {type: integer, const: 4}
+        sign_in:
           type: object
-          required: [error, delivery]
+          required: [carbons, silicons, device_flow, slt_public_client]
           properties:
-            error:
-              type: object
-              required: [code, message]
-              properties:
-                code: {type: string, const: delivery_moved_to_ting}
-                message: {type: string}
-            delivery: {$ref: '#/components/schemas/DeliveryDiscovery'}
-    TingSubscription:
+            carbons: {type: string}
+            silicons: {type: string}
+            device_flow: {type: boolean}
+            slt_public_client: {type: boolean}
+        proof_scopes:
+          type: array
+          items: {type: string, enum: [dm.conversations.read, dm.messages.read, dm.messages.write, dm.receipts.write, dm.drafts.write]}
+        delivery: {$ref: '#/components/schemas/Delivery'}
+    Delivery:
       type: object
-      required: [id, app_id, for, active]
+      required: [transport, ting_enabled, sync_path, sync_long_poll_seconds, presence_path, receipts_path, dm_websocket_supported]
       properties:
-        id: {type: string, description: Opaque Ting subscription identifier.}
-        app_id: {type: string, example: 'dm'}
-        for: {type: string, description: Authenticated recipient's canonical public ID.}
-        active: {type: boolean, const: true}
+        transport: {type: string, enum: [sync, ting], description: '`sync` while Ting is not configured for this DM.'}
+        ting_enabled: {type: boolean}
+        ting_api_base_url: {type: [string, 'null'], format: uri}
+        enrolled: {type: boolean, description: 'Present for a signed-in account: Ting knows it as a recipient.'}
+        enrolment: {type: string}
+        sync_path: {type: string, const: /api/v1/sync}
+        sync_long_poll_seconds: {type: integer, const: 30}
+        presence_path: {type: string}
+        receipts_path: {type: string}
+        dm_websocket_supported: {type: boolean, const: false}
+    Me:
+      type: object
+      required: [account, custodian, custodian_of, scopes, via_app, delivery]
+      properties:
+        account: {$ref: '#/components/schemas/AccountRef'}
+        custodian:
+          anyOf:
+            - {$ref: '#/components/schemas/AccountRef'}
+            - {type: 'null'}
+          description: A Silicon's custodian.
+        custodian_of: {type: array, items: {$ref: '#/components/schemas/AccountRef'}, description: The Silicons a Carbon looks after.}
+        scopes: {type: array, items: {type: string}}
+        via_app: {type: [string, 'null'], description: 'The app that issued the proof, when the request came with one.'}
+        delivery: {$ref: '#/components/schemas/Delivery'}
+    AllowList:
+      type: object
+      required: [silicon, items]
+      properties:
+        silicon: {$ref: '#/components/schemas/AccountRef'}
+        items: {type: array, items: {$ref: '#/components/schemas/AccountRef'}}
+        note: {type: string}
+    ConversationAddress:
+      type: string
+      description: >-
+        A direct conversation as its two current ids joined by `::` (Carbon before Silicon, then
+        in order), a group id, or the conversation UUID (the only address of a conversation kept
+        for its history). Sending routes also accept an account id.
+      examples: ['c:ada::si:scout', 'g:product-design', '01a122d0-ea97-7ef0-bd3b-832aeda4402f']
+    GroupId:
+      type: string
+      pattern: '^g:(?:[a-z0-9_-]+:)?[a-z0-9]+(?:-[a-z0-9]+)*$'
+      description: '`g:{slug}`; groups created before contract 4 keep `g:{older-prefix}:{slug}`.'
+      examples: ['g:product-design', 'g:product-design-2']
+    GroupSettings:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 120}
+        description: {type: string, maxLength: 4000, default: ''}
+    GroupCreate:
+      allOf:
+        - {$ref: '#/components/schemas/GroupSettings'}
+        - type: object
+          properties:
+            member_ids:
+              type: array
+              maxItems: 100
+              items: {$ref: '#/components/schemas/AccountSelector'}
+              default: []
+    GroupDetails:
+      type: object
+      required: [name, description, version, owners, members, pending_invitations]
+      properties:
+        name: {type: string}
+        description: {type: string}
+        version: {type: integer, minimum: 1}
+        owners: {type: array, minItems: 1, items: {$ref: '#/components/schemas/AccountRef'}}
+        members: {type: array, items: {$ref: '#/components/schemas/AccountRef'}, description: 'Accepted members, owners included.'}
+        pending_invitations: {type: array, items: {$ref: '#/components/schemas/AccountRef'}, description: Only owners (and custodians acting for them) see these.}
+    GroupSummary:
+      type: object
+      required: [name, description, owners]
+      properties:
+        name: {type: string}
+        description: {type: string}
+        owners: {type: array, items: {$ref: '#/components/schemas/AccountRef'}}
+    Invitation:
+      type: object
+      required: [conversation_id, name, description, invitee, owners]
+      properties:
+        conversation_id: {$ref: '#/components/schemas/GroupId'}
+        name: {type: string}
+        description: {type: string}
+        invitee: {$ref: '#/components/schemas/AccountRef'}
+        invited_by: {$ref: '#/components/schemas/AccountRef'}
+        invited_at: {type: [string, 'null'], format: date-time}
+        owners: {type: array, items: {$ref: '#/components/schemas/AccountRef'}}
+    Conversation:
+      type: object
+      required: [id, participants, last_message, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/ConversationAddress'}
+        participants: {type: array, items: {$ref: '#/components/schemas/AccountRef'}, description: 'Everyone in it; a deleted account stays in a direct conversation, marked deleted.'}
+        visible_to_custodians: {type: array, items: {$ref: '#/components/schemas/AccountRef'}, description: Custodians who can read it without taking part.}
+        superseded_by: {$ref: '#/components/schemas/ConversationAddress'}
+        supersedes: {type: array, items: {$ref: '#/components/schemas/ConversationAddress'}, description: 'Older conversations of the same accounts, kept for their history.'}
+        group: {$ref: '#/components/schemas/GroupDetails'}
+        last_message:
+          anyOf:
+            - {$ref: '#/components/schemas/Message'}
+            - {type: 'null'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ConversationSummary:
+      type: object
+      required: [id, participants, last_message, last_message_status, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/ConversationAddress'}
+        participants: {type: array, items: {$ref: '#/components/schemas/AccountRef'}}
+        visible_to_custodians: {type: array, items: {$ref: '#/components/schemas/AccountRef'}}
+        supersedes: {type: array, items: {$ref: '#/components/schemas/ConversationAddress'}}
+        group: {$ref: '#/components/schemas/GroupSummary'}
+        last_message:
+          anyOf:
+            - {$ref: '#/components/schemas/Message'}
+            - {type: 'null'}
+        last_message_status: {type: [string, 'null'], enum: [sent, delivered, read, null]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
     SyncEvent:
       type: object
       required: [event_id, sequence, type, conversation_id, message_id]
       properties:
-        event_id: {type: string, format: uuid, description: Stable DM event identity; deduplicate independently of Ting IDs.}
+        event_id: {type: string, format: uuid, description: Stable event identity; deduplicate on it.}
         sequence: {type: integer, format: int64, minimum: 1}
         type: {type: string, enum: [message, message_status]}
         conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
-        message_id: {$ref: '#/components/schemas/MessageReference'}
+        message_id: {$ref: '#/components/schemas/MessageCode'}
     SyncPage:
       type: object
-      required: [events, cursor, has_more, upper_sequence, testing_environment_id, testing_generation]
+      required: [events, cursor, has_more, upper_sequence]
       properties:
         events: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/SyncEvent'}}
-        cursor: {type: string, description: Opaque authenticated cursor; retain it even on an empty page.}
+        cursor: {type: string, description: Opaque cursor bound to the account; keep it even after an empty page.}
         has_more: {type: boolean}
-        upper_sequence: {type: integer, format: int64, minimum: 0, description: Fixed upper boundary while paging this scan.}
-        testing_environment_id: {type: [string, 'null'], format: uuid}
-        testing_generation: {type: [integer, 'null'], minimum: 1}
+        upper_sequence: {type: integer, format: int64, minimum: 0}
+    Presence:
+      type: object
+      required: [member_id, availability]
+      properties:
+        member_id: {type: string, description: The account's current id.}
+        member_uuid: {type: string}
+        availability: {type: string, enum: [online, offline]}
+        activity:
+          type: [string, 'null']
+          enum: [typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, null]
+        last_seen_at: {type: [string, 'null'], format: date-time}
     PresenceLease:
       type: object
       required: [presence, lease_expires_at, activity_expires_at]
@@ -2180,181 +1346,6 @@ components:
         presence: {$ref: '#/components/schemas/Presence'}
         lease_expires_at: {type: string, format: date-time}
         activity_expires_at: {type: [string, 'null'], format: date-time}
-    HoneycombOperation:
-      type: object
-      additionalProperties: false
-      required: [operation_id, environment_id, org_id, app_id, environment_revision, generation, key_version, action, testing_key]
-      properties:
-        operation_id: {type: string, format: uuid}
-        environment_id: {type: string, format: uuid}
-        org_id: {type: string, minLength: 1, maxLength: 128}
-        app_id: {type: string}
-        environment_revision: {type: integer, minimum: 1}
-        generation: {type: integer, minimum: 1}
-        key_version: {type: integer, minimum: 1}
-        action:
-          type: string
-          enum: [prepare, import, refresh-import, rotate-key, clean, disable, restore, purge, retire-applications]
-        testing_key: {type: string, pattern: '^[A-Za-z0-9]{32}$', writeOnly: true}
-        name:
-          type: [string, 'null']
-          minLength: 1
-          maxLength: 128
-        description:
-          type: [string, 'null']
-          maxLength: 4096
-        snapshot: {}
-        reason: {type: string}
-        retired_apps:
-          type: array
-          items: {type: string}
-    HoneycombReceipt:
-      type: object
-      required: [operation_id, environment_id, app_id, environment_revision, generation, key_version, state, retired_apps]
-      properties:
-        operation_id: {type: string, format: uuid}
-        environment_id: {type: string, format: uuid}
-        app_id: {type: string}
-        environment_revision: {type: integer, minimum: 1}
-        generation: {type: integer, minimum: 1}
-        key_version: {type: integer, minimum: 1}
-        state:
-          type: string
-          enum: [pending, completed, failed]
-        target_state: {type: string, description: 'Intended local state, present in pending and failed receipts.'}
-        retired_apps:
-          type: array
-          items: {type: string}
-    ConversationAddress:
-      type: string
-      description: Immutable direct address, ordered Carbon before Silicon then lexically, or g:org:group-slug. UUID aliases remain accepted. Conversation
-        routes also accept an authorized recipient account, resolving or creating the direct chat on send. Scope all addresses by organization and testing
-        environment.
-      examples: ['saket::cos:tos', 'g:tos:team']
-    GroupSettings:
-      type: object
-      required: [name]
-      properties:
-        name: {type: string, minLength: 1, maxLength: 120}
-        description: {type: string, maxLength: 4000, default: ''}
-        is_public: {type: boolean, default: false}
-        tag_ids:
-          type: array
-          maxItems: 100
-          items: {type: string, format: uuid}
-          default: []
-    GroupCreate:
-      type: object
-      required: [name]
-      properties:
-        name: {type: string, minLength: 1, maxLength: 120}
-        description: {type: string, maxLength: 4000, default: ''}
-        is_public: {type: boolean, default: false}
-        tag_ids:
-          type: array
-          maxItems: 100
-          items: {type: string, format: uuid}
-          default: []
-        member_ids:
-          type: array
-          maxItems: 100
-          items: {type: string}
-          default: []
-    GroupDetails:
-      type: object
-      required: [name, description, is_public, tag_ids, version, invited_members]
-      properties:
-        name: {type: string, minLength: 1, maxLength: 120}
-        description: {type: string, maxLength: 4000, default: ''}
-        is_public: {type: boolean, default: false}
-        tag_ids:
-          type: array
-          maxItems: 100
-          items: {type: string, format: uuid}
-          default: []
-        version: {type: integer, minimum: 1}
-        invited_members:
-          type: array
-          items: {$ref: '#/components/schemas/MemberRef'}
-    GroupMembers:
-      type: object
-      additionalProperties: false
-      required: [member_ids]
-      properties:
-        member_ids:
-          type: array
-          maxItems: 100
-          items: {type: string}
-          default: []
-    MemberRef:
-      type: object
-      required: [type, id]
-      properties:
-        type:
-          type: string
-          enum: [carbon, silicon]
-        id:
-          type: string
-          description: IAM account ID.
-          examples: [alice@example.com, 'si:assistant']
-    Conversation:
-      type: object
-      required: [id, org_id, participants, created_at, updated_at]
-      properties:
-        group: {$ref: '#/components/schemas/GroupDetails'}
-        id: {$ref: '#/components/schemas/ConversationAddress'}
-        org_id: {type: string}
-        participants:
-          type: array
-          minItems: 1
-          items: {$ref: '#/components/schemas/MemberRef'}
-        last_message:
-          anyOf:
-            - {$ref: '#/components/schemas/Message'}
-            - {type: 'null'}
-        created_at: {type: string, format: date-time}
-        updated_at: {type: string, format: date-time}
-    Attachment:
-      type: object
-      required: [permanent_url]
-      properties:
-        permanent_url:
-          type: string
-          format: uri
-          maxLength: 8192
-          pattern: ^https://(?![^/?#]*@)[^/?#]+(?:[/?#]|$)
-          description: Credential-free HTTPS link, at most 8192 bytes. DM stores this link without contacting its host. No upload, proxy, or temporary-URL
-            endpoint exists.
-        name: {type: string, minLength: 1, maxLength: 1024}
-        content_type: {type: string, minLength: 1, maxLength: 255}
-        size: {type: integer, minimum: 0, maximum: 5368709120, description: Untrusted client-declared byte size.}
-    VoiceAttachment:
-      allOf:
-        - {$ref: '#/components/schemas/Attachment'}
-        - type: object
-          required: [duration_milliseconds]
-          properties:
-            duration_milliseconds: {type: integer, minimum: 1, maximum: 172800000, description: 'Untrusted caller-supplied total playback duration, capped
-                at 48 hours.'}
-    StoredVoiceAttachment:
-      allOf:
-        - {$ref: '#/components/schemas/Attachment'}
-        - type: object
-          required: [duration_milliseconds]
-          properties:
-            duration_milliseconds:
-              type: [integer, 'null']
-              minimum: 1
-              maximum: 172800000
-              description: Total playback duration. Null is returned only for a historical pre-v 2 voice row whose provider did not supply duration metadata.
-    Gif:
-      type: object
-      required: [provider_id, url]
-      properties:
-        provider_id: {type: string, minLength: 1, maxLength: 255}
-        url: {type: string, format: uri, maxLength: 8192, pattern: '^https://'}
-        preview_url: {type: string, format: uri, maxLength: 8192, pattern: '^https://'}
-        title: {type: string, maxLength: 1000}
     MessageCreate:
       type: object
       properties:
@@ -2363,9 +1354,7 @@ components:
           type: array
           maxItems: 100
           items: {$ref: '#/components/schemas/AttachmentLink'}
-        voice_transcript:
-          type: [string, 'null']
-          maxLength: 100000000
+        voice_transcript: {type: [string, 'null'], maxLength: 100000000}
         reply:
           anyOf:
             - type: object
@@ -2373,37 +1362,28 @@ components:
               properties:
                 message-id: {$ref: '#/components/schemas/MessageReference'}
             - {type: 'null'}
-        recipient_id: {type: string, description: Required for POST /messages; otherwise the path supplies the destination.}
-        sender_id: {type: string, description: Explicit represented sender when authorized.}
-      anyOf:
-        - required: [message]
-          properties:
-            message: {minLength: 1}
-        - required: [attachments]
-          properties:
-            attachments: {minItems: 1}
-      description: Text, attachments, or both. Audio goes in attachments with optional voice_transcript. Supply only the referenced message-id for a reply;
-        sender and quoted content come from the server. Legacy UUID references and old attachment objects remain accepted on input.
+        recipient_id:
+          type: string
+          description: >-
+            For POST /messages: the account, group or conversation to send to. Inside a
+            conversation: an optional routing address `isi@si:handle` naming one Silicon's
+            intent; it is kept on edits and can never change.
+        sender_id:
+          type: string
+          description: Optional routing address of your own (`isi@si:you`); naming anyone else is 403 `sender_mismatch`.
+      description: Text, attachments, or both. Audio goes in attachments with an optional voice_transcript.
     Message:
       type: object
-      additionalProperties: false
       required: [message-id, conversation_id, recipient_id, sender, message, attachments, voice_transcript, reply, bundle, created_at, updated_at, deleted_at,
         delivered_at, read_at, history]
       properties:
         message-id: {$ref: '#/components/schemas/MessageCode'}
         conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
-        recipient_id: {type: string, description: 'History: the destination account or group. Callback: the receiving account, including the sender copy.'}
-        sender: {$ref: '#/components/schemas/MemberRef'}
-        message:
-          type: [string, 'null']
-          maxLength: 100000000
-        attachments:
-          type: array
-          maxItems: 100
-          items: {$ref: '#/components/schemas/AttachmentLink'}
-        voice_transcript:
-          type: [string, 'null']
-          maxLength: 100000000
+        recipient_id: {type: string, description: 'The other account, the group, or the routing address, with current ids.'}
+        sender: {$ref: '#/components/schemas/AccountRef'}
+        message: {type: [string, 'null'], maxLength: 100000000, description: Empty for attachment-only messages; null for a tombstone.}
+        attachments: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/AttachmentLink'}}
+        voice_transcript: {type: [string, 'null'], maxLength: 100000000}
         reply:
           anyOf:
             - {$ref: '#/components/schemas/Reply'}
@@ -2413,32 +1393,89 @@ components:
             - {$ref: '#/components/schemas/BundleRef'}
             - {type: 'null'}
         created_at: {type: string, format: date-time}
-        updated_at:
-          type: [string, 'null']
-          format: date-time
-        deleted_at:
-          type: [string, 'null']
-          format: date-time
-        delivered_at:
-          type: [string, 'null']
-          format: date-time
-        read_at:
-          type: [string, 'null']
-          format: date-time
-        history:
-          type: array
-          items: {$ref: '#/components/schemas/MessageHistoryEntry'}
-          description: Previous content, oldest first. Empty initially; deletion adds no history entry. Deleted responses hide content history.
-      description: Fixed current snapshot. All fields are present. Text is empty for attachment-only sends, null for tombstones. Upsert by conversation_id,
-        message-id and updated_at. Delivery records may hydrate the current edited or deleted snapshot on replay.
+        updated_at: {type: [string, 'null'], format: date-time}
+        deleted_at: {type: [string, 'null'], format: date-time}
+        delivered_at: {type: [string, 'null'], format: date-time, description: When every recipient had it on a device.}
+        read_at: {type: [string, 'null'], format: date-time, description: When every recipient read it.}
+        history: {type: array, items: {$ref: '#/components/schemas/MessageHistoryEntry'}, description: 'Previous content, oldest first; hidden once deleted.'}
+    MessageHistoryEntry:
+      type: object
+      required: [message, attachments, voice_transcript, reply, created_at]
+      properties:
+        message: {type: [string, 'null']}
+        attachments: {type: array, items: {$ref: '#/components/schemas/AttachmentLink'}}
+        voice_transcript: {type: [string, 'null']}
+        reply:
+          anyOf:
+            - {$ref: '#/components/schemas/Reply'}
+            - {type: 'null'}
+        created_at: {type: string, format: date-time, description: When this content became current.}
+    Reply:
+      type: object
+      required: [message-id, sender, content]
+      properties:
+        message-id: {$ref: '#/components/schemas/MessageCode'}
+        sender: {$ref: '#/components/schemas/AccountRef'}
+        content:
+          anyOf:
+            - type: object
+              required: [message, attachments, voice_transcript]
+              properties:
+                message: {type: [string, 'null']}
+                attachments: {type: array, items: {$ref: '#/components/schemas/AttachmentLink'}}
+                voice_transcript: {type: [string, 'null']}
+            - {type: 'null'}
+          description: The quoted message as it is now; null once it is deleted.
+    MessageCode:
+      type: string
+      pattern: ^(?:[0-9a-z]{3}|[1-9a-z][0-9a-z]{3,12})$
+      examples: ['000', '00a', 'zzz', '1000']
+      description: Lowercase base36 message code within the conversation, from 000; never reused.
+    MessageReference:
+      oneOf:
+        - {$ref: '#/components/schemas/MessageCode'}
+        - {type: string, format: uuid}
+    AttachmentLink:
+      type: string
+      format: uri
+      maxLength: 8192
+      pattern: ^https://(?![^/?#]*@)[^/?#]+(?:[/?#]|$)
+      description: A credential-free HTTPS link. DM stores it without fetching it.
+    Attachment:
+      type: object
+      required: [permanent_url]
+      properties:
+        permanent_url: {$ref: '#/components/schemas/AttachmentLink'}
+        name: {type: string, minLength: 1, maxLength: 1024}
+        content_type: {type: string, minLength: 1, maxLength: 255}
+        size: {type: integer, minimum: 0, maximum: 5368709120}
+    VoiceAttachment:
+      allOf:
+        - {$ref: '#/components/schemas/Attachment'}
+        - type: object
+          required: [duration_milliseconds]
+          properties:
+            duration_milliseconds: {type: integer, minimum: 1, maximum: 172800000}
+    StoredVoiceAttachment:
+      allOf:
+        - {$ref: '#/components/schemas/Attachment'}
+        - type: object
+          properties:
+            duration_milliseconds: {type: [integer, 'null'], minimum: 1, maximum: 172800000}
+    Gif:
+      type: object
+      required: [provider_id, url]
+      properties:
+        provider_id: {type: string, minLength: 1, maxLength: 255}
+        url: {type: string, format: uri, maxLength: 8192, pattern: '^https://'}
+        preview_url: {type: string, format: uri, maxLength: 8192, pattern: '^https://'}
+        title: {type: string, maxLength: 1000}
     BundleRef:
       type: object
       required: [id, role]
       properties:
         id: {$ref: '#/components/schemas/BundleCode'}
-        role:
-          type: string
-          enum: [display, member]
+        role: {type: string, enum: [display, member]}
     BundleCreate:
       type: object
       required: [message_ids, display_message]
@@ -2456,13 +1493,9 @@ components:
       properties:
         id: {$ref: '#/components/schemas/BundleCode'}
         conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
-        original_message_ids:
-          type: array
-          minItems: 1
-          maxItems: 100
-          items: {$ref: '#/components/schemas/MessageReference'}
+        original_message_ids: {type: array, minItems: 1, maxItems: 100, items: {$ref: '#/components/schemas/MessageCode'}}
         display_message: {$ref: '#/components/schemas/Message'}
-        created_by: {$ref: '#/components/schemas/MemberRef'}
+        created_by: {$ref: '#/components/schemas/AccountRef'}
         created_at: {type: string, format: date-time}
     BundleDetail:
       allOf:
@@ -2470,387 +1503,50 @@ components:
         - type: object
           required: [original_messages]
           properties:
-            original_messages:
-              type: array
-              minItems: 1
-              maxItems: 100
-              items: {$ref: '#/components/schemas/Message'}
+            original_messages: {type: array, minItems: 1, maxItems: 100, items: {$ref: '#/components/schemas/Message'}}
+    BundleCode:
+      type: string
+      pattern: ^(?:00[1-9a-z]|0[1-9a-z][0-9a-z]|[1-9a-z][0-9a-z]{2,})$
+      examples: ['001', '00a', '1000']
     DraftInput:
       type: object
       properties:
-        message_content: {type: string, maxLength: 100000000}
-        attachments:
-          type: array
-          maxItems: 100
-          items: {$ref: '#/components/schemas/Attachment'}
-          description: Combined attachment and voice item count may not exceed 100.
-        voice: {$ref: '#/components/schemas/VoiceAttachment', description: Counts toward the combined 100 attachment-item maximum.}
-        voice_transcript:
-          type: [string, 'null']
-          maxLength: 100000000
-          description: Optional synchronized client-supplied transcript; requires voice.
+        message: {type: string, maxLength: 100000000}
+        attachments: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/Attachment'}}
+        voice: {$ref: '#/components/schemas/VoiceAttachment'}
+        voice_transcript: {type: [string, 'null'], maxLength: 100000000}
         gif: {$ref: '#/components/schemas/Gif'}
-        metadata:
-          type: object
-          additionalProperties: true
-          default: {}
-          description: Arbitrary caller-owned JSON object, always returned. Nested JSON values are preserved. PATCH is full replacement; include the metadata
-            to retain it.
+        metadata: {type: object, additionalProperties: true, default: {}}
         reply_to_message_id:
           anyOf:
             - {$ref: '#/components/schemas/MessageReference'}
             - {type: 'null'}
-      allOf:
-        - if:
-            required: [voice_transcript]
-            properties:
-              voice_transcript: {type: string}
-          then:
-            required: [voice]
-            properties:
-              voice: {}
     Draft:
       type: object
       required: [conversation_id, member_id, version, updated_at, metadata]
       properties:
         conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
-        member_id: {type: string}
-        version: {type: integer, minimum: 1, description: Monotonic token retained across draft deletion and automatic clearing. Gaps are allowed. Use this
-            returned value for the next save.}
-        message_content: {type: string, maxLength: 100000000}
-        attachments:
-          type: array
-          maxItems: 100
-          items: {$ref: '#/components/schemas/Attachment'}
+        member_id: {type: string, description: The owner's current id.}
+        member_uuid: {type: string}
+        version: {type: integer, minimum: 1, description: Send the returned version with the next save.}
+        message: {type: string}
+        attachments: {type: array, items: {$ref: '#/components/schemas/Attachment'}}
         voice: {$ref: '#/components/schemas/StoredVoiceAttachment'}
-        voice_transcript:
-          type: [string, 'null']
-          maxLength: 100000000
+        voice_transcript: {type: [string, 'null']}
         gif: {$ref: '#/components/schemas/Gif'}
+        metadata: {type: object, additionalProperties: true}
         updated_at: {type: string, format: date-time}
-        metadata:
-          type: object
-          additionalProperties: true
-          default: {}
-          description: Arbitrary caller-owned JSON object, always returned. Nested JSON values are preserved. PATCH is full replacement; include the metadata
-            to retain it.
         reply_to_message_id:
           anyOf:
             - {$ref: '#/components/schemas/MessageReference'}
             - {type: 'null'}
-      allOf:
-        - if:
-            required: [voice_transcript]
-            properties:
-              voice_transcript: {type: string}
-          then:
-            required: [voice]
-            properties:
-              voice: {}
-    Presence:
-      type: object
-      required: [member_id, availability]
-      properties:
-        member_id: {type: string}
-        availability:
-          type: string
-          enum: [online, offline]
-        activity:
-          type: [string, 'null']
-          enum: [typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, null]
-        last_seen_at:
-          type: [string, 'null']
-          format: date-time
-    Error:
-      type: object
-      required: [error]
-      properties:
-        error:
-          type: object
-          required: [code, message]
-          properties:
-            code: {type: string}
-            message: {type: string}
-    ApplicationSession:
-      type: object
-      properties:
-        access_token: {type: string, writeOnly: false}
-        refresh_token: {type: string}
-        token_type: {const: Bearer}
-        expires_in: {type: integer, minimum: 1}
-        scope: {type: string}
-        member: {$ref: '#/components/schemas/MemberRef'}
-        organization_id: {type: string, description: Initial workspace; first currently selected organization handle in sorted order.}
-        organization_ids:
-          type: array
-          minItems: 1
-          uniqueItems: true
-          description: Organizations explicitly selected in IAM with current active memberships. Each request still authorizes X-Org-ID.
-          items: {type: string}
-      required: [access_token, refresh_token, token_type, expires_in, scope, member, organization_id, organization_ids]
-    Identity:
-      type: object
-      properties:
-        member: {$ref: '#/components/schemas/MemberRef'}
-        organization_id: {type: string}
-        principal_id: {type: string, description: Legacy DM response alias of member.id; contains the canonical Carbon or Silicon handle.}
-        session_id:
-          type: [string, 'null']
-          format: uuid
-        org_role:
-          type: [string, 'null']
-        capabilities:
-          type: array
-          items: {type: string}
-        reconsent_required:
-          type: boolean
-          description: True when this session predates DM's Ting permissions (Ting OBO endpoints subscriptions.register and tings.send). IAM refresh keeps the originally consented scopes, so the member must sign in again once; that login presents DM's current permissions. Delivery through Ting is part of DM's consent and never a separate choice.
-      required: [member, organization_id, principal_id, session_id, org_role, capabilities, reconsent_required]
-    LoginInput:
-      type: object
-      properties:
-        slt: {type: string, writeOnly: true, description: Opaque IAM short-lived token. Current IAM wire values use oac_; the field is named slt. Never
-            assume the field name is a token prefix.}
-      required: [slt]
-      additionalProperties: false
-    RefreshInput:
-      type: object
-      properties:
-        refresh_token: {type: string, writeOnly: true, pattern: ^ort_}
-      required: [refresh_token]
-      additionalProperties: false
-    LogoutInput:
-      type: object
-      properties:
-        token: {type: string, writeOnly: true}
-      required: [token]
-      additionalProperties: false
-    TestingEnvironment:
-      type: object
-      properties:
-        environment_id: {type: string, format: uuid}
-        organization_id: {type: string}
-        creator_member_id: {type: string}
-        creator_member_kind:
-          type: string
-          enum: [carbon, silicon]
-        name: {type: string, minLength: 1, maxLength: 128}
-        description:
-          type: [string, 'null']
-          maxLength: 4096
-        iam_environment_id: {type: string, format: uuid}
-        iam_app_id: {type: string}
-        status:
-          type: string
-          enum: [creating, active, deleted, purging]
-        version: {type: integer, minimum: 1}
-        created_at: {type: string, format: date-time}
-        last_activity_at: {type: string, format: date-time}
-        deleted_at:
-          type: [string, 'null']
-          format: date-time
-        purge_after:
-          type: [string, 'null']
-          format: date-time
-      required: [environment_id, organization_id, creator_member_id, creator_member_kind, name, description, iam_environment_id, iam_app_id, status, version,
-        created_at, last_activity_at, deleted_at, purge_after]
-    TestingEnvironmentWithKey:
-      allOf:
-        - {$ref: '#/components/schemas/TestingEnvironment'}
-        - type: object
-          properties:
-            root_key: {type: string, pattern: '^[A-Za-z0-9]{32}$'}
-          required: [root_key]
-    TestingEnvironmentKey:
-      type: object
-      properties:
-        environment_id: {type: string, format: uuid}
-        root_key: {type: string, pattern: '^[A-Za-z0-9]{32}$'}
-      required: [environment_id, root_key]
-    TestingEnvironmentList:
-      type: object
-      properties:
-        items:
-          type: array
-          items: {$ref: '#/components/schemas/TestingEnvironment'}
-      required: [items]
-    TestingEnvironmentCreate:
-      type: object
-      properties:
-        name: {type: string}
-        description:
-          type: [string, 'null']
-        iam_environment_id: {type: string, format: uuid}
-        iam_environment_key: {type: string, writeOnly: true, pattern: '^[A-Za-z0-9]{32}$'}
-        iam_app_id: {type: string}
-        iam_app_secret: {type: string, writeOnly: true}
-        iam_webhook_secret:
-          type: string
-          writeOnly: true
-          minLength: 32
-          maxLength: 512
-          pattern: ^[!-~]{32,512}$
-          description: Optional dedicated IAM test webhook signer. Supply together with iam_webhook_key_version, or omit both to inherit the backend signer.
-        iam_webhook_key_version: {type: integer, minimum: 1, description: Exact webhook signer version registered in the paired IAM testing application.
-            Requires iam_webhook_secret.}
-      required: [name, iam_environment_id, iam_environment_key, iam_app_id, iam_app_secret]
-      additionalProperties: false
-      dependentRequired:
-        iam_webhook_secret: [iam_webhook_key_version]
-        iam_webhook_key_version: [iam_webhook_secret]
-    TestingEnvironmentUpdate:
-      type: object
-      properties:
-        name: {type: string}
-        description:
-          type: [string, 'null']
-          description: Empty string clears displayed description; omitted/null leaves unchanged.
-      additionalProperties: false
-    MessageCode:
+    DeviceId:
       type: string
-      pattern: ^(?:[0-9a-z]{3}|[1-9a-z][0-9a-z]{3,12})$
-      examples: ['000', 00a, zzz, '1000']
-      description: Lowercase base36 message code, scoped to the conversation. Starts at 000, grows to 1000 after zzz; never reused.
-    MessageReference:
-      oneOf:
-        - {$ref: '#/components/schemas/MessageCode'}
-        - {type: string, format: uuid}
-    AttachmentLink:
-      type: string
-      format: uri
-      maxLength: 8192
-      pattern: ^https://(?![^/?#]*@)[^/?#]+(?:[/?#]|$)
-      description: A credential-free HTTPS attachment link. DM stores the URL without fetching it.
-    Reply:
-      type: object
-      additionalProperties: false
-      required: [message-id, sender, content]
-      properties:
-        message-id: {$ref: '#/components/schemas/MessageCode'}
-        sender: {$ref: '#/components/schemas/MemberRef'}
-        content:
-          anyOf:
-            - type: object
-              required: [message, attachments, voice_transcript]
-              properties:
-                message:
-                  type: [string, 'null']
-                  maxLength: 100000000
-                attachments:
-                  type: array
-                  maxItems: 100
-                  items: {$ref: '#/components/schemas/AttachmentLink'}
-                voice_transcript:
-                  type: [string, 'null']
-                  maxLength: 100000000
-            - {type: 'null'}
-          description: Server-resolved current reply content, or null after the referenced message is deleted.
-    ConversationSummary:
-      type: object
-      required: [id, org_id, participants, last_message, last_message_status, created_at, updated_at]
-      properties:
-        id:
-          type: string
-          description: Immutable conversation address.
-          examples: ['alice@example.com::bob@example.com', 'g:acme:engineering']
-        org_id: {type: string, description: Matches X-Org-ID.}
-        participants:
-          type: array
-          items: {$ref: '#/components/schemas/MemberRef'}
-          description: Everyone currently granted access.
-        group: {$ref: '#/components/schemas/GroupSummary', description: Omitted for normal DMs.}
-        last_message:
-          anyOf:
-            - {$ref: '#/components/schemas/MessagePreview'}
-            - {type: 'null'}
-          description: Latest visible message; null when none exist.
-        last_message_status:
-          type: [string, 'null']
-          enum: [sent, delivered, read, null]
-          description: Sent means accepted; delivered/read requires every recipient. Null when no message exists.
-        created_at: {type: string, format: date-time}
-        updated_at:
-          type: string
-          format: date-time
-          description: Advances on messages/replies, edits, deletions, reactions, and group details/membership changes. Excludes typing, presence, receipts,
-            and drafts.
-    GroupSummary:
-      type: object
-      required: [name, description, tag_ids]
-      properties:
-        name: {type: string, minLength: 1, maxLength: 120}
-        description: {type: string, maxLength: 4000, description: Empty string when unset.}
-        tag_ids:
-          type: array
-          maxItems: 100
-          items: {type: string, format: uuid}
-          description: Any matching tag grants private-group access.
-    MessageContent:
-      type: object
-      required: [message, attachments, voice_transcript]
-      properties:
-        message:
-          type: [string, 'null']
-          description: Text; empty for attachment-only messages; null after deletion.
-        attachments:
-          type: array
-          items: {type: string, format: uri, pattern: '^https://'}
-          description: File/audio/GIF URLs; empty when absent or deleted.
-        voice_transcript:
-          type: [string, 'null']
-          description: Audio transcript; null when absent or deleted.
-    MessagePreview:
-      allOf:
-        - {$ref: '#/components/schemas/MessageContent'}
-        - type: object
-          required: [message-id, conversation_id, recipient_id, sender, reply, bundle, created_at, updated_at, deleted_at, delivered_at, read_at, history]
-          properties:
-            message-id: {type: string, description: Conversation-local lowercase base36 code., example: 00a}
-            conversation_id: {type: string, description: Parent conversation address.}
-            recipient_id: {type: string, description: Destination account or group address.}
-            sender: {$ref: '#/components/schemas/MemberRef'}
-            reply:
-              anyOf:
-                - {$ref: '#/components/schemas/ReplyPreview'}
-                - {type: 'null'}
-              description: Null for non-replies or deleted messages.
-            bundle:
-              anyOf:
-                - {$ref: '#/components/schemas/BundleRef'}
-                - {type: 'null'}
-              description: Null when unbundled.
-            created_at: {type: string, format: date-time}
-            updated_at:
-              type: [string, 'null']
-              format: date-time
-              description: Last edit; null if never edited.
-            deleted_at:
-              type: [string, 'null']
-              format: date-time
-              description: Deletion time; null if not deleted.
-            delivered_at:
-              type: [string, 'null']
-              format: date-time
-              description: All-recipient delivery time; null until reached.
-            read_at:
-              type: [string, 'null']
-              format: date-time
-              description: All-recipient read time; null until reached.
-            history:
-              type: array
-              items: {$ref: '#/components/schemas/MessageHistoryEntry'}
-              description: Previous content, oldest first. Empty initially; deletion adds no history entry. Deleted responses hide content history.
-    ReplyPreview:
-      type: object
-      required: [message-id, sender, content]
-      properties:
-        message-id: {type: string, example: 009}
-        sender: {$ref: '#/components/schemas/MemberRef'}
-        content:
-          anyOf:
-            - {$ref: '#/components/schemas/MessageContent'}
-            - {type: 'null'}
-          description: Referenced content; null after its deletion.
+      minLength: 1
+      maxLength: 255
+      pattern: ^[^\u0000-\u001F\u007F-\u009F]+$
+      description: A stable, client-chosen device id (not a hardware id or a credential).
+      examples: [laptop-browser-1, phone-app-1]
     ErrorResponse:
       type: object
       required: [type, data]
@@ -2864,40 +1560,15 @@ components:
               type: object
               required: [code, message]
               properties:
-                code: {type: string, description: Machine-readable failure code; see each response example.}
-                message: {type: string, description: Human-readable explanation; clients branch on code rather than message text.}
-    BundleCode:
-      type: string
-      pattern: ^(?:00[1-9a-z]|0[1-9a-z][0-9a-z]|[1-9a-z][0-9a-z]{2,})$
-      description: Conversation-local sequential lowercase base36 bundle code. Starts at 001; increments for each new bundle and grows beyond three characters
-        after zzz.
-      examples: ['001', '002', 009, 00a, 00z, '010', zzz, '1000']
-    DeviceId:
-      type: string
-      minLength: 1
-      maxLength: 255
-      pattern: ^[^\u0000-\u001F\u007F-\u009F]+$
-      x-max-utf8-bytes: 255
-      description: Client-chosen stable device/consumer ID. Reuse on reconnect and receipts; independent client installations should use distinct IDs. Accepts
-        1–255 UTF-8 bytes, including spaces and Unicode, but no control characters. Not a hardware ID or credential.
-      examples: [laptop-browser-1, phone-app-1, f96100cd-d86e-470b-88eb-4721830e59e1]
-    MessageHistoryEntry:
+                code: {type: string, description: 'Branch on this: e.g. contact_not_allowed, conversation_superseded, recipient_deleted, not_group_owner, last_owner, proof_scope_missing.'}
+                message: {type: string, description: 'What happened and what to do next, for people.'}
+    AccountsEvent:
       type: object
-      additionalProperties: false
-      required: [message, attachments, voice_transcript, reply, created_at]
+      required: [event_id, type, data]
       properties:
-        message:
-          type: [string, 'null']
-          description: Text; empty for attachment-only messages; null after deletion.
-        attachments:
-          type: array
-          items: {type: string, format: uri, pattern: '^https://'}
-          description: File/audio/GIF URLs; empty when absent or deleted.
-        voice_transcript:
-          type: [string, 'null']
-          description: Audio transcript; null when absent or deleted.
-        reply:
-          anyOf:
-            - {$ref: '#/components/schemas/Reply'}
-            - {type: 'null'}
-        created_at: {type: string, format: date-time, description: When this content became current.}
+        event_id: {type: string}
+        type: {type: string, examples: [account.id_changed, account.updated, account.deleted, membership.signed_out, membership.access_removed, silicon.custodian_changed, ping]}
+        occurred_at: {type: string, format: date-time}
+        app_id: {type: [string, 'null']}
+        silicon: {type: [string, 'null']}
+        data: {type: object, additionalProperties: true}
