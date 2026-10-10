@@ -81,8 +81,8 @@ were preserved. The published binary passed 17 native checks, including a
 effect, stable hook reconnect, and separate delivered/read receipts. The two
 existing Ting bindings and daemon were unchanged. Running Ting daemon 0.1.2 is
 distinct from installed Ting CLI 0.1.4; no shared-daemon restart was performed.
-See the committed [32-check backend evidence](../../docs/ting-deployed-live-verification.json)
-and [17-check native evidence](../../docs/ting-native-release-verification.json).
+See the committed [32-check backend evidence](../../ting-deployed-live-verification.json)
+and [17-check native evidence](../../ting-native-release-verification.json).
 Both sanitized reports are also public GitHub release assets.
 
 Task-owned callbacks, relays and hook processes were stopped; native DM/Ting
