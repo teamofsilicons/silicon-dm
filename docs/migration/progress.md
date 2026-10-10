@@ -309,3 +309,161 @@ CLI env per home: `HOME=SILICON_HOME=<fresh dir>`, `SILICON_DM_RELAY_HOME=<dir>/
 - Tests that run `dm login` start a relay: give each test home its own `SILICON_DM_RELAY_HOME` and run
   `dm daemon stop` afterwards (the CLI test support does this on drop), or test relays outlive the run.
 - The stub's token names must not contain the error codes the test looks for (`slt_expired` "echoed" itself).
+
+## 2026-10-10 — Stage 3 (packaging, CI, deployment, documentation): done
+
+Everything around the code now says and does Silicon Accounts and Silicon Apps. Nothing was pushed,
+released or deployed: a release is one tag away (`release.yml`) and the deployment is a sequence of
+reviewed commands in [cutover.md](cutover.md). Judgement calls are S1–S25 in [decisions.md](decisions.md).
+
+What changed:
+
+- **Packaging**: `packaging/apps.yaml.in` and `scripts/package-apps.sh` (`scripts/package_apps.py`)
+  pack one archive per target, `dist/apps/dm-<version>-<target>.tar.gz` + `.sha256`, refusing a
+  version that differs from the CLI or workspace version, a binary that is not native for the
+  target, a Linux binary needing glibc > 2.39, and a binary that answers the three discovery
+  commands wrongly or writes to an empty home. `scripts/build-release.py` replaces the Mac
+  cross-build script; `scripts/install.sh` hands over to `silicon-apps install dm`.
+  `honeycomb.yaml`, `scripts/package-release.py` and `scripts/build-honeycomb-release.py` are gone.
+- **CI**: `release.yml` (was `release.yaml`): six native runners, CLI tests, the per-binary check
+  with `--discovery require`, one Linux pack job with `silicon-apps-cli` 0.2.0, artifact
+  `dm-silicon-apps-release` with SHA256SUMS; tags must equal the version. `publish-release.yml`
+  removed. `ci.yml`: Postgres 16 service container for the database tests, the discovery check on
+  the built `dm`, packager and deployment unit tests, `cfn-lint` 1.57.2, docs site build and check.
+- **Deployment configuration** (`deploy/aws`): both templates take `AccountsUrl`, `AccountsApiUrl`,
+  `AppId`, `ProofIssuers`, `TingUrl` (no `IamBaseUrl`) and read `DM_APP_SECRET`,
+  `DM_ACCOUNTS_WEBHOOK_SECRET`, `DM_DATA_KEY` from the runtime secret; no IAM, test-environment or
+  Honeycomb variables; the testing RDS instance is kept but unused. The ECS bootstrap validates the
+  new fields, never rotates the database URL or data key, keeps the 0.14 runtime keys for a rollback,
+  and takes commands (`status`, `migrate`, `draft-identity-mapping`, `link-identities`);
+  `run-bootstrap-task.py` runs one as a Fargate task from the stack's outputs and prints its log.
+  The deploy guides follow; `README.gateway.md` points at the coming website.
+- **Documentation**: `docs/releasing.md` (also `dm docs releasing`); install copy names the website
+  for Carbons and `silicon-apps install dm` for the command; the docs site links to `main` and its
+  preview banner is generic; dated records moved to `docs/history/` (with a README). The cutover
+  runbook was rewritten end to end; the UNDERSTANDING proposal gained three missed passages; the
+  root `decisions.md` gained D-060.
+
+### Commits
+
+| commit | subject |
+| --- | --- |
+| 3a6fe30 | Package dm for Silicon Apps instead of Honeycomb |
+| 24e8a1d | Build Silicon Apps release archives in CI |
+| 74cd55b | Configure the deployment for Silicon Accounts |
+| 43d770a | Move dated IAM-era and Honeycomb-era records to docs/history |
+| 15b6ef1 | Document releasing through Silicon Apps and installing from the website |
+| b5f732e | Run the cutover steps as one-off bootstrap task commands |
+| 3d3f8e3 | Write the production cutover runbook and record the stage 3 decisions |
+| 82e7ce4 | Let the one-off task runner name another task definition |
+| (last) | Record stage 3 in the migration progress log |
+
+### Tests (from the worktree with the brief's Rust env)
+
+| command | result |
+| --- | --- |
+| `cargo fmt --all -- --check` | ok |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | ok |
+| `cargo deny --all-features check` | advisories ok, bans ok, licenses ok, sources ok |
+| `DM_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5460/postgres cargo test --locked --workspace --all-features` | **164 passed, 0 failed** (29 binaries): service 44 + account_routes 3 + accounts_auth 6 + accounts_authorization 5 + accounts_schema_migration 2 + accounts_webhook 6 + link_identities 6 + messaging_flow 6 + ting_delivery 4 + ting_transport 7 + wire_contract 6; CLI 6 + accounts 8 + discovery 1 + em_dash 1 + home 2 + message_length 1 + receive 3 + state 4; client 36 + http_contract 4; protocol 3. Same count as the end of stage 2: nothing regressed |
+| `python3 -m unittest discover -s scripts -p 'test_*.py'` | 17 passed (manifest rendering, native-format and glibc checks, version rules, discovery with stand-in binaries, packing with a stand-in packer) |
+| `python3 -m unittest discover -s deploy/aws -p 'test_*.py'` | 27 passed (grants for both bootstraps; runtime secret: keys, rollback keys, no rotation, refusals that name fields and never echo values; bootstrap commands against fake Secrets Manager and processes; the task runner against a fake `aws`; both templates and `.env.example` carry every variable `src/config.rs` requires and none it retired). The template tests fail on the stage-2 templates (checked) |
+| `python3 scripts/sync-cli-docs.py --check` | `crates/cli/docs matches 19 canonical files` |
+| `cd docs-site && npm ci && npm run build && npm run check` | 18 pages built and verified (the new releasing page included) |
+| `npx --yes @redocly/cli@2.49.0 lint openapi.yaml` | valid (4 problems explicitly ignored, as before) |
+| `actionlint` 1.7.12 on `.github/workflows/*.yml` | clean (it found one unused loop variable in the old `ci.yml`, fixed) |
+| `cfn-lint` 1.57.2 on `fargate.yaml`, `production.yaml` | clean (both were clean at baseline too) |
+| `shellcheck -S warning` 0.11.0 on `bootstrap.sh`, `install.sh`, `package-apps.sh` | clean (two warnings fixed) |
+| `python3 deploy/aws/render.py` twice | `production.yaml` unchanged by a re-render (11,710 user-data bytes, limit 14,500) |
+
+### Packaging, proven locally
+
+- `cargo build --release --locked -p silicon-dm-cli` (Mach-O arm64, `dm 0.15.0`), then
+  `scripts/package-apps.sh 0.15.0 macos-aarch64 target/mig/release/dm --discovery require` with
+  `~/.apps/bin/silicon-apps` 0.2.0 run in an empty home against an unreachable server (so the
+  Carbon's production sign-in is never used): discovery passed, archive
+  `dist/apps/dm-0.15.0-macos-aarch64.tar.gz` (5,041,407 bytes, sha256 `9764d4aa…91d4`) holding
+  exactly `apps.yaml` and `bin/dm` (mode 0755). Packing the same binary twice gives the same
+  sha256.
+- `silicon-apps validate` on the extracted (staged) directory and on the archive:
+  `"valid": true, "errors": []`, manifest `{app_id: dm, command: dm, version: 0.15.0, targets:
+  {macos-aarch64: {binary: bin/dm}}}`.
+- From the extracted archive under `env -i HOME=SILICON_HOME=<empty dir> PATH=/usr/bin:/bin`:
+  `dm --help` exit 0 (58 lines); `dm accounts --json` exit 0 with `"app_id":"dm"`,
+  `"client_id":"dm"`, `"version":"0.15.0"`, `device_flow` and `public_client` true;
+  `dm login status --json` exit 0, exactly `{"authenticated":false}`; `dm --version` → `dm 0.15.0`;
+  nothing written to the home.
+- `python3 scripts/build-release.py --targets macos-aarch64` built, checked and packed the target
+  with SHA256SUMS; `--stage-only` repacked it byte for byte; unknown targets and missing builds are
+  refused with the reason.
+
+### Cutover tooling, proven locally
+
+With the real `dm-migrate` against a scratch database (`dm_ship_ops`, dropped afterwards) and the
+shared local Silicon Accounts stack (dm's dev credentials, never printed):
+`psql -X -A -t -F '|'` with the bootstrap's status query lists migrations up to `40|accounts
+partition behaviour|t`; `dm-migrate link-identities --file /dev/stdin --dry-run` reads a mapping
+from a pipe (`mapping_rows: 1`); `dm-migrate draft-identity-mapping --out /dev/stdout` with two
+seeded IAM-era ids printed `c:shubham,b97` and listed `si:cos` as unresolved, and the bootstrap's
+parser split that real output into the mapping and the report; feeding the drafted mapping back
+through stdin to a dry run linked `c:shubham -> b97` (verified online) and reported
+`dm.bug_reports.actor_id: 1` rewritten, `si:cos` unmatched. The jq pipelines in the runbook (one-off
+task definition, change-set parameters for both stack updates, secret merge from files) were run on
+realistic documents: the parameter files name exactly the template's parameters.
+
+### Sweep
+
+`git grep -n -i -E 'iam|honeycomb|org_id|organi[sz]ation|\borg\b|tenant'` outside `docs/history/`
+(122 files). Every remaining hit is intentional:
+
+| where | why it stays |
+| --- | --- |
+| `migrations/` (32 files) | Applied migrations are immutable (sqlx checksums them); they describe the IAM-era schema. |
+| `src/` (`organization_id`, `OrganizationId`, `ACCOUNTS_PARTITION`, `infrastructure/postgres/*`) | Stage 1's storage partition: the column keeps its name, every new row is in `@accounts` (decisions, stage 1). |
+| `src/infrastructure/postgres/link_identities.rs`, `src/operator.rs`, `src/bin/dm_migrate.rs`, `deploy/aws/bootstrap-task.py` (help text) | The cutover tools re-key IAM-era identities and say so; operator-only copy. |
+| `iam_principal_id,accounts_uuid` (operator, bootstrap, runner, their tests) | The mapping file format the brief defines (D6). |
+| `src/config.rs` `OBSOLETE_VARIABLES`; `deploy/aws/bootstrap-task.py` `RETIRED`; cutover section 5 | Names of retired settings: logged when set, carried over for a rollback, then removed. |
+| `src/api/contracts.rs` `retired_routes`, `src/api/{access,render,sync}.rs`, `src/domain/*`, `src/reporting.rs`, `src/infrastructure/postgres/{accounts,group_ids,ting,directory}.rs` | Tell old clients why `/api/v1/iam` is gone, render unlinked IAM-era ids, refuse cursors signed with the old key, read the IAM-era directory tables (stage 1). |
+| `tests/` (fixture `legacy-0038.sql`, `link_identities`, `accounts_*`, `account_routes`, `ting_delivery`) | Upgrade and re-key tests load IAM-era data or assert the retired routes are gone. |
+| `crates/cli` (`Command::Iam`, `command_tests.rs`, `docs.rs`, `tests/{accounts,state}.rs`) | The hidden `dm iam --json` alias (one release) and the tests that keep retired words out of help and guides. |
+| `crates/client/src/ting.rs`, `runtime_tests.rs`, `tests/http_contract.rs`; `crates/protocol/src/lib.rs` | Reject schema-1 Ting references that carry `org_id`; load 0.14 profiles; accept older `g:<org>:<slug>` group ids. |
+| `crates/client/src/runtime/daemon.rs` (`Tenant`) | The shared relay's internal name for an attached home; not an account grouping, never shown (S24). |
+| `deploy/aws/*.yaml`, `README.md` (`AWS::IAM::Role`, `CAPABILITY_NAMED_IAM`, `IamInstanceProfile`, `arn:aws:iam::`) | AWS's own Identity and Access Management, unrelated to the retired service. |
+| `deploy/aws/test_bootstrap_*.py`, `test_run_bootstrap_task.py` | Fixtures of a 0.14 runtime secret and assertions that the templates carry no retired variable. |
+| `deploy/aws/gateway.yaml`, `gateway-bootstrap.sh` (`IAM_LOGIN_ORIGIN`), `README.gateway.md` | The SolidJS website's gateway, still what production runs; the web stage replaces it (S19). |
+| `web/` (29 files) | The SolidJS website, replaced wholesale by the web stage. |
+| `understanding/` | Carbon-only contract files; proposals are in `understanding-proposal.md`. |
+| `decisions.md`, `docs/migration/*` | The historical decision log and the migration record. |
+
+### Left for later stages
+
+- **E2E stage**: run `scripts/package-apps.sh` on the e2e build and the discovery commands from the
+  archive (scenario 7); the archive from this stage is in `dist/apps/` (ignored by git).
+- **Web stage**: the Next.js website must replace `web/` and its hosting files: `deploy/aws/gateway.yaml`,
+  `gateway-bootstrap.sh`, `render-gateway.py`, `README.gateway.md` and the `gateway` job of
+  `deployment-images.yml`, for a standalone Next.js server behind the DM ALB at
+  `dm.teamofsilicons.com` (settings `PUBLIC_URL`, `ACCOUNTS_URL`, `APP_API_URL`, and `APP_SECRET`
+  and `SESSION_SECRET` from Secrets Manager; streaming to the backend; DNS moves from Vercel). Add
+  the web job to `ci.yml`. The cutover's "The website" section is the plan to make concrete.
+- **Contract**: paste `understanding-proposal.md` into UNDERSTANDING.md (Carbon only).
+
+### Blocked on
+
+- Unchanged from stage 2: production registration of `dm` in Silicon Accounts and Silicon Apps;
+  Silicon Interface's switch to proofs; the Silicon runtime's switch (Silicon Apps installs, the new
+  sign-in, `dm inbox --watch`); Ting accepting proofs (only to turn Ting delivery back on).
+- Not verifiable here: the Windows, macOS x86_64 and Linux release builds (no runners for them on
+  this Mac; the workflow runs them natively, as before), and anything in AWS (templates are
+  cfn-lint clean and the operator tooling is tested against fakes).
+
+### Gotchas
+
+- zsh does not split an unquoted `$args`: `dm $args` with `args="accounts --json"` passes one
+  argument and clap answers exit 2. Use arrays or separate words in test loops.
+- `dm-migrate` logs to stdout; run operator commands with `DM_LOG_FILTER=error` when their stdout
+  is the product (the bootstrap does).
+- `cfn-lint` exits non-zero on warnings; `gateway.yaml` has an older W3005, so CI lints only the
+  two backend templates.
+- Python tests that import the hyphenated scripts leave `__pycache__/` beside them; it is ignored
+  now.
+- `psql` is not on PATH on this Mac: `/opt/homebrew/Cellar/postgresql@16/16.11_1/bin/psql`.
