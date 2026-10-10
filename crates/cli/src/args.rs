@@ -168,7 +168,9 @@ pub enum Command {
         after_help = "EXAMPLES\n  dm report 'Messages fail after reconnect'\n  dm report 'Fixed replay' --pr https://github.com/teamofsilicons/silicon-dm/pull/123\nInclude steps to reproduce and what you expected. Never include tokens."
     )]
     Report {
+        /// What went wrong: steps to reproduce and what you expected.
         message: String,
+        /// The pull request that fixes it (https://github.com/…/pull/N).
         #[arg(long, value_name = "URL")]
         pr: Option<String>,
     },
@@ -324,6 +326,7 @@ pub enum Conversations {
         after_help = "Repeat --participant for each other account (c:… or si:… id, or uuid). Anyone may start a conversation with a Carbon; a Silicon only with its custodian, the custodian's other Silicons and accounts on its allow-list.\nEXAMPLE\n  dm conversations create --participant c:ada --participant si:scout"
     )]
     Create {
+        /// Another account in the conversation (c:… or si:… id, or uuid); repeat for each.
         #[arg(long = "participant", required = true, value_name = "ACCOUNT")]
         participants: Vec<String>,
     },
@@ -331,8 +334,10 @@ pub enum Conversations {
 
 #[derive(Args)]
 pub struct GroupSettingsArgs {
+    /// The group's name (1 to 120 characters).
     #[arg(long)]
     pub name: String,
+    /// What the group is for (up to 4000 characters).
     #[arg(long, default_value = "")]
     pub description: String,
     /// Retired: groups are invite-only; invite accounts by id.
@@ -351,7 +356,10 @@ pub enum Groups {
         page: Pagination,
     },
     /// A group's name, owners, members and (for owners) pending invitations.
-    Show { group: String },
+    Show {
+        /// The group: its id (g:name) or UUID.
+        group: String,
+    },
     /// Create a group: you become its first owner and --member accounts are invited.
     #[command(
         after_help = "Invitations must be accepted (dm groups accept), except a custodian's own Silicons, who join at once. A Silicon is invited only by its custodian, the custodian's other Silicons or an account on its allow-list. New groups get the id g:<name-slug>.\nEXAMPLE\n  dm groups create --name 'Product design' --member c:ada --member si:scout"
@@ -359,12 +367,15 @@ pub enum Groups {
     Create {
         #[command(flatten)]
         settings: GroupSettingsArgs,
+        /// An account to invite (c:… or si:… id, or uuid); repeat for each.
         #[arg(long = "member", value_name = "ACCOUNT")]
         members: Vec<String>,
     },
     /// Rename or describe a group (owners); --version comes from dm groups show.
     Update {
+        /// The group: its id (g:name) or UUID.
         group: String,
+        /// The version dm groups show reported; a change made since then is not overwritten.
         #[arg(long)]
         version: i64,
         #[command(flatten)]
@@ -372,13 +383,17 @@ pub enum Groups {
     },
     /// Invite accounts (owners); each must accept before it sees the group.
     Invite {
+        /// The group: its id (g:name) or UUID.
         group: String,
+        /// An account to invite (c:… or si:… id, or uuid); repeat for each.
         #[arg(long = "member", required = true, value_name = "ACCOUNT")]
         members: Vec<String>,
     },
     /// Remove members or withdraw invitations (owners; a custodian may remove its own Silicons).
     Remove {
+        /// The group: its id (g:name) or UUID.
         group: String,
+        /// A member, or an account invited but not joined yet; repeat for each.
         #[arg(long = "member", required = true, value_name = "ACCOUNT")]
         members: Vec<String>,
     },
@@ -389,32 +404,45 @@ pub enum Groups {
     },
     /// Invitations waiting for you (a custodian adds --for si:… for one of its Silicons).
     Invitations {
+        /// One of the Silicons you look after (si:… or uuid).
         #[arg(long = "for", value_name = "SILICON")]
         for_account: Option<String>,
     },
     /// Accept your invitation and join (you see the whole history).
-    Accept { group: String },
+    Accept {
+        /// The group: its id (g:name) or UUID.
+        group: String,
+    },
     /// Decline your invitation (a custodian may decline for its Silicon with --for).
     Decline {
+        /// The group: its id (g:name) or UUID.
         group: String,
+        /// One of the Silicons you look after (si:… or uuid), to decline for it.
         #[arg(long = "for", value_name = "SILICON")]
         for_account: Option<String>,
     },
     /// Leave a group (the last owner makes someone else owner first).
-    Leave { group: String },
+    Leave {
+        /// The group: its id (g:name) or UUID.
+        group: String,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum GroupOwners {
     /// Make members owners.
     Add {
+        /// The group: its id (g:name) or UUID.
         group: String,
+        /// A member to make an owner (c:… or si:… id, or uuid); repeat for each.
         #[arg(long = "member", required = true, value_name = "ACCOUNT")]
         members: Vec<String>,
     },
     /// Stop members being owners.
     Remove {
+        /// The group: its id (g:name) or UUID.
         group: String,
+        /// An owner who stays a member but stops being an owner; repeat for each.
         #[arg(long = "member", required = true, value_name = "ACCOUNT")]
         members: Vec<String>,
     },
@@ -424,6 +452,7 @@ pub enum GroupOwners {
 pub enum Allow {
     /// The accounts a Silicon allows (yours, or with --for one you look after).
     List {
+        /// One of the Silicons you look after (si:… or uuid).
         #[arg(long = "for", value_name = "SILICON")]
         for_account: Option<String>,
     },
@@ -432,15 +461,19 @@ pub enum Allow {
         after_help = "Its custodian and the custodian's other Silicons never need to be listed.\nEXAMPLES\n  dm allow add c:ada                 (as the Silicon)\n  dm allow add c:ada --for si:scout  (as its custodian)"
     )]
     Add {
+        /// Accounts to allow (c:… or si:… ids, or uuids).
         #[arg(required = true, value_name = "ACCOUNT")]
         accounts: Vec<String>,
+        /// One of the Silicons you look after (si:… or uuid), to change its list.
         #[arg(long = "for", value_name = "SILICON")]
         for_account: Option<String>,
     },
     /// Take accounts off the list; existing conversations keep working.
     Remove {
+        /// Accounts to take off the list (c:… or si:… ids, or uuids).
         #[arg(required = true, value_name = "ACCOUNT")]
         accounts: Vec<String>,
+        /// One of the Silicons you look after (si:… or uuid), to change its list.
         #[arg(long = "for", value_name = "SILICON")]
         for_account: Option<String>,
     },
@@ -457,6 +490,7 @@ pub struct Content {
     /// Message JSON file or '-': message, attachments, voice_transcript, reply.
     #[arg(long, value_name = "FILE")]
     pub data: Option<PathBuf>,
+    /// The message text.
     #[arg(long)]
     pub text: Option<String>,
     /// An existing https link, repeatable. DM never uploads the file.
@@ -563,8 +597,10 @@ pub enum Drafts {
     Put {
         #[arg(help = CONVERSATION)]
         conversation: String,
+        /// DraftInput JSON file, or '-' for standard input.
         #[arg(long, value_name = "FILE")]
         data: PathBuf,
+        /// The draft's current version (0 when there is none yet).
         #[arg(long, default_value_t = 0)]
         version: i64,
     },
@@ -581,6 +617,7 @@ pub enum Bundles {
     Create {
         #[arg(help = CONVERSATION)]
         conversation: String,
+        /// Bundle JSON file, or '-' for standard input.
         #[arg(long, value_name = "FILE")]
         data: PathBuf,
     },
@@ -613,6 +650,7 @@ pub enum PresenceCommands {
     },
     /// Show what you are doing now (through the relay; it expires by itself).
     Set {
+        /// What you are doing now.
         #[arg(value_enum)]
         activity: ActivityValue,
     },
@@ -623,7 +661,10 @@ pub enum Gifs {
     /// Trending GIFs.
     Trending,
     /// Search GIFs by phrase.
-    Search { query: String },
+    Search {
+        /// The phrase to search for (1 to 50 characters).
+        query: String,
+    },
     /// GIFs you sent recently (Carbons; Silicons get an empty list).
     Recent,
 }
@@ -682,15 +723,22 @@ pub enum Profiles {
     /// Every profile of this home: who it is signed in as, without secrets.
     List,
     /// Make NAME the default profile.
-    Use { name: String },
+    Use {
+        /// The profile to use by default.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
     /// Keep DM's state under LOCATION/.silicon-dm (LOCATION must be a directory).
-    Home { location: PathBuf },
+    Home {
+        /// An existing directory; DM keeps its state in LOCATION/.silicon-dm.
+        location: PathBuf,
+    },
     /// Turn diagnostics (no message content, no tokens) on or off for this home.
     Telemetry {
+        /// true to send diagnostics, false not to.
         #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
@@ -722,11 +770,15 @@ pub enum Relay {
         after_help = "JSON: {\"type\":\"request\",\"data\":{\"request_id\":\"UUID\",\"profile\":\"default\",\"request\":{\"operation\":\"send_message\",\"conversation_id\":\"c:ada\",\"idempotency_key\":\"stable-key\",\"message\":{\"message\":\"hello\"}}}}\nNEXT: dm relay result REQUEST_ID"
     )]
     Submit {
+        /// RelayRequest JSON file, or '-' for standard input.
         #[arg(long, value_name = "FILE")]
         data: PathBuf,
     },
     /// The state and result of a submitted request.
-    Result { request_id: uuid::Uuid },
+    Result {
+        /// The request_id the submission returned.
+        request_id: uuid::Uuid,
+    },
     /// The loopback address and this home's private relay bearer, for local integrations.
     Credentials,
 }

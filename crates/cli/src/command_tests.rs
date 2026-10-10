@@ -106,6 +106,11 @@ fn every_visible_command_explains_itself_without_retired_words() {
         if command.get_about().is_none() && path != "dm" {
             problems.push(format!("{path}: no description"));
         }
+        for argument in command.get_arguments() {
+            if !argument.is_hide_set() && argument.get_help().is_none() {
+                problems.push(format!("{path}: {} has no help", argument.get_id()));
+            }
+        }
         let help = command
             .clone()
             .render_long_help()
