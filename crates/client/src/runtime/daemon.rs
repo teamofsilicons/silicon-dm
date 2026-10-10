@@ -266,6 +266,7 @@ fn launch_relay(
             });
         }
     }
+    super::prevent_detached_pipe_inheritance()?;
     let mut child = tokio::process::Command::from(command)
         .spawn()
         .context("could not start the shared DM relay")?;

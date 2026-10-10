@@ -13,7 +13,7 @@ default = []
 # Sign in to DM with Silicon Accounts as DM's public client (device flow, short-lived tokens).
 accounts = ["dep:silicon-accounts-client", "tokio/time"]
 # The CLI's local runtime: stored sign-ins, the durable outgoing relay, the sync inbox.
-runtime = ["accounts", "silicon-dm-protocol/http", "dep:anyhow", "dep:axum", "dep:blake3", "dep:fs2", "dep:libc", "dep:rusqlite", "dep:semver", "dep:time", "tokio/macros", "tokio/rt-multi-thread", "tokio/signal", "tokio/sync", "tokio/process"]
+runtime = ["accounts", "silicon-dm-protocol/http", "dep:anyhow", "dep:axum", "dep:blake3", "dep:fs2", "dep:libc", "dep:rusqlite", "dep:semver", "dep:time", "dep:windows-sys", "tokio/macros", "tokio/rt-multi-thread", "tokio/signal", "tokio/sync", "tokio/process"]
 
 [[bin]]
 name = "dm-relay"
@@ -43,3 +43,6 @@ uuid = { version = "1.26.0", features = ["serde", "v4"] }
 axum = { version = "0.8.9", features = ["json", "form", "query", "tokio", "http1"] }
 tempfile = "3"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", optional = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }

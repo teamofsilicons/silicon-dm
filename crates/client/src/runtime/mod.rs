@@ -17,6 +17,38 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
+/// Windows keeps inherited standard-pipe handles inheritable. Even when the relay's
+/// own stdout is a log file, CreateProcess can copy those unrelated parent handles,
+/// holding a caller's output pipe open after the CLI exits. Explicit Stdio::inherit
+/// still works: std duplicates the handle it is asked to pass to a child.
+fn prevent_detached_pipe_inheritance() -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{
+            Foundation::{HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation},
+            Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType},
+            System::Console::{
+                GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+            },
+        };
+        for stream in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: these APIs inspect an OS-owned standard handle and change only
+            // its inheritance flag. They neither close it nor change its access rights.
+            unsafe {
+                let handle = GetStdHandle(stream);
+                if !handle.is_null()
+                    && handle != INVALID_HANDLE_VALUE
+                    && GetFileType(handle) == FILE_TYPE_PIPE
+                    && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) == 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Executable and arguments used for an independently running relay process.
 #[derive(Clone, Debug)]
 pub struct DaemonCommand {
@@ -270,6 +302,7 @@ impl LocalRuntime {
         }
         // The request is already durable; if the starter cannot launch, the
         // next DM command that starts the relay sends it.
+        prevent_detached_pipe_inheritance()?;
         let _ = command.spawn();
         Ok(crate::relay::RelayAcknowledgement {
             acknowledged: true,
