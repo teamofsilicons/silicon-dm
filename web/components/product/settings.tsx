@@ -1,10 +1,10 @@
 "use client";
 import {useState} from "react";
 import {Page,PageHeader,Surface,Section} from "@/components/foundation/layout/layout";
-import {Input} from "@/components/arc/input/input";
-import {Button} from "@/components/arc/button/button";
-import {Textarea} from "@/components/arc/textarea/textarea";
-import {HoldToConfirm} from "@/components/arc/hold-to-confirm/hold-to-confirm";
+import {Input} from "@/components/silicon-ui/input/input";
+import {Button} from "@/components/silicon-ui/button/button";
+import {Textarea} from "@/components/silicon-ui/textarea/textarea";
+import {HoldToConfirm} from "@/components/silicon-ui/hold-to-confirm/hold-to-confirm";
 import {call,useResource,useAction,Feedback,Empty,ResourceError} from "./common";
 import type {Me,AllowList} from "@/lib/product/types";
 import styles from "./product.module.css";
