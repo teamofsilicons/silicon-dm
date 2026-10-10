@@ -1,0 +1,128 @@
+name: Build Silicon Apps release
+
+# Builds the dm CLI for the six targets it ships, each on its own native runner,
+# runs the CLI tests there and checks the binary where it was built: the native
+# format, the glibc ceiling on Linux, and the three discovery commands Silicon
+# Apps runs (`dm --help`, `dm accounts --json`, `dm login status --json`, signed
+# out in an empty home). One Linux job then packs one Silicon Apps archive per
+# target with scripts/package-apps.sh (`silicon-apps validate` + `silicon-apps
+# pack`) and uploads them with SHA256SUMS as the workflow artifact
+# `dm-silicon-apps-release`. It publishes nothing: uploading to Silicon Apps and
+# publishing the crates are separate, reviewed steps (docs/releasing.md).
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: 1.98.0
+  SILICON_APPS_CLI_VERSION: 0.2.0
+
+jobs:
+  version:
+    name: Read the release version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check the tag against the CLI and workspace versions
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("crates/cli/Cargo.toml", "rb"))["package"]["version"])')
+          workspace=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [ "$version" != "$workspace" ]; then
+            echo "::error::crates/cli/Cargo.toml ($version) and Cargo.toml ($workspace) must carry the same version."
+            exit 1
+          fi
+          if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "v$version" ]; then
+            echo "::error::The release tag $REF_NAME must be v$version, the version in crates/cli/Cargo.toml."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    name: Build ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, target: linux-x86_64, triple: x86_64-unknown-linux-gnu, binary: dm}
+          - {runner: ubuntu-24.04-arm, target: linux-aarch64, triple: aarch64-unknown-linux-gnu, binary: dm}
+          - {runner: windows-2025, target: windows-x86_64, triple: x86_64-pc-windows-msvc, binary: dm.exe}
+          - {runner: windows-11-arm, target: windows-aarch64, triple: aarch64-pc-windows-msvc, binary: dm.exe}
+          - {runner: macos-15-intel, target: macos-x86_64, triple: x86_64-apple-darwin, binary: dm}
+          - {runner: macos-15, target: macos-aarch64, triple: aarch64-apple-darwin, binary: dm}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.triple }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Check the CLI's packaged guides match docs/
+        run: python scripts/sync-cli-docs.py --check
+      - run: cargo test --locked -p silicon-dm-cli --target ${{ matrix.triple }}
+      - run: cargo build --release --locked -p silicon-dm-cli --target ${{ matrix.triple }}
+      # Every runner builds natively, so the discovery commands always run here.
+      - name: Check the binary on the runner that built it
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: >-
+          python scripts/package_apps.py "$VERSION" ${{ matrix.target }}
+          target/${{ matrix.triple }}/release/${{ matrix.binary }}
+          --check-only --discovery require
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: target/${{ matrix.triple }}/release/${{ matrix.binary }}
+          if-no-files-found: error
+
+  package:
+    name: Pack the Silicon Apps archives
+    needs: [version, binaries]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-binaries
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Install the Silicon Apps packer
+        run: cargo install --locked silicon-apps-cli --version "$SILICON_APPS_CLI_VERSION"
+      - name: Validate and pack one archive per target
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for target in linux-x86_64 linux-aarch64 windows-x86_64 windows-aarch64 macos-x86_64 macos-aarch64; do
+            binary=dm
+            case "$target" in windows-*) binary=dm.exe ;; esac
+            scripts/package-apps.sh "$VERSION" "$target" "release-binaries/$target/$binary"
+          done
+          cd dist/apps
+          sha256sum dm-*.tar.gz > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          cat SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dm-silicon-apps-release
+          path: |
+            dist/apps/*.tar.gz
+            dist/apps/*.tar.gz.sha256
+            dist/apps/SHA256SUMS
+          if-no-files-found: error

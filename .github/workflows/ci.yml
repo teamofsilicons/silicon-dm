@@ -15,19 +15,48 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  bootstrap-grants:
-    name: Restricted database bootstrap grants
+  deploy-config:
+    name: Deployment configuration
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: python3 deploy/aws/test_bootstrap_grants.py
+      - name: Test the bootstrap scripts (database grants and the runtime secret)
+        run: python3 -m unittest discover -s deploy/aws -p 'test_*.py' -v
       - run: bash -n deploy/aws/bootstrap.sh
-      - run: python3 deploy/aws/render.py && git diff --exit-code -- deploy/aws/production.yaml
+      - name: Check production.yaml embeds the reviewed bootstrap
+        run: python3 deploy/aws/render.py && git diff --exit-code -- deploy/aws/production.yaml
+      - name: Lint the CloudFormation templates
+        run: pipx run cfn-lint==1.57.2 deploy/aws/fargate.yaml deploy/aws/production.yaml
+
+  packaging:
+    name: Silicon Apps packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Test the packager
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Check the shell entry points
+        run: bash -n scripts/package-apps.sh && sh -n scripts/install.sh
 
   rust:
     name: Rust quality gate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    services:
+      # Database tests create and drop one database each on this server.
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DM_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -49,11 +78,31 @@ jobs:
       - name: Run tests
         run: cargo test --locked --workspace --all-targets --all-features
 
+      - name: Check dm answers Silicon Apps' discovery commands in an empty home
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("crates/cli/Cargo.toml", "rb"))["package"]["version"])')
+          python3 scripts/package_apps.py "$version" linux-x86_64 target/debug/dm --check-only --discovery require
+
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Validate OpenAPI contract
         run: npx --yes @redocly/cli@2.49.0 lint openapi.yaml
+
+  docs:
+    name: Documentation site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install the documentation site's locked dependencies
+        run: npm ci --prefix docs-site
+      - name: Build the documentation site
+        run: npm run build --prefix docs-site
+      - name: Check every page's links, anchors and canonical URLs
+        run: npm run check --prefix docs-site
 
   dependency-policy:
     name: Dependency policy
@@ -86,7 +135,7 @@ jobs:
             --network-alias postgres \
             --env POSTGRES_PASSWORD=postgres \
             postgres:16-bookworm
-          for attempt in {1..30}; do
+          for _ in {1..30}; do
             if docker exec dm-postgres pg_isready --username postgres --dbname postgres; then
               exit 0
             fi
