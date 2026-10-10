@@ -61,7 +61,7 @@ pub struct Actor {
     /// The current public id (`c:ada`, `si:scout`); the uuid for a deleted account; the stored
     /// id for an identity from before Silicon Accounts that was never linked to an account.
     pub id: String,
-    /// The permanent Silicon Accounts uuid (short and case-sensitive, e.g. `zQo`).
+    /// The permanent Silicon Accounts 128-bit UUID (canonical lowercase UUIDv4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
