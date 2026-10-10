@@ -232,3 +232,50 @@ with these additions:
 | # | Decision |
 | --- | --- |
 | C28 | DM's sign-in setup on the shared stack required a phone number, so the device-flow approval was refused (`requirements_missing`). `apps/dm.md` says nothing is required, so this stage set `required_fields` to `[]` (read-modify-write with `expected_version` 2 → 3; redirect URIs, methods, optional fields, device flow and public client unchanged). DM's webhook was not touched. Production should match (cutover.md). |
+
+## Stage 3 — packaging, CI, deployment and documentation (2026-10-10)
+
+### Packaging and release
+
+| # | Decision | Why |
+| --- | --- | --- |
+| S1 | `packaging/apps.yaml.in` and `scripts/package-apps.sh` (implemented in `scripts/package_apps.py`) pack one archive per target, `dist/apps/dm-<version>-<target>.tar.gz` with `apps.yaml` naming only that target and `bin/dm[.exe]`, after `silicon-apps validate` and `pack`, then check the archive's exact contents and validate it again extracted. The design is the one the other apps of this migration use. | The brief's packaging convention; one design across the eight apps is easier to review and operate. |
+| S2 | The packager refuses a version that differs from `crates/cli/Cargo.toml` **or** from the workspace `Cargo.toml`. | DM releases the service and the CLI under one version (the Honeycomb packager enforced the same). |
+| S3 | Linux binaries may need at most glibc 2.39. The release workflow keeps DM's native runners (`cargo build` on ubuntu-24.04 and ubuntu-24.04-arm); the Mac path (`scripts/build-release.py`) keeps cargo-zigbuild against glibc 2.28. | "Same toolchains as before": DM's releases were built natively on Ubuntu 24.04, which is what the fleet hosts and the Apps Linux workers run. |
+| S4 | The six targets DM shipped stay (linux x86_64/aarch64, windows x86_64/aarch64, macOS x86_64/aarch64); linux-i686 and linux-armv7hf are not added. The packager accepts all nine, so adding one later needs no packager change. | The brief keeps the existing targets; the fleet runs x86_64 and aarch64; 32-bit cross builds of the rustls/aws-lc and SQLite stack are unproven. |
+| S5 | Every build runner is native, so each one runs the discovery commands with `--discovery require`; one Linux job installs `silicon-apps-cli` 0.2.0 and packs all six, with SHA256SUMS, as the artifact `dm-silicon-apps-release`. Tags `v*` must equal the CLI (and workspace) version. `release.yaml` became `release.yml`. | The Silicon Apps workers re-run the commands at upload, but only the Linux ones exist; checking on the runner that built each binary catches the others now. |
+| S6 | `publish-release.yml` (GitHub release of the Honeycomb bundle) is removed, not ported. | Silicon Apps is the only distribution channel; a GitHub release with binaries would be a second one. Tags still mark releases. |
+| S7 | `scripts/build-release.py` replaces `build-honeycomb-release.py`: it builds the chosen targets on a Mac and packs them with the same packager. `honeycomb.yaml` and `package-release.py` are deleted. | Keeps the local release path without the retired packager. Verified for macos-aarch64 here (no zig or MSVC SDK on this Mac). |
+| S8 | `scripts/install.sh` stays (the docs site serves it at `/install.sh`) and hands over to `silicon-apps install dm`; without `silicon-apps` it prints the official installer commands and exits 1 instead of downloading and running another installer. | Anything that still fetches the old URL gets a working instruction; running a second remote installer silently is not ours to do. |
+
+### CI
+
+| # | Decision | Why |
+| --- | --- | --- |
+| S9 | The Rust job uses a Postgres 16 service container (`DM_TEST_POSTGRES_URL`) instead of testcontainers, runs the discovery check on the built `dm`, and its timeout is 45 minutes. New jobs: the packager's unit tests, the deployment tests plus `cfn-lint` 1.57.2 on `fargate.yaml` and `production.yaml`, and the docs site's build and link check. | The stage asks for what the new code needs; the docs site was never built in CI; `gateway.yaml` is left out of `cfn-lint` because the website rewrites it and it carries an older warning. |
+
+### Deployment configuration
+
+| # | Decision | Why |
+| --- | --- | --- |
+| S10 | Non-secret Silicon Accounts settings are stack parameters (`AccountsUrl`, `AccountsApiUrl`, `AppId`, `ProofIssuers` defaulting to `interface` for the five scopes, `TingUrl` empty); `IamBaseUrl` is gone. Secrets stay in the existing `AppSecretArn` and runtime secret under the new key names (`DM_APP_SECRET`, `DM_ACCOUNTS_WEBHOOK_SECRET`, `DM_DATA_KEY`). | "The same secret store, new key names"; parameters are reviewable in a change set. |
+| S11 | The testing RDS instance stays in both templates, annotated as retained and unused; the bootstraps no longer configure it and the bootstrap task role no longer reads its secret. | Never delete data; removing the resource would make CloudFormation delete (or fail to delete) a protected database. Its fate is a Carbon's call. |
+| S12 | The ECS bootstrap carries the 0.14 runtime keys over unchanged (`RETIRED`) and never rotates `DM_DATABASE_URL` or `DM_DATA_KEY`. Section 5 of the cutover removes the retired keys after the rollback window. | The 0.14 task definitions name those keys; without them a rollback could not start. A new data key would reset every cursor and orphan stored proofs. |
+| S13 | Bootstrap refusals now print the field or step (`Missing or invalid secret field: DM_DATA_KEY`); before, a missing field printed only `ValueError`. Values are never printed. | Errors say exactly what and why. |
+| S14 | The cutover steps are commands of the bootstrap image (`status`, `migrate`, `draft-identity-mapping`, `link-identities`), started by `deploy/aws/run-bootstrap-task.py` in the app security group. The mapping travels in `DM_IDENTITY_MAPPING` and reaches `dm-migrate` on stdin; the draft is printed between markers. Operator runs log at `error` level. | The database is reachable only from the app security group; the bootstrap task already has the right roles and network. The task's filesystem is read-only; dm-migrate logs to stdout. Proven with the real `dm-migrate` against local Postgres and the local Accounts stack. |
+| S15 | The mapping is drafted before the window with a one-off task definition (`silicon-dm-cutover`: the 0.15 bootstrap image on the 0.14 roles). | The stack cannot be updated before the window without moving the running services to task definitions whose secrets do not exist yet. Reviewing the mapping must not lengthen the window. |
+| S16 | The window stops 0.14 before the snapshot, and rollback restores the snapshot under the same identifier. Running 0.14 on a 0040 database is not offered as a rollback. | Nothing is written between the stop and the restore point, so a rollback loses nothing; 0040 changes group access, delivery sequences and new group ids, which 0.14 was never tested against. |
+| S17 | The webhook URL is set in the window once 0.15 answers; its secret is generated before (`silicon-apps webhook dm rotate` works without a URL). The picks add `custodian_change` to the defaults. | Deliveries to 0.14 would fail; DM needs custodian changes, which are not a default pick. |
+| S18 | Production sign-in setup: only the website callback as redirect URI, `device_flow` and `public_client` on, no required fields, email and timezone optional; `allowed_origins` untouched. | The CLI's device flow and short-lived token exchange; the website exchanges codes on its server. |
+| S19 | The website's hosting files (`gateway.yaml`, `gateway-bootstrap.sh`, `render-gateway.py`, the gateway image job, `README.gateway.md`) are left for the web stage, with a pointer in `README.gateway.md` and the plan in the cutover's "The website". | They configure the SolidJS gateway, which keeps running until the new website replaces it; the Next.js server's files do not exist yet. |
+
+### Documentation
+
+| # | Decision | Why |
+| --- | --- | --- |
+| S20 | Dated records (`RELEASE_IAM5.md`, `deploy/*` records and verification, `deploy/releases`, `releases/`) moved to `docs/history/`, which gained a README saying nothing there is current. | The brief's history rule; nothing referenced them. |
+| S21 | `docs/releasing.md` is the release guide and a packaged topic (`dm docs releasing`), so the CLI's retired-word test guards it. | Releasing is part of operating DM, like `dm docs deployment`. |
+| S22 | Install copy names both ways in: Carbons use the website (nothing to install), the command comes from `silicon-apps install dm`, with a link to install Silicon Apps. | The stage's install instruction for Carbons and Silicons. |
+| S23 | The docs site links to `main` (it linked a retired release branch), its preview banner no longer names the earlier sign-in, and its package version follows DM's. | No current page may point at the retired systems. |
+| S24 | The relay's internal type `Tenant` (a home attached to the shared relay) keeps its name. | An internal name for a state directory, never shown; not an account grouping. |
+| S25 | The EC2 user data accepts only standard base64 for `DM_DATA_KEY`; the ECS bootstrap also accepts URL-safe base64, as the service does. | The EC2 template is the alternate path and its user data has a size limit; the documented `openssl rand -base64 32` is standard base64 either way. |

@@ -833,3 +833,21 @@ environments and the IAM webhook are retired; the Accounts webhook at
 sync over HTTP. Existing data is kept: IAM-era identities are re-keyed at
 cutover by `dm-migrate link-identities`. The full record of choices is in
 `docs/migration/decisions.md`.
+
+## D-060 — Silicon Apps distribution and the Silicon Accounts deployment
+
+**Status:** Accepted; completes D-059 for releases and deployments
+
+The `dm` command is distributed and updated only by Silicon Apps. Each release builds one
+`.tar.gz` per target, with an `apps.yaml` that names only that target, on the target's own
+native runner, and checks each binary there (format, glibc ceiling, and `--help`,
+`accounts --json` and `login status --json` signed out in an empty home). The workflow publishes
+nothing: uploads, releases and promotion are deliberate commands (`docs/releasing.md`). DM never
+replaces its own executable.
+
+The deployment templates pass the Silicon Accounts settings as stack parameters and read DM's app
+secret, webhook secret and data key from the runtime secret. The bootstrap never rotates the
+database URL or the data key, keeps the earlier runtime keys for a rollback window, and runs the
+cutover's re-key steps as one-off tasks. The testing database is retained but unused. The full
+record of choices is in `docs/migration/decisions.md`; the procedure is
+`docs/migration/cutover.md`.

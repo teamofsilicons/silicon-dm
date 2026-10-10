@@ -39,6 +39,10 @@ Add after the first paragraph:
 
 In the Ting registration paragraph, replace "using their IAM consent" with "with a proof of their own agreement".
 
+In the paragraph about the message schema, replace "Ting carries an event with the org, conversation and message
+references" with "Ting carries an event with the recipient (its uuid and current id), the conversation and the message
+references".
+
 ## Speed & Reliability
 
 Replace "using the agreed IAM and Ting application authentication" with "using DM's own App verification proof for
@@ -111,14 +115,25 @@ Replace the paragraph that starts "Whenever someone authenticates as a silicon o
   hidden `dm iam --json` printing the same object for one release, while Silicon runtimes still call it.)
 - Replace the two `ting webhook` / `ting unhook` lines with "For receiving DM updates use `dm inbox --watch`; when DM
   delivers through Ting, use Ting's commands."
+- Replace the "App Internals" paragraph with:
+
+  > App Internals: DM has a stateless rust library and a stateful cli built on it. The CLI reads DM's sync feed for
+  > incoming updates. When DM delivers through Ting, Ting owns the always running daemon for incoming delivery, and DM
+  > does not duplicate that daemon's connections, queues, retries or webhook forwarding.
+
 - Replace "On the docs page, show `honeycomb install 'dm'` to install the CLI" with "On the docs page, show
-  `silicon-apps install dm` to install the CLI".
+  `silicon-apps install dm` to install the CLI, and say that Carbons can also use DM on the website without installing
+  anything".
 - Replace "These CLIs can be used by humans, but more often than not, it'll be used by an agent" with "These CLIs can be
   used by Carbons, but more often than not, they'll be used by a Silicon".
 
 ## Docs
 
 Replace "Since all IAM apps can both be used as is" with "Since all the apps can both be used as is".
+
+## Telemetry
+
+Replace "All IAM apps use Space Station" with "All the apps use Space Station".
 
 ## Updates
 
