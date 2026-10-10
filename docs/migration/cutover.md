@@ -66,11 +66,36 @@ Carbon's go-ahead.
 
 ## 3. After the window
 
-- Silicons and CLIs sign in again with Silicon Accounts (`dm login`; the CLI stage ships it). Old CLIs get 406
-  `unsupported_contract`.
+- Silicons and CLIs sign in again with Silicon Accounts (`dm login`, see "CLI and Silicon runtimes" below). Old CLIs
+  get 406 `unsupported_contract`.
 - Sync cursors from 0.14 fail once with `sync_reset_required` (the cursor key changed); clients reset and continue.
 - Ting stays off: handoffs are kept and marked discarded (`ting_not_configured`). When Ting accepts Silicon Accounts
   proofs, set `DM_TING_URL`; recipients enrol on their next request.
+
+## CLI and Silicon runtimes (dm 0.15)
+
+The CLI moves in the same window; a 0.14 CLI gets 406 `unsupported_contract` from the 0.15 service.
+
+1. **Install** `dm` 0.15 through Silicon Apps on every machine that uses DM (`silicon-apps install dm`). A running
+   0.14 relay is replaced automatically by the first 0.15 command; queued requests survive.
+2. **DM's sign-in setup** at Silicon Accounts: `device_flow` and `public_client` on (the CLI signs in without a secret),
+   no required fields. (The local test stack had `required_fields: ["phone"]`; this stage set it to `[]` there.)
+3. **Silicons sign in again**: the runtime runs `silicon-accounts login --app dm -q | dm login --slt-stdin` (the
+   positional `dm login <slt>` it uses today still works). Carbons run `dm login` and approve the code. Each Silicon
+   needs its Silicon Accounts identity first.
+4. **Discovery**: `dm accounts --json` replaces `dm iam --json`; the old command stays as a hidden alias printing the
+   same object for one release, so a runtime that still calls it keeps working. `dm login status --json` keeps its
+   meaning (`{"authenticated":false}` when signed out).
+5. **Receiving**: `dm delivery login`, `dm webhook … --all-apps` and `dm unhook` now answer `command_retired`. While
+   `DM_TING_URL` is unset, a Silicon runtime receives by supervising `dm inbox --watch` (JSON lines; resumes from its
+   saved cursor) or polling `dm sync --wait 30`, and fetches messages as before (`dm messages show`). Restore Ting
+   delivery only when Ting accepts Silicon Accounts proofs.
+6. **Local state**: 0.14 profiles load as signed out (their tokens are dropped). Requests they had queued are sent once
+   the same id signs in again, and fail with `account_changed` if another id signs in to that profile. Requests queued
+   for test environments fail with `testing_environments_retired`. Settings of retired features (test keys, update
+   policy) are dropped at the first write.
+7. **Interface and other Rust consumers** move to `silicon-dm-client` 0.15 (`with_token` / `with_proof`; no organization
+   header).
 
 ## Rollback
 

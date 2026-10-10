@@ -170,3 +170,141 @@ scripts in the session scratchpad `dm-svc/`: `e2e-start.sh`, `e2e-start-runtime.
 - When moving the shared stack's `dm` webhook for a test, read it first and put it back (`PUT` keeps the secret;
   never rotate it, other runs use the seeded secret from `test-stack.json`).
 - Old clients' sync cursors fail once with `sync_reset_required` (the cursor key is now `DM_DATA_KEY`).
+
+## 2026-10-10 — Stage 2 (client crate and CLI): done
+
+`silicon-dm-client` 0.15 and the `dm` CLI speak Silicon Accounts only, follow the Silicon Apps CLI contract and work
+against the migrated service. Every judgement call is C1–C28 in [decisions.md](decisions.md); the CLI part of the
+runbook is "CLI and Silicon runtimes" in [cutover.md](cutover.md); contract wording is in
+[understanding-proposal.md](understanding-proposal.md).
+
+Baseline before any change (same commands as below): CLI 12 tests, client 46 + 4, protocol 3, all passing; one client
+lane test (`profile_wide_requests_keep_order_with_everything_before_them`) failed once and passed 3/3 on rerun: it
+crossed a one-second backoff boundary. It is fixed (the test now pushes the retry well into the future).
+
+What changed:
+
+- **Client (`crates/client`)**: `Client::with_token` / `with_proof` (Bearer or `Proof sap_…`), contract 4 header, no
+  organization header; `accounts`, `me`, `delivery`, allow-list, owners, invitations, accept/decline/leave,
+  `conversations_for` (custodian `?for=`), `send_to_recipient`, `sync` with `wait`. Models: `Actor` with `uuid`
+  (and name, photo, deleted, legacy), `Me`, `Delivery`, `SignInDiscovery`, `AllowList`/`AllowListEntry`,
+  `Invitation`, owners/members/pending in `GroupDetails`, supersession fields. Errors keep `hint`; `code()`,
+  `message()`, `hint()`, `status()`, `is_code()`. Removed: IAM sign-in, test environments, delivery
+  registration/authorization, `check_update`, WebSocket shims and frame types. The `ting` module validates schema-2
+  references (recipient `{uuid,id}`); schema-1 references are `LegacyReference`.
+- **`accounts` feature**: `PublicClient` (device flow, short-lived token exchange, refresh, revoke) with classified
+  `SignInError`s.
+- **Runtime**: profile format 2 in `config.json` (sign-in, account, DM and Accounts URLs), single-flight refresh under
+  the profile lock, legacy profiles signed out with their old id, unreadable state kept aside, `save_sign_in` (account
+  switch and legacy-queue rules, replaced sign-in revoked), `login_status`, `offline_status`, `logout`, `refresh`,
+  `profiles`, `with_client`, `sync_page`, `inbox`; relay without sandbox generations, `sync_feed` status marker,
+  retired test-environment requests failed; `ting_delivery` and `updates` removed with `silicon-ting-client`.
+- **CLI (`crates/cli`)**: new command tree (`args.rs`), `auth.rs` (login/accounts), `receive.rs` (sync/inbox),
+  `output.rs` (JSON errors with hints); discovery, docs and signed-out status before any runtime; retired commands
+  answer `command_retired`; `publish = false`.
+- **Docs**: every packaged guide rewritten (new `accounts.md`, `cli/receiving.md`); IAM/Honeycomb-era records in
+  `docs/history/`; sync script with `--check` (CI step); docs site skips history/migration; READMEs, deployment and
+  configuration guides; OpenAPI corrections (allow-list entries, draft `message_content`, owners `Idempotency-Key`).
+- **Service test** `tests/wire_contract.rs` follows the client API (Bearer, contract 4; the retired WebSocket frame
+  test became a rendered-account round trip).
+
+### Commits
+
+| commit | subject |
+| --- | --- |
+| e2b38fe | Move the DM client and CLI to Silicon Accounts |
+| 9ba6733 | Read allow-list entries as the service sends them |
+| 5140793 | Rewrite the DM guides for Silicon Accounts and Silicon Apps |
+| (last) | Record stage 2 results, decisions and the CLI cutover |
+
+### Tests (from the worktree with the brief's Rust env)
+
+| command | result |
+| --- | --- |
+| `cargo fmt --all -- --check` | ok |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | ok |
+| `cargo deny --all-features check` | advisories ok, bans ok, licenses ok, sources ok |
+| `DM_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5460/postgres cargo test --locked --workspace --all-features` | **163 passed, 0 failed** (service 44 + 3 + 6 + 5 + 2 + 6 + 6 + 6 + 4 + 7 + 6; CLI unit 6, accounts 8, discovery 1, em_dash 1, home 2, message_length 1, receive 3, state 4; client 35 + http_contract 4; protocol 3) |
+| `python3 scripts/sync-cli-docs.py --check` | `crates/cli/docs matches 18 canonical files` |
+| `npx --yes @redocly/cli@2.49.0 lint openapi.yaml` | valid (4 problems explicitly ignored, as before) |
+| `cd docs-site && npm ci && npm run build && npm run check` | 17 pages built and verified |
+| `cargo package --list --allow-dirty --offline -p silicon-dm-client` / `-p silicon-dm-protocol` | file lists as expected (sources, README, tests) |
+
+New tests: `crates/cli/tests/accounts.rs` (real binary against an axum stand-in for Silicon Accounts and DM: discovery
+golden JSON in an empty home with no files written; device flow pending → slow_down → approved with the poll
+intervals measured; denied; expired (answer and deadline); Silicon `--slt-stdin` with the token in no file and no
+output, 0600/0700; positional, `--slt` and `--token-file` forms; every refusal code without echo; service trusting
+another Accounts refused before spending; three concurrent commands rotating once; a refused refresh signing the
+profile out), `tests/state.rs` (0.14 profile + queued send released to the same id, failed for another id, retired
+test key not written back; damaged state kept aside; retired commands and flags), `tests/receive.rs` (sync pages,
+inbox lines with hydration, `--mark-delivered`, inaccessible, saved-cursor resume, `--watch` until SIGTERM exit 0),
+`src/command_tests.rs` (documented forms parse, removed ones do not, every visible help page has a description and no
+retired words), client `runtime_tests.rs` (legacy profile, damaged file, eight concurrent refreshes rotating once,
+refused refresh, unreachable Accounts, account takeover refused, revoke forms), `accounts.rs` unit tests (refusal
+codes, URLs, non-`slt_` input never sent), `tests/http_contract.rs` (Bearer/Proof/contract header, custodian and
+allow-list routes, owners idempotency, sync long-poll query, errors with hints, Ting hydration without ACKs).
+
+### Live, against the shared local Silicon Accounts stack and the migrated service
+
+Service: `dm-api` on 127.0.0.1:4121 with a fresh `dm_e2e_cli` database (`<session scratch>/dm-cli/start-api.sh`);
+CLI env per home: `HOME=SILICON_HOME=<fresh dir>`, `SILICON_DM_RELAY_HOME=<dir>/relay`, `DM_API_URL=http://127.0.0.1:4121`,
+`ACCOUNTS_URL=http://localhost:9590`. Identities from `mint.mts` (`dm-cli-c1-<run>`, `dm-cli-s1-<run>`,
+`dm-cli-c2-<run>`). Scripts: `<session scratch>/dm-cli/e2e_cli.py`, `e2e_cli_2.py` (never print secrets).
+
+- `e2e_cli.py` run 602814: **30/30**. Discovery in an empty `HOME`/`SILICON_HOME`: `--help` exit 0 (58 lines);
+  `accounts --json` exit 0 →
+  `{"accounts_url":"https://accounts.teamofsilicons.com","api_url":"https://backend.dm.teamofsilicons.com","app_id":"dm","client_id":"dm","contract_version":4,"device_flow":true,…,"version":"0.15.0",…}`;
+  `login status --json` → exactly `{"authenticated":false}`; nothing written. Silicon: `mint slt` →
+  `dm --json login --slt-stdin` → `{"uuid":"2VO","id":"si:dm-cli-s1-602814","kind":"silicon","method":"slt","custodian":{"uuid":"qB5",…}}`;
+  token in no file or output; `config.json` 0600; `login status --json` → `verified: true`; `whoami` through the relay
+  → account and custodian; the conversation with its custodian exists (`c:dm-cli-c1-602814::si:dm-cli-s1-602814`);
+  `messages send c:… --wait` → completed, code `000`, sender rendered with uuid. Refusals from the real Accounts: reused
+  token → `slt_already_used` ("…already used; each one works once…"), a token for `remind` → `slt_wrong_app` naming
+  'remind', hints name `silicon-accounts login --app dm -q`. Carbon: `dm --json login` printed
+  `{"event":"device_code",…,"verification_uri":"http://localhost:9590/device"}`; `mint approve --email … --code …`;
+  the CLI finished as `c:dm-cli-c1-602814` (`method: device`); status lists the Silicon in `custodian_of`;
+  `conversations list --for si:…` (custodian view); `inbox --from beginning` shows the Silicon's message. `inbox --watch
+  --mark-delivered` started from the saved cursor and printed the Silicon's next message 0.04 s after the send command
+  started, with `delivered_receipt: true`; SIGTERM → exit 0. Allow-list: the Silicon allowed `c:dm-cli-c2-…`, its
+  custodian read the list with `--for`, the Silicon removed it. Logout (both): `revoked: true`, then
+  `{"authenticated":false}`; `whoami` → `not_signed_in` with the sign-in hint.
+- `e2e_cli_2.py` run 602878: **16/16**. Positional `dm login <slt>`; hidden `dm iam --json` = `dm accounts --json`;
+  with `expires_at` forced to 0, `login status --json` rotated the refresh token (sha256 prefix 2e79fcf65e4b →
+  561de7bd0f25); forced again, four concurrent `whoami` all exit 0 after one rotation (→ a7c35483fd87) and the sign-in
+  still verifies (a reused refresh token would have ended it); `sync --reset` and `sync --cursor … --wait 1`;
+  groups: the custodian created `g:design-602878` with its Silicon (joined at once) and the outside Carbon (pending),
+  the outsider saw and accepted the invitation, was made co-owner and back, left; the last owner's `groups leave` →
+  409 `last_owner`.
+- Earlier runs found two real problems, both fixed before the passing runs: the stack's `dm` sign-in setup required a
+  phone number (approval refused with `requirements_missing`; C28 set `required_fields: []`), and the allow-list answer
+  has `{account, added_by, added_at}` entries (client model and OpenAPI corrected in 9ba6733).
+- Afterwards: `dm-api` stopped, relays stopped (`dm daemon stop` per home), temporary homes removed, `dm_e2e_cli`
+  dropped. The only process on 19780 is the Carbon's own relay (started 30 Sep, untouched).
+
+### Left for later stages
+
+- **Ship / packaging**: `apps.yaml`, `scripts/package-apps.sh`, the Silicon Apps release workflow (one archive per
+  target; the discovery commands already answer in a clean, empty home), `honeycomb.yaml` and
+  `scripts/build-honeycomb-release.py` removal, `scripts/install.sh` and the docs site's revision/preview banner and
+  install script, deploy templates (`DM_IAM_*` → the Accounts variables). Cross builds were not tried here (no MSVC
+  SDK or zig on this Mac); `reqwest`'s rustls backend pulls `aws-lc-sys`, as before.
+- **Web**: the Next.js BFF; the CLI's `GET /api/v1/accounts` check and the `/me`, sync and allow-list routes are the
+  same ones it will use.
+- **Contract**: paste `understanding-proposal.md` (now with the CLI, Docs and Updates sections) into UNDERSTANDING.md
+  (Carbon only).
+
+### Blocked on
+
+- Ting accepting Silicon Accounts proofs (unchanged): until then receiving is `dm inbox --watch` / `dm sync`; the
+  Silicon runtime must switch from `dm delivery login` + `dm webhook` to supervising `dm inbox --watch` at cutover.
+- Production registration of the app `dm` (orchestrator), with `device_flow` and `public_client` on.
+
+### Gotchas
+
+- crates.io `silicon-accounts-client` 0.4.0 has no `exchange_slt_public_client` even though the repo's 0.4.0 source
+  does; the CLI posts the SLT grant itself.
+- The relay status marker changed to `sync_feed`; a CLI that only knew `delivery_moved_to_ting` would not recognize a
+  0.15 relay (0.15 recognizes both, so upgrades work; downgrades start a second relay on the next free port).
+- Tests that run `dm login` start a relay: give each test home its own `SILICON_DM_RELAY_HOME` and run
+  `dm daemon stop` afterwards (the CLI test support does this on drop), or test relays outlive the run.
+- The stub's token names must not contain the error codes the test looks for (`slt_expired` "echoed" itself).

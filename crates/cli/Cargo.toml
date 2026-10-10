@@ -4,6 +4,9 @@ version = "0.15.0"
 edition = "2024"
 rust-version = "1.98"
 license = "LicenseRef-Proprietary"
+# Silicon Apps is the only distribution channel and updater for `dm`; the libraries
+# (silicon-dm-client, silicon-dm-protocol) stay publishable.
+publish = false
 description = "DM command line: sign in with Silicon Accounts, message Carbons and Silicons, durable local relay"
 readme = "README.md"
 repository = "https://github.com/teamofsilicons/silicon-dm"

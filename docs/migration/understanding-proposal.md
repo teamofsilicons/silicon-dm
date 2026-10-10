@@ -65,6 +65,67 @@ Replace the last two sentences:
 
 > Ids can change; every account also has a permanent uuid, which is what DM stores. Responses show both.
 
-## Cli experience, Docs, Updates
+## Rust Package & CLI
 
-The CLI stage proposes these (installation and updates move to Silicon Apps).
+In the first paragraph, replace "Ting's shared daemon handles incoming delivery, DM doesn't need its own daemon for
+receiving messages" with:
+
+> The CLI reads new messages from DM's sync feed (`dm inbox --watch`); when DM delivers through Ting, Ting's shared
+> daemon handles incoming delivery. DM has no incoming daemon of its own.
+
+and "(carbons, silicons, org, access keys, api keys, …)" with "(carbons, silicons, read, write, patch, delete,
+everything)".
+
+Remove "Testing in the test enviorment should also be possible via both cli, and the package." and the paragraph about
+`dm --test <test_id> <command>`.
+
+Replace "--- logging in via cli ---" through the paragraph that starts "For CLI login there should be this exact
+command" with:
+
+> A Carbon signs in with `dm login`: the CLI shows a code and a Silicon Accounts page to approve it on (the device
+> flow); it never asks for credentials and opens nothing unless asked (`--open`). A Silicon passes a short-lived token
+> it gets with `silicon-accounts login --app dm -q`: `dm login <slt>` (this exact form), `dm login --slt <slt>` or
+> `silicon-accounts login --app dm -q | dm login --slt-stdin`. The sign-in is kept in `{home_dir}/.silicon-dm`
+> (owner-only), refreshed automatically, and `dm logout` signs this machine out. The home directory is configured
+> with `dm config home {location}`; if it's not a directory give an error not a directory.
+
+Replace the paragraph that starts "Whenever someone authenticates as a silicon or carbon" and the endpoint list with:
+
+> A DM sign-in is for using DM's API. Until Ting accepts Silicon Accounts, updates come from DM's sync feed: `dm inbox
+> --watch` prints each new or changed message as a JSON line and remembers where it stopped; `dm sync` reads one page.
+> When DM delivers through Ting, the local endpoint is configured with Ting's own commands.
+>
+> It should also expose these specific commands, answering signed out, offline, in an empty home:
+> 1) `--help`, which gives all the help documentation on how to use dm.
+> 2) `accounts --json`, which returns `app_id` (`dm`) alongside the Silicon Accounts URL and DM's API URL.
+> 3) `login status --json`, which reports `{"authenticated": false}` when signed out, and `authenticated: true` with the
+>    account's uuid, id and kind when signed in.
+
+## Cli experience
+
+- Replace "CLI is the primary way to interact with IAM Apps" with "CLI is the primary way to interact with the apps".
+- Replace "it should just ask for short lived tokens that the user can generate from the official iam cli, or from the
+  web where the the user is sent to auth concent screen" with "a Carbon approves a device code at Silicon Accounts;
+  a Silicon hands over a short-lived token from `silicon-accounts login --app dm -q`".
+- Replace `app iam --json` gives {app_id: "...", ...} with `app accounts --json` gives {app_id: "...", ...}. (DM keeps a
+  hidden `dm iam --json` printing the same object for one release, while Silicon runtimes still call it.)
+- Replace the two `ting webhook` / `ting unhook` lines with "For receiving DM updates use `dm inbox --watch`; when DM
+  delivers through Ting, use Ting's commands."
+- Replace "On the docs page, show `honeycomb install 'dm'` to install the CLI" with "On the docs page, show
+  `silicon-apps install dm` to install the CLI".
+- Replace "These CLIs can be used by humans, but more often than not, it'll be used by an agent" with "These CLIs can be
+  used by Carbons, but more often than not, they'll be used by a Silicon".
+
+## Docs
+
+Replace "Since all IAM apps can both be used as is" with "Since all the apps can both be used as is".
+
+## Updates
+
+Replace the section:
+
+> For each DM release, provide one `.tar.gz` per target with `apps.yaml` at the archive root and the prebuilt `dm`
+> CLI (Linux first: x86_64 and aarch64; Windows and macOS are built and kept until Silicon Apps validates them). The
+> manifest maps the `dm` command to the target's executable and uses the release version. Run
+> `silicon-apps validate` and then `silicon-apps pack`. Silicon Apps handles installation and updates (development
+> releases install as `dm>dev`); DM never replaces its own CLI.
