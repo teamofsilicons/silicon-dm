@@ -17,7 +17,7 @@ info:
     same body returns the original result, a different body under the same key is 409.
   license: {name: Proprietary, identifier: LicenseRef-Proprietary}
 servers:
-  - url: https://backend.dm.teamofsilicons.com
+  - url: https://api.dm.teamofsilicons.com
 security:
   - bearerAuth: []
 tags:

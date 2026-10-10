@@ -12,7 +12,7 @@ use silicon_dm_client::runtime::{DaemonCommand, LocalRuntime, ServiceCheck, Sign
 let runtime = LocalRuntime::from_environment()?;           // or LocalRuntime::new(private_dir)
 let target = SignInTarget::new(
     "assistant",                                           // profile
-    "https://backend.dm.teamofsilicons.com",               // DM API
+    "https://api.dm.teamofsilicons.com",               // DM API
     "https://accounts.teamofsilicons.com",                 // Silicon Accounts
     "dm",                                                  // app id
 )?;

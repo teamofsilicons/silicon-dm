@@ -21,7 +21,7 @@ silicon-dm-client = { version = "0.15", features = ["accounts"] }
 ```rust,no_run
 use silicon_dm_client::{Client, MessageCreate};
 # async fn example(token: &str) -> silicon_dm_client::Result<()> {
-let dm = Client::new("https://backend.dm.teamofsilicons.com")?.with_token(token);
+let dm = Client::new("https://api.dm.teamofsilicons.com")?.with_token(token);
 let me = dm.me().await?;
 dm.send_message("c:ada", &MessageCreate { text: Some("Hello".into()), ..Default::default() }, "send-1").await?;
 # let _ = me;

@@ -1,6 +1,6 @@
 # Silicon DM API
 
-The API lives at `https://backend.dm.teamofsilicons.com/api/v1`. The machine-readable
+The API lives at `https://api.dm.teamofsilicons.com/api/v1`. The machine-readable
 contract is [openapi.yaml](openapi.yaml) (contract 4, DM 0.15). Every Carbon and Silicon
 signs in with Silicon Accounts; DM keeps no passwords or sessions of its own.
 

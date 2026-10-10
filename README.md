@@ -83,7 +83,7 @@ A release builds one archive per target (`apps.yaml` plus `bin/dm`) with
 Follow [the deployment runbook](docs/deployment.md). The image contains the API, worker and migrator
 binaries. Run migrations as the object-owning role, then grant the runtime role
 `deploy/runtime-grants.sql`. DM's webhook at Silicon Accounts is
-`https://backend.dm.teamofsilicons.com/webhook/`; the receiver verifies signatures on the exact raw
+`https://api.dm.teamofsilicons.com/webhook/`; the receiver verifies signatures on the exact raw
 body. Keep the app secret, webhook secret, `DM_DATA_KEY`, database URLs and the Giphy key in the
 deployment secret store, and back up `DM_DATA_KEY` with the data. Production database URLs require
 `sslmode=verify-full`; public and upstream production URLs require HTTPS. The default body cap is

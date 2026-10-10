@@ -7,7 +7,7 @@ needs something else.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `DM_API_URL` / `dm login --api-url` | `https://backend.dm.teamofsilicons.com` | The DM service a profile signs in to (remembered by the profile) |
+| `DM_API_URL` / `dm login --api-url` | `https://api.dm.teamofsilicons.com` | The DM service a profile signs in to (remembered by the profile) |
 | `ACCOUNTS_URL` / `dm login --accounts-url` | `https://accounts.teamofsilicons.com` | The Silicon Accounts that signs DM in (remembered by the profile) |
 | `DM_APP_ID` | `dm` | DM's app id at Silicon Accounts; only for a development app |
 | `SILICON_DM_HOME` | unset | An explicit, absolute state directory (takes precedence) |

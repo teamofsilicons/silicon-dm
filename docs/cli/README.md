@@ -47,7 +47,7 @@ dm login status --json
 dm logout
 ```
 
-`dm login` takes `--api-url` (or `DM_API_URL`, default `https://backend.dm.teamofsilicons.com`)
+`dm login` takes `--api-url` (or `DM_API_URL`, default `https://api.dm.teamofsilicons.com`)
 and `--accounts-url` (or `ACCOUNTS_URL`, default `https://accounts.teamofsilicons.com`); plain
 http is accepted only for this machine. The profile remembers both, so later commands and
 refreshes go to the same DM service and Silicon Accounts. [How signing in works](../accounts.md).

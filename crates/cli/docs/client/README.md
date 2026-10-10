@@ -21,7 +21,7 @@ silicon-dm-client = { version = "0.15", features = ["accounts"] }
 ```rust,no_run
 use silicon_dm_client::{Client, MessageCreate, PageRequest};
 # async fn example(access_token: &str, proof: &str) -> silicon_dm_client::Result<()> {
-let dm = Client::new("https://backend.dm.teamofsilicons.com")?.with_token(access_token);
+let dm = Client::new("https://api.dm.teamofsilicons.com")?.with_token(access_token);
 let me = dm.me().await?;                         // account, custodian, custodian_of, delivery
 let sent = dm
     .send_message("c:ada", &MessageCreate { text: Some("Hello".into()), ..Default::default() }, "send-1")
@@ -29,7 +29,7 @@ let sent = dm
 let history = dm.messages(&sent.conversation_id, &PageRequest::default(), false).await?;
 
 // Another app acting for its user with a User verification proof (receiving app `dm`):
-let for_user = Client::new("https://backend.dm.teamofsilicons.com")?.with_proof(proof);
+let for_user = Client::new("https://api.dm.teamofsilicons.com")?.with_proof(proof);
 let conversations = for_user.conversations(&PageRequest::default()).await?;
 # let _ = (me, history, conversations);
 # Ok(()) }

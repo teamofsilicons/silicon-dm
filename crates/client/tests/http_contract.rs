@@ -93,7 +93,7 @@ async fn handler(State(requests): State<Requests>, request: Request) -> Response
     let value = match path.as_str() {
         "/api/v1/accounts" => {
             json!({"app_id":"dm","accounts_url":"https://accounts.teamofsilicons.com",
-            "api_base_url":"https://backend.dm.teamofsilicons.com/api/v1","contract_version":4,
+            "api_base_url":"https://api.dm.teamofsilicons.com/api/v1","contract_version":4,
             "sign_in":{"device_flow":true},"proof_scopes":["dm.messages.read"],"delivery":delivery()})
         }
         "/api/v1/me" => {

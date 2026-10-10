@@ -34,7 +34,7 @@ async fn discovery_answers_offline_in_an_empty_home_and_writes_nothing() {
         accounts.json(),
         json!({
             "app_id":"dm","client_id":"dm","accounts_url":"https://accounts.teamofsilicons.com",
-            "api_url":"https://backend.dm.teamofsilicons.com","version":env!("CARGO_PKG_VERSION"),
+            "api_url":"https://api.dm.teamofsilicons.com","version":env!("CARGO_PKG_VERSION"),
             "contract_version":4,"device_flow":true,"public_client":true,
             "sign_in":{"carbon":"dm login","silicon":"silicon-accounts login --app dm -q | dm login --slt-stdin"},
             "status":"dm login status --json","install":"silicon-apps install dm",

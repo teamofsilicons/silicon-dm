@@ -126,10 +126,10 @@ fn a_profile_from_before_silicon_accounts_loads_signed_out_and_keeps_its_old_id(
     std::fs::write(
         root.path().join("config.json"),
         serde_json::to_vec(&json!({"default_profile":"work","profiles":{
-            "work:production":{"name":"work","base_url":"https://backend.dm.teamofsilicons.com","device_id":"kept",
+            "work:production":{"name":"work","base_url":"https://api.dm.teamofsilicons.com","device_id":"kept",
                 "expires_at":4102444800u64,"enabled":true,"tokens":{"access_token":"oat_old","refresh_token":"ort_old",
                 "token_type":"Bearer","expires_in":1800,"scope":"dm","actor":{"type":"carbon","id":"c:ada"},"organization_id":"tos"}},
-            "work:00000000-0000-0000-0000-000000000001":{"name":"work","base_url":"https://backend.dm.teamofsilicons.com",
+            "work:00000000-0000-0000-0000-000000000001":{"name":"work","base_url":"https://api.dm.teamofsilicons.com",
                 "device_id":"sandbox","expires_at":1,"testing_environment_id":"00000000-0000-0000-0000-000000000001",
                 "tokens":{"access_token":"oat_t","refresh_token":"ort_t","token_type":"Bearer","expires_in":1,"scope":"dm",
                 "actor":{"type":"carbon","id":"c:ada"},"organization_id":"tos"}}},

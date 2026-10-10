@@ -57,7 +57,7 @@ with the usual retry keys.
 ```rust,no_run
 use silicon_dm_client::{Client, models::{GroupCreate, GroupSettings, PageRequest}};
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let client = Client::new("https://backend.dm.teamofsilicons.com")?.with_token("DM-ACCESS-TOKEN");
+let client = Client::new("https://api.dm.teamofsilicons.com")?.with_token("DM-ACCESS-TOKEN");
 let group = client
     .create_group(
         &GroupCreate {

@@ -22,8 +22,8 @@ command arguments. Fargate allows a 120-second stop timeout; DM's shutdown deadl
 
 ## Required configuration
 
-The public origin is `https://backend.dm.teamofsilicons.com`. DM's app at Silicon Accounts (`dm`)
-needs its webhook at `https://backend.dm.teamofsilicons.com/webhook/` (every update, including
+The public origin is `https://api.dm.teamofsilicons.com`. DM's app at Silicon Accounts (`dm`)
+needs its webhook at `https://api.dm.teamofsilicons.com/webhook/` (every update, including
 custodian changes) and, for the CLI, `device_flow` and `public_client` turned on.
 
 | Setting | Migration process | API and worker |
@@ -31,7 +31,7 @@ custodian changes) and, for the CLI, `device_flow` and `public_client` turned on
 | `DM_ENVIRONMENT` | `production` | `production` |
 | `DM_DATABASE_URL` | Object-owning migration role | Same database, restricted runtime role |
 | `DM_BIND_ADDR` | not needed | `0.0.0.0:8080` |
-| `DM_PUBLIC_BASE_URL` | not needed | `https://backend.dm.teamofsilicons.com/api/v1` |
+| `DM_PUBLIC_BASE_URL` | not needed | `https://api.dm.teamofsilicons.com/api/v1` |
 | `ACCOUNTS_URL` | not needed (`dm-migrate link-identities` uses it) | `https://accounts.teamofsilicons.com` |
 | `ACCOUNTS_API_URL` | optional | Optional server-to-server origin |
 | `DM_APP_ID` | not needed | `dm` |

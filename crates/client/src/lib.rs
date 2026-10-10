@@ -36,7 +36,7 @@ pub const CONTRACT_VERSION: u16 = 4;
 /// DM's app id at Silicon Accounts (the `aud` of its access tokens).
 pub const APP_ID: &str = "dm";
 /// The production DM service.
-pub const DEFAULT_API_URL: &str = "https://backend.dm.teamofsilicons.com";
+pub const DEFAULT_API_URL: &str = "https://api.dm.teamofsilicons.com";
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -973,7 +973,7 @@ mod tests {
     #[test]
     fn endpoints_are_https_or_this_machine() {
         for good in [
-            "https://backend.dm.teamofsilicons.com",
+            "https://api.dm.teamofsilicons.com",
             "http://127.0.0.1:4121",
             "http://localhost:4121/api/v1",
             "http://dm.localhost:19780",
@@ -982,20 +982,20 @@ mod tests {
             assert!(api_base(good).is_ok(), "{good}");
         }
         for bad in [
-            "http://backend.dm.teamofsilicons.com",
+            "http://api.dm.teamofsilicons.com",
             "http://localhost.example.com",
             "ftp://127.0.0.1",
-            "https://user:secret@backend.dm.teamofsilicons.com",
-            "https://backend.dm.teamofsilicons.com/?x=1",
+            "https://user:secret@api.dm.teamofsilicons.com",
+            "https://api.dm.teamofsilicons.com/?x=1",
             "not a url",
         ] {
             assert!(api_base(bad).is_err(), "{bad}");
         }
         assert_eq!(
-            api_base("https://backend.dm.teamofsilicons.com")
+            api_base("https://api.dm.teamofsilicons.com")
                 .map(|u| u.to_string())
                 .ok(),
-            Some("https://backend.dm.teamofsilicons.com/api/v1/".to_owned())
+            Some("https://api.dm.teamofsilicons.com/api/v1/".to_owned())
         );
     }
 

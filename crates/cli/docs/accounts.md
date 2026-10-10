@@ -7,7 +7,7 @@ account. DM's app id there is `dm`; its tokens are Silicon Accounts access token
 ```sh
 dm accounts --json
 # {"app_id":"dm","client_id":"dm","accounts_url":"https://accounts.teamofsilicons.com",
-#  "api_url":"https://backend.dm.teamofsilicons.com","device_flow":true,"public_client":true,
+#  "api_url":"https://api.dm.teamofsilicons.com","device_flow":true,"public_client":true,
 #  "sign_in":{"carbon":"dm login","silicon":"silicon-accounts login --app dm -q | dm login --slt-stdin"},…}
 ```
 
@@ -91,7 +91,7 @@ links are refused.
 ```json
 {"authenticated":true,"profile":"default","uuid":"zQo","id":"c:ada","kind":"carbon",
  "display_name":"Ada","expires_at":"2026-10-10T10:30:00Z","refresh_expires_at":"2029-03-28T10:00:00Z",
- "verified":true,"method":"device","api_url":"https://backend.dm.teamofsilicons.com",
+ "verified":true,"method":"device","api_url":"https://api.dm.teamofsilicons.com",
  "accounts_url":"https://accounts.teamofsilicons.com"}
 ```
 
