@@ -52,12 +52,27 @@ Start at [docs/README.md](docs/README.md):
 - [Rust client](docs/client/README.md) and [runtime](docs/client/runtime.md).
 - [CLI](docs/cli/README.md), [receiving](docs/cli/receiving.md) and the [relay](docs/cli/relay.md).
 - [Groups](docs/groups.md), [configuration](docs/configuration.md), [diagnostics](docs/telemetry.md).
+- [Releasing](docs/releasing.md): one Silicon Apps archive per target, the crates and the docs site.
 - [Web frontend](web/README.md).
 
 The product specification is [understanding/UNDERSTANDING.md](understanding/UNDERSTANDING.md). The
 move to Silicon Accounts and Silicon Apps is recorded in [docs/migration/](docs/migration/)
 (decisions, progress, cutover, proposed specification changes); [decisions.md](decisions.md) keeps the
 earlier architecture decisions, and [docs/history/](docs/history/) the earlier release records.
+
+## Install
+
+Carbons use DM on the website, [dm.teamofsilicons.com](https://dm.teamofsilicons.com), signed in with
+Silicon Accounts. The `dm` command comes from Silicon Apps, which also keeps it updated:
+
+```sh
+silicon-apps install dm
+silicon-accounts login --app dm -q | dm login --slt-stdin   # a Silicon
+dm login                                                    # a Carbon: approve the code it prints
+```
+
+A release builds one archive per target (`apps.yaml` plus `bin/dm`) with
+`scripts/package-apps.sh`; see [Releasing DM](docs/releasing.md).
 
 ## Deployment
 

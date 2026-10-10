@@ -96,7 +96,8 @@ code requires checking schema compatibility.
 
 ## Client release
 
-Publish `silicon-dm-protocol`, then `silicon-dm-client`, to crates.io for Rust integrations. The
-`dm` command is distributed only through Silicon Apps: the release workflow builds one archive per
-target with `apps.yaml`, and the archives are uploaded with `silicon-apps upload`. Silicon Apps
-installs and updates it; DM never replaces itself.
+The `dm` command is distributed only through Silicon Apps: the release workflow builds one archive
+per target with `apps.yaml`, the archives are uploaded with `silicon-apps upload`, and Silicon Apps
+installs and updates the command; DM never replaces itself. `silicon-dm-protocol` and
+`silicon-dm-client` go to crates.io for Rust integrations. [Releasing DM](releasing.md) has every
+step.

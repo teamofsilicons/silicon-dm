@@ -56,6 +56,8 @@ enum Topic {
     Telemetry,
     /// Deploying the DM service.
     Deployment,
+    /// Releasing DM: Silicon Apps archives, the Rust crates and the docs site.
+    Releasing,
 }
 
 struct Guide {
@@ -110,6 +112,7 @@ const GUIDES: &[Guide] = &[
     guide!("configuration", "Configure DM", "configuration.md"),
     guide!("telemetry", "Diagnostics and analytics", "telemetry.md"),
     guide!("deployment", "Deploying the DM service", "deployment.md"),
+    guide!("releasing", "Release DM", "releasing.md"),
 ];
 
 fn entry(guide: &Guide) -> Value {
