@@ -1,19 +1,19 @@
 //! Contracted HTTP request handlers.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::extract::{ApiJson, ApiPath, ApiQuery, Authenticated, Idempotency, IfMatch};
+use super::extract::{
+    ApiJson, ApiPath, ApiQuery, Authenticated, ConversationAccess, Idempotency, IfMatch,
+};
 use crate::{
     AppError, AppResult,
     application::{
         auth::AuthContext,
         commands::{
-            CreateBundleCommand, CreateConversationCommand, PutDraftCommand, PutDraftOutcome,
-            RecordReceiptCommand, SendMessageCommand,
+            CreateBundleCommand, PutDraftCommand, PutDraftOutcome, RecordReceiptCommand,
+            SendMessageCommand,
         },
         messaging::{prepare_message_content, validate_device_id},
         state::AppState,
@@ -23,31 +23,53 @@ use crate::{
         ConversationPage, Draft, DraftInput, GifPage, MAX_CONVERSATION_PARTICIPANTS, Message,
         MessageCreate, MessagePage, PageRequest, Presence, ReceiptStatus,
     },
+    infrastructure::postgres::Reviser,
 };
 
-/// Lists conversations visible to the IAM-authenticated actor.
+/// `GET /api/v1/conversations[?for=si:x]`: the caller's conversations, or (for a
+/// custodian) those of a Silicon it looks after.
 pub(super) async fn list_conversations(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
-    ApiQuery(page): ApiQuery<PageRequest>,
+    ApiQuery(query): ApiQuery<ListConversationsQuery>,
 ) -> AppResult<Json<ConversationPage>> {
+    let page = PageRequest {
+        cursor: query.cursor,
+        limit: query.limit,
+    };
     page.validated_limit()?;
+    let subject = match &query.for_account {
+        Some(silicon) => looked_after(&state, &context, silicon).await?,
+        None => context.actor.clone(),
+    };
     state
         .store
-        .list_conversations_scoped(
-            &context.organization_id,
-            &context.actor,
-            &page,
-            &context
-                .tag_ids
-                .iter()
-                .flatten()
-                .copied()
-                .collect::<Vec<_>>(),
-            false,
-        )
+        .list_conversations(&context.actor, &subject, &page, false)
         .await
         .map(Json)
+}
+
+/// Resolves `for=si:x` and requires the caller to be that Silicon's custodian.
+pub(super) async fn looked_after(
+    state: &AppState,
+    context: &AuthContext,
+    selector: &str,
+) -> AppResult<ActorRef> {
+    context.require_own_session("Acting as a Silicon's custodian")?;
+    let account = state.directory().resolve(selector).await?;
+    if account.uuid == context.actor.id.as_str() {
+        return Ok(context.actor.clone());
+    }
+    if !account.is_silicon() || account.custodian.as_deref() != Some(context.actor.id.as_str()) {
+        return Err(AppError::forbidden(
+            "not_custodian",
+            format!(
+                "You are not the custodian of {}; `for` only works for Silicons you look after.",
+                account.display_id()
+            ),
+        ));
+    }
+    Ok(account.actor())
 }
 
 /// Reads the latest version of an accessible conversation message.
@@ -58,29 +80,25 @@ pub(super) async fn get_message(
 ) -> AppResult<Json<Message>> {
     state
         .store
-        .get_message(
-            &context.organization_id,
-            &context.actor,
-            path.conversation_id,
-            path.message_id,
-        )
+        .get_message(&context.actor, path.conversation_id, path.message_id)
         .await
         .map(Json)
 }
 
-/// Replaces content and appends the previous content to history.
+/// Replaces content and appends the previous content to history (the sender only).
 pub(super) async fn edit_message(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
     ApiPath(path): ApiPath<MessagePath>,
     Idempotency(key): Idempotency,
-    ApiJson(input): ApiJson<MessageCreate>,
+    ApiJson(mut input): ApiJson<MessageCreate>,
 ) -> AppResult<Json<Message>> {
+    resolve_routing(&state, &context, &mut input).await?;
     state
         .store
         .revise_message(
-            &context.organization_id,
             &context.actor,
+            Reviser::Sender,
             path.conversation_id,
             path.message_id,
             &key,
@@ -90,18 +108,24 @@ pub(super) async fn edit_message(
         .map(Json)
 }
 
-/// Marks the sender's message deleted without adding history.
+/// Tombstones a message: its sender, or the custodian of the Silicon that sent it.
 pub(super) async fn delete_message(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
+    access: ConversationAccess,
     ApiPath(path): ApiPath<MessagePath>,
     Idempotency(key): Idempotency,
 ) -> AppResult<Json<Message>> {
+    let reviser = match access {
+        ConversationAccess::Participant => Reviser::Sender,
+        ConversationAccess::Custodian => Reviser::CustodianOfSender,
+        ConversationAccess::Invitee => return Err(AppError::NotFound),
+    };
     state
         .store
         .revise_message(
-            &context.organization_id,
             &context.actor,
+            reviser,
             path.conversation_id,
             path.message_id,
             &key,
@@ -111,7 +135,7 @@ pub(super) async fn delete_message(
         .map(Json)
 }
 
-/// Creates or resolves the conversation for an exact participant set.
+/// Creates or resolves the canonical direct conversation of an exact participant set.
 pub(super) async fn create_conversation(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
@@ -120,41 +144,30 @@ pub(super) async fn create_conversation(
 ) -> AppResult<(StatusCode, Json<Conversation>)> {
     if request.participant_ids.is_empty() {
         return Err(AppError::validation(
-            "participant_ids must contain at least one actor",
+            "participant_ids must contain at least one account id",
         ));
     }
-
-    let mut actor_ids = request.participant_ids.into_iter().collect::<BTreeSet<_>>();
-    actor_ids.insert(context.actor.id.clone());
-    if actor_ids.len() < 2 {
-        return Err(AppError::validation(
-            "a conversation requires at least two unique participants",
-        ));
-    }
-    if actor_ids.len() > MAX_CONVERSATION_PARTICIPANTS {
+    if request.participant_ids.len() >= MAX_CONVERSATION_PARTICIPANTS {
         return Err(AppError::validation(
             "a conversation may contain at most 100 unique participants",
         ));
     }
-    let actor_ids = actor_ids.into_iter().collect::<Vec<_>>();
-    let participants = state
-        .identity
-        .authorize_participants(&context, &actor_ids)
+    let accounts = state
+        .directory()
+        .resolve_all(&request.participant_ids)
         .await?;
-    let participants = verify_resolved_actors(&actor_ids, participants)?;
-    if !participants.contains(&context.actor) {
-        return Err(iam_contract_error());
+    let others: Vec<_> = accounts
+        .into_iter()
+        .filter(|account| account.uuid != context.actor.id.as_str())
+        .collect();
+    if others.is_empty() {
+        return Err(AppError::validation(
+            "a conversation requires at least two unique participants",
+        ));
     }
-
-    let conversation = state
-        .store
-        .create_conversation(CreateConversationCommand {
-            organization_id: context.organization_id,
-            creator: context.actor,
-            participants,
-            idempotency_key,
-        })
-        .await?;
+    let id =
+        super::access::start_conversation(&state, &context, &others, Some(idempotency_key)).await?;
+    let conversation = state.store.get_conversation(&context.actor, id).await?;
     Ok((StatusCode::CREATED, Json(conversation)))
 }
 
@@ -173,7 +186,6 @@ pub(super) async fn list_messages(
     state
         .store
         .list_messages(
-            &context.organization_id,
             &context.actor,
             path.conversation_id,
             &page,
@@ -186,29 +198,40 @@ pub(super) async fn list_messages(
 /// Validates, persists, and durably queues a message.
 pub(super) async fn send_message(
     State(state): State<AppState>,
-    Authenticated(authority): Authenticated,
+    Authenticated(context): Authenticated,
     ApiPath(path): ApiPath<ConversationPath>,
     Idempotency(idempotency_key): Idempotency,
-    ApiJson(content): ApiJson<MessageCreate>,
+    ApiJson(body): ApiJson<MessageCreate>,
 ) -> AppResult<(StatusCode, Json<Message>)> {
-    let sender = resolve_sender(&state, &authority, content.sender_id.as_ref()).await?;
-    state
-        .store
-        .require_participant(&authority.organization_id, &sender, path.conversation_id)
-        .await?;
-    let content = prepare_message_content(&state, content)?;
+    send(
+        &state,
+        &context,
+        path.conversation_id,
+        idempotency_key,
+        body,
+    )
+    .await
+}
+
+async fn send(
+    state: &AppState,
+    context: &AuthContext,
+    conversation_id: Uuid,
+    idempotency_key: crate::domain::IdempotencyKey,
+    mut body: MessageCreate,
+) -> AppResult<(StatusCode, Json<Message>)> {
+    state.store.require_current(conversation_id).await?;
+    resolve_routing(state, context, &mut body).await?;
+    let prepared = prepare_message_content(state, body)?;
     let message = state
         .store
-        .send_message_as(
-            SendMessageCommand {
-                organization_id: authority.organization_id,
-                conversation_id: path.conversation_id,
-                sender,
-                content,
-                idempotency_key,
-            },
-            &authority.actor,
-        )
+        .send_message(SendMessageCommand {
+            conversation_id,
+            sender: context.actor.clone(),
+            content: prepared,
+            idempotency_key,
+            via_app: context.via_app().map(str::to_owned),
+        })
         .await?;
     Ok((StatusCode::ACCEPTED, Json(message)))
 }
@@ -224,7 +247,6 @@ pub(super) async fn record_message_receipt(
     state
         .store
         .record_receipt(RecordReceiptCommand {
-            organization_id: context.organization_id,
             conversation_id: path.conversation_id,
             message_id: path.message_id,
             recipient: context.actor,
@@ -244,31 +266,18 @@ pub(super) async fn create_message_bundle(
     ApiJson(mut bundle): ApiJson<BundleCreate>,
 ) -> AppResult<(StatusCode, Json<Bundle>)> {
     if context.actor.actor_type != ActorType::Silicon {
-        return Err(AppError::Forbidden);
+        return Err(AppError::forbidden(
+            "silicon_only",
+            "Only Silicons bundle messages.",
+        ));
     }
     bundle.validate().map_err(AppError::validation)?;
-    if bundle
-        .display_message
-        .sender_id
-        .as_ref()
-        .is_some_and(|sender_id| !sender_id.addresses(&context.actor))
-    {
-        return Err(AppError::Forbidden);
-    }
-    state
-        .store
-        .require_participant(
-            &context.organization_id,
-            &context.actor,
-            path.conversation_id,
-        )
-        .await?;
+    resolve_routing(&state, &context, &mut bundle.display_message).await?;
     let display_message = prepare_message_content(&state, bundle.display_message)?;
     bundle.display_message = display_message;
     let created = state
         .store
         .create_bundle(CreateBundleCommand {
-            organization_id: context.organization_id,
             conversation_id: path.conversation_id,
             creator: context.actor,
             bundle,
@@ -286,29 +295,25 @@ pub(super) async fn get_message_bundle(
 ) -> AppResult<Json<BundleDetail>> {
     state
         .store
-        .get_bundle(
-            &context.organization_id,
-            &context.actor,
-            path.conversation_id,
-            path.bundle_id,
-        )
+        .get_bundle(&context.actor, path.conversation_id, path.bundle_id)
         .await
         .map(Json)
 }
 
-/// Returns the authenticated actor's synchronized draft.
+/// The caller's synchronized draft, or (`?for=si:x`, custodians) its Silicon's.
 pub(super) async fn get_draft(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
     ApiPath(path): ApiPath<ConversationPath>,
+    ApiQuery(query): ApiQuery<ForQuery>,
 ) -> AppResult<Json<Draft>> {
+    let owner = match &query.for_account {
+        Some(silicon) => looked_after(&state, &context, silicon).await?,
+        None => context.actor.clone(),
+    };
     state
         .store
-        .get_draft(
-            &context.organization_id,
-            &context.actor,
-            path.conversation_id,
-        )
+        .get_draft(&owner, path.conversation_id)
         .await
         .map(Json)
 }
@@ -317,24 +322,16 @@ pub(super) async fn get_draft(
 pub(super) async fn put_draft(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
+    access: ConversationAccess,
     ApiPath(path): ApiPath<ConversationPath>,
     IfMatch(expected_version): IfMatch,
     ApiJson(input): ApiJson<DraftInput>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    state
-        .store
-        .require_participant(
-            &context.organization_id,
-            &context.actor,
-            path.conversation_id,
-        )
-        .await?;
+    require_participant_access(access)?;
     input.validate().map_err(AppError::validation)?;
-
     let outcome = state
         .store
         .put_draft(PutDraftCommand {
-            organization_id: context.organization_id,
             conversation_id: path.conversation_id,
             actor: context.actor,
             expected_version,
@@ -357,42 +354,49 @@ pub(super) async fn put_draft(
     })
 }
 
-/// Deletes the authenticated actor's synchronized draft idempotently.
+/// Deletes the caller's synchronized draft idempotently.
 pub(super) async fn delete_draft(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
+    access: ConversationAccess,
     ApiPath(path): ApiPath<ConversationPath>,
 ) -> AppResult<StatusCode> {
+    require_participant_access(access)?;
     state
         .store
-        .delete_draft(
-            &context.organization_id,
-            &context.actor,
-            path.conversation_id,
-        )
+        .delete_draft(&context.actor, path.conversation_id)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Returns IAM-authorized online and activity state for an actor.
+fn require_participant_access(access: ConversationAccess) -> AppResult<()> {
+    match access {
+        ConversationAccess::Participant => Ok(()),
+        ConversationAccess::Custodian => Err(AppError::forbidden(
+            "custodian_read_only",
+            "A custodian can read its Silicon's drafts (`?for=si:x`) but never write or delete them.",
+        )),
+        ConversationAccess::Invitee => Err(AppError::NotFound),
+    }
+}
+
+/// Online state and activity of an account the caller shares a conversation with (or
+/// a Silicon it looks after).
 pub(super) async fn get_presence(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
     ApiPath(path): ApiPath<PresencePath>,
 ) -> AppResult<Json<Presence>> {
-    let target = state
-        .identity
-        .authorize_presence(&context, &path.actor_id)
-        .await?;
-    state
+    let target = state.directory().resolve(path.actor_id.as_str()).await?;
+    let target = target.actor();
+    if !state
         .store
-        .refresh_directory(&context.organization_id, &[context.actor.clone(), target])
-        .await?;
-    state
-        .store
-        .get_presence(&context.organization_id, &context.actor, &path.actor_id)
-        .await
-        .map(Json)
+        .may_see_presence(&context.actor, &target)
+        .await?
+    {
+        return Err(AppError::NotFound);
+    }
+    state.store.get_presence(&target).await.map(Json)
 }
 
 /// Returns provider-filtered trending GIFs.
@@ -426,11 +430,7 @@ pub(super) async fn list_recent_gifs(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
 ) -> AppResult<Json<GifPage>> {
-    state
-        .store
-        .recent_gifs(&context.organization_id, &context.actor)
-        .await
-        .map(Json)
+    state.store.recent_gifs(&context.actor).await.map(Json)
 }
 
 /// Unauthenticated process liveness; no dependency check is performed.
@@ -449,10 +449,100 @@ pub(super) async fn readiness(State(state): State<AppState>) -> StatusCode {
     }
 }
 
+/// Sends to an account, a group or a conversation address without a prior lookup; a
+/// direct conversation with an account is created on first contact.
+pub(super) async fn send_to_recipient(
+    State(state): State<AppState>,
+    Authenticated(context): Authenticated,
+    Idempotency(idempotency_key): Idempotency,
+    ApiJson(mut input): ApiJson<serde_json::Value>,
+) -> AppResult<(StatusCode, Json<Message>)> {
+    let recipient = input["recipient_id"]
+        .as_str()
+        .ok_or_else(|| AppError::validation("recipient_id is required"))?
+        .to_owned();
+    let (conversation_id, access) =
+        super::access::resolve_conversation_path(&state, &context, &recipient, true).await?;
+    if access != ConversationAccess::Participant {
+        return Err(AppError::forbidden(
+            "custodian_read_only",
+            "You can read this conversation as a custodian but only its participants send to it.",
+        ));
+    }
+    state
+        .store
+        .resolve_message_input(conversation_id, &mut input)
+        .await?;
+    if recipient == conversation_id.to_string() || !super::access::names_one_account(&recipient) {
+        input
+            .as_object_mut()
+            .ok_or_else(|| AppError::validation("message must be an object"))?
+            .remove("recipient_id");
+    }
+    let body: MessageCreate = serde_json::from_value(input)
+        .map_err(|_| AppError::validation("invalid message content"))?;
+    send(&state, &context, conversation_id, idempotency_key, body).await
+}
+
+/// Resolves the ISI routing addresses of a message to storage form: `sender_id` must
+/// address the caller (`isi@si:me`), `recipient_id` a participant (`isi@si:them`).
+async fn resolve_routing(
+    state: &AppState,
+    context: &AuthContext,
+    message: &mut MessageCreate,
+) -> AppResult<()> {
+    if let Some(sender) = message.sender_id.take() {
+        let (base, isi) = sender.address_parts().map_err(AppError::validation)?;
+        let account = state.directory().resolve(base).await?;
+        if account.uuid != context.actor.id.as_str() {
+            return Err(AppError::forbidden(
+                "sender_mismatch",
+                format!(
+                    "sender_id {sender} is not you; a message is always sent as the signed-in account (sender_id may only add an ISI, such as deliberate@si:you)."
+                ),
+            ));
+        }
+        message.sender_id = Some(storage_address(&account.uuid, isi)?);
+    }
+    if let Some(recipient) = message.recipient_id.take() {
+        let (base, isi) = recipient.address_parts().map_err(AppError::validation)?;
+        let account = state.directory().resolve(base).await?;
+        if isi.is_some() && !account.is_silicon() {
+            return Err(AppError::validation(
+                "an ISI address (isi@si:handle) can only name a Silicon",
+            ));
+        }
+        message.recipient_id = Some(storage_address(&account.uuid, isi)?);
+    }
+    Ok(())
+}
+
+fn storage_address(uuid: &str, isi: Option<&str>) -> AppResult<ActorId> {
+    isi.map_or_else(|| uuid.to_owned(), |isi| format!("{isi}@{uuid}"))
+        .parse()
+        .map_err(|_| AppError::validation("invalid routing address"))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateConversationRequest {
     participant_ids: Vec<ActorId>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ListConversationsQuery {
+    cursor: Option<String>,
+    limit: Option<u16>,
+    #[serde(rename = "for")]
+    for_account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ForQuery {
+    #[serde(rename = "for")]
+    pub(super) for_account: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -497,55 +587,6 @@ pub(super) struct GifSearchQuery {
     q: String,
 }
 
-async fn resolve_sender(
-    state: &AppState,
-    context: &AuthContext,
-    requested_id: Option<&ActorId>,
-) -> AppResult<ActorRef> {
-    let Some(requested_id) = requested_id else {
-        return Ok(context.actor.clone());
-    };
-    let base_id = requested_id.base_actor_id().map_err(AppError::validation)?;
-    let requested_id = &base_id;
-    if *requested_id == context.actor.id {
-        return Ok(context.actor.clone());
-    }
-    if !context.may_represent(requested_id) {
-        return Err(AppError::Forbidden);
-    }
-    let requested = [requested_id.clone()];
-    let mut resolved = state
-        .identity
-        .authorize_participants(context, &requested)
-        .await?;
-    if resolved.len() != 1 {
-        return Err(iam_contract_error());
-    }
-    let actor = resolved.pop().ok_or_else(iam_contract_error)?;
-    if actor.id != *requested_id {
-        return Err(iam_contract_error());
-    }
-    Ok(actor)
-}
-
-pub(crate) fn verify_resolved_actors(
-    requested: &[ActorId],
-    resolved: Vec<ActorRef>,
-) -> AppResult<Vec<ActorRef>> {
-    let mut by_id = BTreeMap::new();
-    for actor in resolved {
-        if by_id.insert(actor.id.clone(), actor).is_some() {
-            return Err(iam_contract_error());
-        }
-    }
-    let requested = requested.iter().collect::<BTreeSet<_>>();
-    let returned = by_id.keys().collect::<BTreeSet<_>>();
-    if requested != returned {
-        return Err(iam_contract_error());
-    }
-    Ok(by_id.into_values().collect())
-}
-
 fn validate_gif_query(query: &str) -> AppResult<()> {
     if query.trim().is_empty() || query.chars().count() > 50 || query.chars().any(char::is_control)
     {
@@ -556,111 +597,23 @@ fn validate_gif_query(query: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn iam_contract_error() -> AppError {
-    AppError::DependencyUnavailable { dependency: "iam" }
-}
-
-/// Sends to an account or group without a client-side conversation lookup.
-pub(super) async fn send_to_recipient(
-    State(state): State<AppState>,
-    Authenticated(authority): Authenticated,
-    Idempotency(idempotency_key): Idempotency,
-    ApiJson(mut input): ApiJson<serde_json::Value>,
-) -> AppResult<(StatusCode, Json<Message>)> {
-    let recipient = input["recipient_id"]
-        .as_str()
-        .ok_or_else(|| AppError::validation("recipient_id is required"))?
-        .to_owned();
-    let conversation_id = state
-        .store
-        .resolve_destination(&authority, &recipient, true, state.identity.as_ref())
-        .await?;
-    state
-        .store
-        .check_group_access(&authority, conversation_id)
-        .await?;
-    state
-        .store
-        .resolve_message_input(&authority.organization_id, conversation_id, &mut input)
-        .await?;
-    if recipient.starts_with("g:")
-        || recipient.contains("::")
-        || Uuid::parse_str(&recipient).is_ok()
-    {
-        input
-            .as_object_mut()
-            .ok_or_else(|| AppError::validation("message must be an object"))?
-            .remove("recipient_id");
-    }
-    let content: MessageCreate = serde_json::from_value(input)
-        .map_err(|_| AppError::validation("invalid message content"))?;
-    let sender = resolve_sender(&state, &authority, content.sender_id.as_ref()).await?;
-    state
-        .store
-        .require_participant(&authority.organization_id, &sender, conversation_id)
-        .await?;
-    let content = prepare_message_content(&state, content)?;
-    let message = state
-        .store
-        .send_message_as(
-            SendMessageCommand {
-                organization_id: authority.organization_id,
-                conversation_id,
-                sender,
-                content,
-                idempotency_key,
-            },
-            &authority.actor,
-        )
-        .await?;
-    Ok((StatusCode::ACCEPTED, Json(message)))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr as _;
-
-    use super::{validate_gif_query, verify_resolved_actors};
-    use crate::domain::{ActorId, ActorRef, ActorType};
-
-    #[test]
-    fn iam_actor_resolution_must_exactly_match_requested_set()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let carbon_id = ActorId::from_str("carbon-1")?;
-        let silicon_id = ActorId::from_str("silicon-1")?;
-        let carbon = ActorRef {
-            actor_type: ActorType::Carbon,
-            id: carbon_id.clone(),
-        };
-        let silicon = ActorRef {
-            actor_type: ActorType::Silicon,
-            id: silicon_id.clone(),
-        };
-
-        let exact = verify_resolved_actors(std::slice::from_ref(&carbon_id), vec![carbon.clone()])?;
-        assert_eq!(exact, vec![carbon.clone()]);
-
-        let missing =
-            verify_resolved_actors(&[carbon_id.clone(), silicon_id], vec![carbon.clone()]);
-        assert!(missing.is_err());
-
-        let extra = verify_resolved_actors(
-            std::slice::from_ref(&carbon_id),
-            vec![carbon.clone(), silicon],
-        );
-        assert!(extra.is_err());
-
-        let duplicate = verify_resolved_actors(
-            std::slice::from_ref(&carbon_id),
-            vec![carbon.clone(), carbon],
-        );
-        assert!(duplicate.is_err());
-        Ok(())
-    }
+    use super::{storage_address, validate_gif_query};
 
     #[test]
     fn gif_query_bounds_reject_control_characters() {
         assert!(validate_gif_query("celebration").is_ok());
         assert!(validate_gif_query("\n").is_err());
+    }
+
+    #[test]
+    fn routing_addresses_are_stored_with_the_account_uuid() -> crate::AppResult<()> {
+        assert_eq!(
+            storage_address("K1E", Some("deliberate"))?.as_str(),
+            "deliberate@K1E"
+        );
+        assert_eq!(storage_address("zQo", None)?.as_str(), "zQo");
+        Ok(())
     }
 }

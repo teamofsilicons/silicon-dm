@@ -31,27 +31,30 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
     let p: Vec<_> = path.split('/').collect();
     match (method, p.as_slice()) {
         ("POST", ["messages"]) => "message.create",
-        (_, ["iam"]) => "iam",
+        (_, ["me"]) => "me",
+        (_, ["accounts"]) => "accounts",
         (_, ["contracts"]) => "contracts",
         (_, ["sync"]) => "sync",
-        (_, ["delivery", "registration"]) => "delivery_registration",
-        (_, ["delivery", "authorization"]) => "delivery_authorization",
-        (_, ["delivery", "authorization", "complete"]) => "delivery_authorization_complete",
-        (_, ["delivery", "authorization", "disconnect"]) => "delivery_authorization_disconnect",
+        (_, ["delivery"]) => "delivery",
         ("PUT", ["presence", "devices", _]) => "renew_presence",
         ("DELETE", ["presence", "devices", _]) => "close_presence",
         (_, ["reports"]) => "report",
         (_, ["telemetry"]) => "telemetry",
-        (_, ["auth", "login"]) => "login",
-        (_, ["auth", "refresh"]) => "refresh",
-        (_, ["auth", "logout"]) => "logout",
-        (_, ["auth", "me"]) => "me",
+        (_, ["invitations"]) => "invitations",
+        ("POST", ["allow-list"]) => "allow_list_add",
+        ("DELETE", ["allow-list"]) => "allow_list_remove",
+        (_, ["allow-list"]) => "allow_list",
         ("POST", ["groups"]) => "create_group",
         (_, ["groups"]) => "groups",
         ("PATCH", ["groups", _]) => "update_group",
         (_, ["groups", _]) => "group",
         ("DELETE", ["groups", _, "members"]) => "remove_group_members",
         (_, ["groups", _, "members"]) => "invite_group_members",
+        ("DELETE", ["groups", _, "owners"]) => "remove_group_owners",
+        (_, ["groups", _, "owners"]) => "add_group_owners",
+        (_, ["groups", _, "accept"]) => "accept_group_invitation",
+        (_, ["groups", _, "decline"]) => "decline_group_invitation",
+        (_, ["groups", _, "leave"]) => "leave_group",
         ("POST", ["conversations"]) => "create_conversation",
         (_, ["conversations"]) => "conversations",
         ("POST", ["conversations", _, "messages"]) => "message.create",
@@ -67,15 +70,7 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
         (_, ["conversations", _, "draft"]) => "draft",
         (_, ["presence", _]) => "presence",
         (_, ["gifs", _]) => "gifs",
-        ("POST", ["testing-environments"]) => "create_testing_environment",
-        (_, ["testing-environments"]) => "testing_environments",
-        ("PATCH", ["testing-environments", _]) => "update_testing_environment",
-        ("DELETE", ["testing-environments", _]) => "delete_testing_environment",
-        (_, ["testing-environments", _]) => "testing_environment",
-        (_, ["testing-environments", _, "key"]) => "testing_environment_key",
-        (_, ["testing-environments", _, "rotate-key"]) => "rotate_testing_environment_key",
-        (_, ["testing-environments", _, "restore"]) => "restore_testing_environment",
-        (_, ["testing-environments", _, "clean"]) => "clean_testing_environment",
+        // The local outgoing relay (dm.localhost), not the DM service.
         (_, ["requests"]) => "request",
         (_, ["requests", _, "status"]) => "request_status",
         (_, ["requests", _]) => "request_result",
@@ -150,25 +145,29 @@ pub async fn responses(
     axum::response::Response::from_parts(parts, Body::from_stream(stream))
 }
 
-/// Canonical public group address: g:<organization>:<lowercase-name-slug>.
+/// A public group address: `g:<lowercase-name-slug>` for groups created from contract 4
+/// on, or the older `g:<organization>:<lowercase-name-slug>` that existing groups keep.
 pub fn valid_group_id(value: &str) -> bool {
-    let mut parts = value.split(':');
-    if parts.next() != Some("g") {
-        return false;
-    }
-    let (Some(org), Some(slug)) = (parts.next(), parts.next()) else {
+    let Some(rest) = value.strip_prefix("g:") else {
         return false;
     };
-    parts.next().is_none()
-        && org
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && org.len() <= 255
-        && org
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-        && !slug.is_empty()
+    match rest.split_once(':') {
+        None => valid_slug(rest),
+        Some((org, slug)) => {
+            org.as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+                && org.len() <= 255
+                && org
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+                && valid_slug(slug)
+        }
+    }
+}
+
+fn valid_slug(slug: &str) -> bool {
+    !slug.is_empty()
         && slug.len() <= 140
         && !slug.starts_with('-')
         && !slug.ends_with('-')
@@ -187,11 +186,16 @@ mod group_id_tests {
             "g:other-org:product-design",
             "g:tos:research-2",
             "g:tos:123",
+            "g:tos-product-design",
+            "g:product-design",
+            "g:product-design-2",
         ] {
             assert!(super::valid_group_id(id), "{id}");
         }
         for id in [
-            "g:tos-product-design",
+            "g:Product-Design",
+            "g:",
+            "g:-bad",
             "g:tos:Product-Design",
             "g:tos:bad--slug",
             "g:tos:-bad",

@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Silicon DM on private ARM64 ECS Fargate with dedicated ALB and separate production/testing RDS.
+Description: Silicon DM on private ARM64 ECS Fargate with a dedicated ALB and RDS PostgreSQL, signing in with Silicon Accounts.
 
 Parameters:
   VpcId:
@@ -16,16 +16,38 @@ Parameters:
     Type: String
   AppSecretArn:
     Type: String
-    Description: Secrets Manager secret holding the IAM application and webhook credentials.
+    Description: Secrets Manager secret holding DM's Silicon Accounts app secret, webhook secret, data key, provider keys and the runtime database password.
   BackendImageUri:
     Type: String
     Description: Immutable ARM64 ECR runtime image with the AWS RDS CA bundle baked in.
   PublicHostName:
     Type: String
     Default: backend.dm.teamofsilicons.com
-  IamBaseUrl:
+  AccountsUrl:
     Type: String
-    Default: https://backend.iam.teamofsilicons.com/
+    Default: https://accounts.teamofsilicons.com
+    AllowedPattern: ^https://[^/\s]+$
+    Description: Silicon Accounts public origin, exactly the iss of its tokens (no trailing slash).
+  AccountsApiUrl:
+    Type: String
+    Default: ""
+    AllowedPattern: ^(https://[^\s]+)?$
+    Description: Optional server-to-server Silicon Accounts origin; empty uses AccountsUrl.
+  AppId:
+    Type: String
+    Default: dm
+    AllowedPattern: ^[a-z][a-z0-9_-]*$
+    Description: DM's app id at Silicon Accounts.
+  ProofIssuers:
+    Type: String
+    Default: dm.conversations.read=interface,dm.messages.read=interface,dm.messages.write=interface,dm.receipts.write=interface,dm.drafts.write=interface
+    AllowedPattern: ^[a-z0-9._=,-]*$
+    Description: Apps whose User verification proofs DM accepts, per scope (scope=app,...); empty accepts none.
+  TingUrl:
+    Type: String
+    Default: ""
+    AllowedPattern: ^(https://[^/\s]+)?$
+    Description: Ting origin; empty keeps Ting delivery off and clients read DM's sync feed.
   BootstrapImageUri:
     Type: String
     Description: ARM64 image containing the reviewed one-off bootstrap script and DM migrator.
@@ -47,6 +69,7 @@ Parameters:
     Type: String
     Default: db.t4g.micro
     AllowedValues: [db.t4g.micro, db.t4g.small]
+    Description: Class of the retained testing database (test environments are retired; its data is kept).
 
 Resources:
   InstanceSecurityGroup:
@@ -154,6 +177,8 @@ Resources:
         - Key: Environment
           Value: production
 
+  # Retained: it held the test environments, which DM 0.15 no longer runs. Nothing
+  # reads or writes it any more; its data stays until a Carbon decides otherwise.
   TestingDatabase:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Snapshot
@@ -232,7 +257,7 @@ Resources:
       Matcher:
         HttpCode: "204"
       TargetGroupAttributes:
-        # Finish large REST requests; durable clients reconnect and replay sockets.
+        # Finish large REST requests and sync long-polls (at most 30 s) before a task stops.
         - Key: deregistration_delay.timeout_seconds
           Value: "180"
       Tags:
@@ -512,9 +537,6 @@ Resources:
             - Fn::GetAtt:
               - Database
               - MasterUserSecret.SecretArn
-            - Fn::GetAtt:
-              - TestingDatabase
-              - MasterUserSecret.SecretArn
           - Effect: Allow
             Action:
             - secretsmanager:PutSecretValue
@@ -584,24 +606,25 @@ Resources:
             Fn::GetAtt:
             - Database
             - MasterUserSecret.SecretArn
-        - Name: TEST_DB_SECRET_ARN
-          Value:
-            Fn::GetAtt:
-            - TestingDatabase
-            - MasterUserSecret.SecretArn
         - Name: DB_HOST
           Value:
             Fn::GetAtt:
             - Database
             - Endpoint.Address
-        - Name: TEST_DB_HOST
-          Value:
-            Fn::GetAtt:
-            - TestingDatabase
-            - Endpoint.Address
         - Name: RUNTIME_SECRET_ARN
           Value:
             Ref: RuntimeSecret
+        # The cutover commands (draft-identity-mapping, link-identities) check uuids
+        # with Silicon Accounts as DM's app.
+        - Name: ACCOUNTS_URL
+          Value:
+            Ref: AccountsUrl
+        - Name: ACCOUNTS_API_URL
+          Value:
+            Ref: AccountsApiUrl
+        - Name: DM_APP_ID
+          Value:
+            Ref: AppId
         - Name: AWS_DEFAULT_REGION
           Value:
             Ref: AWS::Region
@@ -672,15 +695,25 @@ Resources:
         - Name: DM_PUBLIC_BASE_URL
           Value:
             Fn::Sub: https://${PublicHostName}/api/v1
-        - Name: DM_IAM_BASE_URL
+        - Name: ACCOUNTS_URL
           Value:
-            Ref: IamBaseUrl
+            Ref: AccountsUrl
+        - Name: ACCOUNTS_API_URL
+          Value:
+            Ref: AccountsApiUrl
+        - Name: DM_APP_ID
+          Value:
+            Ref: AppId
+        - Name: DM_PROOF_ISSUERS
+          Value:
+            Ref: ProofIssuers
+        - Name: DM_TING_URL
+          Value:
+            Ref: TingUrl
         - Name: DM_DATABASE_MAX_CONNECTIONS
           Value: '16'
         - Name: DM_DATABASE_MIN_CONNECTIONS
           Value: '1'
-        - Name: DM_TEST_DATABASE_MAX_CONNECTIONS
-          Value: '4'
         - Name: DM_DATABASE_ACQUIRE_TIMEOUT_SECONDS
           Value: '10'
         - Name: DM_DATABASE_STATEMENT_TIMEOUT_SECONDS
@@ -694,42 +727,27 @@ Resources:
         - Name: DM_LOG_FILTER
           Value: info,silicon_dm=info
         Secrets:
-        - Name: DM_HONEYCOMB_SERVICE_TOKEN
+        - Name: DM_APP_SECRET
           ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_HONEYCOMB_SERVICE_TOKEN::'
-        - Name: DM_HONEYCOMB_BASE_URL
+            Fn::Sub: '${RuntimeSecret}:DM_APP_SECRET::'
+        - Name: DM_ACCOUNTS_WEBHOOK_SECRET
           ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_HONEYCOMB_BASE_URL::'
+            Fn::Sub: '${RuntimeSecret}:DM_ACCOUNTS_WEBHOOK_SECRET::'
+        - Name: DM_DATA_KEY
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_DATA_KEY::'
         - Name: DM_SPACE_STATION_TABLE_KEY
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_SPACE_STATION_TABLE_KEY::'
         - Name: DM_POSTMARK_SERVER_TOKEN
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_POSTMARK_SERVER_TOKEN::'
-        - Name: DM_IAM_APP_ID
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_IAM_APP_ID::'
-        - Name: DM_IAM_APP_SECRET
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_IAM_APP_SECRET::'
-        - Name: DM_IAM_WEBHOOK_SECRET
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_IAM_WEBHOOK_SECRET::'
-        - Name: DM_IAM_WEBHOOK_KEY_VERSION
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_IAM_WEBHOOK_KEY_VERSION::'
         - Name: DM_GIPHY_API_KEY
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_GIPHY_API_KEY::'
-        - Name: DM_TEST_KEY_ENCRYPTION_KEY
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_TEST_KEY_ENCRYPTION_KEY::'
         - Name: DM_DATABASE_URL
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_DATABASE_URL::'
-        - Name: DM_TEST_DATABASE_URL
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_TEST_DATABASE_URL::'
         PortMappings:
         - ContainerPort: 8080
           Protocol: tcp
@@ -834,15 +852,25 @@ Resources:
         - Name: DM_PUBLIC_BASE_URL
           Value:
             Fn::Sub: https://${PublicHostName}/api/v1
-        - Name: DM_IAM_BASE_URL
+        - Name: ACCOUNTS_URL
           Value:
-            Ref: IamBaseUrl
+            Ref: AccountsUrl
+        - Name: ACCOUNTS_API_URL
+          Value:
+            Ref: AccountsApiUrl
+        - Name: DM_APP_ID
+          Value:
+            Ref: AppId
+        - Name: DM_PROOF_ISSUERS
+          Value:
+            Ref: ProofIssuers
+        - Name: DM_TING_URL
+          Value:
+            Ref: TingUrl
         - Name: DM_DATABASE_MAX_CONNECTIONS
           Value: '4'
         - Name: DM_DATABASE_MIN_CONNECTIONS
           Value: '1'
-        - Name: DM_TEST_DATABASE_MAX_CONNECTIONS
-          Value: '4'
         - Name: DM_DATABASE_ACQUIRE_TIMEOUT_SECONDS
           Value: '10'
         - Name: DM_DATABASE_STATEMENT_TIMEOUT_SECONDS
@@ -856,42 +884,27 @@ Resources:
         - Name: DM_LOG_FILTER
           Value: info,silicon_dm=info
         Secrets:
-        - Name: DM_HONEYCOMB_SERVICE_TOKEN
+        - Name: DM_APP_SECRET
           ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_HONEYCOMB_SERVICE_TOKEN::'
-        - Name: DM_HONEYCOMB_BASE_URL
+            Fn::Sub: '${RuntimeSecret}:DM_APP_SECRET::'
+        - Name: DM_ACCOUNTS_WEBHOOK_SECRET
           ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_HONEYCOMB_BASE_URL::'
+            Fn::Sub: '${RuntimeSecret}:DM_ACCOUNTS_WEBHOOK_SECRET::'
+        - Name: DM_DATA_KEY
+          ValueFrom:
+            Fn::Sub: '${RuntimeSecret}:DM_DATA_KEY::'
         - Name: DM_SPACE_STATION_TABLE_KEY
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_SPACE_STATION_TABLE_KEY::'
         - Name: DM_POSTMARK_SERVER_TOKEN
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_POSTMARK_SERVER_TOKEN::'
-        - Name: DM_IAM_APP_ID
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_IAM_APP_ID::'
-        - Name: DM_IAM_APP_SECRET
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_IAM_APP_SECRET::'
-        - Name: DM_IAM_WEBHOOK_SECRET
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_IAM_WEBHOOK_SECRET::'
-        - Name: DM_IAM_WEBHOOK_KEY_VERSION
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_IAM_WEBHOOK_KEY_VERSION::'
         - Name: DM_GIPHY_API_KEY
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_GIPHY_API_KEY::'
-        - Name: DM_TEST_KEY_ENCRYPTION_KEY
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_TEST_KEY_ENCRYPTION_KEY::'
         - Name: DM_DATABASE_URL
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:DM_DATABASE_URL::'
-        - Name: DM_TEST_DATABASE_URL
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:DM_TEST_DATABASE_URL::'
       Tags:
       - Key: Service
         Value: silicon-dm

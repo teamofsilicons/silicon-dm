@@ -1,5 +1,5 @@
-# Honeycomb activates prebuilt commands without running a runtime installer.
-# Link the Microsoft CRT into both Windows executables.
+# Silicon Apps installs prebuilt commands without running a runtime installer,
+# so link the Microsoft CRT into both Windows executables.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 

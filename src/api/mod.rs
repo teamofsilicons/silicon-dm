@@ -6,14 +6,12 @@ pub mod router;
 
 pub use router::build_router;
 
-/// IAM application-session endpoints.
-pub mod auth_handlers;
-/// Signed IAM webhook receiver.
+/// Signed Silicon Accounts webhook receiver.
 pub mod webhook;
 
+mod access;
 mod contracts;
-
-mod group_ids;
 mod groups;
+mod me;
+mod render;
 mod sync;
-mod ting;

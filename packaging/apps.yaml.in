@@ -1,0 +1,16 @@
+# Silicon Apps manifest template for one DM CLI package.
+#
+# scripts/package-apps.sh renders this file as apps.yaml at the root of each
+# archive: comment lines are dropped, @VERSION@ becomes the release version
+# (crates/cli/Cargo.toml, equal to the workspace version), @TARGET@ one Silicon
+# Apps target and @BINARY@ bin/dm (bin/dm.exe on Windows). Each archive lists
+# only its own target, so every target uploads and is validated on its own.
+# `dm` is an existing two-character app id, which Silicon Apps keeps accepting.
+# Reference: https://developers.teamofsilicons.com/docs/apps/reference/manifest
+schema_version: 1
+app_id: dm
+version: @VERSION@
+command: dm
+targets:
+  @TARGET@:
+    binary: @BINARY@

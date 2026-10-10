@@ -1,13 +1,15 @@
 //! Axum router construction.
 
+use std::time::Duration;
+
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, Request},
+    extract::DefaultBodyLimit,
     http::{HeaderName, StatusCode, header},
-    response::{IntoResponse as _, Response},
-    routing::{any, get, post, put},
+    response::Response,
+    routing::{get, post, put},
 };
-use tower::{ServiceBuilder, ServiceExt as _};
+use tower::ServiceBuilder;
 use tower_http::{
     catch_panic::CatchPanicLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -16,28 +18,41 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use super::{auth_handlers, handlers, webhook};
-use crate::testing::handlers as testing;
+use super::{groups, handlers, me, webhook};
 use crate::{AppError, application::state::AppState};
+
+/// Margin added to the longest sync wait before the request is cut off.
+const SYNC_TIMEOUT_MARGIN: Duration = Duration::from_secs(15);
 
 /// Builds the versioned DM router.
 #[allow(
     clippy::too_many_lines,
     reason = "all public routes remain visible together"
 )]
-fn build_plane_router(state: AppState) -> Router {
+fn build_api_router(state: AppState) -> Router {
     let public_api = Router::new()
-        .route("/groups", post(super::groups::create))
-        .route(
-            "/groups/{group_id}",
-            get(super::groups::get).patch(super::groups::update),
-        )
+        .route("/groups", post(groups::create))
+        .route("/groups/{group_id}", get(groups::get).patch(groups::update))
         .route(
             "/groups/{group_id}/members",
-            post(super::groups::invite).delete(super::groups::remove),
+            post(groups::invite).delete(groups::remove),
         )
+        .route(
+            "/groups/{group_id}/owners",
+            post(groups::add_owners).delete(groups::remove_owners),
+        )
+        .route("/groups/{group_id}/accept", post(groups::accept))
+        .route("/groups/{group_id}/decline", post(groups::decline))
+        .route("/groups/{group_id}/leave", post(groups::leave))
+        .route("/invitations", get(groups::invitations))
+        .route(
+            "/allow-list",
+            get(me::allow_list).post(me::allow).delete(me::disallow),
+        )
+        .route("/me", get(me::me))
+        .route("/accounts", get(me::accounts))
+        .route("/delivery", get(me::delivery_status))
         .route("/messages", post(handlers::send_to_recipient))
-        .route("/iam", get(auth_handlers::iam))
         .route(
             "/reports",
             post(crate::reporting::submit).layer(DefaultBodyLimit::max(65536)),
@@ -47,23 +62,6 @@ fn build_plane_router(state: AppState) -> Router {
             post(crate::telemetry::receive).layer(DefaultBodyLimit::max(2048)),
         )
         .route("/contracts", get(super::contracts::describe))
-        .route("/sync", get(super::sync::events))
-        .route(
-            "/delivery/authorization",
-            get(super::ting::status).post(super::ting::authorize),
-        )
-        .route(
-            "/delivery/authorization/complete",
-            post(super::ting::complete),
-        )
-        .route(
-            "/delivery/authorization/disconnect",
-            post(super::ting::disconnect),
-        )
-        .route(
-            "/delivery/registration",
-            post(super::ting::register_delivery),
-        )
         .route(
             "/presence/devices/{device_id}",
             put(super::sync::renew_presence).delete(super::sync::close_presence),
@@ -103,52 +101,8 @@ fn build_plane_router(state: AppState) -> Router {
         .route("/presence/{actor_id}", get(handlers::get_presence))
         .route("/gifs/trending", get(handlers::list_trending_gifs))
         .route("/gifs/search", get(handlers::search_gifs))
-        .route("/gifs/recent", get(handlers::list_recent_gifs))
-        .route(
-            "/auth/login",
-            post(auth_handlers::login).layer(DefaultBodyLimit::max(16 * 1024)),
-        )
-        .route(
-            "/auth/refresh",
-            post(auth_handlers::refresh).layer(DefaultBodyLimit::max(16 * 1024)),
-        )
-        .route(
-            "/auth/logout",
-            post(auth_handlers::logout).layer(DefaultBodyLimit::max(16 * 1024)),
-        )
-        .route("/auth/me", get(auth_handlers::me))
-        .route(
-            "/testing-environments",
-            get(testing::list).post(testing::create),
-        )
-        .route(
-            "/testing-environments/{environment_id}",
-            get(testing::get)
-                .patch(testing::update)
-                .delete(testing::delete),
-        )
-        .route(
-            "/testing-environments/{environment_id}/key",
-            get(testing::key),
-        )
-        .route(
-            "/testing-environments/{environment_id}/rotate-key",
-            post(testing::rotate),
-        )
-        .route(
-            "/testing-environments/{environment_id}/restore",
-            post(testing::restore),
-        )
-        .route(
-            "/testing-environments/{environment_id}/clean",
-            post(testing::clean),
-        );
+        .route("/gifs/recent", get(handlers::list_recent_gifs));
 
-    let participant_routes = Router::new().route(
-        "/internal/honeycomb/organizations/{org_id}/testing-environments/{environment_id}/operations/{operation_id}",
-        put(crate::testing::honeycomb::apply).get(crate::testing::honeycomb::receipt)
-            .layer(DefaultBodyLimit::max(1024 * 1024)),
-    );
     let timed_routes = Router::new()
         .route(
             "/webhook/",
@@ -161,17 +115,24 @@ fn build_plane_router(state: AppState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             state.settings.server.request_timeout,
         ));
+    // Sync may hold a request open up to MAX_WAIT_SECONDS waiting for something new.
+    let sync_routes = Router::new()
+        .route("/api/v1/sync", get(super::sync::events))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(u64::from(super::sync::MAX_WAIT_SECONDS)) + SYNC_TIMEOUT_MARGIN,
+        ));
     let retired_routes = Router::new()
         .route("/api/v1/ws", get(super::contracts::retired))
         .route("/api/v1/ws/shared", get(super::contracts::retired));
 
     Router::new()
-        .merge(participant_routes)
         .merge(timed_routes)
+        .merge(sync_routes)
         .merge(retired_routes)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            super::group_ids::responses,
+            super::render::responses,
         ))
         .fallback(|| async { AppError::NotFound })
         .layer(axum::middleware::from_fn_with_state(
@@ -193,17 +154,14 @@ async fn prevent_response_caching(mut response: Response) -> Response {
     response
 }
 
-/// Builds guarded routing with fail-closed selection of testing data planes.
+/// Builds the DM router with request ids, tracing, panic isolation and the public
+/// `{type, data}` envelope.
 pub fn build_router(state: AppState) -> Router {
     let maximum_body = state.settings.server.max_body_bytes;
-    let production = build_plane_router(state.clone());
+    let api = build_api_router(state);
     let request_id_header = HeaderName::from_static("x-request-id");
-    let test_header = HeaderName::from_static("x-testing-environment-key");
     let middleware = ServiceBuilder::new()
-        .layer(SetSensitiveRequestHeadersLayer::new([
-            header::AUTHORIZATION,
-            test_header,
-        ]))
+        .layer(SetSensitiveRequestHeadersLayer::new([header::AUTHORIZATION]))
         .layer(SetRequestIdLayer::new(
             request_id_header.clone(),
             MakeRequestUuid,
@@ -220,143 +178,8 @@ pub fn build_router(state: AppState) -> Router {
         .layer(PropagateRequestIdLayer::new(request_id_header))
         .layer(CatchPanicLayer::new());
 
-    Router::new()
-        .fallback(any(move |request: Request| {
-            let state = state.clone();
-            let production = production.clone();
-            async move { dispatch(state, production, request).await }
-        }))
-        .layer(DefaultBodyLimit::max(maximum_body))
+    api.layer(DefaultBodyLimit::max(maximum_body))
         .layer(middleware)
-        .layer(axum::middleware::from_fn(public_responses))
+        .layer(axum::middleware::from_fn(silicon_dm_protocol::responses))
         .layer(axum::middleware::map_response(prevent_response_caching))
-}
-
-async fn dispatch(state: AppState, production: Router, request: Request) -> Response {
-    let path = request.uri().path();
-    // Retirement is public and final; old credentials, versions, or test keys
-    // cannot revive these routes or hide their actionable migration response.
-    if super::contracts::is_retired_socket(path) {
-        return super::contracts::retired(axum::extract::State(state)).await;
-    }
-    // Lifecycle authority always comes from production IAM; only clean explicitly
-    // accepts a testing root key. Webhooks authenticate their own environment binding.
-    let control = path.starts_with("/internal/honeycomb/")
-        || path.starts_with("/api/v1/testing-environments")
-        || matches!(path, "/live" | "/ready" | "/webhook/");
-    let mut values = request
-        .headers()
-        .get_all("x-testing-environment-key")
-        .iter();
-    let value = values.next();
-    if values.next().is_some() {
-        return AppError::validation("provide exactly one testing environment key").into_response();
-    }
-    let selected_key = match value {
-        Some(value) => match value.to_str() {
-            Ok(value) => Some(value.to_owned()),
-            Err(_) => return AppError::Unauthorized.into_response(),
-        },
-        None => None,
-    };
-    let expected_generation = if control {
-        None
-    } else {
-        match testing_generation(&request) {
-            Ok(value) => value,
-            Err(error) => return error.into_response(),
-        }
-    };
-    if !control && selected_key.is_none() && expected_generation.is_some() {
-        return AppError::validation(
-            "testing environment generation requires a testing environment key",
-        )
-        .into_response();
-    }
-    if control || selected_key.is_none() {
-        return match production.oneshot(request).await {
-            Ok(response) => response,
-            Err(never) => match never {},
-        };
-    }
-    let Some(registry) = state.testing.clone() else {
-        return AppError::validation("testing environments are not configured").into_response();
-    };
-    let selected = match registry
-        .state_for_key(&state, selected_key.as_deref().unwrap_or_default())
-        .await
-    {
-        Ok(state) => state,
-        Err(error) => return error.into_response(),
-    };
-    let (Some(id), Some(generation)) = (selected.testing_environment, selected.testing_generation)
-    else {
-        return AppError::Unauthorized.into_response();
-    };
-    if expected_generation.is_none()
-        && !matches!(
-            *request.method(),
-            axum::http::Method::GET | axum::http::Method::HEAD
-        )
-        && !request.uri().path().starts_with("/api/v1/auth/")
-        && registry.is_honeycomb_environment(id).await.unwrap_or(true)
-    {
-        return AppError::conflict("testing generation required; read /api/v1/iam and bind X-Testing-Environment-Generation before writing").into_response();
-    }
-    if expected_generation.is_some_and(|expected| expected != generation) {
-        return AppError::conflict(
-            "testing environment generation changed; reconnect before retrying",
-        )
-        .into_response();
-    }
-    let Some(revision) = selected.testing_runtime_revision else {
-        return AppError::Unauthorized.into_response();
-    };
-    let fence = match registry
-        .request_runtime_fence(id, generation, revision)
-        .await
-    {
-        Ok(fence) => fence,
-        Err(error) => return error.into_response(),
-    };
-    if let Err(error) = registry.touch(id, generation).await {
-        return error.into_response();
-    }
-    let result = build_plane_router(selected).oneshot(request).await;
-    drop(fence);
-    match result {
-        Ok(response) => response,
-        Err(never) => match never {},
-    }
-}
-
-fn testing_generation(request: &Request) -> crate::AppResult<Option<i64>> {
-    let mut values = request
-        .headers()
-        .get_all("x-testing-environment-generation")
-        .iter();
-    let value = values.next();
-    if values.next().is_some() {
-        return Err(AppError::validation(
-            "provide exactly one testing environment generation",
-        ));
-    }
-    let Some(value) = value else { return Ok(None) };
-    let generation = value
-        .to_str()
-        .ok()
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(|| {
-            AppError::validation("testing environment generation must be a positive integer")
-        })?;
-    Ok(Some(generation))
-}
-
-async fn public_responses(request: Request, next: axum::middleware::Next) -> Response {
-    if request.uri().path().starts_with("/internal/honeycomb/") {
-        next.run(request).await
-    } else {
-        silicon_dm_protocol::responses(request, next).await
-    }
 }

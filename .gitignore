@@ -10,8 +10,11 @@ coverage/
 
 /dist/
 
-# Native Honeycomb payloads are delivered in the release archive.
+# Release staging trees from the packaging scripts before Silicon Apps.
 /targets/
 
 # Exclude dependency directories and local worktree dependency links.
 **/node_modules
+
+# Python bytecode from the packaging scripts and their tests.
+__pycache__/

@@ -6,15 +6,25 @@ use uuid::Uuid;
 
 use super::{ActorRef, Message};
 
-/// Organization-scoped participant set and its latest message.
+/// A direct conversation (one exact participant set) or a group, and its latest message.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Conversation {
-    /// Stable conversation identifier.
+    /// Stable conversation identifier (rendered as its public address).
     pub id: Uuid,
-    /// Owning organization.
-    pub org_id: super::OrganizationId,
     /// Canonically ordered participants.
     pub participants: Vec<ActorRef>,
+    /// Custodians who can read this conversation because one of its participants is a
+    /// Silicon they look after.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visible_to_custodians: Vec<ActorRef>,
+    /// When the same accounts have a newer canonical conversation, its id. This one stays
+    /// readable; new messages go to the canonical one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<Uuid>,
+    /// Older conversations of the same accounts (from before DM had one conversation per
+    /// set of accounts); their history stays readable by id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supersedes: Vec<Uuid>,
     /// Named group policy; omitted for existing direct conversations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<super::GroupDetails>,
@@ -35,4 +45,16 @@ pub struct ConversationPage {
     pub items: Vec<Conversation>,
     /// Opaque cursor for the next page.
     pub next_cursor: Option<String>,
+}
+
+/// How an account may use a conversation or group.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConversationAccess {
+    /// A participant of the direct conversation, or an accepted member of the group.
+    Participant,
+    /// Custodian of a Silicon in it: reads everything; may tombstone that Silicon's
+    /// messages and manage its group memberships, never act as it.
+    Custodian,
+    /// Invited to the group and not yet a member: may see the group's settings only.
+    Invitee,
 }

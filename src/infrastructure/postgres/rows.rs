@@ -56,6 +56,7 @@ pub(crate) struct MessageRecord {
     pub created_at: OffsetDateTime,
     pub delivered_at: Option<OffsetDateTime>,
     pub read_at: Option<OffsetDateTime>,
+    pub via_app: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -122,7 +123,8 @@ impl PostgresStore {
                 failure_reason,
                 created_at,
                 delivered_at,
-                read_at
+                read_at,
+                via_app
             FROM messages
             WHERE id = ANY($1)
             "#,
@@ -317,6 +319,7 @@ fn map_message(
         delivered_at: record.delivered_at,
         read_at: record.read_at,
         failure_reason: record.failure_reason,
+        via_app: record.via_app,
     })
 }
 

@@ -1,26 +1,27 @@
 # Contracts and compatibility
 
-DM serves HTTP contract 3. Public `/api/v1/ws` and `/api/v1/ws/shared` routes are
-retired and return HTTP 410 `delivery_moved_to_ting`; WebSocket 5 and shared
-transport 2 are no longer supported. Upgrade the backend and all delivery
-consumers together. Clients still using DM sockets cannot receive live updates
-from the migrated backend.
+DM serves HTTP contract 4 (DM 0.15): every request sends `x-dm-contract-version: 4` and every
+response advertises it. Contract 4 signs every account in with Silicon Accounts: each account
+stands on its own, named by uuid and current id, with groups that have owners and invitations,
+Silicon allow-lists, `GET /me`, `GET /accounts` and `GET /sync?wait=`. A client on
+contract 3 gets 406 `unsupported_contract`; upgrade the client and the service together.
 
-`GET /api/v1/contracts` returns the selected data plane's contract lifecycle,
-HTTP-only compatibility, retired routes and Ting delivery discovery. The same
-`delivery` object appears in `/api/v1/iam`: Ting's API URL, browser origin,
-separate receiver-session requirement, originating-DM-session publisher authority,
-and DM registration/sync/presence/receipt paths. These values describe the
-integration; they do not certify live Ting configuration or successful delivery.
+`GET /api/v1/contracts` (no sign-in) returns the supported versions, their lifecycle, the retired
+routes (so an old client learns why a path now answers 404 or 410) and how updates are delivered.
+`GET /api/v1/accounts` (no sign-in) says how to sign in to this DM service.
 
-HTTP responses advertise `X-DM-Contract-Version: 3`; they no longer advertise a
-DM socket protocol. Unsupported explicit HTTP versions return 406. Retired
-socket paths return 410 regardless of old protocol headers. Testing planes
-retain independent contract usage. Message history, group versions and draft
-versions remain independent of notification transport.
+The retired WebSocket paths (`/api/v1/ws`, `/api/v1/ws/shared`) answer 410 `delivery_moved`
+regardless of headers. Updates come from the sync feed, or through Ting where the service is
+configured for it ([receiving](cli/receiving.md)).
 
-Use Ting for updates and DM HTTP for mutations, receipt writes, device presence
-and cursor recovery. Preserve the opaque `/sync` cursor; a Ting sequence is not
-its replacement. See [API delivery migration](api/README.md#ting-enrollment-and-http-recovery),
-[Ting integration requirements](ting-integration-issues.md), and
-[wire format](wire-format.md).
+Compatibility rules within a contract:
+
+- New optional response fields can appear at any time; ignore what you do not know.
+- Request fields and routes are not removed or changed in meaning without a new contract
+  version. A deprecated version (announced in `GET /contracts`) is retired once it has gone
+  unused for seven days; requests on it then get 410 `contract_sunset`.
+- Message codes, group ids and conversation addresses are stable identifiers; an account's id can
+  change, its uuid never does.
+- Sync cursors are opaque and bound to the account; keep them and pass them back unchanged.
+
+See the [wire format](wire-format.md) and the [OpenAPI document](../openapi.yaml).

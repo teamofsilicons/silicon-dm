@@ -1,5 +1,6 @@
 //! Domain types and invariants.
 
+mod account;
 mod actor;
 mod bundle;
 mod conversation;
@@ -10,9 +11,12 @@ mod message;
 mod pagination;
 mod presence;
 
-pub use actor::{ActorId, ActorRef, ActorType, OrganizationId};
+pub use account::Account;
+pub use actor::{
+    ACCOUNTS_PARTITION, ActorId, ActorRef, ActorType, OrganizationId, is_account_uuid,
+};
 pub use bundle::{Bundle, BundleCreate, BundleDetail, BundleRef, BundleRole};
-pub use conversation::{Conversation, ConversationPage};
+pub use conversation::{Conversation, ConversationAccess, ConversationPage};
 pub use draft::{Draft, DraftInput};
 pub use group::{GroupCreate, GroupDetails, GroupSettings};
 pub use idempotency::IdempotencyKey;

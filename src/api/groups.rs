@@ -1,13 +1,15 @@
-//! Named-group HTTP operations. All message operations reuse the conversation UUID.
-use super::{
-    extract::{ApiJson, ApiPath, Authenticated, Idempotency, IfMatch},
-    handlers::verify_resolved_actors,
+//! Groups over HTTP. Owners are co-equal (edit settings, invite, remove, promote, cancel
+//! invitations); invitations must be accepted; members leave; the last owner cannot.
+//! A Silicon's custodian manages the groups its Silicon owns and may take its Silicon out
+//! of any group, but never accepts, sends or speaks as it.
+use super::extract::{
+    ApiJson, ApiPath, ApiQuery, Authenticated, ConversationAccess, Idempotency, IfMatch,
 };
 use crate::{
     AppError, AppResult,
     application::{auth::AuthContext, state::AppState},
-    domain::{ActorId, ActorRef, Conversation, GroupCreate, GroupDetails, GroupSettings},
-    infrastructure::postgres::groups::require_group_admin,
+    domain::{Account, ActorId, ActorRef, Conversation, GroupCreate, GroupDetails, GroupSettings},
+    infrastructure::postgres::groups::{Invitation, Invitee},
 };
 use axum::{
     Json,
@@ -26,22 +28,36 @@ pub(super) struct GroupPath {
 pub(super) struct Members {
     member_ids: Vec<ActorId>,
 }
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ForQuery {
+    #[serde(rename = "for")]
+    for_account: Option<String>,
+}
+
+const MAX_MEMBERS_PER_REQUEST: usize = 100;
 
 pub(super) async fn get(
     State(state): State<AppState>,
     Authenticated(auth): Authenticated,
+    access: ConversationAccess,
     ApiPath(path): ApiPath<GroupPath>,
 ) -> AppResult<Json<Conversation>> {
-    state.store.check_group_access(&auth, path.group_id).await?;
-    let conversation = state
-        .store
-        .get_conversation(&auth.organization_id, &auth.actor, path.group_id)
-        .await?;
-    if conversation.group.is_none() {
-        return Err(AppError::NotFound);
+    if access == ConversationAccess::Invitee {
+        return Err(AppError::refused(
+            StatusCode::FORBIDDEN,
+            "invitation_pending",
+            "You are invited to this group but have not accepted yet: see GET /api/v1/invitations, then POST /api/v1/groups/{group}/accept.",
+        ));
     }
-    Ok(Json(conversation))
+    Ok(Json(
+        state
+            .store
+            .get_conversation(&auth.actor, path.group_id)
+            .await?,
+    ))
 }
+
 pub(super) async fn create(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -49,23 +65,23 @@ pub(super) async fn create(
     Idempotency(key): Idempotency,
     ApiJson(input): ApiJson<GroupCreate>,
 ) -> AppResult<(StatusCode, Json<Conversation>)> {
-    require_group_admin(&auth)?;
-    let members = resolve(&state, &auth, &input.member_ids).await?;
+    auth.require_own_session("Creating a group")?;
+    let invitees = invitees(&state, &auth, &input.member_ids).await?;
     let conversation = state
         .store
-        .create_group(&auth, input.settings, members, &key)
+        .create_group(&auth.actor, input.settings, invitees, &key)
         .await?;
     event(
         &state,
         &headers,
         "group.created",
         conversation.id,
-        conversation.group.as_ref().map(|g| &g.settings),
         input.member_ids.len(),
     )
     .await;
     Ok((StatusCode::CREATED, Json(conversation)))
 }
+
 pub(super) async fn update(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -75,23 +91,18 @@ pub(super) async fn update(
     Idempotency(key): Idempotency,
     ApiJson(settings): ApiJson<GroupSettings>,
 ) -> AppResult<Json<GroupDetails>> {
+    require_manager(&state, &auth, path.group_id).await?;
     let version = version
         .ok_or_else(|| AppError::validation("If-Match is required when updating a group"))?;
     let group = state
         .store
-        .update_group(&auth, path.group_id, settings, version, &key)
+        .update_group(&auth.actor, path.group_id, settings, version, &key)
         .await?;
-    event(
-        &state,
-        &headers,
-        "group.updated",
-        path.group_id,
-        Some(&group.settings),
-        group.invited_members.len(),
-    )
-    .await;
+    event(&state, &headers, "group.updated", path.group_id, 0).await;
     Ok(Json(group))
 }
+
+/// `POST /groups/{group}/members`: owners invite accounts.
 pub(super) async fn invite(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -100,23 +111,25 @@ pub(super) async fn invite(
     Idempotency(key): Idempotency,
     ApiJson(input): ApiJson<Members>,
 ) -> AppResult<Json<GroupDetails>> {
-    require_group_admin(&auth)?;
-    let members = resolve(&state, &auth, &input.member_ids).await?;
+    require_manager(&state, &auth, path.group_id).await?;
+    let invitees = invitees(&state, &auth, &input.member_ids).await?;
     let group = state
         .store
-        .change_group_members(&auth, path.group_id, members, false, &key)
+        .invite_to_group(&auth.actor, path.group_id, invitees, &key)
         .await?;
     event(
         &state,
         &headers,
         "group.members_invited",
         path.group_id,
-        None,
         input.member_ids.len(),
     )
     .await;
     Ok(Json(group))
 }
+
+/// `DELETE /groups/{group}/members`: owners remove members or cancel invitations; a
+/// custodian may take its own Silicons out.
 pub(super) async fn remove(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -125,72 +138,188 @@ pub(super) async fn remove(
     Idempotency(key): Idempotency,
     ApiJson(input): ApiJson<Members>,
 ) -> AppResult<Json<GroupDetails>> {
-    require_group_admin(&auth)?;
-    validate_members(&input.member_ids)?;
-    let ids = input
-        .member_ids
-        .iter()
-        .map(|id| {
-            id.base_actor_id()
-                .map(|id| id.to_string())
-                .map_err(AppError::validation)
-        })
-        .collect::<AppResult<Vec<_>>>()?;
-    // Snapshot identities survive departures and invitation deletion, keeping retries stable.
-    let rows: Vec<(crate::domain::ActorType, String)> = sqlx::query_as("SELECT actor_kind,actor_id FROM actor_snapshots WHERE organization_id=$1 AND actor_id=ANY($2)")
-        .bind(auth.organization_id.as_str()).bind(&ids).fetch_all(state.store.pool()).await?;
-    let members = rows
-        .into_iter()
-        .map(|(actor_type, id)| {
-            Ok(ActorRef {
-                actor_type,
-                id: id.parse().map_err(|_| AppError::NotFound)?,
-            })
-        })
-        .collect::<AppResult<Vec<_>>>()?;
-    let members = verify_resolved_actors(&input.member_ids, members)?;
+    let members = resolve(&state, &input.member_ids).await?;
+    if !state
+        .store
+        .manages_group(&auth.actor, path.group_id)
+        .await?
+        && !members
+            .iter()
+            .all(|member| member.custodian.as_deref() == Some(auth.actor.id.as_str()))
+    {
+        return Err(not_manager());
+    }
+    let refs: Vec<ActorRef> = members.iter().map(Account::actor).collect();
     let group = state
         .store
-        .change_group_members(&auth, path.group_id, members, true, &key)
+        .remove_from_group(&auth.actor, path.group_id, &refs, &key)
         .await?;
     event(
         &state,
         &headers,
-        "group.invitations_removed",
+        "group.members_removed",
         path.group_id,
-        None,
-        input.member_ids.len(),
+        refs.len(),
     )
     .await;
     Ok(Json(group))
 }
-fn validate_members(ids: &[ActorId]) -> AppResult<()> {
-    if ids.len() > 100 {
+
+/// `POST /groups/{group}/owners` / `DELETE …/owners`: promote members, demote owners.
+pub(super) async fn add_owners(
+    state: State<AppState>,
+    auth: Authenticated,
+    path: ApiPath<GroupPath>,
+    key: Idempotency,
+    input: ApiJson<Members>,
+) -> AppResult<Json<GroupDetails>> {
+    owners(state, auth, path, key, input, true).await
+}
+
+pub(super) async fn remove_owners(
+    state: State<AppState>,
+    auth: Authenticated,
+    path: ApiPath<GroupPath>,
+    key: Idempotency,
+    input: ApiJson<Members>,
+) -> AppResult<Json<GroupDetails>> {
+    owners(state, auth, path, key, input, false).await
+}
+
+async fn owners(
+    State(state): State<AppState>,
+    Authenticated(auth): Authenticated,
+    ApiPath(path): ApiPath<GroupPath>,
+    Idempotency(key): Idempotency,
+    ApiJson(input): ApiJson<Members>,
+    promote: bool,
+) -> AppResult<Json<GroupDetails>> {
+    require_manager(&state, &auth, path.group_id).await?;
+    let members = resolve(&state, &input.member_ids).await?;
+    let refs: Vec<ActorRef> = members.iter().map(Account::actor).collect();
+    state
+        .store
+        .set_group_owners(&auth.actor, path.group_id, &refs, promote, &key)
+        .await
+        .map(Json)
+}
+
+/// `POST /groups/{group}/accept`: the invitee joins (and sees the full history).
+pub(super) async fn accept(
+    State(state): State<AppState>,
+    Authenticated(auth): Authenticated,
+    ApiPath(path): ApiPath<GroupPath>,
+) -> AppResult<Json<Conversation>> {
+    auth.require_own_session("Accepting an invitation")?;
+    state
+        .store
+        .respond_to_invitation(&auth.actor, path.group_id, true)
+        .await?;
+    Ok(Json(
+        state
+            .store
+            .get_conversation(&auth.actor, path.group_id)
+            .await?,
+    ))
+}
+
+/// `POST /groups/{group}/decline[?for=si:x]`: the invitee (or its custodian) declines.
+pub(super) async fn decline(
+    State(state): State<AppState>,
+    Authenticated(auth): Authenticated,
+    ApiPath(path): ApiPath<GroupPath>,
+    ApiQuery(query): ApiQuery<ForQuery>,
+) -> AppResult<StatusCode> {
+    let invitee = match &query.for_account {
+        Some(silicon) => super::handlers::looked_after(&state, &auth, silicon).await?,
+        None => auth.actor.clone(),
+    };
+    state
+        .store
+        .respond_to_invitation(&invitee, path.group_id, false)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /groups/{group}/leave`: a member leaves (the last owner cannot).
+pub(super) async fn leave(
+    State(state): State<AppState>,
+    Authenticated(auth): Authenticated,
+    ApiPath(path): ApiPath<GroupPath>,
+) -> AppResult<StatusCode> {
+    auth.require_own_session("Leaving a group")?;
+    state.store.leave_group(&auth.actor, path.group_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/v1/invitations[?for=si:x]`: pending group invitations.
+pub(super) async fn invitations(
+    State(state): State<AppState>,
+    Authenticated(auth): Authenticated,
+    ApiQuery(query): ApiQuery<ForQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    let invitee = match &query.for_account {
+        Some(silicon) => super::handlers::looked_after(&state, &auth, silicon).await?,
+        None => auth.actor.clone(),
+    };
+    let items: Vec<Invitation> = state.store.invitations_for(&invitee).await?;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+async fn require_manager(state: &AppState, auth: &AuthContext, id: Uuid) -> AppResult<()> {
+    auth.require_own_session("Managing a group")?;
+    if state.store.manages_group(&auth.actor, id).await? {
+        Ok(())
+    } else {
+        Err(not_manager())
+    }
+}
+
+fn not_manager() -> AppError {
+    AppError::forbidden(
+        "not_group_owner",
+        "Only the group's owners (and the custodian of a Silicon owner) manage it. Ask an owner to make you an owner.",
+    )
+}
+
+async fn resolve(state: &AppState, ids: &[ActorId]) -> AppResult<Vec<Account>> {
+    if ids.is_empty() || ids.len() > MAX_MEMBERS_PER_REQUEST {
         return Err(AppError::validation(
-            "at most 100 explicit invitations per request",
+            "member_ids must name 1 to 100 accounts per request",
         ));
     }
-    Ok(())
+    state.directory().resolve_all(ids).await
 }
-async fn resolve(
+
+/// Resolves invitees and applies the reach rules: a Silicon is invited only by its
+/// circle or an account on its allow-list; a custodian's own Silicons join at once.
+async fn invitees(
     state: &AppState,
     auth: &AuthContext,
     ids: &[ActorId],
-) -> AppResult<Vec<ActorRef>> {
-    validate_members(ids)?;
+) -> AppResult<Vec<Invitee>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    verify_resolved_actors(ids, state.identity.authorize_participants(auth, ids).await?)
+    let mut invitees = Vec::new();
+    for account in resolve(state, ids).await? {
+        if account.deleted {
+            return Err(AppError::account_deleted(account.display_id()));
+        }
+        state
+            .directory()
+            .require_may_reach(&auth.actor, &account)
+            .await?;
+        let accepted = account.custodian.as_deref() == Some(auth.actor.id.as_str());
+        invitees.push(Invitee {
+            actor: account.actor(),
+            accepted,
+        });
+    }
+    Ok(invitees)
 }
-async fn event(
-    state: &AppState,
-    headers: &HeaderMap,
-    name: &str,
-    id: Uuid,
-    settings: Option<&GroupSettings>,
-    count: usize,
-) {
+
+async fn event(state: &AppState, headers: &HeaderMap, name: &str, id: Uuid, count: usize) {
     if crate::telemetry::requested(headers) && state.settings.telemetry.enabled {
         let Ok(id) = state.store.public_group_id(id).await else {
             return;
@@ -199,7 +328,7 @@ async fn event(
             state,
             "backend",
             name,
-            serde_json::json!({"group_id":id,"is_public":settings.map(|s|s.is_public),"count":count,"success":true}),
+            serde_json::json!({"group_id": id, "count": count, "success": true}),
         );
     }
 }

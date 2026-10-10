@@ -7,7 +7,7 @@ use secrecy::SecretString;
 use serde_json::{Value, json};
 use silicon_dm::{
     config::TingSettings,
-    infrastructure::ting::{TingFailure, TingSendAuthority, TingSocket, TingTestingHeaders},
+    infrastructure::ting::{TingFailure, TingSendAuthority, TingSocket},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -28,26 +28,37 @@ type ServerSocket = WebSocketStream<TcpStream>;
 
 // Whitespace, key ordering, Unicode and escape spelling are deliberately retained.
 const BODY: &str = r#" {
-  "key" : "dm-original-key", "org_id":"tos",
-  "data" : {"schema_version":1,"message_id":"000"},
+  "key" : "dm-original-key",
+  "data" : {"schema_version":2,"message_id":"000"},
   "metadata":{"isi":"plan\u006eer", "note":"नमस्ते"},
-  "for":"si:cos", "type":"dm.sync.changed"
+  "for":{"uuid":"K1E","id":"si:cos"}, "type":"dm.sync.changed"
 } "#;
 
 fn authority(proof: &str) -> TingSendAuthority {
     TingSendAuthority {
         proof_token: SecretString::from(proof.to_owned()),
-        testing: None,
     }
 }
 
-async fn fixture(request_timeout: Duration) -> TestResult<(TcpListener, TingSettings)> {
+/// A local Ting origin and its settings.
+struct Fixture {
+    base_url: url::Url,
+    settings: TingSettings,
+}
+
+async fn fixture(request_timeout: Duration) -> TestResult<(TcpListener, Fixture)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base_url: url::Url = format!("http://{}", listener.local_addr()?).parse()?;
     let settings = TingSettings {
-        base_url: format!("http://{}", listener.local_addr()?).parse()?,
+        base_url: Some(base_url.clone()),
+        app_id: "ting".to_owned(),
         request_timeout,
     };
-    Ok((listener, settings))
+    Ok((listener, Fixture { base_url, settings }))
+}
+
+fn start(fixture: &Fixture, cancellation: CancellationToken) -> TingSocket {
+    TingSocket::start(fixture.base_url.clone(), &fixture.settings, cancellation)
 }
 
 #[allow(
@@ -137,9 +148,9 @@ async fn prewarms_and_preserves_exact_body_with_idle_and_inflight_heartbeats() -
         assert_eq!(second["body"], BODY);
         assert_eq!(second["proof_token"], "proof-fresh");
         assert_ne!(first["request_id"], second["request_id"]);
-        assert_eq!(
-            second["headers"],
-            json!({"IAM_TEST_APP_SECRET":"ting-test-secret", "X-Testing-Environment-Key":"iam-environment-key"})
+        assert!(
+            second.get("headers").is_none(),
+            "only the proof authorizes a send"
         );
         socket
             .send(Message::Text(accepted(&second)?.to_string().into()))
@@ -147,21 +158,10 @@ async fn prewarms_and_preserves_exact_body_with_idle_and_inflight_heartbeats() -
         Ok::<_, Box<dyn Error + Send + Sync>>(())
     });
     let cancellation = CancellationToken::new();
-    let publisher = TingSocket::start(&settings, cancellation.clone());
+    let publisher = start(&settings, cancellation.clone());
     timeout(Duration::from_secs(4), ready).await??;
     let first = publisher.send(BODY, authority("proof-first")).await?;
-    let second = publisher
-        .send(
-            BODY,
-            TingSendAuthority {
-                proof_token: SecretString::from("proof-fresh"),
-                testing: Some(TingTestingHeaders {
-                    app_secret: SecretString::from("ting-test-secret"),
-                    environment_key: SecretString::from("iam-environment-key"),
-                }),
-            },
-        )
-        .await?;
+    let second = publisher.send(BODY, authority("proof-fresh")).await?;
     assert_eq!(first, second);
     assert_eq!(first.id, "ting-original-id");
     assert!(!first.silent);
@@ -215,7 +215,7 @@ async fn rejected_and_mismatched_responses_never_confirm_acceptance() -> TestRes
             Ok::<_, Box<dyn Error + Send + Sync>>(())
         });
         let cancellation = CancellationToken::new();
-        let publisher = TingSocket::start(&settings, cancellation.clone());
+        let publisher = start(&settings, cancellation.clone());
         let result = publisher.send(BODY, authority("proof-test")).await;
         if matches!(invalid, "error" | "unsafe_error") {
             let Err(TingFailure::Rejected(code)) = result else {
@@ -281,7 +281,7 @@ async fn cancelled_inflight_caller_discards_socket_before_its_own_deadline() -> 
     });
     let cancellation = CancellationToken::new();
     let _cancel_on_exit = cancellation.clone().drop_guard();
-    let publisher = TingSocket::start(&settings, cancellation);
+    let publisher = start(&settings, cancellation);
     let first_publisher = publisher.clone();
     let first = tokio::spawn(async move {
         first_publisher
@@ -327,7 +327,7 @@ async fn a_valid_ready_greeting_is_required_before_transmitting_a_proof() -> Tes
             Ok::<_, Box<dyn Error + Send + Sync>>(())
         });
         let cancellation = CancellationToken::new();
-        let publisher = TingSocket::start(&settings, cancellation.clone());
+        let publisher = start(&settings, cancellation.clone());
         assert!(
             publisher
                 .send(BODY, authority("proof-must-stay-local"))
@@ -381,7 +381,7 @@ async fn assert_uncertain_retry(disconnect: bool) -> TestResult {
         Ok::<_, Box<dyn Error + Send + Sync>>(())
     });
     let cancellation = CancellationToken::new();
-    let publisher = TingSocket::start(&settings, cancellation.clone());
+    let publisher = start(&settings, cancellation.clone());
     let result = publisher.send(BODY, authority("proof-uncertain")).await;
     if disconnect {
         assert!(matches!(result, Err(TingFailure::Transport)));
@@ -399,8 +399,7 @@ async fn assert_uncertain_retry(disconnect: bool) -> TestResult {
 }
 
 #[tokio::test]
-async fn invalid_local_requests_and_incomplete_test_credentials_are_not_transmitted() -> TestResult
-{
+async fn invalid_local_requests_are_not_transmitted() -> TestResult {
     let (listener, settings) = fixture(Duration::from_secs(2)).await?;
     let (prewarmed, ready) = oneshot::channel();
     let (inspected, finish) = oneshot::channel();
@@ -417,7 +416,7 @@ async fn invalid_local_requests_and_incomplete_test_credentials_are_not_transmit
         Ok::<_, Box<dyn Error + Send + Sync>>(())
     });
     let cancellation = CancellationToken::new();
-    let publisher = TingSocket::start(&settings, cancellation.clone());
+    let publisher = start(&settings, cancellation.clone());
     ready.await?;
     for body in [
         "[]".to_owned(),
@@ -435,23 +434,6 @@ async fn invalid_local_requests_and_incomplete_test_credentials_are_not_transmit
         publisher.send(BODY, authority("")).await,
         Err(TingFailure::InvalidRequest)
     ));
-    for (secret, key) in [("", "iam-key"), ("ting-secret", "")] {
-        assert!(matches!(
-            publisher
-                .send(
-                    BODY,
-                    TingSendAuthority {
-                        proof_token: SecretString::from("test-proof"),
-                        testing: Some(TingTestingHeaders {
-                            app_secret: SecretString::from(secret),
-                            environment_key: SecretString::from(key),
-                        }),
-                    }
-                )
-                .await,
-            Err(TingFailure::InvalidRequest)
-        ));
-    }
     assert!(matches!(
         publisher
             .send(BODY, authority(&"x".repeat(1024 * 1024)))

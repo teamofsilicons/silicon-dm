@@ -6,10 +6,12 @@ use uuid::Uuid;
 
 /// Public DM operations accepted by the local daemon, without auth secrets.
 /// Mutations include their retry key in the command so crash recovery preserves it.
+/// `for` names one of the custodian's Silicons where the service allows it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Operation {
     Me,
+    Delivery,
     ListGroups {
         #[serde(default)]
         page: PageRequest,
@@ -37,9 +39,50 @@ pub enum Operation {
         member_ids: Vec<String>,
         idempotency_key: String,
     },
+    AddGroupOwners {
+        group_id: String,
+        member_ids: Vec<String>,
+        idempotency_key: String,
+    },
+    RemoveGroupOwners {
+        group_id: String,
+        member_ids: Vec<String>,
+        idempotency_key: String,
+    },
+    ListInvitations {
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+        for_account: Option<String>,
+    },
+    AcceptInvitation {
+        group_id: String,
+    },
+    DeclineInvitation {
+        group_id: String,
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+        for_account: Option<String>,
+    },
+    LeaveGroup {
+        group_id: String,
+    },
+    GetAllowList {
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+        for_account: Option<String>,
+    },
+    Allow {
+        account_ids: Vec<String>,
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+        for_account: Option<String>,
+    },
+    Disallow {
+        account_ids: Vec<String>,
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+        for_account: Option<String>,
+    },
     ListConversations {
         #[serde(default)]
         page: PageRequest,
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+        for_account: Option<String>,
     },
     CreateConversation {
         participant_ids: Vec<String>,
@@ -101,7 +144,7 @@ pub enum Operation {
     GetPresence {
         actor_id: String,
     },
-    /// Transient activity renews the local daemon's actor-owned HTTP device lease.
+    /// Transient activity renews the local daemon's account-owned HTTP device lease.
     SetPresence {
         activity: Option<Activity>,
     },
@@ -120,6 +163,13 @@ impl Operation {
                 | Self::UpdateGroup { .. }
                 | Self::InviteGroupMembers { .. }
                 | Self::RemoveGroupMembers { .. }
+                | Self::AddGroupOwners { .. }
+                | Self::RemoveGroupOwners { .. }
+                | Self::AcceptInvitation { .. }
+                | Self::DeclineInvitation { .. }
+                | Self::LeaveGroup { .. }
+                | Self::Allow { .. }
+                | Self::Disallow { .. }
                 | Self::CreateConversation { .. }
                 | Self::SendMessage { .. }
                 | Self::EditMessage { .. }
@@ -177,10 +227,61 @@ impl Operation {
                     .remove_group_members(group_id, member_ids, idempotency_key)
                     .await?,
             )?,
-            Self::Me => serde_json::to_value(client.me().await?)?,
-            Self::ListConversations { page } => {
-                serde_json::to_value(client.conversations(page).await?)?
+            Self::AddGroupOwners {
+                group_id,
+                member_ids,
+                idempotency_key,
+            } => serde_json::to_value(
+                client
+                    .add_group_owners(group_id, member_ids, idempotency_key)
+                    .await?,
+            )?,
+            Self::RemoveGroupOwners {
+                group_id,
+                member_ids,
+                idempotency_key,
+            } => serde_json::to_value(
+                client
+                    .remove_group_owners(group_id, member_ids, idempotency_key)
+                    .await?,
+            )?,
+            Self::ListInvitations { for_account } => {
+                serde_json::to_value(client.invitations(for_account.as_deref()).await?)?
             }
+            Self::AcceptInvitation { group_id } => {
+                serde_json::to_value(client.accept_invitation(group_id).await?)?
+            }
+            Self::DeclineInvitation {
+                group_id,
+                for_account,
+            } => {
+                client
+                    .decline_invitation(group_id, for_account.as_deref())
+                    .await?;
+                json!({"declined":true,"group_id":group_id})
+            }
+            Self::LeaveGroup { group_id } => {
+                client.leave_group(group_id).await?;
+                json!({"left":true,"group_id":group_id})
+            }
+            Self::GetAllowList { for_account } => {
+                serde_json::to_value(client.allow_list(for_account.as_deref()).await?)?
+            }
+            Self::Allow {
+                account_ids,
+                for_account,
+            } => serde_json::to_value(client.allow(account_ids, for_account.as_deref()).await?)?,
+            Self::Disallow {
+                account_ids,
+                for_account,
+            } => serde_json::to_value(client.disallow(account_ids, for_account.as_deref()).await?)?,
+            Self::Me => serde_json::to_value(client.me().await?)?,
+            Self::Delivery => serde_json::to_value(client.delivery().await?)?,
+            Self::ListConversations { page, for_account } => serde_json::to_value(
+                client
+                    .conversations_for(page, for_account.as_deref())
+                    .await?,
+            )?,
             Self::CreateConversation {
                 participant_ids,
                 idempotency_key,
@@ -285,14 +386,27 @@ impl Operation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayRequest {
     pub request_id: Uuid,
-    /// Local profile name, with optional testing environment UUID.
+    /// Local profile name (see `dm profiles list`).
     pub profile: String,
-    #[serde(default)]
+    /// Retired with test environments. Requests that name one are refused instead of
+    /// running against the signed-in account; requests queued by older releases carry null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub testing_environment_id: Option<Uuid>,
-    /// Expected sandbox state; the daemon captures its known generation when omitted.
+    /// Retired with test environments; ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub testing_generation: Option<i64>,
     pub request: Operation,
+}
+impl RelayRequest {
+    pub fn new(profile: impl Into<String>, request: Operation) -> Self {
+        Self {
+            request_id: Uuid::new_v4(),
+            profile: profile.into(),
+            testing_environment_id: None,
+            testing_generation: None,
+            request,
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayAcknowledgement {
@@ -318,7 +432,8 @@ pub struct RelayRequestStatus {
     pub request_id: Uuid,
     pub state: String,
 }
-/// Loopback-only HTTP relay client; bearer is a local credential, not an IAM token.
+/// Loopback-only HTTP relay client; its bearer is a local credential of this DM home, never
+/// a DM access token.
 #[derive(Clone)]
 pub struct RelayClient {
     http: reqwest::Client,

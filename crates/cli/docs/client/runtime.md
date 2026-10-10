@@ -1,185 +1,104 @@
 # Optional Rust runtime
 
-Enable `silicon-dm-client`'s `runtime` feature for private login storage, direct
-Ting destination setup, and the durable **outgoing** command relay used by the CLI.
-DM has no incoming socket supervisor, delivery queue worker or webhook forwarder.
-Ting's installed system daemon owns those responsibilities.
+Enable `silicon-dm-client`'s `runtime` feature for what the `dm` CLI does: Silicon Accounts
+sign-ins kept per profile, the durable **outgoing** relay, and the sync inbox. Build the
+standalone relay with `cargo build -p silicon-dm-client --features runtime --bin dm-relay`.
 
-For this checkout, use a path dependency with `features = ["runtime"]`. Build the
-matching relay with `cargo build -p silicon-dm-client --features runtime --bin
-dm-relay`; the executable is `target/debug/dm-relay`. A published version must
-contain the same Ting migration before it can serve this runtime.
+## Signing a profile in
 
-## DM login and outgoing relay
+```rust,no_run
+use silicon_dm_client::runtime::{DaemonCommand, LocalRuntime, ServiceCheck, SignInTarget};
+# async fn example(slt: &str) -> anyhow::Result<()> {
+let runtime = LocalRuntime::from_environment()?;           // or LocalRuntime::new(private_dir)
+let target = SignInTarget::new(
+    "assistant",                                           // profile
+    "https://api.dm.teamofsilicons.com",               // DM API
+    "https://accounts.teamofsilicons.com",                 // Silicon Accounts
+    "dm",                                                  // app id
+)?;
+if let ServiceCheck::Unreachable(why) = LocalRuntime::check_service(&target).await? {
+    eprintln!("could not check the DM service first: {why}");
+}
+let session = runtime.public_client(&target)?.exchange_slt(slt).await?;  // or the device flow
+let status = runtime.save_sign_in(&target, &session, "slt", &DaemonCommand::default()).await?;
+let verified = runtime.login_status("assistant").await?;
+# let _ = (status, verified);
+# Ok(()) }
+```
 
-```rust
-use silicon_dm_client::runtime::{DaemonCommand, LocalRuntime, LoginOptions};
+- `check_service` asks the DM service (`GET /api/v1/accounts`) which Silicon Accounts and app id
+  it trusts and refuses a mismatch before a single-use code or token is spent.
+- `save_sign_in` stores the session in the profile and starts the relay (a relay that cannot
+  start is reported in the result; the sign-in is kept). A profile with queued requests from
+  another account is never taken over (`profile_in_use`); the replaced sign-in of the same profile
+  is revoked. A profile from before Silicon Accounts releases its queued requests only to the same
+  public id and fails them (`account_changed`) otherwise.
+- `login_status` refreshes when needed and confirms with `GET /api/v1/me`;
+  `runtime::offline_status(profile)` reads only the file, creates nothing and needs no home.
+- `logout(profile)` revokes the refresh token at Silicon Accounts and forgets the tokens;
+  `refresh(profile)` refreshes now; `profiles()` lists every profile without secrets.
 
-let runtime = LocalRuntime::new(private_state_directory)?;
-let options = LoginOptions {
-    profile: "assistant",
-    base_url: "https://backend.dm.teamofsilicons.com",
-    short_lived_token: &dm_slt,
-    webhook_url: None,
-    testing_environment_id: None,
-    idempotency_key: &saved_dm_login_key,
-};
-runtime.login(&options, &DaemonCommand::default()).await?;
-let identity = runtime.login_status("assistant", None).await?;
+Errors that concern the sign-in are `store::SessionError { code, message, hint }`
+(`not_signed_in`, `sign_in_ended`, `sign_in_required`, `profile_in_use`, `accounts_mismatch`,
+`app_id_mismatch`, `service_not_accounts`) or `accounts::SignInError`.
+
+## Storage and refresh
+
+`from_environment()` uses `SILICON_DM_HOME`, else the directory set with `dm config home`, else
+`$SILICON_HOME/.silicon-dm`, else `$HOME/.silicon-dm`. The directory is 0700, `config.json` is 0600
+and replaced atomically under `config.lock`; symbolic links are refused. A file that cannot be
+read is kept as `config.json.unreadable-<time>` and replaced by defaults.
+
+`store().fresh_profile(key)` returns the profile with at least a minute of access token left.
+When it must refresh, it takes `refresh-<profile>.lock`, re-reads the file (another process may
+have refreshed already), rotates the refresh token with Silicon Accounts and stores the new pair
+before returning it, so concurrent processes rotate once. A refused refresh token signs the
+profile out with the reason; a passing Silicon Accounts failure keeps using a token that still has
+more than 10 seconds left. `with_client(profile, |client| …)` runs a call with a fresh client and
+repeats it once after a 401 (nothing ran).
+
+## The outgoing relay
+
+```rust,no_run
+use silicon_dm_client::relay::{Operation, RelayRequest};
+use silicon_dm_client::runtime::{DaemonCommand, LocalRuntime};
+# async fn example(runtime: LocalRuntime) -> anyhow::Result<()> {
+let request = RelayRequest::new("assistant", Operation::Me);
+let starter = DaemonCommand { executable: "dm".into(), arguments: vec!["daemon".into(), "start".into()] };
+let ack = runtime.submit_or_queue(&request, &starter).await?;   // durable before it returns
 let relay = runtime.client()?;
-let outgoing_status = relay.status().await?;
+let result = relay.result(ack.request_id).await?;
+# let _ = result;
+# Ok(()) }
 ```
 
-Create a fresh operation key before the first attempt; retain it with the original
-SLT for an uncertain retry. A profile cannot switch actor, organization or backend.
-Login saves its tokens before starting the outgoing relay, so a launch failure can
-be recovered with `start()` without consuming another SLT. Use `start_with()` and
-an explicit `DaemonCommand` executable path when `dm-relay` is not on PATH.
+`run()` hosts the relay in this process (one per operating-system user; it refuses to start
+twice), `start()`/`start_with()` attaches this home to the running relay or launches one. The
+[relay guide](../cli/relay.md) describes lanes, retries, the loopback API and upgrades.
 
-Login verifies DM's discovery response against the selected API and data world.
-The saved account pins the canonical Carbon/Silicon actor, organization, backend
-and testing generation. Refresh rotates credentials within that context only;
-`login_status()` verifies both discovery and `/auth/me` against it. A response or
-local configuration change cannot silently replace the account while a request
-is in flight. Status adds the public `base_url` and `testing_generation` fields
-and never includes tokens.
+## The inbox
 
-Legacy sandbox profiles without a saved generation require an explicit new DM
-login. A clean or restore also requires login for the new generation. Queued
-requests remain on disk; old generation commands require inspection and explicit
-resubmission. Production profiles remain separate and never adopt test authority.
-
-`LoginOptions.webhook_url` must be `None`. The old `runtime.webhook(...)` method
-returns migration guidance. Do not configure a legacy DM callback and assume it
-understands Ting batches.
-
-The absolute state directory and its files are private to the local OS user.
-`from_environment()` checks `SILICON_DM_HOME`, configured home,
-`$SILICON_HOME/.silicon-dm`, then `$HOME/.silicon-dm`. Different state directories
-require different loopback ports. Set `config.relay_port` through
-`runtime.store().update(...)` before starting if needed.
-
-## Explicit grant, Ting login, and direct attachment
-
-First call `Client::register_delivery(saved_registration_key)` with this
-recipient's authenticated DM client as shown in the [client guide](README.md).
-That explicit IAM-consented grant allows DM to send the recipient tings. DM login,
-Ting login and reconnect do not create or restore that grant automatically.
-
-Obtain a separate **Ting-bound SLT** for the same member and organization. DM's
-access token, refresh token and DM-bound SLT are not Ting receiver credentials.
-Install/start Ting's official shared system daemon before attaching a destination.
-The runtime reports `daemon_unavailable` if it is missing; it does not start a DM
-receive daemon as a fallback.
-
-```rust
-use silicon_dm_client::runtime::{DeliveryLoginOptions, DeliveryAttachOptions};
-
-runtime.delivery_login(&DeliveryLoginOptions {
-    profile: "assistant",
-    testing_environment_id: None,
-    ting_api_url: "https://backend.ting.teamofsilicons.com",
-    short_lived_token: &ting_slt,
-    idempotency_key: &saved_ting_login_key,
-    testing: None,
-}).await?;
-
-let destination = "http://127.0.0.1:9000/tings".parse()?;
-runtime.delivery_attach(&DeliveryAttachOptions {
-    profile: "assistant",
-    testing_environment_id: None,
-    webhook_url: &destination,
-    webhook_id: None, // First attachment; later calls reuse the saved stable ID.
-    secret: Some(&callback_secret),
-    health_url: None,
-    takeover: false,
-    accept_all_apps: true,
-}).await?;
+```rust,no_run
+use silicon_dm_client::runtime::{InboxOptions, InboxStart, LocalRuntime};
+# async fn example(runtime: LocalRuntime) -> anyhow::Result<()> {
+let options = InboxOptions {
+    profile: "assistant".into(),
+    watch: true,
+    wait: 30,
+    start: InboxStart::Saved,
+    hydrate: true,
+    mark_delivered: false,
+    limit: None,
+};
+runtime
+    .inbox(&options, |line| { println!("{line}"); Ok(()) }, |notice| eprintln!("{notice}"))
+    .await?;
+# Ok(()) }
 ```
 
-`accept_all_apps: true` is an explicit acknowledgement of Ting's contract: the
-endpoint receives raw `{"tings":[...]}` for **every eligible app** in this
-recipient/org, not only DM. Use a generic consumer that authenticates the secret
-and `Ting-Webhook-Id`, dispatches all apps, deduplicates durably and returns HTTP
-204 only after accepting the whole batch. DM callback ACK JSON and Silicon
-result JSON are not translated automatically. The SDK's
-`Client::hydrate_ting_batch` only validates and fetches DM messages; see
-[consumer and initial-history setup](README.md#receiving-raw-ting-batches).
-DM Delivered and Read receipts remain explicit HTTP operations.
-
-The supplied URL goes directly to Ting's daemon and remains local. DM's backend
-never receives it. The runtime keeps a private official Ting profile scoped to
-the DM profile and environment generation, checks member type/identity and org
-access, and remembers the exact hook ID. Ting owns its opaque session and local
-delivery state. The DM outgoing relay does not need to stay running to receive
-Ting deliveries; the generic consumer and Ting service do.
-
-Do not create a new hook after losing an attachment response. Retry the same
-attachment intent, or recover its exact `webhook_id`; uncertain attachment state
-is reported instead of blindly creating another destination. `takeover: true`
-explicitly transfers that same hook from another live receiver.
-
-| Runtime method | Effect |
-| --- | --- |
-| `delivery_status(profile, test)` | Verifies the bound identity and asks Ting for status; does not create or reconnect a hook. |
-| `delivery_reconnect(profile, test)` | Explicitly rebinds existing Ting destinations; never creates a replacement ID. |
-| `delivery_unhook(profile, test)` | Detaches the saved hook while retaining its ID for explicit reattachment. |
-| `delivery_logout(profile, test)` | Ends this bound Ting session and reports unconfirmed remote revocation. |
-| `logout(profile, test, key)` | Revokes the DM family and disables outgoing commands for that profile. |
-
-DM and Ting login lifecycles are separate. Use the corresponding logout operation
-for the session you intend to end. A paused or detached destination requires
-explicit reconnect/attachment; status checks do not silently reactivate it.
-
-## Outgoing queue and migration
-
-`RelayClient::submit` accepts a typed `RelayRequest`; `submit_value` preserves the
-exact original JSON, including extension fields. A local ACK confirms durable
-storage, not backend success. Read `request_status(request_id)` for lightweight
-progress and `result(request_id)` for the backend result and original request.
-Use the same request UUID and operation idempotency key across retries. These
-outgoing APIs remain available to the CLI and embedding applications.
-
-The relay serializes requests per profile and retries eligible HTTP failures.
-It handles presence through HTTP device leases, not socket frames. Before each
-sandbox mutation it checks `/iam` and refuses to apply an old or unknown generation
-to a cleaned environment. Presence commands do not replay after relay restart.
-
-Starting the new runtime replaces a recognized legacy DM relay process while
-preserving durable state. It refuses to stop an unrecognized service on the port.
-The launched executable must support the new Ting ownership contract.
-
-Status reports `incoming_delivery.code = "delivery_moved_to_ting"` and
-`forwarding = false`. New installations create no incoming inbox or cursor
-tables. Existing inbox/cursor records remain unchanged for explicit inspection or
-migration; `retained_legacy_deliveries` and `retained_legacy_pending_deliveries`
-report them. `pending_webhooks` is zero because no DM worker forwards these rows.
-Logging in or attaching a Ting hook does not replay or reinterpret them. Initialize
-current history using the SDK's boundary/snapshot/sync procedure in the
-[client guide](README.md#initial-history-and-recovery).
-
-An embedding application can run `runtime.run().await` rather than launch a
-process. One relay serves every state directory of an operating-system user, so
-`run()` refuses while that relay is running and `start()` attaches the directory
-to it instead. `LocalRuntime::with_relay_home(dir)` shares a relay only with
-directories using the same `dir`, as tests do. `runtime.client()?.stop().await`,
-Ctrl-C, or cancelling `run()` stops the shared relay; durable requests remain.
-The generic Ting consumer has its own lifecycle.
-
-## Sandboxes and credentials
-
-Select the DM audience's testing app secret through
-`select_testing_application(base_url, secret)` before a testing DM login. Use the
-returned environment UUID in `LoginOptions`. Tokens must come from that IAM test
-environment; a production token is not a substitute.
-
-For `delivery_login`, supply the same environment UUID and
-`DeliveryTestCredentials { app_secret, environment_key }` for **Ting's** imported
-audience and the shared IAM environment. The runtime verifies these through IAM
-before sending the SLT to Ting. They are not persisted by the DM helper; Ting
-retains its validated session context. Never use the DM audience's app secret as
-Ting's credential. Clean/restore changes the generation and requires explicit
-setup for that generation; old destination state is not silently repurposed.
-
-Rust packages update through the consuming project's Cargo manifest and lockfile.
-Legacy runtime updater hooks do not modify projects. Honeycomb manages CLI updates.
+`inbox` long-polls `GET /api/v1/sync`, emits one JSON value per event (with the current message
+when `hydrate`), a `cursor` value after each batch, and saves the cursor per profile after every
+page. Without `watch` it returns a `done` value once nothing is pending. Passing failures are
+retried with a growing pause and reported through the second callback; a `sync_reset_required`
+answer emits a `reset` value and continues from a fresh cursor. `sync_page(profile, &request)`
+reads one page instead. [Receiving](../cli/receiving.md) documents every line.

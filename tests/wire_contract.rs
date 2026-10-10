@@ -5,8 +5,8 @@ use axum::{
     routing::post,
 };
 use serde_json::{Value, json};
-use silicon_dm::{api::extract::ApiJson, domain::MessageCreate, realtime as protocol};
-use silicon_dm_client::{Client, ClientFrame};
+use silicon_dm::{api::extract::ApiJson, domain::MessageCreate};
+use silicon_dm_client::Client;
 use uuid::Uuid;
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -36,7 +36,7 @@ async fn sdk_http_send_and_response_preserve_content_headers_and_metadata() -> R
             post(
                 |headers: HeaderMap, ApiJson(content): ApiJson<MessageCreate>| async move {
                     assert_eq!(headers["authorization"], "Bearer access");
-                    assert_eq!(headers["x-org-id"], "tos");
+                    assert_eq!(headers["x-dm-contract-version"], "4");
                     assert_eq!(headers["idempotency-key"], "stable-message-key");
                     assert_eq!(content.text.as_deref(), Some("hello"));
                     let body = message(&content).unwrap_or_else(|error| panic!("fixture: {error}"));
@@ -48,7 +48,7 @@ async fn sdk_http_send_and_response_preserve_content_headers_and_metadata() -> R
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let client = Client::new(&base)?.with_auth("access", "tos");
+    let client = Client::new(&base)?.with_token("access");
     let content: silicon_dm_client::MessageCreate = serde_json::from_value(json!({
         "message":"hello", "metadata":{"type":"keep","data":{"message":"nested"},"text":"untouched"},
         "recipient_id":"deliberate@si:cos",
@@ -107,119 +107,17 @@ async fn http_rejects_flat_wrong_type_and_extra_top_level_fields() -> Result {
 }
 
 #[test]
-fn websocket_command_and_delivery_round_trip_between_backend_and_sdk() -> Result {
-    let content: silicon_dm_client::MessageCreate = serde_json::from_value(json!({
-        "message":"hello", "metadata":{"data":{"type":"user metadata"}},
-        "voice":{"permanent_url":"https://files.example/voice.ogg","duration_milliseconds":1000},
-        "voice_transcript":"spoken hello"
-    }))?;
-    let encoded = serde_json::to_value(ClientFrame::SendMessage {
-        actor_id: "si:cos".into(),
-        org_id: "tos".into(),
-        conversation_id: Uuid::nil().to_string(),
-        idempotency_key: "retry-message-key".into(),
-        message: Box::new(content),
-    })?;
-    assert_eq!(encoded.as_object().map(serde_json::Map::len), Some(2));
-    assert_eq!(encoded["type"], "message.create");
-    assert_eq!(encoded["data"]["message"], "hello");
-    let protocol::ClientFrame::SendMessage {
-        message: content, ..
-    } = serde_json::from_value(encoded.clone())?
-    else {
-        return Err("unexpected command".into());
-    };
-    let frame = protocol::ServerFrame::Message {
-        delivery_id: Uuid::nil(),
-        actor_id: "si:cos".parse()?,
-        delivery_sequence: 1,
-        message: Box::new(message(&serde_json::from_value(*content)?)?),
-    };
-    let delivery = serde_json::to_value(frame)?;
-    assert_eq!(delivery.as_object().map(serde_json::Map::len), Some(2));
-    assert_eq!(delivery["data"]["message"], "hello");
-    assert_eq!(delivery["data"]["metadata"], json!({}));
-    assert!(encoded["data"].get("metadata").is_none());
-    let received: silicon_dm_client::ServerFrame = serde_json::from_value(delivery)?;
-    let silicon_dm_client::ServerFrame::Message {
-        message,
-        delivery_sequence,
-        ..
-    } = received
-    else {
-        return Err("unexpected delivery".into());
-    };
-    assert_eq!(message.content.text.as_deref(), Some("hello"));
-    assert_eq!(delivery_sequence, 1);
-    assert!(
-        serde_json::from_value::<protocol::ClientFrame>(json!({"type":"pong","ping_id":"p"}))
-            .is_err()
-    );
-    assert!(
-        serde_json::from_value::<protocol::ClientFrame>(
-            json!({"type":"pong","data":{"ping_id":"p"},"extra":true})
-        )
-        .is_err()
-    );
-    Ok(())
-}
-
-#[test]
-fn creation_delivery_is_created_for_all_recipients_and_distinct_from_command_reply() -> Result {
+fn sdk_reads_the_service_message_and_renders_the_published_shape() -> Result {
     let content: MessageCreate = serde_json::from_value(json!({"message":"hello"}))?;
-    let message: silicon_dm_client::Message =
-        serde_json::from_value(serde_json::to_value(message(&content)?)?)?;
-    for recipient in ["si:cos", "c:alice"] {
-        let frame = silicon_dm_client::ServerFrame::Message {
-            delivery_id: Uuid::nil(),
-            actor_id: recipient.into(),
-            delivery_sequence: 1,
-            message: Box::new(message.clone()),
-        };
-        let encoded = serde_json::to_value(frame)?;
-        assert_eq!(encoded["type"], "message.created");
-        for kind in [
-            "message.created",
-            "message.create",
-            "message.create.successful",
-        ] {
-            for nested_metadata in [true, false] {
-                let mut legacy = encoded.clone();
-                legacy["type"] = json!(kind);
-                if nested_metadata {
-                    legacy
-                        .as_object_mut()
-                        .ok_or("missing frame")?
-                        .remove("metadata");
-                } else {
-                    legacy["data"]
-                        .as_object_mut()
-                        .ok_or("missing data")?
-                        .remove("metadata");
-                }
-                let decoded: silicon_dm_client::ServerFrame = serde_json::from_value(legacy)?;
-                assert_eq!(
-                    decoded.delivery_position(),
-                    Some((Uuid::nil(), recipient, 1))
-                );
-                let normalized = serde_json::to_value(decoded)?;
-                assert_eq!(normalized["type"], "message.created");
-                assert_eq!(normalized["metadata"], encoded["metadata"]);
-                assert_eq!(normalized["data"], encoded["data"]);
-            }
-        }
-    }
-    for kind in ["message.create.successful", "message.create.success"] {
-        let mut data = serde_json::to_value(&message)?;
-        data["idempotency_key"] = json!("send-retry");
-        let decoded: silicon_dm_client::ServerFrame =
-            serde_json::from_value(json!({"type":kind,"data":data}))?;
-        assert!(matches!(
-            decoded,
-            silicon_dm_client::ServerFrame::MessageAccepted { .. }
-        ));
-        assert!(decoded.delivery_position().is_none());
-    }
+    let mut published = serde_json::to_value(message(&content)?)?;
+    // The service renders accounts as {type, id: current id, uuid}.
+    published["sender"] = json!({"type":"silicon","id":"si:cos","uuid":"K1E"});
+    let decoded: silicon_dm_client::Message = serde_json::from_value(published)?;
+    assert_eq!(decoded.sender.uuid.as_deref(), Some("K1E"));
+    assert_eq!(decoded.content.text.as_deref(), Some("hello"));
+    let rendered = serde_json::to_value(&decoded)?;
+    assert_eq!(rendered["sender"]["uuid"], "K1E");
+    assert_eq!(rendered["message"], "hello");
     Ok(())
 }
 

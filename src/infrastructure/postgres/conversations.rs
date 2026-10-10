@@ -1,4 +1,5 @@
-//! Conversation persistence and pagination.
+//! Conversations: one canonical direct conversation per exact set of accounts, groups,
+//! listing, and who may use a conversation (participant, custodian, invitee).
 
 use std::collections::HashMap;
 
@@ -12,8 +13,8 @@ use crate::{
     AppError, AppResult,
     application::commands::CreateConversationCommand,
     domain::{
-        ActorRef, ActorType, Conversation, ConversationPage, Cursor, MAX_CONVERSATION_PARTICIPANTS,
-        OrganizationId, PageRequest,
+        ActorId, ActorRef, ActorType, Conversation, ConversationAccess, ConversationPage, Cursor,
+        MAX_CONVERSATION_PARTICIPANTS, OrganizationId, PageRequest,
     },
 };
 
@@ -30,8 +31,8 @@ const CREATE_CONVERSATION_OPERATION: &str = "conversations.create";
 #[derive(Debug, FromRow)]
 struct ConversationRecord {
     id: Uuid,
-    organization_id: String,
     last_message_id: Option<Uuid>,
+    superseded_by: Option<Uuid>,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
 }
@@ -48,82 +49,29 @@ struct ConversationIdempotencyContent<'a> {
     participants: &'a [ActorRef],
 }
 
-impl PostgresStore {
-    /// Initializes empty direct chats with IAM-disclosed active organization members.
-    /// Existing chats retain their IDs and activity; no message or delivery is created.
-    ///
-    /// # Errors
-    /// Fails closed on ambiguous IAM identities or database errors.
-    pub async fn initialize_member_conversations(
-        &self,
-        organization: &OrganizationId,
-        actor: &ActorRef,
-    ) -> AppResult<()> {
-        let mut tx = self.pool().begin().await?;
-        // The same active projections authorize explicit conversation creation.
-        // Lock them through insertion so a concurrent removal cannot create a new chat.
-        let members: Vec<(ActorType, String)> = sqlx::query_as(
-            "SELECT member.actor_kind, member.actor_id
-             FROM iam_membership_projections member
-             JOIN organization_snapshots org USING (organization_id)
-             JOIN iam_membership_projections caller ON caller.organization_id=org.organization_id
-             WHERE org.organization_id=$1 AND org.status='active'
-               AND caller.actor_kind=$2::text::actor_kind AND caller.actor_id=$3 AND caller.status='active'
-               AND member.status='active'
-               AND (member.actor_kind<>caller.actor_kind OR member.actor_id<>caller.actor_id)
-             ORDER BY member.membership_id
-             FOR SHARE OF member, caller, org",
-        )
-        .bind(organization.as_str()).bind(actor.actor_type.as_str()).bind(actor.id.as_str())
-        .fetch_all(&mut *tx).await?;
-        let mut unique = std::collections::HashSet::new();
-        let mut candidates = Vec::with_capacity(members.len());
-        for (kind, id) in members {
-            if !unique.insert(id.clone()) {
-                return Err(AppError::Forbidden);
-            }
-            let member = ActorRef {
-                actor_type: kind,
-                id: parse_actor_id(&id)?,
-            };
-            let mut participants = vec![actor.clone(), member.clone()];
-            canonicalize_participants(&mut participants);
-            let hash = participant_set_hash(&participants);
-            candidates.push(serde_json::json!({
-                "id": Uuid::now_v7(), "hash": blake3::Hash::from(hash).to_hex().to_string(),
-                "actor_kind": member.actor_type.as_str(), "actor_id": member.id.as_str(),
-            }));
-        }
-        if !candidates.is_empty() {
-            sqlx::query(
-                "WITH candidates AS (
-                   SELECT * FROM jsonb_to_recordset($4) AS c(id uuid, hash text, actor_kind text, actor_id text)
-                 ), created AS (
-                   INSERT INTO conversations (id,organization_id,participant_set_hash,created_by_kind,created_by_id)
-                   SELECT id,$1,decode(hash,'hex'),$2::text::actor_kind,$3 FROM candidates ORDER BY hash
-                   ON CONFLICT (organization_id,participant_set_hash) DO NOTHING RETURNING id
-                 )
-                 INSERT INTO conversation_participants (conversation_id,organization_id,actor_kind,actor_id)
-                 SELECT id,$1,$2::text::actor_kind,$3 FROM created
-                 UNION ALL
-                 SELECT c.id,$1,c.actor_kind::actor_kind,c.actor_id FROM candidates c JOIN created USING(id)",
-            )
-            .bind(organization.as_str()).bind(actor.actor_type.as_str()).bind(actor.id.as_str())
-            .bind(serde_json::Value::Array(candidates)).execute(&mut *tx).await?;
-        }
-        tx.commit().await.map_err(map_constraint_error)
-    }
+const CONVERSATION_COLUMNS: &str = r"
+    conversation.id,
+    (
+        SELECT message.id
+        FROM messages AS message
+        LEFT JOIN message_bundle_items AS bundle_item
+          ON bundle_item.message_id = message.id
+        WHERE message.conversation_id = conversation.id
+          AND (bundle_item.role IS NULL OR bundle_item.role = 'display')
+        ORDER BY message.sequence DESC
+        LIMIT 1
+    ) AS last_message_id,
+    conversation.superseded_by,
+    conversation.created_at,
+    conversation.updated_at";
 
-    /// Creates or resolves the exact participant set idempotently.
+impl PostgresStore {
+    /// Creates or resolves the canonical direct conversation of an exact participant set,
+    /// whatever storage partition it lives in. Retries with the same key replay.
     ///
     /// # Errors
-    ///
-    /// Rejects fewer than two unique participants, a missing creator, key reuse
-    /// with different content, or a durable database invariant failure.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the exact-participant-set transaction and idempotency decision are reviewed as one atomic workflow"
-    )]
+    /// Rejects fewer than two or more than 100 participants, a creator who is not one of
+    /// them, key reuse with different content, or a durable invariant failure.
     pub async fn create_conversation(
         &self,
         mut command: CreateConversationCommand,
@@ -142,140 +90,287 @@ impl PostgresStore {
         if !command.participants.contains(&command.creator) {
             return Err(AppError::Forbidden);
         }
-        let participant_hash = participant_set_hash(&command.participants);
         let idempotency_hash = request_hash(&ConversationIdempotencyContent {
             participants: &command.participants,
         })?;
         let mut transaction = self.pool().begin().await?;
-        refresh_directory_in(
-            &mut transaction,
-            &command.organization_id,
-            &command.participants,
-        )
-        .await?;
+        let partition = OrganizationId::accounts();
+        refresh_directory_in(&mut transaction, &partition, &command.participants).await?;
         let claim = claim(
             &mut transaction,
-            &command.organization_id,
+            &partition,
             &command.creator,
             CREATE_CONVERSATION_OPERATION,
             &command.idempotency_key,
             &idempotency_hash,
         )
         .await?;
-
         let conversation_id = match claim {
             IdempotencyClaim::Replay(resource_id) => resource_id,
             IdempotencyClaim::Acquired => {
-                let candidate_id = Uuid::now_v7();
-                let inserted = sqlx::query_scalar::<_, Uuid>(
-                    r#"
-                    INSERT INTO conversations (
-                        id,
-                        organization_id,
-                        participant_set_hash,
-                        created_by_kind,
-                        created_by_id
-                    )
-                    VALUES ($1, $2, $3, $4::text::actor_kind, $5)
-                    ON CONFLICT (organization_id, participant_set_hash) DO NOTHING
-                    RETURNING id
-                    "#,
+                let id = canonical_or_insert_in(
+                    &mut transaction,
+                    &command.creator,
+                    &command.participants,
                 )
-                .bind(candidate_id)
-                .bind(command.organization_id.as_str())
-                .bind(participant_hash.as_slice())
-                .bind(command.creator.actor_type.as_str())
-                .bind(command.creator.id.as_str())
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(map_constraint_error)?;
-
-                let (conversation_id, was_created) = if let Some(id) = inserted {
-                    (id, true)
-                } else {
-                    let id = sqlx::query_scalar::<_, Uuid>(
-                        r#"
-                            SELECT id
-                            FROM conversations
-                            WHERE organization_id = $1
-                              AND participant_set_hash = $2
-                            "#,
-                    )
-                    .bind(command.organization_id.as_str())
-                    .bind(participant_hash.as_slice())
-                    .fetch_one(&mut *transaction)
-                    .await?;
-                    (id, false)
-                };
-
-                if was_created {
-                    for participant in &command.participants {
-                        sqlx::query(
-                            r#"
-                            INSERT INTO conversation_participants (
-                                conversation_id,
-                                organization_id,
-                                actor_kind,
-                                actor_id
-                            )
-                            VALUES ($1, $2, $3::text::actor_kind, $4)
-                            "#,
-                        )
-                        .bind(conversation_id)
-                        .bind(command.organization_id.as_str())
-                        .bind(participant.actor_type.as_str())
-                        .bind(participant.id.as_str())
-                        .execute(&mut *transaction)
-                        .await
-                        .map_err(map_constraint_error)?;
-                    }
-                }
+                .await?;
                 complete(
                     &mut transaction,
-                    &command.organization_id,
+                    &partition,
                     &command.creator,
                     CREATE_CONVERSATION_OPERATION,
                     &command.idempotency_key,
                     IdempotencyResult {
                         resource_type: "conversation",
-                        resource_id: conversation_id,
+                        resource_id: id,
                         response_status: 201,
                     },
                 )
                 .await?;
-                conversation_id
+                id
             }
         };
         transaction.commit().await.map_err(map_constraint_error)?;
-        self.get_conversation(&command.organization_id, &command.creator, conversation_id)
+        self.get_conversation(&command.creator, conversation_id)
             .await
     }
 
-    /// Lists conversations visible to a participant in newest-activity order.
+    /// Idempotently creates the canonical direct conversation of two accounts (DM does this
+    /// by itself only for a Silicon and its custodian).
     ///
     /// # Errors
+    /// Durable invariant or database failures.
+    pub async fn ensure_direct_conversation(&self, a: &ActorRef, b: &ActorRef) -> AppResult<Uuid> {
+        let mut participants = vec![a.clone(), b.clone()];
+        canonicalize_participants(&mut participants);
+        if participants.len() != 2 {
+            return Err(AppError::validation(
+                "a conversation needs two different accounts",
+            ));
+        }
+        let mut transaction = self.pool().begin().await?;
+        refresh_directory_in(&mut transaction, &OrganizationId::accounts(), &participants).await?;
+        let id = canonical_or_insert_in(&mut transaction, a, &participants).await?;
+        transaction.commit().await.map_err(map_constraint_error)?;
+        Ok(id)
+    }
+
+    /// The canonical direct conversation of this exact participant set, if there is one.
     ///
-    /// Rejects an invalid cursor or page length and propagates database/data
-    /// corruption errors.
+    /// # Errors
+    /// Database failures.
+    pub async fn canonical_direct_conversation(
+        &self,
+        participants: &[ActorRef],
+    ) -> AppResult<Option<Uuid>> {
+        let mut participants = participants.to_vec();
+        canonicalize_participants(&mut participants);
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM conversations
+             WHERE participant_set_hash = $1 AND NOT is_group AND superseded_by IS NULL",
+        )
+        .bind(participant_set_hash(&participants).as_slice())
+        .fetch_optional(self.pool())
+        .await?)
+    }
+
+    /// How many direct conversations this account started in the last hour.
+    ///
+    /// # Errors
+    /// Database failures.
+    pub async fn conversations_started_last_hour(&self, actor: &ActorRef) -> AppResult<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT count(*) FROM conversations
+             WHERE created_by_kind = $1::text::actor_kind AND created_by_id = $2
+               AND NOT is_group AND created_at > clock_timestamp() - interval '1 hour'",
+        )
+        .bind(actor.actor_type.as_str())
+        .bind(actor.id.as_str())
+        .fetch_one(self.pool())
+        .await?)
+    }
+
+    /// How `caller` may use a conversation: a participant (group: accepted member), the
+    /// custodian of a Silicon in it, a pending group invitee (or the custodian of a pending
+    /// Silicon invitee) — or not at all (`None`).
+    ///
+    /// # Errors
+    /// Database failures.
+    pub async fn conversation_access(
+        &self,
+        caller: &ActorRef,
+        conversation_id: Uuid,
+    ) -> AppResult<Option<ConversationAccess>> {
+        let row: Option<(bool, bool, bool)> = sqlx::query_as(
+            "SELECT
+                EXISTS (SELECT 1 FROM effective_conversation_participants p
+                        WHERE p.conversation_id = c.id AND p.actor_kind = $2::text::actor_kind
+                          AND p.actor_id = $3),
+                EXISTS (SELECT 1 FROM effective_conversation_participants p
+                        JOIN accounts a ON a.uuid = p.actor_id
+                        WHERE p.conversation_id = c.id AND p.actor_kind = 'silicon'
+                          AND a.custodian_uuid = $3 AND $2 = 'carbon'),
+                EXISTS (SELECT 1 FROM group_invitations i
+                        WHERE i.conversation_id = c.id AND i.status = 'pending'
+                          AND ((i.actor_kind = $2::text::actor_kind AND i.actor_id = $3)
+                            OR ($2 = 'carbon' AND i.actor_kind = 'silicon' AND EXISTS (
+                                SELECT 1 FROM accounts a WHERE a.uuid = i.actor_id AND a.custodian_uuid = $3))))
+             FROM conversations c WHERE c.id = $1",
+        )
+        .bind(conversation_id)
+        .bind(caller.actor_type.as_str())
+        .bind(caller.id.as_str())
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(match row {
+            Some((true, _, _)) => Some(ConversationAccess::Participant),
+            Some((false, true, _)) => Some(ConversationAccess::Custodian),
+            Some((false, false, true)) => Some(ConversationAccess::Invitee),
+            _ => None,
+        })
+    }
+
+    /// Requires `viewer` to be able to read the conversation: a participant, or the
+    /// custodian of a Silicon in it.
+    ///
+    /// # Errors
+    /// Not found for anyone else; database failures.
+    pub async fn require_reader(&self, viewer: &ActorRef, conversation_id: Uuid) -> AppResult<()> {
+        match self.conversation_access(viewer, conversation_id).await? {
+            Some(ConversationAccess::Participant | ConversationAccess::Custodian) => Ok(()),
+            _ => Err(AppError::NotFound),
+        }
+    }
+
+    /// The storage partition of a conversation.
+    ///
+    /// # Errors
+    /// Not found, or database failures.
+    pub async fn partition_of(&self, conversation_id: Uuid) -> AppResult<OrganizationId> {
+        let partition: String =
+            sqlx::query_scalar("SELECT organization_id FROM conversations WHERE id = $1")
+                .bind(conversation_id)
+                .fetch_optional(self.pool())
+                .await?
+                .ok_or(AppError::NotFound)?;
+        partition
+            .parse()
+            .map_err(|error| super::rows::data_error("conversation partition", error))
+    }
+
+    /// Refuses a write into a conversation that was superseded by a canonical one, or a
+    /// direct conversation whose other account was deleted (its history stays readable).
+    ///
+    /// # Errors
+    /// `conversation_superseded` (409) naming the conversation to use instead;
+    /// `recipient_deleted` (409).
+    pub async fn require_current(&self, conversation_id: Uuid) -> AppResult<()> {
+        let closed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM conversations c
+                JOIN conversation_participants p ON p.conversation_id = c.id
+                JOIN accounts a ON a.uuid = p.actor_id AND a.status = 'deleted'
+                WHERE c.id = $1 AND NOT c.is_group)",
+        )
+        .bind(conversation_id)
+        .fetch_one(self.pool())
+        .await?;
+        if closed {
+            return Err(AppError::refused(
+                http::StatusCode::CONFLICT,
+                "recipient_deleted",
+                "The other account in this conversation was deleted. Its history stays readable; it takes no new messages.",
+            ));
+        }
+        let superseded: Option<String> = sqlx::query_scalar(
+            "SELECT address.public_id FROM conversations c
+             JOIN conversation_addresses address ON address.id = c.superseded_by
+             WHERE c.id = $1 AND c.superseded_by IS NOT NULL",
+        )
+        .bind(conversation_id)
+        .fetch_optional(self.pool())
+        .await?;
+        match superseded {
+            Some(canonical) => Err(AppError::refused(
+                http::StatusCode::CONFLICT,
+                "conversation_superseded",
+                format!(
+                    "This conversation is kept for its history; the same accounts now talk in {canonical}. Send there."
+                ),
+            )),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Finds the canonical conversation of the set, or creates it in the @accounts partition.
+async fn canonical_or_insert_in(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    creator: &ActorRef,
+    participants: &[ActorRef],
+) -> AppResult<Uuid> {
+    let hash = participant_set_hash(participants);
+    if let Some(id) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM conversations
+         WHERE participant_set_hash = $1 AND NOT is_group AND superseded_by IS NULL",
+    )
+    .bind(hash.as_slice())
+    .fetch_optional(&mut **transaction)
+    .await?
+    {
+        return Ok(id);
+    }
+    let candidate = Uuid::now_v7();
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO conversations (id, organization_id, participant_set_hash, created_by_kind, created_by_id)
+         VALUES ($1, '@accounts', $2, $3::text::actor_kind, $4)
+         ON CONFLICT (participant_set_hash) WHERE NOT is_group AND superseded_by IS NULL DO NOTHING
+         RETURNING id",
+    )
+    .bind(candidate)
+    .bind(hash.as_slice())
+    .bind(creator.actor_type.as_str())
+    .bind(creator.id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_constraint_error)?;
+    let Some(id) = inserted else {
+        // A concurrent creator won; its row is visible once it commits.
+        return sqlx::query_scalar(
+            "SELECT id FROM conversations
+             WHERE participant_set_hash = $1 AND NOT is_group AND superseded_by IS NULL",
+        )
+        .bind(hash.as_slice())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or_else(|| AppError::conflict("the conversation is being created; retry"));
+    };
+    for participant in participants {
+        sqlx::query(
+            "INSERT INTO conversation_participants (conversation_id, organization_id, actor_kind, actor_id)
+             VALUES ($1, '@accounts', $2::text::actor_kind, $3)",
+        )
+        .bind(id)
+        .bind(participant.actor_type.as_str())
+        .bind(participant.id.as_str())
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_constraint_error)?;
+    }
+    Ok(id)
+}
+
+impl PostgresStore {
+    /// Lists the conversations of `subject` (the caller, or a Silicon the caller is
+    /// custodian of) in newest-activity order. Superseded conversations are left out;
+    /// the canonical one names them in `supersedes`.
+    ///
+    /// # Errors
+    /// Rejects an invalid cursor or page length; propagates database failures.
     pub async fn list_conversations(
         &self,
-        organization_id: &OrganizationId,
-        actor: &ActorRef,
+        viewer: &ActorRef,
+        subject: &ActorRef,
         page: &PageRequest,
-    ) -> AppResult<ConversationPage> {
-        self.list_conversations_scoped(organization_id, actor, page, &[], false)
-            .await
-    }
-
-    /// Lists conversations using the exact token's IAM tags and an optional group filter.
-    /// # Errors
-    /// Rejects invalid pagination and propagates storage errors.
-    pub async fn list_conversations_scoped(
-        &self,
-        organization_id: &OrganizationId,
-        actor: &ActorRef,
-        page: &PageRequest,
-        tag_ids: &[Uuid],
         groups_only: bool,
     ) -> AppResult<ConversationPage> {
         let limit = page.validated_limit()?;
@@ -284,10 +379,6 @@ impl PostgresStore {
             .as_deref()
             .map(|value| Cursor::decode(value, "conversations"))
             .transpose()?;
-        let (cursor_time, cursor_id) = cursor
-            .as_ref()
-            .and_then(Cursor::activity_position)
-            .map_or((None, None), |(time, id)| (Some(time), Some(id)));
         if cursor
             .as_ref()
             .is_some_and(|value| value.activity_position().is_none())
@@ -296,176 +387,159 @@ impl PostgresStore {
                 "cursor is invalid for conversation pagination",
             ));
         }
-        let records = sqlx::query_as::<_, ConversationRecord>(
-            r#"
-            SELECT
-                conversation.id,
-                conversation.organization_id,
-                (
-                    SELECT message.id
-                    FROM messages AS message
-                    LEFT JOIN message_bundle_items AS bundle_item
-                      ON bundle_item.message_id = message.id
-                    WHERE message.conversation_id = conversation.id
-                      AND (bundle_item.role IS NULL OR bundle_item.role = 'display')
-                    ORDER BY message.sequence DESC
-                    LIMIT 1
-                ) AS last_message_id,
-                conversation.created_at,
-                conversation.updated_at
+        let (cursor_time, cursor_id) = cursor
+            .as_ref()
+            .and_then(Cursor::activity_position)
+            .map_or((None, None), |(time, id)| (Some(time), Some(id)));
+        let records = sqlx::query_as::<_, ConversationRecord>(sqlx::AssertSqlSafe(format!(
+            r"
+            SELECT {CONVERSATION_COLUMNS}
             FROM conversations AS conversation
             JOIN effective_conversation_participants AS participant
               ON participant.conversation_id = conversation.id
              AND participant.organization_id = conversation.organization_id
-            WHERE conversation.organization_id = $1
-              AND participant.actor_kind = $2::text::actor_kind
-              AND participant.actor_id = $3
-              AND (NOT $8 OR conversation.is_group)
-              AND (NOT conversation.is_group OR EXISTS (
-                  SELECT 1 FROM groups g WHERE g.conversation_id=conversation.id AND (
-                    EXISTS(SELECT 1 FROM group_invitations i WHERE i.conversation_id=g.conversation_id AND i.actor_kind=participant.actor_kind AND i.actor_id=participant.actor_id)
-                    OR (g.is_public AND $2='carbon') OR (NOT g.is_public AND g.tag_ids && $7))))
-              AND (
-                    $4::timestamptz IS NULL
-                    OR (conversation.updated_at, conversation.id) < ($4, $5)
-              )
+            WHERE participant.actor_kind = $1::text::actor_kind
+              AND participant.actor_id = $2
+              AND conversation.superseded_by IS NULL
+              AND (NOT $6 OR conversation.is_group)
+              AND ($3::timestamptz IS NULL OR (conversation.updated_at, conversation.id) < ($3, $4))
             ORDER BY conversation.updated_at DESC, conversation.id DESC
-            LIMIT $6
-            "#,
-        )
-        .bind(organization_id.as_str())
-        .bind(actor.actor_type.as_str())
-        .bind(actor.id.as_str())
+            LIMIT $5
+            "
+        )))
+        .bind(subject.actor_type.as_str())
+        .bind(subject.id.as_str())
         .bind(cursor_time)
         .bind(cursor_id)
         .bind(i64::from(limit) + 1)
-        .bind(tag_ids)
         .bind(groups_only)
         .fetch_all(self.pool())
         .await?;
-        self.conversation_page(records, limit).await
+        self.conversation_page(viewer, records, limit).await
     }
 
-    /// Fetches one conversation after participant authorization in SQL.
+    /// One conversation, for a participant or the custodian of a Silicon in it.
     ///
     /// # Errors
-    ///
-    /// Returns not found for absent, cross-tenant, or non-participant access.
+    /// Not found when the viewer may not read it; database failures.
     pub async fn get_conversation(
         &self,
-        organization_id: &OrganizationId,
-        actor: &ActorRef,
+        viewer: &ActorRef,
         conversation_id: Uuid,
     ) -> AppResult<Conversation> {
-        let record = sqlx::query_as::<_, ConversationRecord>(
-            r#"
-            SELECT
-                conversation.id,
-                conversation.organization_id,
-                (
-                    SELECT message.id
-                    FROM messages AS message
-                    LEFT JOIN message_bundle_items AS bundle_item
-                      ON bundle_item.message_id = message.id
-                    WHERE message.conversation_id = conversation.id
-                      AND (bundle_item.role IS NULL OR bundle_item.role = 'display')
-                    ORDER BY message.sequence DESC
-                    LIMIT 1
-                ) AS last_message_id,
-                conversation.created_at,
-                conversation.updated_at
-            FROM conversations AS conversation
-            JOIN effective_conversation_participants AS participant
-              ON participant.conversation_id = conversation.id
-             AND participant.organization_id = conversation.organization_id
-            WHERE conversation.id = $1
-              AND conversation.organization_id = $2
-              AND participant.actor_kind = $3::text::actor_kind
-              AND participant.actor_id = $4
-            "#,
-        )
+        match self.conversation_access(viewer, conversation_id).await? {
+            Some(ConversationAccess::Participant | ConversationAccess::Custodian) => {}
+            _ => return Err(AppError::NotFound),
+        }
+        let record = sqlx::query_as::<_, ConversationRecord>(sqlx::AssertSqlSafe(format!(
+            "SELECT {CONVERSATION_COLUMNS} FROM conversations AS conversation WHERE conversation.id = $1"
+        )))
         .bind(conversation_id)
-        .bind(organization_id.as_str())
-        .bind(actor.actor_type.as_str())
-        .bind(actor.id.as_str())
         .fetch_optional(self.pool())
         .await?
         .ok_or(AppError::NotFound)?;
-        let page = self.conversation_page(vec![record], 1).await?;
+        let page = self.conversation_page(viewer, vec![record], 1).await?;
         page.items.into_iter().next().ok_or(AppError::NotFound)
     }
 
-    /// Checks participant membership without exposing whether a cross-tenant
-    /// conversation exists.
+    /// Requires `actor` to be an effective participant and returns the conversation's
+    /// storage partition.
     ///
     /// # Errors
-    ///
-    /// Returns not-found when the actor is not a participant and propagates
-    /// database failures.
+    /// Not found for anyone else (existence is not disclosed); database failures.
     pub async fn require_participant(
         &self,
-        organization_id: &OrganizationId,
         actor: &ActorRef,
         conversation_id: Uuid,
-    ) -> AppResult<()> {
-        let allowed = sqlx::query_scalar::<_, bool>(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM effective_conversation_participants
-                WHERE conversation_id = $1
-                  AND organization_id = $2
-                  AND actor_kind = $3::text::actor_kind
-                  AND actor_id = $4
-            )
-            "#,
+    ) -> AppResult<OrganizationId> {
+        let partition: Option<String> = sqlx::query_scalar(
+            "SELECT organization_id FROM effective_conversation_participants
+             WHERE conversation_id = $1 AND actor_kind = $2::text::actor_kind AND actor_id = $3",
         )
         .bind(conversation_id)
-        .bind(organization_id.as_str())
         .bind(actor.actor_type.as_str())
         .bind(actor.id.as_str())
-        .fetch_one(self.pool())
+        .fetch_optional(self.pool())
         .await?;
-        if allowed {
-            Ok(())
-        } else {
-            Err(AppError::NotFound)
-        }
+        partition
+            .ok_or(AppError::NotFound)?
+            .parse()
+            .map_err(|error| super::rows::data_error("conversation partition", error))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one page: participants, custodians, supersession and messages"
+    )]
     async fn conversation_page(
         &self,
+        viewer: &ActorRef,
         mut records: Vec<ConversationRecord>,
         limit: u16,
     ) -> AppResult<ConversationPage> {
         let total_records = records.len();
-        let has_next = total_records > usize::from(limit);
-        if has_next {
+        if total_records > usize::from(limit) {
             records.truncate(usize::from(limit));
         }
         let conversation_ids = records.iter().map(|record| record.id).collect::<Vec<_>>();
-        let participant_records = if conversation_ids.is_empty() {
-            Vec::new()
-        } else {
-            sqlx::query_as::<_, ParticipantRecord>(
-                r#"
-                SELECT conversation_id, actor_kind::text AS actor_kind, actor_id
-                FROM effective_conversation_participants
-                WHERE conversation_id = ANY($1)
-                ORDER BY conversation_id, actor_kind, actor_id
-                "#,
+        let mut participants: HashMap<Uuid, Vec<ActorRef>> = HashMap::new();
+        let mut custodians: HashMap<Uuid, Vec<ActorRef>> = HashMap::new();
+        let mut supersedes: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        if !conversation_ids.is_empty() {
+            // Direct conversations keep showing a deleted account (rendered `deleted`);
+            // groups show their current members.
+            for record in sqlx::query_as::<_, ParticipantRecord>(
+                "SELECT DISTINCT p.conversation_id, p.actor_kind::text AS actor_kind, p.actor_id
+                 FROM conversation_participants p
+                 JOIN conversations c ON c.id = p.conversation_id
+                 WHERE p.conversation_id = ANY($1)
+                   AND (NOT c.is_group OR EXISTS (SELECT 1 FROM effective_conversation_participants e
+                        WHERE e.conversation_id = p.conversation_id AND e.actor_kind = p.actor_kind
+                          AND e.actor_id = p.actor_id))
+                 ORDER BY 1, 2, 3",
             )
             .bind(&conversation_ids)
             .fetch_all(self.pool())
             .await?
-        };
-        let mut participants: HashMap<Uuid, Vec<ActorRef>> = HashMap::new();
-        for record in participant_records {
-            let conversation_id = record.conversation_id;
-            participants
-                .entry(conversation_id)
-                .or_default()
-                .push(map_participant(&record)?);
+            {
+                participants
+                    .entry(record.conversation_id)
+                    .or_default()
+                    .push(map_participant(&record)?);
+            }
+            // Custodians who can read a conversation without taking part in it.
+            for (conversation_id, custodian) in sqlx::query_as::<_, (Uuid, String)>(
+                "SELECT DISTINCT p.conversation_id, a.custodian_uuid
+                 FROM effective_conversation_participants p
+                 JOIN accounts a ON a.uuid = p.actor_id
+                 WHERE p.conversation_id = ANY($1) AND p.actor_kind = 'silicon'
+                   AND a.custodian_uuid IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM effective_conversation_participants other
+                       WHERE other.conversation_id = p.conversation_id
+                         AND other.actor_kind = 'carbon' AND other.actor_id = a.custodian_uuid)
+                 ORDER BY 1, 2",
+            )
+            .bind(&conversation_ids)
+            .fetch_all(self.pool())
+            .await?
+            {
+                custodians
+                    .entry(conversation_id)
+                    .or_default()
+                    .push(ActorRef {
+                        actor_type: ActorType::Carbon,
+                        id: ActorId::from_storage_key(custodian),
+                    });
+            }
+            for (canonical, old) in sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT superseded_by, id FROM conversations WHERE superseded_by = ANY($1) ORDER BY id",
+            )
+            .bind(&conversation_ids)
+            .fetch_all(self.pool())
+            .await?
+            {
+                supersedes.entry(canonical).or_default().push(old);
+            }
         }
         let mut items = Vec::with_capacity(records.len());
         let mut payload_bytes: usize = 0;
@@ -488,20 +562,11 @@ impl PostgresStore {
             payload_bytes = payload_bytes.saturating_add(message_bytes);
             items.push(Conversation {
                 id: record.id,
-                org_id: record
-                    .organization_id
-                    .parse()
-                    .map_err(|error| super::rows::data_error("organization ID", error))?,
                 participants: participants.remove(&record.id).unwrap_or_default(),
-                group: self
-                    .group_details(
-                        &record
-                            .organization_id
-                            .parse()
-                            .map_err(|error| super::rows::data_error("organization ID", error))?,
-                        record.id,
-                    )
-                    .await?,
+                visible_to_custodians: custodians.remove(&record.id).unwrap_or_default(),
+                superseded_by: record.superseded_by,
+                supersedes: supersedes.remove(&record.id).unwrap_or_default(),
+                group: self.group_details(viewer, record.id).await?,
                 last_message,
                 created_at: record.created_at,
                 updated_at: record.updated_at,
@@ -524,7 +589,8 @@ impl PostgresStore {
     }
 }
 
-fn canonicalize_participants(participants: &mut Vec<ActorRef>) {
+/// Sorts participants by (kind, storage key) and drops duplicates.
+pub(crate) fn canonicalize_participants(participants: &mut Vec<ActorRef>) {
     participants.sort_by(|left, right| {
         (left.actor_type.as_str(), left.id.as_str())
             .cmp(&(right.actor_type.as_str(), right.id.as_str()))
@@ -532,7 +598,9 @@ fn canonicalize_participants(participants: &mut Vec<ActorRef>) {
     participants.dedup();
 }
 
-fn participant_set_hash(participants: &[ActorRef]) -> [u8; 32] {
+/// SHA-256 over the length-framed, sorted (kind, storage key) pairs; the same bytes the
+/// 0036 migration and `dm-migrate link-identities` compute in SQL.
+pub(crate) fn participant_set_hash(participants: &[ActorRef]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     for participant in participants {
         let kind = participant.actor_type.as_str().as_bytes();
@@ -564,11 +632,11 @@ mod tests {
     fn participant_hash_is_order_independent() -> Result<(), Box<dyn std::error::Error>> {
         let carbon = ActorRef {
             actor_type: ActorType::Carbon,
-            id: "carbon-1".parse()?,
+            id: "zQo".parse()?,
         };
         let silicon = ActorRef {
             actor_type: ActorType::Silicon,
-            id: "silicon-1".parse()?,
+            id: "K1E".parse()?,
         };
         let mut first = vec![carbon.clone(), silicon.clone()];
         let mut second = vec![silicon, carbon];
@@ -582,11 +650,32 @@ mod tests {
     fn duplicate_participants_are_removed() -> Result<(), Box<dyn std::error::Error>> {
         let actor = ActorRef {
             actor_type: ActorType::Carbon,
-            id: "carbon-1".parse()?,
+            id: "zQo".parse()?,
         };
         let mut participants = vec![actor.clone(), actor];
         canonicalize_participants(&mut participants);
         assert_eq!(participants.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn uuids_differing_only_in_case_are_different_accounts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let lower = ActorRef {
+            actor_type: ActorType::Carbon,
+            id: "a8K".parse()?,
+        };
+        let upper = ActorRef {
+            actor_type: ActorType::Carbon,
+            id: "A8k".parse()?,
+        };
+        let mut participants = vec![lower.clone(), upper.clone(), lower];
+        canonicalize_participants(&mut participants);
+        assert_eq!(participants.len(), 2);
+        assert_ne!(
+            participant_set_hash(&participants[..1]),
+            participant_set_hash(&participants[1..])
+        );
         Ok(())
     }
 }

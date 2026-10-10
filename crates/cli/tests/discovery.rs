@@ -1,45 +1,44 @@
-use anyhow::Result;
+//! The three commands Silicon Apps runs in a clean environment before accepting an upload.
 use serde_json::{Value, json};
-use wiremock::{
-    Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
-};
+use std::process::Command;
 
-#[tokio::test]
-async fn iam_discovery_unwraps_the_current_api_envelope_in_a_fresh_home() -> Result<()> {
-    let server = MockServer::start().await;
-    let home = tempfile::tempdir()?;
-    let data = json!({"app_id":"dm", "iam_base_url":"https://iam.example.test", "api_base_url":server.uri()});
-    Mock::given(method("GET"))
-        .and(path("/api/v1/iam"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"type":"response", "data":data})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    let url = server.uri();
-    let directory = home.path().to_owned();
-    let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(env!("CARGO_BIN_EXE_dm"))
-            .args(["iam", "--base-url", &url, "--json"])
-            .env("SILICON_HOME", directory)
-            .env_remove("SILICON_DM_HOME")
-            .env_remove("SILICON_DM_TEST")
-            .output()
-    })
-    .await??;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+fn clean(args: &[&str]) -> (Option<i32>, String) {
+    let home = tempfile::tempdir().expect("tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_dm"))
+        .env_clear()
+        .env("HOME", home.path())
+        .env("SILICON_HOME", home.path())
+        .args(args)
+        .output()
+        .expect("dm runs");
+    assert_eq!(
+        std::fs::read_dir(home.path()).expect("dir").count(),
+        0,
+        "{args:?} wrote state"
     );
-    let response: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(response["app_id"], "dm");
-    assert_eq!(response["iam_base_url"], "https://iam.example.test");
-    assert_eq!(response["api_base_url"], server.uri());
-    for request in server.received_requests().await.unwrap_or_default() {
-        assert!(!request.headers.contains_key("authorization"));
-    }
-    Ok(())
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+#[test]
+fn help_accounts_and_signed_out_status_answer_in_a_clean_environment() {
+    let (code, help) = clean(&["--help"]);
+    assert_eq!(code, Some(0));
+    assert!(!help.trim().is_empty());
+    let (code, accounts) = clean(&["accounts", "--json"]);
+    assert_eq!(code, Some(0));
+    let accounts: Value = serde_json::from_str(&accounts).expect("json");
+    assert_eq!(accounts["app_id"], "dm");
+    assert_eq!(
+        accounts["accounts_url"],
+        "https://accounts.teamofsilicons.com"
+    );
+    let (code, status) = clean(&["login", "status", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        serde_json::from_str::<Value>(&status).expect("json"),
+        json!({"authenticated":false})
+    );
 }

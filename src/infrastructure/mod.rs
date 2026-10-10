@@ -1,12 +1,11 @@
 //! PostgreSQL and external-service adapters.
 
+pub mod accounts;
 pub mod giphy;
-pub mod iam;
 pub mod postgres;
 pub mod ting;
-pub mod ting_authorization;
-pub mod ting_credentials;
+/// Ting recipient enrolment with User verification proofs (only when Ting is configured).
 pub mod ting_enrollment;
 
-/// Originator-authenticated durable Ting publisher.
+/// DM's App-verification-proof Ting publisher.
 pub mod ting_publisher;

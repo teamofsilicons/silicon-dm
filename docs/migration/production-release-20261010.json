@@ -1,0 +1,72 @@
+{
+  "app_id": "dm",
+  "date": "2026-10-10",
+  "scope": "Parallel Accounts app rollout; existing IAM Silicons, custody, stores, services and clients preserved",
+  "public_api": "https://api.dm.teamofsilicons.com",
+  "public_website": "https://dm.teamofsilicons.com",
+  "legacy_api": "https://backend.dm.teamofsilicons.com",
+  "runtime_source": "5bb4619290efcc89d0ebcbe9ff850fb639a11c9c",
+  "ui_source": "5e688abecf94c76526f9be451de847ad32d8be8c",
+  "cli_source": "637e1f72bf02e304c93349cb9c74f7e970461316",
+  "cli_version": "0.15.0",
+  "cli_native_manifest": {
+    "app_id": "dm",
+    "version": "0.15.0",
+    "source_commit": "637e1f72bf02e304c93349cb9c74f7e970461316",
+    "verifier_commit": "215e51dae4f47a898802fca36fdc4098ed2585d3",
+    "workflow": "https://github.com/teamofsilicons/silicon-dm/actions/runs/38062005164",
+    "reports": [
+      "dm-linux-aarch64.json",
+      "dm-linux-x86_64.json",
+      "dm-macos-aarch64.json",
+      "dm-macos-x86_64.json",
+      "dm-windows-aarch64.json",
+      "dm-windows-x86_64.json"
+    ]
+  },
+  "public_github_releases": [
+    "https://github.com/teamofsilicons/silicon-dm/releases/tag/v0.15.0"
+  ],
+  "crates_published": {
+    "silicon-dm-protocol": "0.13.0",
+    "silicon-dm-client": "0.15.0"
+  },
+  "authenticated_browser": {
+    "authenticated": true,
+    "authMethod": "genuine CLI session in existing BFF sealed-cookie format",
+    "pageErrors": [],
+    "themes": [
+      "light",
+      "dark"
+    ],
+    "viewports": [
+      "desktop",
+      "mobile"
+    ],
+    "spacing": "1.5rem"
+  },
+  "webhook_signed_ping": "delivered",
+  "temporary_fixture": {
+    "uuid": "6af7bf6a-2fec-4f09-a502-c11447b8f4ac",
+    "account_deletion": "Permanently deleted after DM/Extend/Commit/Hook and Remind verification; existing IAM accounts untouched",
+    "android_device": "removed; access revoked; session ended; owned emulator stopped",
+    "cleanup_receipt": ".migration/live/parallel/release-validation-cleanup.private.json",
+    "receiver": "Deleted after verified Remind timer delivery; subscription removed and reminder archived",
+    "revocation_proof": "Unexpired fixture Hook access token returns HTTP 401 after account deletion",
+    "dm_messages": "Both fixture messages replaced with tombstones; private local relay stopped"
+  },
+  "evidence_directory": ".migration/live/parallel/dm/",
+  "pr": "https://github.com/teamofsilicons/silicon-dm/pull/11",
+  "post_release_backup": {
+    "identifier": "silicon-dm-accounts-live-20261010",
+    "status": "available",
+    "encrypted": true,
+    "restore_qualification": "RDS snapshot retained; this snapshot was not restored into a separate RDS instance during this release"
+  },
+  "optional_dependencies": {
+    "ting": "Not configured on fresh Accounts service; native product reads and retained events remain available",
+    "interface": "Existing IAM Interface remains on its legacy backend; no live Accounts Interface integration is claimed"
+  },
+  "merge_evidence_url": "https://github.com/teamofsilicons/silicon-dm/pull/11",
+  "apps_catalog": "Published 0.15.0; central importer apply, idempotent replay and public resolve passed"
+}

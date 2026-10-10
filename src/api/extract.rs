@@ -5,7 +5,7 @@ use std::{future::Future, ops::Deref, str::FromStr as _};
 use axum::{
     Json,
     extract::{FromRequest, FromRequestParts, Path, Query, Request, rejection::JsonRejection},
-    http::{HeaderMap, HeaderName, StatusCode, request::Parts},
+    http::{HeaderMap, HeaderName, Method, StatusCode, request::Parts},
     response::{IntoResponse, Response},
 };
 use secrecy::SecretString;
@@ -13,18 +13,23 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
     AppError, AppResult,
-    application::{auth::AuthContext, ports::AuthenticationRequest, state::AppState},
-    domain::{IdempotencyKey, OrganizationId},
+    application::{
+        auth::AuthContext,
+        ports::{AuthRequirement, PresentedCredential},
+        state::AppState,
+    },
+    domain::IdempotencyKey,
 };
 
-static ORG_ID: HeaderName = HeaderName::from_static("x-org-id");
-static OBO_PROOF: HeaderName = HeaderName::from_static("x-iam-obo-access-proof");
-static OBO_TOKEN: HeaderName = HeaderName::from_static("x-iam-obo-access-token");
 static IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
 static IF_MATCH: HeaderName = HeaderName::from_static("if-match");
 
-/// IAM-authenticated actor request.
+/// A request authenticated with Silicon Accounts: the account's own access token
+/// (`Authorization: Bearer`), or a User verification proof from another app
+/// (`Authorization: Proof sap_…`) on the routes that accept one.
 pub struct Authenticated(pub AuthContext);
+
+pub use crate::domain::ConversationAccess;
 
 /// Validated required idempotency header.
 pub struct Idempotency(pub IdempotencyKey);
@@ -71,6 +76,36 @@ impl Deref for Authenticated {
     }
 }
 
+/// The proof scope that lets another app call a route, and whether the route is
+/// sensitive enough to check the sign-in with Silicon Accounts live.
+pub(crate) fn route_requirement(method: &Method, path: &str) -> AuthRequirement {
+    let operation = silicon_dm_protocol::http_type(method.as_str(), path);
+    let read = *method == Method::GET;
+    let proof_scope = match operation {
+        "conversations" | "group" if read => Some("dm.conversations.read"),
+        // The sync feed only references messages the account can already read, so an app
+        // that may read them can follow new ones (Ting is off by default).
+        "messages" | "message" | "bundle" | "sync" if read => Some("dm.messages.read"),
+        "create_conversation" | "message.create" | "message.updated" | "message.deleted" => {
+            Some("dm.messages.write")
+        }
+        "receipt" => Some("dm.receipts.write"),
+        "draft" | "put_draft" | "delete_draft" => Some("dm.drafts.write"),
+        _ => None,
+    };
+    let live = matches!(
+        operation,
+        "update_group"
+            | "remove_group_members"
+            | "add_group_owners"
+            | "remove_group_owners"
+            | "message.deleted"
+            | "allow_list_add"
+            | "allow_list_remove"
+    );
+    AuthRequirement { proof_scope, live }
+}
+
 impl FromRequestParts<AppState> for Authenticated {
     type Rejection = AppError;
 
@@ -78,42 +113,49 @@ impl FromRequestParts<AppState> for Authenticated {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let organization_id = parse_organization_id(&parts.headers)?;
-        let token = realtime_bearer(&parts.headers)?;
-        let context = state
-            .identity
-            .authenticate(AuthenticationRequest::Bearer {
-                token: &token,
-                organization_id: &organization_id,
-            })
-            .await?;
-
-        if context.organization_id != organization_id {
-            return Err(AppError::Forbidden);
+        let secret;
+        let credential = match presented_credential(&parts.headers)? {
+            (Scheme::Bearer, token) => {
+                secret = token;
+                PresentedCredential::Bearer(&secret)
+            }
+            (Scheme::Proof, token) => {
+                secret = token;
+                PresentedCredential::Proof(&secret)
+            }
+        };
+        let requirement = route_requirement(&parts.method, parts.uri.path());
+        let context = state.identity.authenticate(credential, requirement).await?;
+        state.directory().admit(&context).await?;
+        if state.ting_enabled() && state.accounts.ting_check_due(context.actor.id.as_str()) {
+            crate::infrastructure::ting_enrollment::spawn_enrolment(state, &context);
         }
-        // Resolve decoded addresses before exact-token authorization. The internal key
-        // is passed to handlers only after tenant-scoped lookup succeeds.
+        // Addresses are resolved to internal keys, and access is decided, before any
+        // handler runs. A conversation the caller may not see is reported as not found.
         if let Ok(Path(mut parameters)) =
             Path::<std::collections::HashMap<String, String>>::from_request_parts(parts, state)
                 .await
         {
-            for field in ["conversation_id", "group_id"] {
-                if let Some(value) = parameters.get(field) {
-                    let id = state
-                        .store
-                        .resolve_destination(
-                            &context,
-                            value,
-                            parts.method == axum::http::Method::POST
-                                && parts.uri.path().ends_with("/messages"),
-                            state.identity.as_ref(),
-                        )
+            let create = parts.method == Method::POST && parts.uri.path().ends_with("/messages");
+            if let Some(value) = parameters.get("conversation_id").cloned() {
+                let (id, access) =
+                    super::access::resolve_conversation_path(state, &context, &value, create)
                         .await?;
-                    if field == "conversation_id" {
-                        state.store.check_group_access(&context, id).await?;
-                    }
-                    parameters.insert(field.into(), id.to_string());
+                if access == ConversationAccess::Invitee
+                    || (access == ConversationAccess::Custodian
+                        && parts.method != Method::GET
+                        && parts.method != Method::DELETE)
+                {
+                    return Err(custodian_read_only(&parts.method));
                 }
+                parameters.insert("conversation_id".into(), id.to_string());
+                parts.extensions.insert(access);
+            }
+            if let Some(value) = parameters.get("group_id").cloned() {
+                let (id, access) =
+                    super::access::resolve_group_path(state, &context, &value).await?;
+                parameters.insert("group_id".into(), id.to_string());
+                parts.extensions.insert(access);
             }
             if let (Some(conversation), Some(message)) = (
                 parameters.get("conversation_id"),
@@ -122,7 +164,7 @@ impl FromRequestParts<AppState> for Authenticated {
                 let conversation = conversation.parse().map_err(|_| AppError::NotFound)?;
                 let id = state
                     .store
-                    .resolve_message_id(&context.organization_id, conversation, message)
+                    .resolve_message_id(conversation, message)
                     .await?;
                 parameters.insert("message_id".into(), id.to_string());
             }
@@ -133,7 +175,6 @@ impl FromRequestParts<AppState> for Authenticated {
                 let id = state
                     .store
                     .resolve_bundle_id(
-                        &context.organization_id,
                         conversation.parse().map_err(|_| AppError::NotFound)?,
                         bundle,
                     )
@@ -145,6 +186,33 @@ impl FromRequestParts<AppState> for Authenticated {
         parts.extensions.insert(context.clone());
         parts.extensions.insert(state.store.clone());
         Ok(Self(context))
+    }
+}
+
+fn custodian_read_only(method: &Method) -> AppError {
+    AppError::forbidden(
+        "custodian_read_only",
+        format!(
+            "You can read this conversation because you are custodian of a Silicon in it, but you are not a participant: DM never lets a custodian {method} as its Silicon. Only tombstoning that Silicon's own messages is allowed."
+        ),
+    )
+}
+
+/// The conversation access the extractor decided for this request.
+impl<S: Send + Sync> FromRequestParts<S> for crate::domain::ConversationAccess {
+    type Rejection = AppError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(
+            parts
+                .extensions
+                .get::<Self>()
+                .copied()
+                .ok_or(AppError::NotFound),
+        )
     }
 }
 
@@ -263,8 +331,9 @@ where
             ));
         }
         if let (Some(store), Some(context), Some(conversation)) = (store, context, conversation) {
+            let _ = &context;
             store
-                .resolve_message_input(&context.organization_id, conversation, &mut envelope.data)
+                .resolve_message_input(conversation, &mut envelope.data)
                 .await
                 .map_err(|_| {
                     ApiInputRejection::validation(
@@ -326,39 +395,45 @@ impl IntoResponse for ApiInputRejection {
     }
 }
 
-fn parse_organization_id(headers: &HeaderMap) -> AppResult<OrganizationId> {
-    required_header(headers, &ORG_ID)?
-        .parse()
-        .map_err(|_| AppError::validation("X-Org-ID contains an invalid organization ID"))
+/// Which credential scheme the request used.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Scheme {
+    /// `Authorization: Bearer <access token>`.
+    Bearer,
+    /// `Authorization: Proof <sap_…>`.
+    Proof,
 }
 
-fn parse_bearer(authorization: &str) -> AppResult<SecretString> {
-    let token = authorization
-        .strip_prefix("Bearer ")
-        .filter(|token| {
-            !token.is_empty()
-                && !token.contains(',')
-                && !token.chars().any(char::is_whitespace)
-                && !token.chars().any(char::is_control)
-        })
-        .ok_or(AppError::Unauthorized)?;
-    Ok(SecretString::from(token.to_owned()))
-}
-
-pub(super) fn realtime_bearer(headers: &HeaderMap) -> AppResult<SecretString> {
-    if optional_single_header(headers, &OBO_PROOF)
-        .map_err(|_| AppError::Unauthorized)?
-        .is_some()
-        || optional_single_header(headers, &OBO_TOKEN)
-            .map_err(|_| AppError::Unauthorized)?
-            .is_some()
+fn parse_credential(authorization: &str) -> AppResult<(Scheme, SecretString)> {
+    let (scheme, token) = if let Some(token) = authorization.strip_prefix("Bearer ") {
+        (Scheme::Bearer, token)
+    } else if let Some(token) = authorization.strip_prefix("Proof ") {
+        (Scheme::Proof, token)
+    } else {
+        return Err(missing_credential());
+    };
+    if token.is_empty()
+        || token.contains(',')
+        || token.chars().any(char::is_whitespace)
+        || token.chars().any(char::is_control)
     {
-        return Err(AppError::Unauthorized);
+        return Err(missing_credential());
     }
+    Ok((scheme, SecretString::from(token.to_owned())))
+}
+
+fn missing_credential() -> AppError {
+    AppError::unauthenticated(
+        "unauthorized",
+        "Send `Authorization: Bearer <Silicon Accounts access token for dm>` (sign in with `dm login`, or through the DM website). Apps acting for an account send `Authorization: Proof <sap_… User verification proof>`.",
+    )
+}
+
+pub(super) fn presented_credential(headers: &HeaderMap) -> AppResult<(Scheme, SecretString)> {
     let authorization = optional_single_header(headers, &axum::http::header::AUTHORIZATION)
-        .map_err(|_| AppError::Unauthorized)?
-        .ok_or(AppError::Unauthorized)?;
-    parse_bearer(authorization)
+        .map_err(|_| missing_credential())?
+        .ok_or_else(missing_credential)?;
+    parse_credential(authorization)
 }
 
 fn required_header<'a>(headers: &'a HeaderMap, name: &HeaderName) -> AppResult<&'a str> {
@@ -390,18 +465,35 @@ fn optional_single_header<'a>(
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderMap, HeaderValue};
+    use axum::http::{HeaderMap, HeaderValue, Method};
 
-    use super::{IDEMPOTENCY_KEY, OBO_PROOF, parse_bearer, realtime_bearer, required_header};
+    use super::{
+        IDEMPOTENCY_KEY, Scheme, parse_credential, presented_credential, required_header,
+        route_requirement,
+    };
 
     #[test]
-    fn bearer_scheme_is_exact_and_nonempty() {
-        assert!(parse_bearer("Bearer opaque").is_ok());
-        assert!(parse_bearer("bearer opaque").is_err());
-        assert!(parse_bearer("Bearer ").is_err());
-        assert!(parse_bearer("Bearer  opaque").is_err());
-        assert!(parse_bearer("Bearer opaque token").is_err());
-        assert!(parse_bearer("Bearer one,two").is_err());
+    fn credentials_are_one_exact_bearer_or_proof() {
+        assert!(matches!(
+            parse_credential("Bearer eyJ.a.b"),
+            Ok((Scheme::Bearer, _))
+        ));
+        assert!(matches!(
+            parse_credential("Proof sap_abc"),
+            Ok((Scheme::Proof, _))
+        ));
+        for invalid in [
+            "bearer token",
+            "Bearer",
+            "Bearer ",
+            "Bearer  token",
+            "Bearer token second",
+            "Bearer one,two",
+            "Basic ZG06c2VjcmV0",
+            "Proof ",
+        ] {
+            assert!(parse_credential(invalid).is_err(), "accepted {invalid}");
+        }
     }
 
     #[test]
@@ -410,17 +502,6 @@ mod tests {
         headers.append(&IDEMPOTENCY_KEY, HeaderValue::from_static("abcdefgh"));
         headers.append(&IDEMPOTENCY_KEY, HeaderValue::from_static("ijklmnop"));
         assert!(required_header(&headers, &IDEMPOTENCY_KEY).is_err());
-    }
-
-    #[test]
-    fn realtime_auth_rejects_obo_and_duplicate_bearer_headers() {
-        let mut obo_headers = HeaderMap::new();
-        obo_headers.insert(&OBO_PROOF, HeaderValue::from_static("proof"));
-        obo_headers.insert(
-            axum::http::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer token"),
-        );
-        assert!(realtime_bearer(&obo_headers).is_err());
 
         let mut duplicate_bearers = HeaderMap::new();
         duplicate_bearers.append(
@@ -431,35 +512,54 @@ mod tests {
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Bearer second"),
         );
-        assert!(realtime_bearer(&duplicate_bearers).is_err());
+        assert!(presented_credential(&duplicate_bearers).is_err());
+        assert!(presented_credential(&HeaderMap::new()).is_err());
     }
 
     #[test]
-    fn realtime_auth_requires_one_exact_bearer_credential() {
-        for authorization in [
-            "bearer token",
-            "Bearer",
-            "Bearer ",
-            "Bearer  token",
-            "Bearer token second",
-            "Bearer first,Bearer-second",
-        ] {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                axum::http::header::AUTHORIZATION,
-                HeaderValue::from_static(authorization),
-            );
-            assert!(
-                realtime_bearer(&headers).is_err(),
-                "accepted {authorization}"
-            );
-        }
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer opaque-token"),
+    fn proofs_are_accepted_only_on_the_documented_routes() {
+        let scope = |method: Method, path: &str| route_requirement(&method, path).proof_scope;
+        assert_eq!(
+            scope(Method::GET, "/api/v1/conversations"),
+            Some("dm.conversations.read")
         );
-        assert!(realtime_bearer(&headers).is_ok());
+        assert_eq!(
+            scope(Method::GET, "/api/v1/conversations/c:a::si:b/messages"),
+            Some("dm.messages.read")
+        );
+        assert_eq!(
+            scope(Method::POST, "/api/v1/conversations/c:a::si:b/messages"),
+            Some("dm.messages.write")
+        );
+        assert_eq!(
+            scope(Method::POST, "/api/v1/messages"),
+            Some("dm.messages.write")
+        );
+        assert_eq!(
+            scope(
+                Method::POST,
+                "/api/v1/conversations/x/messages/00a/receipts"
+            ),
+            Some("dm.receipts.write")
+        );
+        assert_eq!(
+            scope(Method::PUT, "/api/v1/conversations/x/draft"),
+            Some("dm.drafts.write")
+        );
+        assert_eq!(scope(Method::GET, "/api/v1/sync"), Some("dm.messages.read"));
+        for (method, path) in [
+            (Method::POST, "/api/v1/groups"),
+            (Method::PATCH, "/api/v1/groups/g:team"),
+            (Method::GET, "/api/v1/me"),
+            (Method::POST, "/api/v1/allow-list"),
+            (Method::PUT, "/api/v1/presence/devices/laptop"),
+            (Method::GET, "/api/v1/presence/c:ada"),
+            (Method::GET, "/api/v1/gifs/recent"),
+        ] {
+            assert_eq!(scope(method.clone(), path), None, "{method} {path}");
+        }
+        assert!(route_requirement(&Method::DELETE, "/api/v1/conversations/x/messages/00a").live);
+        assert!(route_requirement(&Method::PATCH, "/api/v1/groups/g:team").live);
+        assert!(!route_requirement(&Method::GET, "/api/v1/conversations").live);
     }
 }

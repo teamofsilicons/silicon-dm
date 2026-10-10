@@ -110,23 +110,18 @@ async fn cli_normalizes_silicon_text_before_queueing_and_checks_final_length() -
         let store = Store::new(directory.path())?;
         let conversation = "sender:org::reader";
         let profile: Profile = serde_json::from_value(json!({
-            "name":"default", "base_url":server.uri(), "device_id":"test",
-            "expires_at":4102444800u64, "tokens":{
-                "access_token":"test-access", "refresh_token":"test-refresh", "token_type":"Bearer",
-                "expires_in":1800, "scope":"dm", "organization_id":"org",
-                "actor":{"type":sender,"id":if sender=="carbon" {"c:sender"}else{"si:sender"}}
-            }
+            "format":2, "name":"default", "base_url":server.uri(), "accounts_url":"http://127.0.0.1:9",
+            "app_id":"dm", "device_id":"test", "expires_at":4102444800u64, "enabled":true,
+            "account":{"uuid":"S3n","kind":sender,"id":if sender=="carbon" {"c:sender"}else{"si:sender"}},
+            "tokens":{"access_token":"test-access", "refresh_token":"sar_test-refresh", "expires_in":1800}
         }))?;
         store.update(|config| {
-            config.auto_update = false;
             config.relay_port = server.address().port();
-            config
-                .profiles
-                .insert(session_key("default", None), profile);
+            config.profiles.insert(session_key("default"), profile);
             Ok(())
         })?;
         Mock::given(method("GET")).and(path("/api/v1/conversations"))
-            .respond_with(response(json!({"items":[{"id":conversation,"org_id":"org","participants":[{"type":"carbon","id":"reader"}],"last_message":null,"created_at":"now","updated_at":"now"}]})))
+            .respond_with(response(json!({"items":[{"id":conversation,"participants":[{"type":"carbon","id":"reader"}],"last_message":null,"created_at":"now","updated_at":"now"}]})))
             .mount(&server).await;
         Mock::given(path("/status"))
             .respond_with(response(json!({"running":true,"incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false},"host":{"shared":true}})))

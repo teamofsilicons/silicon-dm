@@ -1,5 +1,9 @@
 # Browser gateway and Vercel frontend
 
+> **Retired at Accounts cutover.** This is the old Solid gateway. The Next.js website and its
+> separate stack are documented in [README.web.md](README.web.md). Keep this stack and its state
+> only for rollback. Do not run its bootstrap with the new Next standalone image.
+
 The SolidJS frontend runs on Vercel at `https://dm.teamofsilicons.com`.
 Its API and WebSocket traffic connects directly to
 `https://gateway.dm.teamofsilicons.com`, behind the existing DM ALB. The gateway

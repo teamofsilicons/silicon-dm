@@ -5,7 +5,7 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use super::PostgresStore;
-use crate::{AppError, AppResult, application::auth::AuthContext};
+use crate::{AppError, AppResult, domain::ActorRef};
 
 /// A reference instructing the client to fetch current authorized DM state.
 #[derive(Clone, Debug, Serialize)]
@@ -17,7 +17,7 @@ pub struct SyncEvent {
     /// Source category; both categories require fetching the current message.
     #[serde(rename = "type")]
     pub kind: String,
-    /// Existing public conversation address.
+    /// Public conversation address (rendered from the conversation's internal id).
     pub conversation_id: String,
     /// Existing conversation-local message code.
     pub message_id: String,
@@ -44,30 +44,31 @@ struct SyncRow {
 }
 
 impl PostgresStore {
-    /// Reads the committed actor-stream head for a fixed sync boundary.
+    /// The committed head of the account's stream and the floor sync starts above
+    /// (sequences at or below it predate the account's Silicon Accounts stream).
     ///
     /// # Errors
     /// Reports storage failures.
-    pub async fn sync_head(&self, auth: &AuthContext) -> AppResult<i64> {
-        Ok(sqlx::query_scalar::<_, i64>(
-            "SELECT next_sequence - 1 FROM actor_delivery_streams
-             WHERE organization_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3",
+    pub async fn sync_head(&self, actor: &ActorRef) -> AppResult<(i64, i64)> {
+        Ok(sqlx::query_as::<_, (i64, i64)>(
+            "SELECT next_sequence - 1, sync_floor FROM actor_delivery_streams
+             WHERE organization_id = '@accounts' AND actor_kind = $1::text::actor_kind AND actor_id = $2",
         )
-        .bind(auth.organization_id.as_str())
-        .bind(auth.actor.actor_type.as_str())
-        .bind(auth.actor.id.as_str())
+        .bind(actor.actor_type.as_str())
+        .bind(actor.id.as_str())
         .fetch_optional(self.pool())
         .await?
-        .unwrap_or(0))
+        .unwrap_or((0, 0)))
     }
 
-    /// Scans retained references under current participant and exact-token group permissions.
+    /// Scans retained references of the account's stream (whatever partition each
+    /// conversation lives in) under current participation.
     ///
     /// # Errors
     /// Rejects invalid bounds and requires a snapshot reset if any source range expired.
     pub async fn sync_events(
         &self,
-        auth: &AuthContext,
+        actor: &ActorRef,
         after: i64,
         upper: i64,
         limit: u16,
@@ -75,53 +76,30 @@ impl PostgresStore {
         if after < 0 || upper < after || !(1..=100).contains(&limit) {
             return Err(AppError::validation("invalid synchronization bounds"));
         }
-        let tags: Vec<_> = auth.tag_ids.iter().flatten().copied().collect();
         let mut rows = sqlx::query_as::<_, SyncRow>(
             r#"
             SELECT d.id, d.sequence, d.delivery_kind::text AS kind,
-                   address.public_id AS conversation_id, message.sequence AS message_sequence,
+                   d.conversation_id::text AS conversation_id, message.sequence AS message_sequence,
                    (d.delivery_kind IN ('message', 'message_status')
                     AND EXISTS (
                         SELECT 1 FROM effective_conversation_participants participant
-                        WHERE participant.organization_id=d.organization_id
-                          AND participant.conversation_id=d.conversation_id
-                          AND participant.actor_kind=d.target_kind
-                          AND participant.actor_id=d.target_id
-                    )
-                    AND EXISTS (
-                        SELECT 1 FROM conversations conversation
-                        WHERE conversation.id=d.conversation_id
-                          AND conversation.organization_id=d.organization_id
-                          AND (NOT conversation.is_group OR EXISTS (
-                              SELECT 1 FROM groups app_group
-                              WHERE app_group.conversation_id=conversation.id
-                                AND (EXISTS (
-                                    SELECT 1 FROM group_invitations invitation
-                                    WHERE invitation.conversation_id=conversation.id
-                                      AND invitation.actor_kind=d.target_kind
-                                      AND invitation.actor_id=d.target_id
-                                ) OR (app_group.is_public AND $2='carbon')
-                                  OR (NOT app_group.is_public AND app_group.tag_ids && $7))
-                          ))
+                        WHERE participant.conversation_id = d.conversation_id
+                          AND participant.actor_kind = d.target_kind
+                          AND participant.actor_id = d.target_id
                     )) AS authorized
             FROM actor_deliveries d
-            LEFT JOIN messages message ON message.id=d.message_id
-              AND message.organization_id=d.organization_id
-            LEFT JOIN conversation_addresses address ON address.id=d.conversation_id
-              AND address.organization_id=d.organization_id
-            WHERE d.organization_id=$1 AND d.target_kind=$2::text::actor_kind
-              AND d.target_id=$3 AND d.sequence>$4 AND d.sequence<=$5
+            LEFT JOIN messages message ON message.id = d.message_id
+            WHERE d.target_kind = $1::text::actor_kind
+              AND d.target_id = $2 AND d.sequence > $3 AND d.sequence <= $4
             ORDER BY d.sequence
-            LIMIT $6
+            LIMIT $5
             "#,
         )
-        .bind(auth.organization_id.as_str())
-        .bind(auth.actor.actor_type.as_str())
-        .bind(auth.actor.id.as_str())
+        .bind(actor.actor_type.as_str())
+        .bind(actor.id.as_str())
         .bind(after)
         .bind(upper)
         .bind(i64::from(limit) + 1)
-        .bind(tags)
         .fetch_all(self.pool())
         .await?;
         let has_more = rows.len() > usize::from(limit);

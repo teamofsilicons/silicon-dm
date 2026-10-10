@@ -50,6 +50,8 @@ fn open_database(state: &store::Store) -> Result<Connection> {
     store::secure_open(&path)?;
     let conn = Connection::open(path)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    // `generations` and `expected_generation` belonged to the retired test environments;
+    // they stay so a queue written by an earlier release opens unchanged.
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS generations(session TEXT PRIMARY KEY,generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS outbox(request_id TEXT PRIMARY KEY,session TEXT NOT NULL,request TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',result TEXT,error TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL,expected_generation INTEGER);
@@ -138,39 +140,12 @@ pub(crate) struct Diagnostic {
 /// Diagnostics are best effort: keep at most this many unsent events.
 const DIAGNOSTIC_BACKLOG: i64 = 1000;
 impl Queue {
-    pub fn generation(&self, session: &str) -> Result<Option<i64>> {
-        Ok(self
-            .database()?
-            .query_row(
-                "SELECT generation FROM generations WHERE session=?1",
-                params![session],
-                |r| r.get(0),
-            )
-            .optional()?)
-    }
-}
-impl Queue {
-    pub fn adopt_generation(&self, session: &str, next: Option<i64>) -> Result<()> {
-        let Some(next) = next else { return Ok(()) };
-        let mut conn = self.database()?;
-        let tx = conn.transaction()?;
-        let previous: Option<i64> = tx
-            .query_row(
-                "SELECT generation FROM generations WHERE session=?1",
-                params![session],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if previous != Some(next) {
-            tx.execute("UPDATE outbox SET state='failed',error=?2 WHERE session=?1 AND state='pending' AND (expected_generation IS NULL OR expected_generation<>?3)",params![session,json!({"code":"testing_generation_changed","message":"test environment changed; inspect then explicitly resubmit this request"}).to_string(),next])?;
-        }
-        tx.execute("INSERT INTO generations(session,generation) VALUES(?1,?2) ON CONFLICT(session) DO UPDATE SET generation=excluded.generation",params![session,next])?;
-        tx.commit()?;
-        Ok(())
-    }
-}
-impl Queue {
     pub fn enqueue(&self, request: &RelayRequest, original: &Value) -> Result<()> {
+        if request.testing_environment_id.is_some() {
+            bail!(
+                "test environments were retired with the move to Silicon Accounts; this request was not queued"
+            )
+        }
         let conn = self.database()?;
         let raw = serde_json::to_string(original)?;
         let previous: Option<String> = conn
@@ -186,34 +161,43 @@ impl Queue {
             }
             return Ok(());
         }
-        let session = store::session_key(&request.profile, request.testing_environment_id);
-        let known: Option<i64> = conn
-            .query_row(
-                "SELECT generation FROM generations WHERE session=?1",
-                params![session],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if request.testing_environment_id.is_some()
-            && request.request.is_mutation()
-            && request.testing_generation.or(known).is_none()
-        {
-            bail!(
-                "discover the test environment over HTTP before queuing mutations; its generation is unknown"
-            );
-        }
         conn.execute(
-        "INSERT INTO outbox(request_id,session,request,created,expected_generation,lane) VALUES(?1,?2,?3,?4,?5,?6)",
-        params![
-            request.request_id.to_string(),
-            store::session_key(&request.profile, request.testing_environment_id),
-            raw,
-            (store::now() as i64),
-            request.testing_generation.or(known),
-            lane(&request.request)
-        ],
-    )?;
+            "INSERT INTO outbox(request_id,session,request,created,lane) VALUES(?1,?2,?3,?4,?5)",
+            params![
+                request.request_id.to_string(),
+                store::session_key(&request.profile),
+                raw,
+                (store::now() as i64),
+                lane(&request.request)
+            ],
+        )?;
         Ok(())
+    }
+    /// Pending requests of one profile.
+    pub fn pending_count(&self, session: &str) -> Result<u64> {
+        let count: i64 = self.database()?.query_row(
+            "SELECT count(*) FROM outbox WHERE session=?1 AND state='pending'",
+            params![session],
+            |r| r.get(0),
+        )?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+    /// Fails every pending request of one profile with `error`; returns how many.
+    pub fn fail_pending(&self, session: &str, error: &Value) -> Result<u64> {
+        let changed = self.database()?.execute(
+            "UPDATE outbox SET state='failed',error=?2 WHERE session=?1 AND state='pending'",
+            params![session, serde_json::to_string(error)?],
+        )?;
+        Ok(changed as u64)
+    }
+    /// Requests queued for retired test environments can never be sent: fail them with an
+    /// explanation instead of retrying forever.
+    pub fn retire_test_environment_requests(&self) -> Result<u64> {
+        let changed = self.database()?.execute(
+            "UPDATE outbox SET state='failed',error=?1 WHERE state='pending' AND session NOT LIKE '%:production'",
+            params![json!({"code":"testing_environments_retired","message":"This request was queued for a test environment; test environments were retired with the move to Silicon Accounts, so it was not sent."}).to_string()],
+        )?;
+        Ok(changed as u64)
     }
 }
 impl Queue {
@@ -293,16 +277,14 @@ impl Queue {
     }
 
     pub(crate) fn load_request(&self, id: Uuid) -> Result<Option<RelayRequest>> {
-        Ok(self.database()?.query_row(
-            "SELECT request,expected_generation FROM outbox WHERE request_id=?1 AND state='pending' AND next_attempt<=?2",
-            params![id.to_string(), store::now() as i64],
-            |row| {
-                let mut request: RelayRequest = json_column(row, 0)?;
-                let generation: Option<i64> = row.get(1)?;
-                request.testing_generation = generation.or(request.testing_generation);
-                Ok(request)
-            },
-        ).optional()?)
+        Ok(self
+            .database()?
+            .query_row(
+                "SELECT request FROM outbox WHERE request_id=?1 AND state='pending' AND next_attempt<=?2",
+                params![id.to_string(), store::now() as i64],
+                |row| json_column(row, 0),
+            )
+            .optional()?)
     }
 }
 impl Queue {
@@ -324,20 +306,6 @@ impl Queue {
     }
 }
 impl Queue {
-    /// A missing local prerequisite is not a failed backend attempt. Keep the
-    /// existing attempt count and retry shortly without polling continuously.
-    pub(crate) fn defer_until_ready(&self, id: Uuid, reason: &Value) -> Result<()> {
-        self.database()?.execute(
-            "UPDATE outbox SET next_attempt=?2+1,error=?3 WHERE request_id=?1 AND state='pending'",
-            params![
-                id.to_string(),
-                store::now() as i64,
-                serde_json::to_string(reason)?
-            ],
-        )?;
-        Ok(())
-    }
-
     pub fn retry(&self, id: Uuid, error: &Value) -> Result<()> {
         self.database()?.execute("UPDATE outbox SET attempts=attempts+1,next_attempt=?2+MIN(60,1 << MIN(attempts,6)),error=?3 WHERE request_id=?1",params![id.to_string(),(store::now() as i64),serde_json::to_string(error)?])?;
         Ok(())
@@ -422,7 +390,7 @@ impl Queue {
         Ok(
             json!({"pending_requests":pending,"pending_webhooks":0,"failed_requests":failed,
                 "retained_legacy_deliveries":retained,"retained_legacy_pending_deliveries":retained_pending,
-                "incoming_delivery":"delivery_moved_to_ting"}),
+                "incoming_delivery":"sync_feed"}),
         )
     }
 }
@@ -504,13 +472,12 @@ mod outgoing_tests {
             "INSERT INTO cursors VALUES('default:test#1','c:alice',1)",
             [],
         )?;
-        queue.adopt_generation("default:test", Some(2))?;
         drop(queue);
         let queue = Queue::open(&state)?;
         let stats = queue.stats()?;
         assert_eq!(stats["pending_webhooks"], 0);
         assert_eq!(stats["retained_legacy_pending_deliveries"], 1);
-        assert_eq!(stats["incoming_delivery"], "delivery_moved_to_ting");
+        assert_eq!(stats["incoming_delivery"], "sync_feed");
         let legacy: (String, i64, i64) = queue.database()?.query_row(
             "SELECT frame,attempts,delivered FROM inbox WHERE delivery_id='old'",
             [],
@@ -524,68 +491,6 @@ mod outgoing_tests {
             1
         );
         assert!(queue.request_candidates()?.is_empty());
-        drop(queue);
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod generation_tests {
-    use super::*;
-    #[test]
-    fn unknown_and_old_sends_cannot_cross_a_clean_or_an_environment() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("dm-generation-{}", Uuid::new_v4()));
-        let state = store::Store::new(&root)?;
-        let queue = Queue::open(&state)?;
-        let id = Uuid::new_v4();
-        let session = store::session_key("default", Some(id));
-        let mut request = RelayRequest {
-            request_id: Uuid::new_v4(),
-            profile: "default".into(),
-            testing_environment_id: Some(id),
-            testing_generation: None,
-            request: crate::relay::Operation::CreateConversation {
-                participant_ids: vec!["c:alice".into(), "c:bob".into()],
-                idempotency_key: "fixture".into(),
-            },
-        };
-        assert!(
-            queue
-                .enqueue(&request, &serde_json::to_value(&request)?)
-                .is_err()
-        );
-        // A pre-upgrade, unknown-generation row must not inherit the first new generation.
-        queue.database()?.execute(
-            "INSERT INTO outbox(request_id,session,request,created) VALUES('legacy',?1,'{}',0)",
-            params![session],
-        )?;
-        queue.adopt_generation(&session, Some(1))?;
-        queue.enqueue(&request, &serde_json::to_value(&request)?)?;
-        let old = request.request_id;
-        request.request_id = Uuid::new_v4();
-        request.testing_environment_id = None;
-        queue.enqueue(&request, &serde_json::to_value(&request)?)?;
-        let production = request.request_id;
-        request.request_id = Uuid::new_v4();
-        request.testing_environment_id = Some(Uuid::new_v4());
-        request.testing_generation = Some(9);
-        queue.enqueue(&request, &serde_json::to_value(&request)?)?;
-        let other = request.request_id;
-        queue.adopt_generation(&session, Some(2))?;
-        for (id, expected) in [
-            ("legacy".into(), "failed"),
-            (old.to_string(), "failed"),
-            (production.to_string(), "pending"),
-            (other.to_string(), "pending"),
-        ] {
-            let status: String = queue.database()?.query_row(
-                "SELECT state FROM outbox WHERE request_id=?1",
-                params![id],
-                |r| r.get(0),
-            )?;
-            assert_eq!(status, expected);
-        }
         drop(queue);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -630,6 +535,16 @@ mod lane_tests {
     fn enqueue(queue: &Queue, request: &RelayRequest) -> Result<()> {
         queue.enqueue(request, &serde_json::to_value(request)?)
     }
+    /// A failed attempt whose backoff certainly has not elapsed yet (the real backoff is
+    /// one second, which a slow test run can cross).
+    fn retry_later(queue: &Queue, request: &RelayRequest) -> Result<()> {
+        queue.retry(request.request_id, &json!({"code":"transport_error"}))?;
+        queue.database()?.execute(
+            "UPDATE outbox SET next_attempt=?2 WHERE request_id=?1",
+            params![request.request_id.to_string(), store::now() as i64 + 3600],
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn a_send_retrying_in_one_conversation_does_not_hold_another() -> Result<()> {
@@ -645,7 +560,7 @@ mod lane_tests {
             candidates(&queue)?,
             vec![stuck.request_id, other.request_id]
         );
-        queue.retry(stuck.request_id, &json!({"code":"transport_error"}))?;
+        retry_later(&queue, &stuck)?;
         // The failing send backs off; its conversation stays ordered behind it,
         // but the other conversation proceeds.
         assert_eq!(candidates(&queue)?, vec![other.request_id]);
@@ -658,6 +573,7 @@ mod lane_tests {
         let first = send("c:alice::c:bob");
         let list = request(Operation::ListConversations {
             page: Default::default(),
+            for_account: None,
         });
         let after = send("c:alice::c:carol");
         enqueue(&queue, &first)?;
@@ -666,7 +582,7 @@ mod lane_tests {
         // The profile-wide read waits for the fresh send; the later send waits
         // for the profile-wide read (the empty lane is a barrier).
         assert_eq!(candidates(&queue)?, vec![first.request_id]);
-        queue.retry(first.request_id, &json!({"code":"transport_error"}))?;
+        retry_later(&queue, &first)?;
         // A send that is already failing no longer holds profile-wide work.
         assert_eq!(candidates(&queue)?, vec![list.request_id]);
         Ok(())
@@ -684,7 +600,7 @@ mod lane_tests {
             "UPDATE outbox SET lane='' WHERE request_id=?1",
             params![old.request_id.to_string()],
         )?;
-        queue.retry(old.request_id, &json!({"code":"transport_error"}))?;
+        retry_later(&queue, &old)?;
         assert!(candidates(&queue)?.is_empty());
         Ok(())
     }

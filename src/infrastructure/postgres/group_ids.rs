@@ -1,91 +1,47 @@
-//! Translation between public group addresses and durable conversation keys.
+//! Public conversation addresses: group ids and direct addresses ↔ conversation UUIDs.
 use super::PostgresStore;
-use crate::{AppError, AppResult, domain::OrganizationId};
+use crate::{AppError, AppResult};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 impl PostgresStore {
-    /// Resolve a direct recipient using the same IAM checks as explicit chat creation.
-    pub(crate) async fn resolve_destination(
-        &self,
-        auth: &crate::application::auth::AuthContext,
-        value: &str,
-        create: bool,
-        identity: &dyn crate::application::ports::IdentityProvider,
-    ) -> AppResult<Uuid> {
-        if Uuid::parse_str(value).is_ok() || value.starts_with("g:") || value.contains("::") {
-            return self
-                .resolve_conversation_id(&auth.organization_id, value)
-                .await;
-        }
-        let recipient: crate::domain::ActorId = value
-            .parse()
-            .map_err(|_| AppError::validation("invalid recipient"))?;
-        let recipient = recipient.base_actor_id().map_err(AppError::validation)?;
-        if recipient == auth.actor.id {
-            return Err(AppError::validation("recipient must be another account"));
-        }
-        let actors = vec![auth.actor.id.clone(), recipient.clone()];
-        let participants = identity.authorize_participants(auth, &actors).await?;
-        let participants = crate::api::handlers::verify_resolved_actors(&actors, participants)?;
-        if !participants.contains(&auth.actor) {
-            return Err(AppError::Forbidden);
-        }
-        if !create {
-            let mut ordered = participants;
-            ordered.sort_by(|a, b| {
-                (a.actor_type.as_str(), a.id.as_str()).cmp(&(b.actor_type.as_str(), b.id.as_str()))
-            });
-            let address = ordered
-                .iter()
-                .map(|a| a.id.as_str())
-                .collect::<Vec<_>>()
-                .join("::");
-            return self
-                .resolve_conversation_id(&auth.organization_id, &address)
-                .await;
-        }
-        let key = format!(
-            "recipient-chat:{}",
-            blake3::hash(recipient.as_str().as_bytes()).to_hex()
-        );
-        let conversation = self
-            .create_conversation(crate::application::commands::CreateConversationCommand {
-                organization_id: auth.organization_id.clone(),
-                creator: auth.actor.clone(),
-                participants,
-                idempotency_key: key
-                    .parse()
-                    .map_err(|_| AppError::validation("invalid idempotency key"))?,
-            })
-            .await?;
-        Ok(conversation.id)
+    /// The conversation of a group id (`g:slug` or the older `g:org:slug`).
+    pub(crate) async fn group_by_public_id(&self, public_id: &str) -> AppResult<Option<Uuid>> {
+        Ok(
+            sqlx::query_scalar("SELECT conversation_id FROM groups WHERE public_id = $1")
+                .bind(public_id)
+                .fetch_optional(self.pool())
+                .await?,
+        )
     }
 
-    /// Resolve an address in the authenticated organization. UUID aliases keep old links usable.
-    pub(crate) async fn resolve_conversation_id(
-        &self,
-        org: &OrganizationId,
-        value: &str,
-    ) -> AppResult<Uuid> {
-        if let Ok(id) = Uuid::parse_str(value) {
-            return Ok(id);
-        }
-        if !silicon_dm_protocol::valid_group_id(value) && !value.contains("::") {
-            return Err(AppError::validation(
-                "expected a direct conversation address, UUID or g:org:group-slug",
-            ));
-        }
-        sqlx::query_scalar(
-            "SELECT id FROM conversation_addresses WHERE organization_id=$1 AND public_id=$2",
+    /// Whether a conversation is a group.
+    pub(crate) async fn is_group(&self, id: Uuid) -> AppResult<bool> {
+        Ok(
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM groups WHERE conversation_id = $1)")
+                .bind(id)
+                .fetch_one(self.pool())
+                .await?,
         )
-        .bind(org.as_str())
-        .bind(value)
-        .fetch_optional(self.pool())
-        .await?
-        .ok_or(AppError::NotFound)
     }
+
+    /// Exact match on a stored direct address: only needed for conversations with an
+    /// IAM-era identity that was never linked to an account (its id stays as stored).
+    pub(crate) async fn conversation_by_stored_address(
+        &self,
+        address: &str,
+    ) -> AppResult<Option<Uuid>> {
+        Ok(
+            sqlx::query_scalar(
+                "SELECT id FROM conversation_addresses WHERE public_id = $1 LIMIT 1",
+            )
+            .bind(address)
+            .fetch_optional(self.pool())
+            .await?,
+        )
+    }
+
     pub(crate) async fn public_group_id(&self, id: Uuid) -> AppResult<String> {
         sqlx::query_scalar("SELECT public_id FROM groups WHERE conversation_id=$1")
             .bind(id)
@@ -93,7 +49,9 @@ impl PostgresStore {
             .await?
             .ok_or(AppError::NotFound)
     }
-    /// Translate only contract-owned ID fields, never user metadata, text or attachments.
+
+    /// Translate only contract-owned conversation id fields, never user metadata, text or
+    /// attachments.
     pub(crate) async fn public_conversation_ids(&self, value: &mut Value) -> AppResult<()> {
         let mut ids = HashSet::new();
         visit_ids(value, &mut |field| {
@@ -123,6 +81,7 @@ impl PostgresStore {
         Ok(())
     }
 }
+
 fn visit_ids(value: &mut Value, visitor: &mut impl FnMut(&mut Value)) {
     match value {
         Value::Array(items) => {
@@ -131,21 +90,30 @@ fn visit_ids(value: &mut Value, visitor: &mut impl FnMut(&mut Value)) {
             }
         }
         Value::Object(object) => {
-            if object.contains_key("participants")
-                && object.contains_key("org_id")
-                && let Some(id) = object.get_mut("id")
-            {
-                visitor(id);
+            if object.contains_key("participants") && object.contains_key("updated_at") {
+                if let Some(id) = object.get_mut("id") {
+                    visitor(id);
+                }
+                if let Some(id) = object.get_mut("superseded_by") {
+                    visitor(id);
+                }
+                if let Some(Value::Array(ids)) = object.get_mut("supersedes") {
+                    for id in ids {
+                        visitor(id);
+                    }
+                }
             }
             if let Some(id) = object.get_mut("conversation_id") {
                 visitor(id);
             }
             for key in [
                 "items",
+                "events",
                 "data",
                 "last_message",
                 "display_message",
                 "original_messages",
+                "conversation",
             ] {
                 if let Some(child) = object.get_mut(key) {
                     visit_ids(child, visitor);
@@ -161,17 +129,15 @@ mod tests {
     #[test]
     fn only_contract_ids_change() {
         let id = Uuid::nil().to_string();
-        let mut value = serde_json::json!({"id":id,"org_id":"tos","participants":[],"last_message":{
+        let mut value = serde_json::json!({"id":id,"participants":[],"updated_at":"x","superseded_by":id,"last_message":{
             "id":id,"conversation_id":id,"metadata":{"conversation_id":id,"data":{"conversation_id":id}},
             "message":id,"attachments":[{"conversation_id":id}]}});
         visit_ids(&mut value, &mut |v| {
-            *v = Value::String("g:tos:product-design".into());
+            *v = Value::String("g:product-design".into());
         });
-        assert_eq!(value["id"], "g:tos:product-design");
-        assert_eq!(
-            value["last_message"]["conversation_id"],
-            "g:tos:product-design"
-        );
+        assert_eq!(value["id"], "g:product-design");
+        assert_eq!(value["superseded_by"], "g:product-design");
+        assert_eq!(value["last_message"]["conversation_id"], "g:product-design");
         assert_eq!(value["last_message"]["id"], id);
         assert_eq!(value["last_message"]["metadata"]["conversation_id"], id);
         assert_eq!(

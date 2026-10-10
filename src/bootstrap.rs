@@ -9,10 +9,9 @@ use uuid::Uuid;
 use crate::{
     AppResult,
     api::build_router,
-    application::state::AppState,
+    application::{accounts::AccountRuntime, state::AppState, sync_hub::SyncHub},
     config::{MigrationSettings, Settings},
-    infrastructure::{giphy::GiphyClient, iam::IamClient, postgres::PostgresStore},
-    realtime::RealtimeHub,
+    infrastructure::{accounts::AccountsAdapter, giphy::GiphyClient, postgres::PostgresStore},
     shutdown,
     worker::TingDeliveryWorker,
 };
@@ -27,32 +26,27 @@ use crate::{
 /// Returns a redacted application error when an adapter cannot be constructed,
 /// PostgreSQL cannot be reached, or its readiness query fails.
 pub async fn build_app_state(settings: Settings) -> AppResult<AppState> {
+    let obsolete = Settings::obsolete_variables_present();
+    if !obsolete.is_empty() {
+        tracing::warn!(
+            variables = ?obsolete,
+            "these obsolete variables are set but DM no longer reads them; remove them"
+        );
+    }
     let telemetry = crate::telemetry::Recorder::new(&settings.telemetry)?;
-    let identity = IamClient::new(&settings.iam)?;
+    let identity = Arc::new(AccountsAdapter::new(&settings.accounts)?);
     let gifs = Arc::new(GiphyClient::new(&settings.providers)?);
     let store = PostgresStore::connect(&settings.database).await?;
     store.readiness().await?;
-    let identity = Arc::new(identity.with_directory(store.clone()));
-    let testing = match &settings.testing {
-        Some(configuration) => Some(Arc::new(
-            crate::testing::TestingRegistry::new(store.clone(), configuration, &settings.iam)
-                .await?,
-        )),
-        None => None,
-    };
-
     Ok(AppState {
         instance_id: new_instance_id(),
         telemetry,
         settings: Arc::new(settings),
         store,
         identity,
-        testing,
-        testing_environment: None,
-        testing_generation: None,
-        testing_runtime_revision: None,
+        accounts: AccountRuntime::default(),
+        sync: SyncHub::default(),
         gifs,
-        realtime: RealtimeHub::default(),
     })
 }
 
@@ -83,11 +77,13 @@ pub async fn run_api(settings: Settings) -> anyhow::Result<()> {
     );
 
     let cancellation = CancellationToken::new();
-    let worker = build_ting_worker(&state, cancellation.clone())?;
-    let testing_maintenance = state
-        .testing
-        .clone()
-        .map(|registry| tokio::spawn(registry.run_maintenance(cancellation.clone())));
+    let worker = build_ting_worker(&state, cancellation.clone());
+    let sync_wakeups = tokio::spawn(
+        state
+            .sync
+            .clone()
+            .run(state.store.clone(), cancellation.clone()),
+    );
     let reporting = tokio::spawn(crate::reporting::run(state.clone(), cancellation.clone()));
     let router = build_router(state);
     let server = axum::serve(listener, router)
@@ -137,9 +133,7 @@ pub async fn run_api(settings: Settings) -> anyhow::Result<()> {
     };
     cancellation.cancel();
     let _ = timeout(shutdown_timeout, reporting).await;
-    if let Some(maintenance) = testing_maintenance {
-        let _ = timeout(shutdown_timeout, maintenance).await;
-    }
+    let _ = timeout(shutdown_timeout, sync_wakeups).await;
     result
 }
 
@@ -165,7 +159,7 @@ pub async fn run_worker(settings: Settings) -> anyhow::Result<()> {
     let shutdown_timeout = settings.server.shutdown_timeout;
     let state = build_app_state(settings).await?;
     let cancellation = CancellationToken::new();
-    let worker = build_ting_worker(&state, cancellation.clone())?;
+    let worker = build_ting_worker(&state, cancellation.clone());
     let worker_run = worker.run(cancellation.clone());
     tokio::pin!(worker_run);
     tracing::info!(instance_id = %state.instance_id, "DM delivery worker is ready");
@@ -207,39 +201,22 @@ fn graceful_deadline_elapsed(component: &str, deadline: std::time::Duration) {
     );
 }
 
-/// Builds a producer with selected-plane identity, cache, and lifecycle fencing.
-/// Never creates or owns recipient-facing delivery sockets.
+/// Builds the Ting worker: a publisher over a prewarmed socket when `DM_TING_URL` is set,
+/// otherwise a worker that marks handoffs discarded. Never owns recipient-facing sockets.
 pub(crate) fn build_ting_worker(
     state: &AppState,
     cancellation: CancellationToken,
-) -> AppResult<TingDeliveryWorker> {
-    use crate::infrastructure::{ting::TingSocket, ting_publisher::AuthenticatedTingPublisher};
-    let credentials = state.ting_credentials()?;
-    if state.testing_environment.is_some() && state.testing.is_none() {
-        return Err(crate::AppError::validation(
-            "sandbox Ting worker requires a testing registry",
-        ));
-    }
-    let socket = TingSocket::start(&state.settings.ting, cancellation);
-    let publisher = Arc::new(AuthenticatedTingPublisher::new(
-        credentials,
-        state.identity.clone(),
-        socket,
-    ));
-    let mut worker = TingDeliveryWorker::new(
-        state.store.clone(),
-        publisher,
-        state.ting_delivery_context(),
-        state.instance_id.clone(),
-        state.settings.worker.clone(),
-    );
-    if let Some(registry) = &state.testing {
-        worker = worker.with_testing_registry(registry.clone());
-        if let Some(revision) = state.testing_runtime_revision {
-            worker = worker.with_runtime_revision(revision);
-        }
-    }
-    Ok(worker)
+) -> TingDeliveryWorker {
+    use crate::infrastructure::{ting::TingSocket, ting_publisher::ProofTingPublisher};
+    let publisher = state.settings.ting.base_url.clone().map(|base_url| {
+        let socket = TingSocket::start(base_url, &state.settings.ting, cancellation);
+        Arc::new(ProofTingPublisher::new(
+            state.identity.clone(),
+            socket,
+            state.settings.ting.app_id.clone(),
+        )) as crate::infrastructure::ting::SharedTingPublisher
+    });
+    TingDeliveryWorker::new(state.clone(), publisher)
 }
 
 #[cfg(test)]

@@ -1,0 +1,58 @@
+{
+  "app": "dm",
+  "schema": "dm",
+  "schemas": [
+    "dm",
+    "dm_private"
+  ],
+  "columns": [
+    "dm.accounts.uuid",
+    "dm.accounts.custodian_uuid",
+    "dm.accounts_webhook_receipts.account_uuid",
+    "dm.actor_snapshots.actor_id",
+    "dm.actor_deliveries.target_id",
+    "dm.actor_delivery_ack_cursors.actor_id",
+    "dm.actor_delivery_streams.actor_id",
+    "dm.actor_presence_state.actor_id",
+    "dm.bug_reports.actor_id",
+    "dm.client_presence_leases.actor_id",
+    "dm.conversation_participants.actor_id",
+    "dm.conversations.created_by_id",
+    "dm.draft_attachments.actor_id",
+    "dm.draft_gifs.actor_id",
+    "dm.draft_version_counters.actor_id",
+    "dm.drafts.actor_id",
+    "dm.group_invitations.actor_id",
+    "dm.group_invitations.invited_by_id",
+    "dm.group_owners.actor_id",
+    "dm.group_owners.added_by_id",
+    "dm.idempotency_records.actor_id",
+    "dm.identity_links.accounts_uuid",
+    "dm.identity_links.previous_uuid",
+    "dm.message_bundles.created_by_id",
+    "dm.message_receipts.recipient_id",
+    "dm.messages.sender_id",
+    "dm.realtime_session_actors.actor_id",
+    "dm.realtime_sessions.authenticated_subject",
+    "dm.recent_gifs.carbon_id",
+    "dm.silicon_contact_allowances.silicon_id",
+    "dm.silicon_contact_allowances.allowed_id",
+    "dm.silicon_contact_allowances.added_by_id",
+    "dm.system_events.target_silicon_id",
+    "dm.ting_automatic_enrollments.actor_id",
+    "dm.ting_handoffs.target_id",
+    "dm.ting_handoffs.originator_id",
+    "dm.ting_proof_grants.actor_id"
+  ],
+  "json_columns": [
+    "dm.idempotency_records.response_body",
+    "dm.message_history.content",
+    "dm.message_history.history"
+  ],
+  "preserved": [
+    "ting_handoffs.request_body and system_events.payload: immutable delivery snapshots, retain delivery identity and signed/retried body",
+    "legacy IAM/Honeycomb credentials and projections: archived authority; aad_actor_id stays original",
+    "message text, metadata, attachments, GIF provider keys, public addresses, conversation/message UUIDs",
+    "participant_set seals rebuilt from exact new participant rows; group hash and all conversation IDs unchanged"
+  ]
+}

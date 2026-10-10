@@ -19,57 +19,45 @@ pub struct DocsArgs {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Topic {
-    /// Honeycomb participant authentication, lifecycle and recovery.
-    HoneycombLifecycle,
-    /// Build and package all six Honeycomb CLI targets.
-    HoneycombRelease,
-    /// Public JSON envelopes and wire formats.
-    WireFormat,
-    /// Group creation, IAM tags, invitations and history.
-    Groups,
-    /// Install, authenticate and send the first message.
+    /// Topic catalog and the conventions every guide relies on.
+    Index,
+    /// Install, sign in and send the first message.
     GettingStarted,
+    /// Signing in with Silicon Accounts: Carbons, Silicons, sessions, custodians.
+    Accounts,
+    /// Command grammar, profiles, messaging, drafts and groups.
+    Cli,
+    /// Receiving without pushes: dm sync and dm inbox --watch.
+    Receiving,
+    /// The outgoing relay at dm.localhost.
+    Relay,
+    /// Groups: owners, invitations, history.
+    Groups,
     /// Build a reliable typed integration.
     Building,
-    /// Version negotiation, compatibility and sunset policy.
-    Contracts,
-    /// Runtime and backend settings.
-    Configuration,
-    /// Diagnostic collection, opt-out and sandbox isolation.
-    Telemetry,
-    /// Topic catalog and essential acknowledgement conventions.
-    Index,
-    /// Command grammar, profiles, messaging, drafts and updates.
-    Cli,
-    /// Outgoing command relay and generic Ting destination contract.
-    Relay,
     /// Stateless typed Rust client and public API methods.
     Client,
-    /// Ting delivery migration and retired DM socket guidance.
-    Realtime,
-    /// Optional caller-owned SDK runtime and update policy.
+    /// The optional runtime: stored sign-ins, the relay, the inbox.
     Runtime,
-    /// Complete HTTP API and Ting delivery migration guide.
+    /// DM references delivered through Ting, when the service has Ting configured.
+    #[value(alias = "realtime")]
+    Ting,
+    /// The HTTP API.
     Api,
-    /// IAM sessions, token boundaries and signed webhooks.
-    Iam,
-    /// Sandbox creation, isolation, lifecycle and recovery.
-    #[value(alias = "tests")]
-    Testing,
-    /// Backend deployment, configuration and runtime grants.
-    Deployment,
-    /// Machine-readable HTTP contract and retired WebSocket responses.
+    /// Machine-readable HTTP contract (OpenAPI).
     Openapi,
-    /// Observed manual backend and realtime results.
-    Verification,
-    /// Observed manual CLI and callback results.
-    CliVerification,
-    /// Observed manual IAM and revocation results.
-    IamVerification,
-    /// Observed manual sandbox and packaged runtime results.
-    TestingVerification,
-    /// Proposed upstream discovery capability and current limits.
-    IamMemberResolution,
+    /// JSON envelopes and wire formats.
+    WireFormat,
+    /// Contract versions, compatibility and sunset policy.
+    Contracts,
+    /// CLI and service settings.
+    Configuration,
+    /// Diagnostics, what they contain and how to turn them off.
+    Telemetry,
+    /// Deploying the DM service.
+    Deployment,
+    /// Releasing DM: Silicon Apps archives, the Rust crates and the docs site.
+    Releasing,
 }
 
 struct Guide {
@@ -93,76 +81,38 @@ macro_rules! guide {
 }
 
 const GUIDES: &[Guide] = &[
-    guide!(
-        "honeycomb-lifecycle",
-        "Honeycomb lifecycle participant",
-        "honeycomb-lifecycle.md"
-    ),
-    guide!(
-        "honeycomb-release",
-        "Honeycomb CLI release packaging",
-        "honeycomb-release.md"
-    ),
-    guide!("groups", "Groups and membership", "groups.md"),
     guide!("getting-started", "Start using DM", "getting-started.md"),
-    guide!("building", "Build on DM", "building.md"),
-    guide!("contracts", "Contracts and compatibility", "contracts.md"),
-    guide!("configuration", "Configure DM", "configuration.md"),
-    guide!("telemetry", "Diagnostics and analytics", "telemetry.md"),
-    guide!("wire-format", "DM JSON wire format", "wire-format.md"),
+    guide!(
+        "accounts",
+        "Signing in with Silicon Accounts",
+        "accounts.md"
+    ),
     guide!("cli", "DM CLI guide", "cli/README.md"),
-    guide!(
-        "relay",
-        "Outgoing relay and Ting destinations",
-        "cli/relay.md"
-    ),
+    guide!("receiving", "Receiving messages", "cli/receiving.md"),
+    guide!("relay", "Outgoing relay", "cli/relay.md"),
+    guide!("groups", "Groups and membership", "groups.md"),
+    guide!("building", "Build on DM", "building.md"),
     guide!("client", "Rust client guide", "client/README.md"),
-    guide!(
-        "realtime",
-        "Ting delivery and retired DM sockets",
-        "client/realtime.md"
-    ),
     guide!(
         "runtime",
         "Optional Rust client runtime",
         "client/runtime.md"
     ),
-    guide!("api", "DM HTTP API and Ting delivery", "api/README.md"),
-    guide!("iam", "Silicon IAM integration", "iam.md"),
-    guide!("testing", "Testing environments", "testing-environments.md"),
-    guide!("deployment", "Deploying Silicon DM", "deployment.md"),
+    guide!("ting", "DM references through Ting", "client/ting.md"),
+    guide!("api", "DM HTTP API", "api/README.md"),
     Guide {
         topic: "openapi",
         title: "OpenAPI contract",
-        path: "openapi.yaml",
+        path: "docs/openapi.yaml",
         format: "yaml",
         content: include_str!("../docs/openapi.yaml"),
     },
-    guide!(
-        "verification",
-        "Manual backend verification",
-        "manual-backend-verification.md"
-    ),
-    guide!(
-        "cli-verification",
-        "Manual CLI verification",
-        "cli/manual-verification.md"
-    ),
-    guide!(
-        "iam-verification",
-        "Manual IAM verification",
-        "manual-iam-verification.md"
-    ),
-    guide!(
-        "testing-verification",
-        "Manual testing-environment verification",
-        "manual-testing-environments.md"
-    ),
-    guide!(
-        "iam-member-resolution",
-        "IAM member-resolution proposal",
-        "iam-member-resolution-proposal.md"
-    ),
+    guide!("wire-format", "DM JSON wire format", "wire-format.md"),
+    guide!("contracts", "Contracts and compatibility", "contracts.md"),
+    guide!("configuration", "Configure DM", "configuration.md"),
+    guide!("telemetry", "Diagnostics and analytics", "telemetry.md"),
+    guide!("deployment", "Deploying the DM service", "deployment.md"),
+    guide!("releasing", "Release DM", "releasing.md"),
 ];
 
 fn entry(guide: &Guide) -> Value {
@@ -215,12 +165,11 @@ pub fn render(options: &DocsArgs) -> Result<Value> {
     }
     Ok(json!({
         "embedded":true,"package_version":env!("CARGO_PKG_VERSION"),
-        "guides":{"cli":"docs/cli/README.md","client":"docs/client/README.md","api":"docs/api/README.md","tests":"docs/testing-environments.md"},
+        "guides":{"getting_started":"docs/getting-started.md","accounts":"docs/accounts.md","cli":"docs/cli/README.md","receiving":"docs/cli/receiving.md","client":"docs/client/README.md","api":"docs/api/README.md"},
         "repository":"https://github.com/teamofsilicons/silicon-dm",
         "topics":GUIDES.iter().map(entry).collect::<Vec<_>>(),
-        "metadata":"Every message/draft includes metadata as a JSON object, including {}.",
-        "delivery":{"provider":"ting","callback_payload":"raw tings array","callback_acceptance":"HTTP 204 after accepting the complete generic batch"},
-        "transport_ack":"Ting owns incoming queues, retries and ACKs. DM Delivered and Read receipts are explicit HTTP operations; its local relay queues only outgoing commands.",
+        "sign_in":{"carbon":"dm login","silicon":"silicon-accounts login --app dm -q | dm login --slt-stdin","status":"dm login status --json"},
+        "receiving":"dm inbox --watch prints new messages as JSON lines (dm sync for one page of references). Delivered and Read receipts are explicit: dm receipts delivered|read.",
         "help":"dm docs TOPIC; dm docs --search TEXT; dm docs --all; dm --help; dm COMMAND --help",
         "read_as_markdown":"dm docs cli | jq -r .content",
         "index_content":include_str!("../docs/README.md")
@@ -230,6 +179,24 @@ pub fn render(options: &DocsArgs) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packaged_guides_name_neither_retired_services_nor_account_groupings() {
+        for guide in GUIDES {
+            let content = guide.content.to_lowercase();
+            for word in [
+                "honeycomb",
+                " iam ",
+                "iam-",
+                "organization",
+                "x-org-id",
+                "human",
+                "ai agent",
+                "user account",
+            ] {
+                assert!(!content.contains(word), "{} mentions {word:?}", guide.topic);
+            }
+        }
+    }
     #[test]
     fn every_advertised_guide_can_be_selected() {
         for guide in GUIDES {

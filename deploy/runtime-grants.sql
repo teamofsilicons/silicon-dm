@@ -9,6 +9,7 @@
 GRANT USAGE ON SCHEMA dm TO :"runtime_role";
 GRANT USAGE ON SCHEMA dm_private TO :"runtime_role";
 GRANT EXECUTE ON FUNCTION dm.sync_group_participants(text) TO :"runtime_role";
+GRANT EXECUTE ON FUNCTION dm.sync_group_conversation(uuid) TO :"runtime_role";
 -- Trigger bodies call these invariant validators under the runtime role.
 -- Trigger-only functions do not need to be callable directly by that role.
 GRANT EXECUTE ON FUNCTION dm_private.assert_direct_conversation_participant_count(uuid) TO :"runtime_role";
@@ -27,3 +28,6 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA dm
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO :"runtime_role";
 ALTER DEFAULT PRIVILEGES IN SCHEMA dm_private
     REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
+-- Only the coordinated cutover operator may retire or remap identities.
+REVOKE INSERT, UPDATE, DELETE ON dm.accounts_uuid128_map FROM :"runtime_role";

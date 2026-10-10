@@ -1,670 +1,50 @@
+mod args;
+mod auth;
 mod daemon;
-mod delivery;
 mod docs;
 mod em_dash;
 mod message_length;
+mod output;
+mod receive;
 mod store;
-mod updater;
+
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use args::*;
+use clap::Parser;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use silicon_dm_client::{
     relay::{Operation, RelayAcknowledgement, RelayRequest, RelayResult},
+    runtime::{self, LocalRuntime},
     *,
 };
 use std::{
-    io::{IsTerminal, Read, Write},
-    path::PathBuf,
+    io::{IsTerminal, Read},
+    path::{Path, PathBuf},
     time::Duration,
 };
 use uuid::Uuid;
 
-#[derive(Parser)]
-#[command(
-    name = "dm",
-    version,
-    about = "Silicon DM: reliable messaging for Carbons and Silicons",
-    arg_required_else_help = true,
-    after_help = "FIRST STEPS\n  dm iam --json\n  dm login --token-file -\n  dm delivery authorize\n  dm delivery login --token-file -\n  dm webhook http://localhost:9000/tings --all-apps\n  dm delivery status\n  dm messages send CONVERSATION_ID --text 'Hello'\n\nTing login requires its own Ting-bound SLT. Destinations receive raw Ting batches for all eligible apps and acknowledge HTTP 204.\nTESTING\n  dm --app-secret-file /private/dm-app-secret login --token-file -\n  dm --test ENV_UUID delivery login --token-file - --ting-app-secret-file /private/ting-app-secret --ting-environment-key-file /private/iam-environment-key\n\nDocs: https://docs.dm.teamofsilicons.com\nRepository: https://github.com/teamofsilicons/silicon-dm\nEvery command has --help. DM state holds private credentials and outgoing requests; Ting owns incoming delivery."
-)]
-struct Cli {
-    /// Local profile; defaults to the name selected with profiles use.
-    #[arg(long, global = true)]
-    profile: Option<String>,
-    /// DM sandbox UUID; first create/import its key, then log in within the sandbox.
-    #[arg(
-        long = "test",
-        env = "SILICON_DM_TEST",
-        global = true,
-        value_name = "ENV_UUID"
-    )]
-    test: Option<Uuid>,
-    /// IAM test app secret: discover the sandbox automatically. Prefer DM_TEST_APP_SECRET or --app-secret-file.
-    #[arg(
-        long,
-        global = true,
-        env = "DM_TEST_APP_SECRET",
-        hide_env_values = true,
-        conflicts_with = "app_secret_file"
-    )]
-    app_secret: Option<String>,
-    /// File containing the IAM test app secret; '-' reads hidden stdin.
-    #[arg(long, global = true)]
-    app_secret_file: Option<PathBuf>,
-    /// Compact JSON. Standard output is JSON in either mode.
-    #[arg(long, global = true)]
-    json: bool,
-    /// Reuse the original key when retrying a mutation. Generated keys are echoed.
-    #[arg(long, global = true)]
-    idempotency_key: Option<String>,
-    /// Wait for relay completion (default 30); timeout leaves the request durably queued.
-    /// messages send returns once queued unless --wait or this flag is given.
-    #[arg(long, global = true)]
-    wait_seconds: Option<u64>,
-    #[command(subcommand)]
-    command: Command,
+/// A command's JSON result and exit code.
+pub struct Outcome {
+    pub value: Value,
+    pub exit: i32,
 }
-#[derive(Subcommand)]
-enum Command {
-    /// Exchange an IAM short-lived token, or run login status to verify the saved session.
-    #[command(
-        after_help = "DM login does not grant notification permission. NEXT: dm delivery authorize; dm delivery complete AUTHORIZATION_ID --code-file -; dm delivery login --token-file - (a separate Ting-bound SLT); dm webhook URL --all-apps. Ting's system daemon sends raw batches and accepts HTTP 204."
-    )]
-    #[command(
-        subcommand_precedence_over_arg = true,
-        args_conflicts_with_subcommands = true
-    )]
-    Login {
-        #[command(subcommand)]
-        command: Option<LoginCommand>,
-        /// IAM short-lived token. Use --token-file - to avoid shell history.
-        slt: Option<String>,
-        /// DM origin or /api/v1 base, never the IAM URL.
-        #[arg(
-            long,
-            env = "DM_API_URL",
-            default_value = "https://backend.dm.teamofsilicons.com"
-        )]
-        base_url: String,
-        /// Retired: rejected before reading the token. Use delivery login and webhook --all-apps.
-        #[arg(long)]
-        webhook: Option<url::Url>,
-        /// File containing the SLT; '-' reads stdin, with hidden input on terminals.
-        #[arg(long)]
-        token_file: Option<PathBuf>,
-    },
-    /// Show the public IAM app_id and service URLs without logging in.
-    Iam {
-        #[arg(
-            long,
-            env = "DM_API_URL",
-            default_value = "https://backend.dm.teamofsilicons.com"
-        )]
-        base_url: String,
-    },
-    /// Manage explicit DM delivery consent and the separate Ting receiver login.
-    Delivery {
-        #[command(subcommand)]
-        command: delivery::Command,
-    },
-    /// Attach a generic raw-Ting endpoint directly to Ting's installed system daemon.
-    Webhook {
-        url: url::Url,
-        /// Optional bearer secret for the local callback. Prefer a private file.
-        #[arg(long)]
-        secret_file: Option<PathBuf>,
-        /// Recover/reattach this exact Ting hook ID; omit to reuse the saved ID.
-        #[arg(long)]
-        id: Option<String>,
-        /// Explicitly transfer the same hook from another live receiver.
-        #[arg(long)]
-        takeover: bool,
-        /// Optional local health endpoint used by Ting during retry recovery.
-        #[arg(long)]
-        health_url: Option<url::Url>,
-        /// Required: this endpoint handles every eligible app's Ting batch, not only DM.
-        #[arg(long, required = true)]
-        all_apps: bool,
-    },
-    /// Submit a bug report and notify maintainers; sandbox notifications are simulated.
-    #[command(
-        after_help = "EXAMPLES\n  dm report 'Messages fail after reconnect'\n  dm report 'Fixed replay' --pr https://github.com/teamofsilicons/silicon-dm/pull/123\nInclude reproduction steps and expected behavior. Never include credentials. Repository: https://github.com/teamofsilicons/silicon-dm\nDocs: https://docs.dm.teamofsilicons.com · Rust: https://crates.io/crates/silicon-dm-client"
-    )]
-    Report {
-        message: String,
-        #[arg(long)]
-        pr: Option<String>,
-    },
-    /// Detach the saved Ting hook, retaining its ID for explicit reattachment.
-    Unhook,
-    /// Configure the parent directory for private DM state.
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
-    /// Inspect supported contracts, deprecation and compatibility.
-    Contracts,
-    /// Revoke the DM refresh-token family and disable outgoing work; Ting logout is separate.
-    Logout,
-    /// Show IAM member, organization, capabilities and session.
-    Whoami,
-    /// Refresh tokens through DM and atomically update the local profile.
-    Refresh,
-    /// List, select and configure independent member logins.
-    Profiles {
-        #[command(subcommand)]
-        command: Profiles,
-    },
-    /// List or create organization-scoped participant sets.
-    Conversations {
-        #[command(subcommand)]
-        command: Conversations,
-    },
-    /// Manage named groups, invitations and IAM tag access (organization admins/owners).
-    Groups {
-        #[command(subcommand)]
-        command: Groups,
-    },
-    /// Send, reply, inspect, edit or delete messages using recipient addresses and short IDs.
-    Messages {
-        #[command(subcommand)]
-        command: Messages,
-    },
-    /// Explicit delivered/read receipts, separate from relay transport ACKs.
-    Receipts {
-        #[command(subcommand)]
-        command: Receipts,
-    },
-    /// Read, replace and delete versioned private drafts.
-    Drafts {
-        #[command(subcommand)]
-        command: Drafts,
-    },
-    /// Non-destructive Silicon message bundles.
-    Bundles {
-        #[command(subcommand)]
-        command: Bundles,
-    },
-    /// Inspect availability or update transient activity through HTTP device leases.
-    Presence {
-        #[command(subcommand)]
-        command: PresenceCommands,
-    },
-    /// Discover GIFs; send selected metadata with messages send --data.
-    Gifs {
-        #[command(subcommand)]
-        command: Gifs,
-    },
-    /// Manage isolated DM environments backed by IAM test environments.
-    #[command(visible_alias = "env")]
-    Environments {
-        #[command(subcommand)]
-        command: Environments,
-    },
-    /// Manage the outgoing command relay at dm.localhost, shared by every DM home of this user; incoming delivery belongs to Ting.
-    Daemon {
-        #[command(subcommand)]
-        command: Daemon,
-    },
-    /// Submit typed JSON operations and inspect durable results.
-    Relay {
-        #[command(subcommand)]
-        command: Relay,
-    },
-    /// Show Honeycomb installation and update guidance.
-    Updates {
-        #[command(subcommand)]
-        command: Updates,
-    },
-    /// Read complete packaged guides without a checkout, login or network.
-    #[command(
-        after_help = "EXAMPLES\n  dm docs\n  dm docs cli\n  dm docs relay\n  dm docs --search 'acknowledged'\n  dm --json docs api\n  dm docs --all\n\nOutput is JSON. Topic responses contain the entire guide in content; pipe through jq -r .content for Markdown. Docs never reads credentials or checks for updates."
-    )]
-    Docs {
-        #[command(flatten)]
-        options: docs::DocsArgs,
-    },
-}
-#[derive(Subcommand)]
-enum LoginCommand {
-    /// Verify the saved authentication and report the current carbon or silicon.
-    Status,
-}
-#[derive(Subcommand)]
-enum ConfigCommand {
-    /// Store state under LOCATION/.silicon-dm. LOCATION must already be a directory.
-    Home { location: PathBuf },
-    /// Enable or disable diagnostic events for this CLI and its daemon.
-    Telemetry {
-        #[arg(action = clap::ArgAction::Set)]
-        enabled: bool,
-    },
-}
-#[derive(Subcommand)]
-enum Profiles {
-    /// List mappings without exposing tokens.
-    List,
-    /// Select a default profile; production and test logins stay independent.
-    Use { name: String },
-    /// Retired: use dm webhook URL --all-apps after explicit Ting login.
-    Webhook { url: String },
-}
-#[derive(Args)]
-struct Pagination {
-    /// Opaque next_cursor from the previous response.
-    #[arg(long)]
-    cursor: Option<String>,
-    #[arg(long,value_parser=clap::value_parser!(u16).range(1..=100))]
-    limit: Option<u16>,
-}
-impl Pagination {
-    fn page(self) -> PageRequest {
-        PageRequest {
-            cursor: self.cursor,
-            limit: self.limit,
+impl Outcome {
+    fn ok(value: Value) -> Self {
+        Self { value, exit: 0 }
+    }
+    /// Nothing more to print (the command streamed its own output).
+    fn printed() -> Self {
+        Self {
+            value: Value::Null,
+            exit: 0,
         }
     }
 }
-#[derive(Subcommand)]
-enum Conversations {
-    /// List one page; pass next_cursor as --cursor for the next page.
-    List {
-        #[command(flatten)]
-        page: Pagination,
-    },
-    /// Current member is included automatically; repeat --participant for each other member.
-    Create {
-        #[arg(long = "participant", required = true)]
-        participants: Vec<String>,
-    },
-}
-#[derive(Args)]
-struct GroupPolicy {
-    #[arg(long)]
-    name: String,
-    #[arg(long, default_value = "")]
-    description: String,
-    /// Automatically admit organization Carbons; Silicons require invitations.
-    #[arg(long)]
-    public: bool,
-    /// Matching IAM tag UUID grants access to a private group; repeat for multiple tags.
-    #[arg(long = "tag")]
-    tags: Vec<Uuid>,
-}
-impl GroupPolicy {
-    fn settings(self) -> silicon_dm_client::models::GroupSettings {
-        silicon_dm_client::models::GroupSettings {
-            name: self.name,
-            description: self.description,
-            is_public: self.public,
-            tag_ids: self.tags,
-        }
-    }
-}
-#[derive(Subcommand)]
-enum Groups {
-    /// List accessible groups with normal conversation pagination.
-    List {
-        #[command(flatten)]
-        page: Pagination,
-    },
-    /// Show settings and the current active roster.
-    Show { group: String },
-    /// Create a group. The creator is invited automatically.
-    Create {
-        #[command(flatten)]
-        policy: GroupPolicy,
-        #[arg(long = "member")]
-        members: Vec<String>,
-    },
-    /// Replace all settings using the version returned by show.
-    Update {
-        group: String,
-        #[arg(long)]
-        version: i64,
-        #[command(flatten)]
-        policy: GroupPolicy,
-    },
-    /// Invite active organization Carbons or Silicons.
-    Invite {
-        group: String,
-        #[arg(long = "member", required = true)]
-        members: Vec<String>,
-    },
-    /// Remove explicit invitations; matching tag or public access remains.
-    Remove {
-        group: String,
-        #[arg(long = "member", required = true)]
-        members: Vec<String>,
-    },
-}
-#[derive(Args)]
-struct Content {
-    /// Sender address; an optional ISI prefix is supported for silicon accounts.
-    #[arg(long, visible_alias = "from")]
-    sender_id: Option<String>,
-    /// Intended participant address, for example deliberate@si:cos.
-    #[arg(long, visible_alias = "to")]
-    recipient_id: Option<String>,
-    /// Message JSON file or '-'; supports text, attachment URLs, transcript and reply.
-    #[arg(long)]
-    data: Option<PathBuf>,
-    #[arg(long)]
-    text: Option<String>,
-    /// Existing attachment URL, repeatable. DM never uploads the file.
-    #[arg(long = "attachment")]
-    attachments: Vec<url::Url>,
-    /// Retired message metadata option; use the fixed message fields.
-    #[arg(long, hide = true)]
-    metadata: Option<String>,
-    /// Original message in this conversation.
-    #[arg(long)]
-    reply_to: Option<String>,
-}
-impl Content {
-    fn read(self) -> Result<MessageCreate> {
-        let mut m = if let Some(path) = self.data {
-            read_json(&path)?
-        } else {
-            MessageCreate::default()
-        };
-        if self.sender_id.is_some() {
-            m.sender_id = self.sender_id;
-        }
-        if self.recipient_id.is_some() {
-            m.recipient_id = self.recipient_id;
-        }
-        if let Some(text) = self.text {
-            m.text = Some(text)
-        }
-        if self.metadata.is_some() || !m.metadata.is_empty() {
-            bail!(
-                "Message metadata was removed in DM 0.8. Use message, attachments, voice_transcript and reply."
-            );
-        }
-        if self.reply_to.is_some() {
-            m.reply_to_message_id = self.reply_to
-        }
-        m.attachments.extend(
-            self.attachments
-                .into_iter()
-                .map(|permanent_url| Attachment {
-                    permanent_url,
-                    name: None,
-                    content_type: None,
-                    size: None,
-                }),
-        );
-        if m.text.as_deref().is_none_or(str::is_empty)
-            && m.attachments.is_empty()
-            && m.voice.is_none()
-            && m.gif.is_none()
-        {
-            bail!(
-                "message needs --text, --attachment or --data with voice/GIF; see dm messages send --help"
-            )
-        }
-        Ok(m)
-    }
-}
-#[derive(Subcommand)]
-enum Messages {
-    /// List newest-first message history with a resumable cursor.
-    List {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-        #[command(flatten)]
-        page: Pagination,
-        #[arg(long)]
-        include_bundled_members: bool,
-    },
-    /// Fetch a message including its content history and deletion state.
-    Show {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-        #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
-        message: String,
-    },
-    /// Send any combination of text, existing links, voice or GIFs.
-    #[command(
-        after_help = "EXAMPLES\n  dm messages send si:cos --text 'hey'\n  dm messages send si:cos --attachment https://example.com/file.pdf\n  dm messages send si:cos --text \"what's up\" --reply-to 000\n  dm messages send si:cos --data message.json\n\nJSON: {\"message\":\"hey\",\"attachments\":[],\"voice_transcript\":null,\"reply\":null}. Audio URLs go in attachments.\nNEXT: dm messages list si:cos"
-    )]
-    Send {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-        #[command(flatten)]
-        content: Content,
-        /// Allow text over 140 characters when a Silicon messages a Carbon.
-        #[arg(long)]
-        dangerously_send_long_message: bool,
-        /// Preserve em dashes in this Silicon message instead of replacing them with spaced hyphens.
-        #[arg(long)]
-        dangerously_use_em_dash: bool,
-        /// Wait until DM's backend accepts the message and print it with its message ID
-        /// (up to --wait-seconds, default 30). Without it, send returns as soon as the
-        /// message is durably queued on this machine; the relay delivers it in the background.
-        #[arg(long)]
-        wait: bool,
-    },
-    /// Full replacement; previous content is appended to history.
-    #[command(
-        after_help = "Supply the complete intended content. Edits serialize in arrival order and preserve history. Retry with the original --idempotency-key."
-    )]
-    Edit {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-        #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
-        message: String,
-        #[command(flatten)]
-        content: Content,
-    },
-    /// Mark a message deleted without adding a history entry.
-    Delete {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-        #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
-        message: String,
-    },
-}
-#[derive(Subcommand)]
-enum Receipts {
-    /// Report receipt by this recipient device.
-    Delivered {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-        #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
-        message: String,
-    },
-    /// Report that this recipient read the message; delivery is implied.
-    Read {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-        #[arg(help = "Conversation-local message ID, e.g. 00a (legacy UUIDs accepted)")]
-        message: String,
-    },
-}
-#[derive(Subcommand)]
-enum Drafts {
-    /// Fetch this member's current synchronized private draft.
-    Get {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-    },
-    /// Full DraftInput JSON. Version 0 creates; replacement requires the current version.
-    #[command(
-        after_help = "Fields: message_content, attachments, voice, voice_transcript, gif, metadata, reply_to_message_id. A 409 preserves the server draft where available; fetch, resolve and save with its new version."
-    )]
-    Put {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-        #[arg(long)]
-        data: PathBuf,
-        #[arg(long, default_value_t = 0)]
-        version: i64,
-    },
-    /// Delete this member's current private draft.
-    Delete {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-    },
-}
-#[derive(Subcommand)]
-enum Bundles {
-    /// JSON: message_ids (1-100 unique conversation-local codes), display_message (normal message content).
-    Create {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-        #[arg(long)]
-        data: PathBuf,
-    },
-    /// Expand a bundle into its display and original messages.
-    Show {
-        #[arg(help = "Recipient account, direct conversation address, or group address")]
-        conversation: String,
-        bundle: String,
-    },
-}
-#[derive(Clone, Copy, ValueEnum)]
-enum ActivityValue {
-    Typing,
-    RecordingVoice,
-    TranscribingVoice,
-    UploadingFile,
-    SearchingGifs,
-    Clear,
-}
-impl ActivityValue {
-    fn activity(self) -> Option<Activity> {
-        match self {
-            Self::Typing => Some(Activity::Typing),
-            Self::RecordingVoice => Some(Activity::RecordingVoice),
-            Self::TranscribingVoice => Some(Activity::TranscribingVoice),
-            Self::UploadingFile => Some(Activity::UploadingFile),
-            Self::SearchingGifs => Some(Activity::SearchingGifs),
-            Self::Clear => None,
-        }
-    }
-}
-#[derive(Subcommand)]
-enum PresenceCommands {
-    /// Show the member's availability, activity and last-seen time.
-    Get { actor_id: String },
-    /// Send transient activity through the connected local relay.
-    Set {
-        #[arg(value_enum)]
-        activity: ActivityValue,
-    },
-}
-#[derive(Subcommand)]
-enum Gifs {
-    /// Cached trending GIFs from the backend's configured provider.
-    Trending,
-    /// Search by phrase; selecting a result does not upload media.
-    Search { query: String },
-    /// The current Carbon's recent sent GIFs; Silicons receive an empty list.
-    Recent,
-}
-#[derive(Subcommand)]
-enum Environments {
-    /// JSON: name, description?, iam_environment_id, iam_environment_key, iam_app_id, iam_app_secret.
-    #[command(
-        after_help = "Uses the production profile to establish ownership. The returned DM root key is saved privately. NEXT: dm --test ENV_UUID login --token-file -"
-    )]
-    Create {
-        #[arg(long)]
-        data: PathBuf,
-    },
-    List {
-        #[arg(long)]
-        include_deleted: bool,
-    },
-    Show {
-        id: Uuid,
-    },
-    Update {
-        id: Uuid,
-        #[arg(long)]
-        data: PathBuf,
-    },
-    /// Save a retrieved key locally. --show explicitly prints the secret.
-    Key {
-        id: Uuid,
-        #[arg(long)]
-        show: bool,
-    },
-    /// Rotate and save a key. Other holders must import the replacement.
-    RotateKey {
-        id: Uuid,
-        #[arg(long)]
-        show: bool,
-    },
-    /// Clear every record in the selected sandbox; requires global --test ENV_UUID.
-    Clean,
-    /// Soft-delete an environment; restoration remains available for 30 days.
-    Delete {
-        id: Uuid,
-    },
-    Restore {
-        id: Uuid,
-    },
-    /// Import a shared root key from a private file or stdin.
-    ImportKey {
-        id: Uuid,
-        #[arg(long, default_value = "-")]
-        key_file: PathBuf,
-        #[arg(
-            long,
-            env = "DM_API_URL",
-            default_value = "https://backend.dm.teamofsilicons.com"
-        )]
-        base_url: String,
-    },
-}
-#[derive(Subcommand)]
-enum Daemon {
-    /// Attach this home to the running relay, or start it when none runs.
-    #[command(
-        after_help = "One relay serves every Silicon and Carbon home of this operating-system user. A second home attaches to it instead of starting another.\n--port is a preference: a busy port falls back to the next free one, and a running relay keeps its port (reported as host.port).\nNEXT: dm daemon status"
-    )]
-    Start {
-        /// Preferred port when the relay is not running yet (default: last port used, else 19780).
-        #[arg(long)]
-        port: Option<u16>,
-    },
-    /// Stop the shared relay for every home; queued requests stay on disk and the next dm command restarts it.
-    Stop,
-    /// This home's profiles and queue, plus the shared relay's port and attached-home count.
-    Status,
-    /// Run in foreground for service supervisors/debugging; refuses if this user's relay already runs.
-    Run,
-}
-#[derive(Subcommand)]
-enum Relay {
-    /// Complete RelayRequest JSON. Response ACKs durable queue storage, not delivery.
-    #[command(
-        after_help = "JSON: {\"type\":\"request\",\"data\":{\"request_id\":\"UUID\",\"profile\":\"default\",\"testing_environment_id\":null,\"request\":{\"operation\":\"send_message\",\"conversation_id\":\"UUID\",\"idempotency_key\":\"stable-key\",\"message\":{\"metadata\":{},\"message\":\"hello\"}}}}\nNEXT: dm relay result REQUEST_ID"
-    )]
-    Submit {
-        #[arg(long)]
-        data: PathBuf,
-    },
-    Result {
-        request_id: Uuid,
-    },
-    /// Print the loopback address and private local bearer for agent integrations.
-    Credentials,
-}
-#[derive(Subcommand)]
-enum Updates {
-    Status,
-    Enable,
-    Disable,
-    Check,
-    Install,
-}
+
 #[derive(Debug)]
-struct OperationFailed(Value);
+pub struct OperationFailed(pub Value);
 impl std::fmt::Display for OperationFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "DM operation failed; inspect response.error")
@@ -672,60 +52,149 @@ impl std::fmt::Display for OperationFailed {
 }
 impl std::error::Error for OperationFailed {}
 
-#[tokio::main]
-async fn main() {
+fn main() {
     #[cfg(unix)]
+    // SAFETY: umask has no preconditions; it only narrows permissions of new files.
     unsafe {
         libc::umask(0o077);
     }
-    let mut cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
             let code = error.exit_code();
             let _ = error.print();
-            let args: Vec<String> = std::env::args().collect();
-            if args.iter().any(|a| {
-                a == "--test"
-                    || a.starts_with("--test=")
-                    || a == "--app-secret"
-                    || a == "--app-secret-file"
-                    || a.starts_with("--app-secret=")
-            }) || std::env::var_os("SILICON_DM_TEST").is_some()
-                || std::env::var_os("DM_TEST_APP_SECRET").is_some()
-            {
-                eprintln!("Testing environment selected (command was not executed).");
-            }
             std::process::exit(code);
         }
     };
-    let mut testing = cli.test;
-    let requested_testing =
-        testing.is_some() || cli.app_secret.is_some() || cli.app_secret_file.is_some();
-    let selection = async {
-        validate_inputs(&cli)?;
-        let secret = match (cli.app_secret.take(), cli.app_secret_file.take()) {
-            (Some(secret), _) => Some(secret),
-            (_, Some(path)) => Some(read_secret(&path)?),
-            _ => None,
-        };
-        if let Some(secret) = secret {
-            let base = match &cli.command {
-                Command::Login { base_url, .. } | Command::Iam { base_url } => base_url.clone(),
-                _ => std::env::var("DM_API_URL")
-                    .unwrap_or_else(|_| "https://backend.dm.teamofsilicons.com".into()),
-            };
-            let info = runtime::LocalRuntime::from_environment()?
-                .select_testing_application(&base, &secret)
-                .await?;
-            if testing.is_some() && testing != info.testing_environment_id {
-                bail!("app secret belongs to a different testing environment");
-            }
-            testing = info.testing_environment_id;
-            cli.test = testing;
-        }
-        Ok::<(), anyhow::Error>(())
+    // Discovery, docs and signed-out status run before any runtime: no network, no state.
+    if let Some(code) = offline(&cli) {
+        std::process::exit(code);
     }
-    .await;
+    let compact = cli.json;
+    if let Err(problem) = refuse_retired_environment() {
+        output::print_error(&problem, compact);
+        std::process::exit(1);
+    }
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            output::print_error(&anyhow::Error::new(error).context("starting dm"), compact);
+            std::process::exit(1);
+        }
+    };
+    let code = runtime.block_on(run_and_report(cli));
+    drop(runtime);
+    std::process::exit(code);
+}
+
+/// Commands that never need the network or the state directory. `Some(exit code)` when handled.
+fn offline(cli: &Cli) -> Option<i32> {
+    let compact = cli.json;
+    match &cli.command {
+        Command::Accounts | Command::Iam => {
+            output::print_json(&auth::accounts_json(), compact);
+            Some(0)
+        }
+        Command::Docs { options } => Some(match docs::render(options) {
+            Ok(value) => {
+                output::print_json(&value, compact);
+                0
+            }
+            Err(error) => {
+                output::print_error(&error, compact);
+                1
+            }
+        }),
+        Command::Login(LoginArgs {
+            command: Some(LoginCommand::Status { offline }),
+            ..
+        }) => {
+            let name = match profile_name_offline(cli) {
+                Ok(name) => name,
+                Err(error) => {
+                    output::print_error(&error, compact);
+                    return Some(1);
+                }
+            };
+            let (status, signed_in) = runtime::offline_status(&name);
+            if *offline || !signed_in {
+                let authenticated = status["authenticated"] == true;
+                output::print_json(&status, compact);
+                return Some(if compact || authenticated { 0 } else { 1 });
+            }
+            None
+        }
+        Command::Delivery { .. } | Command::Webhook { .. } | Command::Unhook { .. } => {
+            output::print_error(
+                &anyhow::Error::new(runtime::store::SessionError {
+                    code: "command_retired",
+                    message: "dm no longer sets up Ting's local receiver: DM signs in with Silicon Accounts, and while the DM service has no Ting delivery configured, updates are read from DM's sync feed.".into(),
+                    hint: "Receive new messages with dm inbox --watch (JSON lines) or dm sync --wait 30. When the DM service delivers through Ting, configure Ting's daemon with Ting's own CLI.".into(),
+                }),
+                compact,
+            );
+            Some(1)
+        }
+        Command::Environments { .. } => {
+            output::print_error(
+                &anyhow::Error::new(runtime::store::SessionError {
+                    code: "command_retired",
+                    message: "Test environments were retired with the move to Silicon Accounts.".into(),
+                    hint: "Test against a local Silicon Accounts stack and a local DM service (DM_API_URL, ACCOUNTS_URL), or a non-production DM deployment.".into(),
+                }),
+                compact,
+            );
+            Some(1)
+        }
+        Command::Updates { .. } => {
+            output::print_error(
+                &anyhow::Error::new(runtime::store::SessionError {
+                    code: "command_retired",
+                    message: "dm does not update itself: Silicon Apps installs and updates it.".into(),
+                    hint: "silicon-apps install dm (development releases: silicon-apps install 'dm>dev'); Silicon Apps keeps installed apps current.".into(),
+                }),
+                compact,
+            );
+            Some(1)
+        }
+        _ => None,
+    }
+}
+
+/// The profile a command uses, read without creating any state.
+fn profile_name_offline(cli: &Cli) -> Result<String> {
+    let name = match &cli.profile {
+        Some(name) => name.clone(),
+        None => runtime::store::peek_directory()
+            .and_then(|directory| runtime::store::peek(&directory).ok().flatten())
+            .map_or_else(|| "default".to_owned(), |config| config.default_profile),
+    };
+    runtime::store::validate_profile_name(&name)?;
+    Ok(name)
+}
+
+/// A home that still selects a retired test environment must not reach the live service.
+fn refuse_retired_environment() -> Result<()> {
+    for variable in ["SILICON_DM_TEST", "DM_TEST_APP_SECRET"] {
+        if std::env::var_os(variable).is_some_and(|value| !value.is_empty()) {
+            return Err(anyhow::Error::new(runtime::store::SessionError {
+                code: "testing_environments_retired",
+                message: format!(
+                    "{variable} selects a DM test environment, and test environments were retired with the move to Silicon Accounts; nothing was sent."
+                ),
+                hint: format!(
+                    "Unset {variable}. Test against a local stack with DM_API_URL and ACCOUNTS_URL instead."
+                ),
+            }));
+        }
+    }
+    Ok(())
+}
+
+async fn run_and_report(cli: Cli) -> i32 {
     let compact = cli.json;
     let foreground = matches!(
         &cli.command,
@@ -734,97 +203,39 @@ async fn main() {
         }
     );
     let diagnostic_profile = cli.profile.clone();
-    let diagnostic_start = std::time::Instant::now();
-    let result = match selection {
-        Ok(()) => run(cli).await,
-        Err(error) => Err(error),
-    };
-    if !foreground && let Ok(runtime) = runtime::LocalRuntime::from_environment() {
+    let started = std::time::Instant::now();
+    let result = run(cli).await;
+    if !foreground && let Ok(local) = LocalRuntime::from_environment() {
         let profile = diagnostic_profile.unwrap_or_else(|| {
-            runtime
+            local
                 .store()
                 .load()
                 .map(|c| c.default_profile)
                 .unwrap_or_default()
         });
-        runtime
-            .record_diagnostic(
-                &profile,
-                testing,
-                "cli",
-                "command",
-                result.is_ok(),
-                u64::try_from(diagnostic_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-            )
-            .await;
+        local.record_diagnostic(
+            &profile,
+            "cli",
+            "command",
+            result.is_ok(),
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
     }
-    match &result {
-        Ok(value) => {
-            if !foreground {
-                print_json(value, compact)
+    match result {
+        Ok(outcome) => {
+            if !outcome.value.is_null() {
+                output::print_json(&outcome.value, compact);
             }
+            outcome.exit
         }
         Err(error) => {
             if let Some(failed) = error.downcast_ref::<OperationFailed>() {
-                print_json(&failed.0, compact)
-            } else if let Some(silicon_dm_client::Error::Api {
-                status,
-                code,
-                message,
-                body,
-                request_id,
-                retry_after,
-            }) = error.downcast_ref::<silicon_dm_client::Error>()
-            {
-                eprintln!(
-                    "{}",
-                    json!({"error": {"status": status, "code": code,
-                    "message": message, "body": body, "request_id": request_id,
-                    "retry_after": retry_after}})
-                );
+                output::print_json(&failed.0, compact);
             } else {
-                eprintln!(
-                    "{}",
-                    json!({"error":{"code":"command_failed","message":format!("{error:#}")}})
-                )
+                output::print_error(&error, compact);
             }
+            1
         }
-    }
-    if requested_testing {
-        let label = testing
-            .and_then(|id| {
-                store::load()
-                    .ok()
-                    .and_then(|c| c.testing_names.get(&id).cloned())
-                    .map(|name| format!("{name} ({id})"))
-            })
-            .unwrap_or_else(|| {
-                testing.map_or_else(
-                    || "unresolved; production was not used".into(),
-                    |id| id.to_string(),
-                )
-            });
-        eprintln!("Testing environment: {label}");
-    }
-    if result.is_err() {
-        std::process::exit(1)
-    }
-}
-fn print_json(value: &Value, compact: bool) {
-    let result = (|| -> Result<()> {
-        let mut output = std::io::BufWriter::new(std::io::stdout().lock());
-        if compact {
-            serde_json::to_writer(&mut output, value)?;
-        } else {
-            serde_json::to_writer_pretty(&mut output, value)?;
-        }
-        output.write_all(b"\n")?;
-        output.flush()?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        eprintln!("DM could not write its JSON result: {error}");
-        std::process::exit(1);
     }
 }
 
@@ -841,25 +252,31 @@ fn relay_result_value(result: RelayResult) -> Value {
     value["error"] = result.error.unwrap_or(Value::Null);
     value
 }
-async fn run(cli: Cli) -> Result<Value> {
-    validate_inputs(&cli)?;
-    if let Command::Docs { options } = &cli.command {
-        return docs::render(options);
+
+fn group_settings(settings: GroupSettingsArgs) -> Result<models::GroupSettings> {
+    if settings.public {
+        bail!(
+            "--public was removed: groups are invite-only now; invite accounts with --member c:… or si:…"
+        );
     }
+    if !settings.tags.is_empty() {
+        bail!(
+            "--tag was removed: tag access no longer exists; invite accounts with --member c:… or si:…"
+        );
+    }
+    Ok(models::GroupSettings {
+        name: settings.name,
+        description: settings.description,
+    })
+}
+
+async fn run(cli: Cli) -> Result<Outcome> {
     let config = store::load()?;
     let name = cli
         .profile
         .clone()
         .unwrap_or_else(|| config.default_profile.clone());
-    if name.is_empty()
-        || name.len() > 64
-        || !name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
-    {
-        bail!("profile names must use 1-64 letters, digits, underscores or hyphens")
-    }
-    let explicit_key = cli.idempotency_key.is_some();
+    runtime::store::validate_profile_name(&name)?;
     let key = cli
         .idempotency_key
         .clone()
@@ -867,183 +284,100 @@ async fn run(cli: Cli) -> Result<Value> {
     if key.len() < 8 || key.len() > 255 || !key.bytes().all(|b| b.is_ascii_graphic()) {
         bail!("idempotency key must be 8-255 visible ASCII characters")
     }
-    let session = store::session_key(&name, cli.test);
+    let local = LocalRuntime::from_environment()?;
     match cli.command {
+        Command::Login(args) => {
+            if let Some(LoginCommand::Status { .. }) = args.command {
+                let status = local.login_status(&name).await?;
+                let authenticated = status["authenticated"] == true;
+                return Ok(Outcome {
+                    value: status,
+                    exit: if cli.json || authenticated { 0 } else { 1 },
+                });
+            }
+            auth::login(&local, &name, args, cli.json)
+                .await
+                .map(Outcome::ok)
+        }
+        Command::Logout => local.logout(&name).await.map(Outcome::ok),
+        Command::Refresh => local.refresh(&name).await.map(Outcome::ok),
         Command::Config { command } => match command {
             ConfigCommand::Telemetry { enabled } => {
-                runtime::LocalRuntime::from_environment()?.set_telemetry(enabled)?;
-                Ok(json!({"telemetry_enabled":enabled}))
+                local.set_telemetry(enabled)?;
+                Ok(Outcome::ok(json!({"telemetry_enabled":enabled})))
             }
             ConfigCommand::Home { location } => {
-                let directory = silicon_dm_client::runtime::store::set_home_directory(&location)?;
-                Ok(json!({"home_directory": directory}))
+                let directory = runtime::store::set_home_directory(&location)?;
+                Ok(Outcome::ok(json!({"home_directory": directory})))
             }
         },
-        Command::Login {
-            command,
-            base_url,
-            webhook,
-            slt,
-            token_file,
-        } => {
-            if matches!(command, Some(LoginCommand::Status)) {
-                return runtime::LocalRuntime::from_environment()?
-                    .login_status(&name, cli.test)
-                    .await;
-            }
-            let token = match (slt, token_file) {
-                (Some(token), None) if !token.trim().is_empty() => token,
-                (None, Some(path)) => read_secret(&path)?,
-                (Some(_), Some(_)) => bail!("provide SLT or --token-file, not both"),
-                _ => bail!("missing SLT; use dm login <slt> or --token-file -"),
-            };
-            let key = if explicit_key {
-                key
-            } else {
-                format!("dm-login-{}", blake3::hash(token.as_bytes()))
-            };
-            let options = runtime::LoginOptions {
-                profile: &name,
-                base_url: &base_url,
-                short_lived_token: &token,
-                webhook_url: webhook.as_ref(),
-                testing_environment_id: cli.test,
-                idempotency_key: &key,
-            };
-            let launch = runtime::DaemonCommand {
-                executable: std::env::current_exe()?,
-                arguments: vec!["daemon".into(), "run".into()],
-            };
-            let mut result = runtime::LocalRuntime::from_environment()?
-                .login(&options, &launch)
-                .await?;
-            result["idempotency_key"] = json!(key);
-            // DM enrolls the member with Ting itself; only this machine's receiver needs setup.
-            eprintln!(
-                "Logged in to DM. For incoming delivery on this machine: dm delivery login --token-file - with a Ting-bound SLT; dm webhook URL --all-apps."
-            );
-            Ok(result)
-        }
-        Command::Iam { base_url } => {
-            let mut client = Client::new(&base_url)?;
-            if let Some(id) = cli.test {
-                let key = config
-                    .testing_keys
-                    .get(&id)
-                    .context("import the testing key first")?;
-                if key.base_url.trim_end_matches('/') != base_url.trim_end_matches('/') {
-                    bail!("testing key belongs to another backend");
-                }
-                client = client.with_test_key(&key.key)?;
-            }
-            Ok(serde_json::to_value(client.iam().await?)?)
-        }
-        Command::Delivery { command } => {
-            delivery::run(command, &name, cli.test, &key, explicit_key).await
-        }
-        Command::Webhook {
-            url,
-            secret_file,
-            id,
-            takeover,
-            health_url,
-            all_apps,
-        } => {
-            let secret = secret_file.as_deref().map(read_secret).transpose()?;
-            runtime::LocalRuntime::from_environment()?
-                .delivery_attach(&runtime::DeliveryAttachOptions {
-                    profile: &name,
-                    testing_environment_id: cli.test,
-                    webhook_url: &url,
-                    webhook_id: id.as_deref(),
-                    secret: secret.as_deref(),
-                    health_url: health_url.as_ref(),
-                    takeover,
-                    accept_all_apps: all_apps,
-                })
-                .await
-        }
-        Command::Unhook => {
-            runtime::LocalRuntime::from_environment()?
-                .delivery_unhook(&name, cli.test)
-                .await
-        }
-        Command::Logout => {
-            runtime::LocalRuntime::from_environment()?
-                .logout(&name, cli.test, &key)
-                .await
-        }
-        Command::Refresh => {
-            store::profile(&config, &name, cli.test)?;
-            store::update(|c| {
-                if let Some(p) = c.profiles.get_mut(&session) {
-                    p.expires_at = 0
-                }
-                Ok(())
-            })?;
-            let (_, p) = store::fresh_profile(&session).await?;
-            Ok(json!({"refreshed":true,"member":p.tokens.actor,"expires_at":p.expires_at}))
-        }
         Command::Profiles { command } => match command {
-            Profiles::List => Ok(
-                json!({"default_profile":config.default_profile,"profiles":config.profiles.values().map(|p|json!({"name":p.name,"member":p.tokens.actor,"organization_id":p.tokens.organization_id,"base_url":p.base_url,"testing_environment_id":p.testing_environment_id,"delivery_provider":"ting","legacy_webhook_configured":p.webhook_url.is_some(),"enabled":p.enabled})).collect::<Vec<_>>()}),
-            ),
+            Profiles::List => local.profiles().map(Outcome::ok),
             Profiles::Use { name } => {
-                if !config.profiles.values().any(|p| p.name == name) {
-                    bail!("unknown profile; run dm profiles list")
+                runtime::store::validate_profile_name(&name)?;
+                if !config
+                    .profiles
+                    .contains_key(&runtime::store::session_key(&name))
+                {
+                    bail!(
+                        "there is no profile named {name}; run dm profiles list, or create it with dm --profile {name} login"
+                    )
                 };
                 store::update(|c| {
-                    c.default_profile = name.clone();
+                    c.default_profile.clone_from(&name);
                     Ok(())
                 })?;
-                Ok(json!({"default_profile":name}))
+                Ok(Outcome::ok(json!({"default_profile":name})))
             }
-            Profiles::Webhook { .. } => bail!(
-                "profile webhook is retired; use dm delivery login --token-file - and dm webhook URL --all-apps"
-            ),
         },
         Command::Daemon { command } => match command {
-            Daemon::Start { port } => daemon::start(port).await,
+            Daemon::Start { port } => daemon::start(port).await.map(Outcome::ok),
             Daemon::Stop => {
                 store::relay(&config)?.stop().await?;
-                Ok(json!({"stopping":true}))
+                Ok(Outcome::ok(json!({"stopping":true})))
             }
             Daemon::Status => match store::relay(&config)?.status().await {
-                Ok(status) => Ok(status),
-                Err(silicon_dm_client::Error::Transport(_)) => Ok(
-                    json!({"running":false,"next":"dm daemon start","incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false},"delivery_status_command":"dm delivery status"}),
-                ),
+                Ok(status) => Ok(Outcome::ok(status)),
+                Err(silicon_dm_client::Error::Transport(_)) => Ok(Outcome::ok(
+                    json!({"running":false,"next":"dm daemon start","incoming_delivery":"dm inbox --watch"}),
+                )),
                 // Something answers on this home's port but does not serve it:
                 // another home's relay before this home attached, or an unrelated service.
-                Err(silicon_dm_client::Error::Api { status: 401, .. }) => Ok(
-                    json!({"attached":false,"next":"dm daemon start","incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false},"delivery_status_command":"dm delivery status"}),
-                ),
+                Err(silicon_dm_client::Error::Api { status: 401, .. }) => Ok(Outcome::ok(
+                    json!({"attached":false,"next":"dm daemon start","incoming_delivery":"dm inbox --watch"}),
+                )),
                 Err(error) => Err(error.into()),
             },
             Daemon::Run => {
                 daemon::run().await?;
-                Ok(Value::Null)
+                Ok(Outcome::printed())
             }
         },
         Command::Relay { command } => match command {
             Relay::Submit { data } => {
                 daemon::start(None).await?;
-                Ok(acknowledgement_value(
+                Ok(Outcome::ok(acknowledgement_value(
                     store::relay(&store::load()?)?
                         .submit_value(&read_json::<Value>(&data)?)
                         .await?,
-                ))
+                )))
             }
-            Relay::Result { request_id } => Ok(relay_result_value(
+            Relay::Result { request_id } => Ok(Outcome::ok(relay_result_value(
                 store::relay(&config)?.result(request_id).await?,
-            )),
-            Relay::Credentials => Ok(
+            ))),
+            Relay::Credentials => Ok(Outcome::ok(
                 json!({"url":format!("http://dm.localhost:{}/",config.relay_port),"loopback_url":format!("http://127.0.0.1:{}/",config.relay_port),"bearer_token":config.relay_token}),
-            ),
+            )),
         },
         Command::Contracts => {
-            let profile = store::profile(&config, &name, cli.test)?;
-            Ok(store::client(&config, profile)?.contracts().await?)
+            let base = runtime::store::profile(&config, &name)
+                .map(|profile| profile.base_url.clone())
+                .unwrap_or_else(|_| {
+                    std::env::var("DM_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.into())
+                });
+            Ok(Outcome::ok(
+                Client::new(&base)?.with_source("cli").contracts().await?,
+            ))
         }
         Command::Report { message, pr } => {
             if pr.is_none() {
@@ -1051,235 +385,332 @@ async fn run(cli: Cli) -> Result<Value> {
                     "You can also submit a patch at https://github.com/teamofsilicons/silicon-dm and attach it with --pr."
                 );
             }
-            let profile = store::profile(&config, &name, cli.test)?;
-            let client = store::client(&config, profile)?;
-            client
-                .report(&message, pr.as_deref(), &key)
+            let (message, pr, key) = (message.as_str(), pr.as_deref(), key.as_str());
+            local
+                .with_client(&name, |client| async move {
+                    client.report(message, pr, key).await
+                })
                 .await
-                .map_err(Into::into)
+                .map(Outcome::ok)
         }
-
-        Command::Updates { command } => updater::command(command).await,
-        Command::Docs { options } => docs::render(&options),
-        Command::Environments { command } => {
-            environments(command, &config, &name, cli.test, &key).await
+        Command::Sync(args) => receive::sync(&local, &name, args).await.map(Outcome::ok),
+        Command::Inbox(args) => {
+            receive::inbox(&local, &name, args, cli.json).await?;
+            Ok(Outcome::printed())
         }
-        other => {
-            let profile = store::profile(&config, &name, cli.test)?;
-            let mut long_message_override = false;
-            let mut queue_only = false;
-            let operation = match other {
-                Command::Groups { command } => match command {
-                    Groups::List { page } => Operation::ListGroups { page: page.page() },
-                    Groups::Show { group } => Operation::GetGroup { group_id: group },
-                    Groups::Create { policy, members } => Operation::CreateGroup {
-                        group: silicon_dm_client::models::GroupCreate {
-                            settings: policy.settings(),
-                            member_ids: members,
-                        },
-                        idempotency_key: key,
-                    },
-                    Groups::Update {
-                        group,
-                        policy,
-                        version,
-                    } => Operation::UpdateGroup {
-                        group_id: group,
-                        settings: policy.settings(),
-                        version,
-                        idempotency_key: key,
-                    },
-                    Groups::Invite { group, members } => Operation::InviteGroupMembers {
-                        group_id: group,
-                        member_ids: members,
-                        idempotency_key: key,
-                    },
-                    Groups::Remove { group, members } => Operation::RemoveGroupMembers {
-                        group_id: group,
-                        member_ids: members,
-                        idempotency_key: key,
-                    },
-                },
-                Command::Whoami => Operation::Me,
-                Command::Conversations { command } => match command {
-                    Conversations::List { page } => {
-                        Operation::ListConversations { page: page.page() }
-                    }
-                    Conversations::Create { participants } => Operation::CreateConversation {
-                        participant_ids: participants,
-                        idempotency_key: key,
-                    },
-                },
-                Command::Messages { command } => match command {
-                    Messages::List {
-                        conversation,
-                        page,
-                        include_bundled_members,
-                    } => Operation::ListMessages {
-                        conversation_id: conversation,
-                        page: page.page(),
-                        include_bundled_members,
-                    },
-                    Messages::Show {
-                        conversation,
-                        message,
-                    } => Operation::GetMessage {
-                        conversation_id: conversation,
-                        message_id: message,
-                    },
-                    Messages::Send {
-                        conversation,
-                        content,
-                        dangerously_send_long_message,
-                        dangerously_use_em_dash,
-                        wait,
-                    } => {
-                        queue_only = !wait && cli.wait_seconds.is_none();
-                        let mut message = content.read()?;
-                        if em_dash::replace(
-                            &profile.tokens.actor,
-                            &mut message,
-                            dangerously_use_em_dash,
-                        ) {
-                            eprintln!("{}", em_dash::NOTICE);
-                        }
-                        if message_length::needs_check(&profile.tokens.actor, &message) {
-                            let (config, profile) = store::fresh_profile(&session).await?;
-                            long_message_override = message_length::check(
-                                &store::client(&config, &profile)?,
-                                &profile.tokens.actor,
-                                &conversation,
-                                &message,
-                                dangerously_send_long_message,
-                            )
-                            .await?;
-                        }
-                        Operation::SendMessage {
-                            conversation_id: conversation,
-                            message,
-                            idempotency_key: key,
-                        }
-                    }
-                    Messages::Edit {
-                        conversation,
-                        message,
-                        content,
-                    } => Operation::EditMessage {
-                        conversation_id: conversation,
-                        message_id: message,
-                        message: content.read()?,
-                        idempotency_key: key,
-                    },
-                    Messages::Delete {
-                        conversation,
-                        message,
-                    } => Operation::DeleteMessage {
-                        conversation_id: conversation,
-                        message_id: message,
-                        idempotency_key: key,
-                    },
-                },
-                Command::Receipts { command } => match command {
-                    Receipts::Delivered {
-                        conversation,
-                        message,
-                    } => Operation::Receipt {
-                        conversation_id: conversation,
-                        message_id: message,
-                        status: ReceiptStatus::Delivered,
-                        device_id: profile.device_id.clone(),
-                    },
-                    Receipts::Read {
-                        conversation,
-                        message,
-                    } => Operation::Receipt {
-                        conversation_id: conversation,
-                        message_id: message,
-                        status: ReceiptStatus::Read,
-                        device_id: profile.device_id.clone(),
-                    },
-                },
-                Command::Drafts { command } => match command {
-                    Drafts::Get { conversation } => Operation::GetDraft {
-                        conversation_id: conversation,
-                    },
-                    Drafts::Put {
-                        conversation,
-                        data,
-                        version,
-                    } => Operation::PutDraft {
-                        conversation_id: conversation,
-                        draft: read_json(&data)?,
-                        version,
-                    },
-                    Drafts::Delete { conversation } => Operation::DeleteDraft {
-                        conversation_id: conversation,
-                    },
-                },
-                Command::Bundles { command } => match command {
-                    Bundles::Create { conversation, data } => Operation::CreateBundle {
-                        conversation_id: conversation,
-                        bundle: read_json(&data)?,
-                        idempotency_key: key,
-                    },
-                    Bundles::Show {
-                        conversation,
-                        bundle,
-                    } => Operation::GetBundle {
-                        conversation_id: conversation,
-                        bundle_id: bundle,
-                    },
-                },
-                Command::Presence { command } => match command {
-                    PresenceCommands::Get { actor_id } => Operation::GetPresence { actor_id },
-                    PresenceCommands::Set { activity } => Operation::SetPresence {
-                        activity: activity.activity(),
-                    },
-                },
-                Command::Gifs { command } => match command {
-                    Gifs::Trending => Operation::TrendingGifs,
-                    Gifs::Search { query } => Operation::SearchGifs { query },
-                    Gifs::Recent => Operation::RecentGifs,
-                },
-                _ => bail!("unsupported command"),
-            };
-            let result = if queue_only {
-                queue(&name, cli.test, operation).await?
-            } else {
-                execute(&name, cli.test, operation, cli.wait_seconds.unwrap_or(30)).await?
-            };
-            // The warning reports a delivered message, so a send that is only
-            // queued (the default) prints it when waited for with --wait.
-            if message_length::sent_warning(long_message_override, &result) {
-                eprintln!("{}", message_length::SENT_WARNING);
-            }
-            Ok(result)
-        }
+        Command::Docs { options } => docs::render(&options).map(Outcome::ok),
+        Command::Accounts | Command::Iam => Ok(Outcome::ok(auth::accounts_json())),
+        Command::Delivery { .. }
+        | Command::Webhook { .. }
+        | Command::Unhook { .. }
+        | Command::Environments { .. }
+        | Command::Updates { .. } => bail!("this command was retired; run dm --help"),
+        other => relay_command(other, &name, key, cli.wait_seconds)
+            .await
+            .map(Outcome::ok),
     }
 }
-/// Durably queues a send and returns without waiting for DM's backend. The
-/// relay starts it immediately when running, or as soon as it attaches this
-/// home; the message is in the Waiting state until the backend accepts it.
-async fn queue(profile: &str, test: Option<Uuid>, request: Operation) -> Result<Value> {
-    let request = RelayRequest {
-        request_id: Uuid::new_v4(),
-        profile: profile.into(),
-        testing_environment_id: test,
-        testing_generation: None,
-        request,
+
+fn content(content: Content) -> Result<MessageCreate> {
+    let mut m = if let Some(path) = content.data {
+        read_json(&path)?
+    } else {
+        MessageCreate::default()
     };
-    let starter = silicon_dm_client::runtime::DaemonCommand {
+    if content.sender_id.is_some() {
+        m.sender_id = content.sender_id;
+    }
+    if content.recipient_id.is_some() {
+        m.recipient_id = content.recipient_id;
+    }
+    if let Some(text) = content.text {
+        m.text = Some(text)
+    }
+    if content.metadata.is_some() || !m.metadata.is_empty() {
+        bail!(
+            "Message metadata was removed in DM 0.8. Use message, attachments, voice_transcript and reply."
+        );
+    }
+    if content.reply_to.is_some() {
+        m.reply_to_message_id = content.reply_to
+    }
+    m.attachments
+        .extend(content.attachments.into_iter().map(Attachment::link));
+    if m.text.as_deref().is_none_or(str::is_empty)
+        && m.attachments.is_empty()
+        && m.voice.is_none()
+        && m.gif.is_none()
+    {
+        bail!(
+            "message needs --text, --attachment or --data with voice/GIF; see dm messages send --help"
+        )
+    }
+    Ok(m)
+}
+
+fn activity(value: ActivityValue) -> Option<Activity> {
+    match value {
+        ActivityValue::Typing => Some(Activity::Typing),
+        ActivityValue::RecordingVoice => Some(Activity::RecordingVoice),
+        ActivityValue::TranscribingVoice => Some(Activity::TranscribingVoice),
+        ActivityValue::UploadingFile => Some(Activity::UploadingFile),
+        ActivityValue::SearchingGifs => Some(Activity::SearchingGifs),
+        ActivityValue::Clear => None,
+    }
+}
+
+/// Commands that run through the local relay (sends return once durably queued).
+async fn relay_command(
+    command: Command,
+    name: &str,
+    key: String,
+    wait_seconds: Option<u64>,
+) -> Result<Value> {
+    let config = store::load()?;
+    let profile = runtime::store::profile(&config, name)?.clone();
+    let mut long_message_override = false;
+    let mut queue_only = false;
+    let operation = match command {
+        Command::Whoami => Operation::Me,
+        Command::Groups { command } => match command {
+            Groups::List { page } => Operation::ListGroups { page: page.page() },
+            Groups::Show { group } => Operation::GetGroup { group_id: group },
+            Groups::Create { settings, members } => Operation::CreateGroup {
+                group: models::GroupCreate {
+                    settings: group_settings(settings)?,
+                    member_ids: members,
+                },
+                idempotency_key: key,
+            },
+            Groups::Update {
+                group,
+                version,
+                settings,
+            } => Operation::UpdateGroup {
+                group_id: group,
+                settings: group_settings(settings)?,
+                version,
+                idempotency_key: key,
+            },
+            Groups::Invite { group, members } => Operation::InviteGroupMembers {
+                group_id: group,
+                member_ids: members,
+                idempotency_key: key,
+            },
+            Groups::Remove { group, members } => Operation::RemoveGroupMembers {
+                group_id: group,
+                member_ids: members,
+                idempotency_key: key,
+            },
+            Groups::Owners { command } => match command {
+                GroupOwners::Add { group, members } => Operation::AddGroupOwners {
+                    group_id: group,
+                    member_ids: members,
+                    idempotency_key: key,
+                },
+                GroupOwners::Remove { group, members } => Operation::RemoveGroupOwners {
+                    group_id: group,
+                    member_ids: members,
+                    idempotency_key: key,
+                },
+            },
+            Groups::Invitations { for_account } => Operation::ListInvitations { for_account },
+            Groups::Accept { group } => Operation::AcceptInvitation { group_id: group },
+            Groups::Decline { group, for_account } => Operation::DeclineInvitation {
+                group_id: group,
+                for_account,
+            },
+            Groups::Leave { group } => Operation::LeaveGroup { group_id: group },
+        },
+        Command::Allow { command } => match command {
+            Allow::List { for_account } => Operation::GetAllowList { for_account },
+            Allow::Add {
+                accounts,
+                for_account,
+            } => Operation::Allow {
+                account_ids: accounts,
+                for_account,
+            },
+            Allow::Remove {
+                accounts,
+                for_account,
+            } => Operation::Disallow {
+                account_ids: accounts,
+                for_account,
+            },
+        },
+        Command::Conversations { command } => match command {
+            Conversations::List { page, for_account } => Operation::ListConversations {
+                page: page.page(),
+                for_account,
+            },
+            Conversations::Create { participants } => Operation::CreateConversation {
+                participant_ids: participants,
+                idempotency_key: key,
+            },
+        },
+        Command::Messages { command } => match command {
+            Messages::List {
+                conversation,
+                page,
+                include_bundled_members,
+            } => Operation::ListMessages {
+                conversation_id: conversation,
+                page: page.page(),
+                include_bundled_members,
+            },
+            Messages::Show {
+                conversation,
+                message,
+            } => Operation::GetMessage {
+                conversation_id: conversation,
+                message_id: message,
+            },
+            Messages::Send {
+                conversation,
+                content: input,
+                dangerously_send_long_message,
+                dangerously_use_em_dash,
+                wait,
+            } => {
+                queue_only = !wait && wait_seconds.is_none();
+                let mut message = content(input)?;
+                let actor = profile
+                    .account
+                    .as_ref()
+                    .map(runtime::store::ProfileAccount::actor)
+                    .context("the profile has no signed-in account")?;
+                if em_dash::replace(&actor, &mut message, dangerously_use_em_dash) {
+                    eprintln!("{}", em_dash::NOTICE);
+                }
+                if message_length::needs_check(&actor, &message) {
+                    let session = runtime::store::session_key(name);
+                    let (config, fresh) = store::fresh_profile(&session).await?;
+                    long_message_override = message_length::check(
+                        &runtime::store::client(&config, &fresh)?,
+                        &actor,
+                        &conversation,
+                        &message,
+                        dangerously_send_long_message,
+                    )
+                    .await?;
+                }
+                Operation::SendMessage {
+                    conversation_id: conversation,
+                    message,
+                    idempotency_key: key,
+                }
+            }
+            Messages::Edit {
+                conversation,
+                message,
+                content: input,
+            } => Operation::EditMessage {
+                conversation_id: conversation,
+                message_id: message,
+                message: content(input)?,
+                idempotency_key: key,
+            },
+            Messages::Delete {
+                conversation,
+                message,
+            } => Operation::DeleteMessage {
+                conversation_id: conversation,
+                message_id: message,
+                idempotency_key: key,
+            },
+        },
+        Command::Receipts { command } => {
+            let (conversation, message, status) = match command {
+                Receipts::Delivered {
+                    conversation,
+                    message,
+                } => (conversation, message, ReceiptStatus::Delivered),
+                Receipts::Read {
+                    conversation,
+                    message,
+                } => (conversation, message, ReceiptStatus::Read),
+            };
+            Operation::Receipt {
+                conversation_id: conversation,
+                message_id: message,
+                status,
+                device_id: profile.device_id.clone(),
+            }
+        }
+        Command::Drafts { command } => match command {
+            Drafts::Get { conversation } => Operation::GetDraft {
+                conversation_id: conversation,
+            },
+            Drafts::Put {
+                conversation,
+                data,
+                version,
+            } => Operation::PutDraft {
+                conversation_id: conversation,
+                draft: read_json(&data)?,
+                version,
+            },
+            Drafts::Delete { conversation } => Operation::DeleteDraft {
+                conversation_id: conversation,
+            },
+        },
+        Command::Bundles { command } => match command {
+            Bundles::Create { conversation, data } => Operation::CreateBundle {
+                conversation_id: conversation,
+                bundle: read_json(&data)?,
+                idempotency_key: key,
+            },
+            Bundles::Show {
+                conversation,
+                bundle,
+            } => Operation::GetBundle {
+                conversation_id: conversation,
+                bundle_id: bundle,
+            },
+        },
+        Command::Presence { command } => match command {
+            PresenceCommands::Get { actor_id } => Operation::GetPresence { actor_id },
+            PresenceCommands::Set { activity: value } => Operation::SetPresence {
+                activity: activity(value),
+            },
+        },
+        Command::Gifs { command } => match command {
+            Gifs::Trending => Operation::TrendingGifs,
+            Gifs::Search { query } => Operation::SearchGifs { query },
+            Gifs::Recent => Operation::RecentGifs,
+        },
+        _ => bail!("unsupported command"),
+    };
+    let result = if queue_only {
+        queue(name, operation).await?
+    } else {
+        execute(name, operation, wait_seconds.unwrap_or(30)).await?
+    };
+    // The warning reports a delivered message, so a send that is only
+    // queued (the default) prints it when waited for with --wait.
+    if message_length::sent_warning(long_message_override, &result) {
+        eprintln!("{}", message_length::SENT_WARNING);
+    }
+    Ok(result)
+}
+
+/// Durably queues a send and returns without waiting for DM's service. The
+/// relay starts it immediately when running, or as soon as it attaches this
+/// home; the message is in the Waiting state until the service accepts it.
+async fn queue(profile: &str, request: Operation) -> Result<Value> {
+    let request = RelayRequest::new(profile, request);
+    let starter = runtime::DaemonCommand {
         executable: std::env::current_exe()?,
         arguments: vec!["daemon".into(), "start".into()],
     };
-    let ack = match silicon_dm_client::runtime::LocalRuntime::from_environment()?
+    let ack = match LocalRuntime::from_environment()?
         .submit_or_queue(&request, &starter)
         .await
     {
         Ok(ack) => ack,
-        // Nothing was queued (for example a sandbox whose generation must be
-        // discovered first); use the relay's full submission path.
-        Err(_) => return execute(profile, test, request.request, 0).await,
+        // Nothing was queued; use the relay's full submission path.
+        Err(_) => return execute(profile, request.request, 0).await,
     };
     let request_id = ack.request_id;
     let envelope = ack.request.clone();
@@ -1293,23 +724,13 @@ async fn queue(profile: &str, test: Option<Uuid>, request: Operation) -> Result<
             "error": null,
         },
         "message_state": "waiting",
-        "next": format!("dm relay result {request_id}  (or send with --wait for the message ID)"),
+        "next": format!("dm relay result {request_id}  (or send with --wait for the message code)"),
     }))
 }
-async fn execute(
-    profile: &str,
-    test: Option<Uuid>,
-    request: Operation,
-    wait: u64,
-) -> Result<Value> {
+
+async fn execute(profile: &str, request: Operation, wait: u64) -> Result<Value> {
     daemon::start(None).await?;
-    let request = RelayRequest {
-        request_id: Uuid::new_v4(),
-        profile: profile.into(),
-        testing_environment_id: test,
-        testing_generation: None,
-        request,
-    };
+    let request = RelayRequest::new(profile, request);
     let relay = store::relay(&store::load()?)?;
     let ack = relay.submit(&request).await?;
     let request_id = request.request_id;
@@ -1340,10 +761,21 @@ async fn execute(
             && (result.state != "pending" || tokio::time::Instant::now() >= deadline)
         {
             if result.state == "pending" {
-                eprintln!(
-                    "Request remains durably queued. Inspect: dm relay result {}",
-                    request_id
-                )
+                // Say why it is still waiting when an attempt failed (signed out, the
+                // service unreachable…), so nobody has to inspect it to find out.
+                match result
+                    .error
+                    .as_ref()
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                {
+                    Some(reason) => eprintln!(
+                        "Request remains durably queued; its last attempt: {reason} Inspect: dm relay result {request_id}"
+                    ),
+                    None => eprintln!(
+                        "Request remains durably queued. Inspect: dm relay result {request_id}"
+                    ),
+                }
             }
             let failed = result.state == "failed";
             let mut value = serde_json::Map::new();
@@ -1362,123 +794,10 @@ async fn execute(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
-async fn environments(
-    command: Environments,
-    config: &store::Config,
-    name: &str,
-    test: Option<Uuid>,
-    mutation_key: &str,
-) -> Result<Value> {
-    if let Environments::ImportKey {
-        id,
-        key_file,
-        base_url,
-    } = command
-    {
-        let key = read_secret(&key_file)?;
-        Client::new(&base_url)?.with_test_key(&key)?;
-        store::update(|c| {
-            c.testing_keys.insert(id, store::TestKey { key, base_url });
-            Ok(())
-        })?;
-        return Ok(
-            json!({"environment_id":id,"key_stored":true,"next":format!("dm --test {id} login --token-file -")}),
-        );
-    }
-    if let Environments::Clean = command {
-        let id=test.context("this action is only possible for test environments; use dm --test ENV_UUID environments clean")?;
-        let selection = config
-            .testing_keys
-            .get(&id)
-            .context("import this test key first")?;
-        Client::new(&selection.base_url)?
-            .with_test_key(&selection.key)?
-            .clean_test_environment(id, mutation_key)
-            .await?;
-        return Ok(json!({"environment_id":id,"cleaned":true,"idempotency_key":mutation_key}));
-    }
-    let production_key = store::session_key(name, None);
-    let (config, profile) = store::fresh_profile(&production_key)
-        .await
-        .context("environment management requires this profile's production login")?;
-    let client = store::client(&config, &profile)?.without_test();
-    let save = |id: Uuid, key: String| {
-        store::update(|c| {
-            c.testing_keys.insert(
-                id,
-                store::TestKey {
-                    key,
-                    base_url: profile.base_url.clone(),
-                },
-            );
-            Ok(())
-        })
-    };
-    let rotate = matches!(&command, Environments::RotateKey { .. });
-    let result = match command {
-        Environments::Create { data } => {
-            let mut env = client
-                .create_test_environment(&read_json(&data)?, mutation_key)
-                .await?;
-            if let Some(key) = env.root_key.take() {
-                save(env.environment_id, key)?
-            }
-            eprintln!(
-                "Test key saved. Next: dm --test {} login --token-file -",
-                env.environment_id
-            );
-            serde_json::to_value(env)?
-        }
-        Environments::List { include_deleted } => {
-            serde_json::to_value(client.test_environments(include_deleted).await?)?
-        }
-        Environments::Show { id } => serde_json::to_value(client.test_environment(id).await?)?,
-        Environments::Update { id, data } => serde_json::to_value(
-            client
-                .update_test_environment(id, &read_json(&data)?, mutation_key)
-                .await?,
-        )?,
-        Environments::Key { id, show } | Environments::RotateKey { id, show } => {
-            let key = if rotate {
-                client.rotate_test_environment_key(id, mutation_key).await?
-            } else {
-                client.test_environment_key(id).await?
-            };
-            save(id, key.root_key.clone())?;
-            if show {
-                serde_json::to_value(key)?
-            } else {
-                json!({"environment_id":id,"key_stored":true})
-            }
-        }
-        Environments::Delete { id } => {
-            client.delete_test_environment(id, mutation_key).await?;
-            store::update(|c| {
-                for p in c
-                    .profiles
-                    .values_mut()
-                    .filter(|p| p.testing_environment_id == Some(id))
-                {
-                    p.enabled = false
-                }
-                Ok(())
-            })?;
-            json!({"environment_id":id,"deleted":true,"recoverable_days":30})
-        }
-        Environments::Restore { id } => {
-            let mut env = client.restore_test_environment(id, mutation_key).await?;
-            if let Some(key) = env.root_key.take() {
-                save(id, key)?
-            }
-            serde_json::to_value(env)?
-        }
-        _ => bail!("unsupported environment command"),
-    };
-    Ok(json!({"result":result,"idempotency_key":mutation_key}))
-}
-fn read_json<T: DeserializeOwned>(path: &std::path::Path) -> Result<T> {
+
+fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let mut body = String::new();
-    if path == std::path::Path::new("-") {
+    if path == Path::new("-") {
         std::io::stdin().read_to_string(&mut body)?;
     } else {
         body = std::fs::read_to_string(path)
@@ -1486,191 +805,38 @@ fn read_json<T: DeserializeOwned>(path: &std::path::Path) -> Result<T> {
     }
     serde_json::from_str(&body).with_context(|| format!("invalid JSON input at {}", path.display()))
 }
-fn read_secret(path: &std::path::Path) -> Result<String> {
-    let value = if path == std::path::Path::new("-") {
+
+/// Reads a secret from a file, or standard input for '-' (hidden when typed on a terminal).
+pub fn read_secret(path: &Path, prompt: &str) -> Result<String> {
+    let value = if path == Path::new("-") {
         if std::io::stdin().is_terminal() {
-            rpassword::prompt_password("Token, key or callback secret (hidden): ")?
+            rpassword::prompt_password(prompt)?
         } else {
             let mut value = String::new();
             std::io::stdin().read_to_string(&mut value)?;
             value
         }
     } else {
-        std::fs::read_to_string(path)?
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?
     };
     let value = value.trim().to_owned();
     if value.is_empty() {
-        bail!("token/key input was empty")
+        bail!(
+            "the {} was empty",
+            if path == Path::new("-") {
+                "standard input".to_owned()
+            } else {
+                path.display().to_string()
+            }
+        )
     }
     Ok(value)
 }
 
-/// Validate retired actions and stdin ownership before reading any credential.
-fn validate_inputs(cli: &Cli) -> Result<()> {
-    if matches!(
-        &cli.command,
-        Command::Login {
-            webhook: Some(_),
-            ..
-        }
-    ) {
-        bail!(
-            "dm login --webhook is retired; no token was read or exchanged. Log in without --webhook, then run dm delivery login --token-file - and dm webhook URL --all-apps."
-        );
-    }
-    if matches!(
-        &cli.command,
-        Command::Profiles {
-            command: Profiles::Webhook { .. }
-        }
-    ) {
-        bail!(
-            "profiles webhook is retired; use dm delivery login --token-file - and dm webhook URL --all-apps"
-        );
-    }
-    let mut inputs = Vec::new();
-    if let Some(path) = &cli.app_secret_file {
-        inputs.push(path);
-    }
-    match &cli.command {
-        Command::Login {
-            token_file: Some(path),
-            ..
-        }
-        | Command::Webhook {
-            secret_file: Some(path),
-            ..
-        } => inputs.push(path),
-        Command::Delivery { command } => {
-            delivery::validate(
-                command,
-                cli.test.is_some() || cli.app_secret.is_some() || cli.app_secret_file.is_some(),
-            )?;
-            if matches!(command, delivery::Command::Login { .. })
-                && let Some(key) = &cli.idempotency_key
-                && (!(16..=200).contains(&key.len())
-                    || !key.bytes().all(|byte| byte.is_ascii_graphic()))
-            {
-                bail!("Ting login idempotency key must contain 16-200 visible ASCII bytes");
-            }
-            if let delivery::Command::Login {
-                token_file,
-                ting_app_secret_file,
-                ting_environment_key_file,
-                ..
-            } = command
-            {
-                inputs.push(token_file);
-                inputs.extend(ting_app_secret_file.iter());
-                inputs.extend(ting_environment_key_file.iter());
-            }
-        }
-        _ => {}
-    }
-    if inputs.iter().filter(|path| path.as_os_str() == "-").count() > 1 {
-        bail!(
-            "only one token/key/secret input may read stdin; use private files or environment variables for the others"
-        );
-    }
-    Ok(())
+/// The standard-input path, for `--slt-stdin`.
+pub fn stdin_path() -> PathBuf {
+    PathBuf::from("-")
 }
 
 #[cfg(test)]
-mod command_tests {
-    use super::*;
-    #[test]
-    fn delivery_commands_require_explicit_generic_endpoints_and_safe_secret_sources() -> Result<()>
-    {
-        for name in ["status", "register", "reconnect", "logout"] {
-            Cli::try_parse_from(["dm", "delivery", name])?;
-        }
-        Cli::try_parse_from(["dm", "delivery", "login", "--token-file", "-"])?;
-        assert!(
-            Cli::try_parse_from(["dm", "delivery", "login", "secret-on-command-line"]).is_err()
-        );
-        assert!(Cli::try_parse_from(["dm", "webhook", "http://localhost:9000/tings"]).is_err());
-        let cli = Cli::try_parse_from([
-            "dm",
-            "webhook",
-            "http://localhost:9000/tings",
-            "--all-apps",
-            "--id",
-            "hook_stable",
-            "--takeover",
-            "--health-url",
-            "http://localhost:9000/health",
-            "--secret-file",
-            "/private/secret",
-        ])?;
-        assert!(matches!(
-            cli.command,
-            Command::Webhook {
-                all_apps: true,
-                takeover: true,
-                id: Some(_),
-                health_url: Some(_),
-                ..
-            }
-        ));
-        let retired = Cli::try_parse_from([
-            "dm",
-            "login",
-            "--token-file",
-            "/file-that-does-not-exist",
-            "--webhook",
-            "http://localhost/events",
-        ])?;
-        assert!(
-            validate_inputs(&retired)
-                .unwrap_err()
-                .to_string()
-                .contains("no token was read")
-        );
-        let two_stdin =
-            Cli::try_parse_from(["dm", "--app-secret-file", "-", "login", "--token-file", "-"])?;
-        assert!(
-            validate_inputs(&two_stdin)
-                .unwrap_err()
-                .to_string()
-                .contains("only one")
-        );
-        Ok(())
-    }
-    #[test]
-    fn onboarding_grammar_and_isi_flags() -> Result<()> {
-        for args in [
-            vec!["dm", "login", "OAC_TOKEN"],
-            vec!["dm", "login", "status", "--json"],
-            vec!["dm", "iam", "--json"],
-            vec!["dm", "webhook", "http://localhost:9000/tings", "--all-apps"],
-            vec!["dm", "unhook"],
-            vec!["dm", "config", "telemetry", "false"],
-            vec!["dm", "config", "telemetry", "true"],
-            vec!["dm", "report", "replay failed"],
-        ] {
-            Cli::try_parse_from(args)?;
-        }
-        let cli = Cli::try_parse_from([
-            "dm",
-            "messages",
-            "send",
-            "00000000-0000-0000-0000-000000000001",
-            "--from",
-            "compose@si:writer",
-            "--to",
-            "deliberate@si:cos",
-            "--text",
-            "hello",
-        ])?;
-        let Command::Messages {
-            command: Messages::Send { content, .. },
-        } = cli.command
-        else {
-            bail!("wrong command")
-        };
-        let message = content.read()?;
-        assert_eq!(message.sender_id.as_deref(), Some("compose@si:writer"));
-        assert_eq!(message.recipient_id.as_deref(), Some("deliberate@si:cos"));
-        Ok(())
-    }
-}
+mod command_tests;

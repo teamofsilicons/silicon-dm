@@ -83,14 +83,12 @@ impl PostgresStore {
     /// incompatible cursor or limit.
     pub async fn list_messages(
         &self,
-        organization_id: &OrganizationId,
-        actor: &ActorRef,
+        viewer: &ActorRef,
         conversation_id: Uuid,
         page: &PageRequest,
         include_bundled_members: bool,
     ) -> AppResult<MessagePage> {
-        self.require_participant(organization_id, actor, conversation_id)
-            .await?;
+        self.require_reader(viewer, conversation_id).await?;
         let limit = page.validated_limit()?;
         let cursor = page
             .cursor
@@ -113,10 +111,9 @@ impl PostgresStore {
             SELECT message.id
             FROM messages AS message
             WHERE message.conversation_id = $1
-              AND message.organization_id = $2
-              AND ($3::bigint IS NULL OR message.sequence < $3)
+              AND ($2::bigint IS NULL OR message.sequence < $2)
               AND (
-                    $4
+                    $3
                     OR NOT EXISTS (
                         SELECT 1
                         FROM message_bundle_items AS bundle_item
@@ -125,11 +122,10 @@ impl PostgresStore {
                     )
               )
             ORDER BY message.sequence DESC
-            LIMIT $5
+            LIMIT $4
             "#,
         )
         .bind(conversation_id)
-        .bind(organization_id.as_str())
         .bind(before_sequence)
         .bind(include_bundled_members)
         .bind(i64::from(limit) + 1)
@@ -168,27 +164,12 @@ impl PostgresStore {
     ///
     /// Rejects invalid content, sender mismatch, non-participant access, and
     /// conflicting idempotency reuse.
-    pub async fn send_message(&self, command: SendMessageCommand) -> AppResult<Message> {
-        let initiator = command.sender.clone();
-        self.send_message_as(command, &initiator).await
-    }
-
-    /// Accepts a message while retaining the authenticated initiating actor when
-    /// that actor is allowed to represent a different message sender.
-    /// Authorization of representation belongs to the authenticated API boundary;
-    /// this internal provenance is never read from the public message payload.
-    ///
-    /// # Errors
-    /// Returns the same validation and storage failures as `send_message`.
     #[allow(
         clippy::too_many_lines,
         reason = "message acceptance, outbox creation, history update, draft clear, and idempotency form one transaction"
     )]
-    pub async fn send_message_as(
-        &self,
-        command: SendMessageCommand,
-        initiator: &ActorRef,
-    ) -> AppResult<Message> {
+    pub async fn send_message(&self, command: SendMessageCommand) -> AppResult<Message> {
+        let initiator = command.sender.clone();
         command.content.validate().map_err(AppError::validation)?;
         if command
             .content
@@ -207,10 +188,13 @@ impl PostgresStore {
             routing_hash: routing_hash.as_ref().map(|hash| hash.as_bytes().as_slice()),
         })?;
         let mut transaction = self.pool().begin().await?;
+        let partition =
+            require_participant_in(&mut transaction, &command.sender, command.conversation_id)
+                .await?;
         refresh_directory_in(
             &mut transaction,
-            &command.organization_id,
-            &[command.sender.clone(), initiator.clone()],
+            &partition,
+            std::slice::from_ref(&initiator),
         )
         .await?;
         // Transaction-local state cannot leak to another request on this pooled
@@ -218,7 +202,7 @@ impl PostgresStore {
         sqlx::query("SELECT set_config('dm.ting_originator',$1,true)")
             .bind(
                 serde_json::json!({
-                    "organization_id": command.organization_id.as_str(),
+                    "organization_id": partition.as_str(),
                     "actor_kind": initiator.actor_type.as_str(),
                     "actor_id": initiator.id.as_str(),
                 })
@@ -226,16 +210,16 @@ impl PostgresStore {
             )
             .execute(&mut *transaction)
             .await?;
-        require_participant_in(
+        let accounts = OrganizationId::accounts();
+        refresh_directory_in(
             &mut transaction,
-            &command.organization_id,
-            &command.sender,
-            command.conversation_id,
+            &accounts,
+            std::slice::from_ref(&command.sender),
         )
         .await?;
         let claim = claim(
             &mut transaction,
-            &command.organization_id,
+            &accounts,
             &command.sender,
             SEND_MESSAGE_OPERATION,
             &command.idempotency_key,
@@ -247,16 +231,17 @@ impl PostgresStore {
             IdempotencyClaim::Acquired => {
                 let message_id = insert_message_in(
                     &mut transaction,
-                    &command.organization_id,
+                    &partition,
                     command.conversation_id,
                     &command.sender,
                     &command.content,
                     &content_hash,
+                    command.via_app.as_deref(),
                 )
                 .await?;
                 enqueue_message_deliveries_in(
                     &mut transaction,
-                    &command.organization_id,
+                    &partition,
                     command.conversation_id,
                     message_id,
                     &command.sender,
@@ -264,7 +249,7 @@ impl PostgresStore {
                 .await?;
                 update_recent_gif_in(
                     &mut transaction,
-                    &command.organization_id,
+                    &partition,
                     &command.sender,
                     message_id,
                     command.content.gif.as_ref(),
@@ -276,17 +261,15 @@ impl PostgresStore {
                     SET version = version + 1,
                         content_hash_version = 3
                     WHERE conversation_id = $1
-                      AND organization_id = $2
-                      AND actor_kind = $3::text::actor_kind
-                      AND actor_id = $4
+                      AND actor_kind = $2::text::actor_kind
+                      AND actor_id = $3
                       AND (
-                            (content_hash_version IN (2, 3) AND content_hash = $5)
-                            OR (content_hash_version = 1 AND content_hash = $6)
+                            (content_hash_version IN (2, 3) AND content_hash = $4)
+                            OR (content_hash_version = 1 AND content_hash = $5)
                       )
                     "#,
                 )
                 .bind(command.conversation_id)
-                .bind(command.organization_id.as_str())
                 .bind(command.sender.actor_type.as_str())
                 .bind(command.sender.id.as_str())
                 .bind(content_hash.as_bytes().as_slice())
@@ -307,13 +290,11 @@ impl PostgresStore {
                         r#"
                         DELETE FROM draft_attachments
                         WHERE conversation_id = $1
-                          AND organization_id = $2
-                          AND actor_kind = $3::text::actor_kind
-                          AND actor_id = $4
+                          AND actor_kind = $2::text::actor_kind
+                          AND actor_id = $3
                         "#,
                     )
                     .bind(command.conversation_id)
-                    .bind(command.organization_id.as_str())
                     .bind(command.sender.actor_type.as_str())
                     .bind(command.sender.id.as_str())
                     .execute(&mut *transaction)
@@ -323,13 +304,11 @@ impl PostgresStore {
                         r#"
                         DELETE FROM draft_gifs
                         WHERE conversation_id = $1
-                          AND organization_id = $2
-                          AND actor_kind = $3::text::actor_kind
-                          AND actor_id = $4
+                          AND actor_kind = $2::text::actor_kind
+                          AND actor_id = $3
                         "#,
                     )
                     .bind(command.conversation_id)
-                    .bind(command.organization_id.as_str())
                     .bind(command.sender.actor_type.as_str())
                     .bind(command.sender.id.as_str())
                     .execute(&mut *transaction)
@@ -339,13 +318,11 @@ impl PostgresStore {
                         r#"
                         DELETE FROM drafts
                         WHERE conversation_id = $1
-                          AND organization_id = $2
-                          AND actor_kind = $3::text::actor_kind
-                          AND actor_id = $4
+                          AND actor_kind = $2::text::actor_kind
+                          AND actor_id = $3
                         "#,
                     )
                     .bind(command.conversation_id)
-                    .bind(command.organization_id.as_str())
                     .bind(command.sender.actor_type.as_str())
                     .bind(command.sender.id.as_str())
                     .execute(&mut *transaction)
@@ -354,7 +331,7 @@ impl PostgresStore {
                 }
                 complete(
                     &mut transaction,
-                    &command.organization_id,
+                    &accounts,
                     &command.sender,
                     SEND_MESSAGE_OPERATION,
                     &command.idempotency_key,
@@ -404,15 +381,8 @@ impl PostgresStore {
     ) -> AppResult<()> {
         validate_device_id(&command.device_id)?;
         let mut transaction = self.pool().begin().await?;
-        refresh_directory_in(
+        let partition = require_participant_in(
             &mut transaction,
-            &command.organization_id,
-            std::slice::from_ref(&command.recipient),
-        )
-        .await?;
-        require_participant_in(
-            &mut transaction,
-            &command.organization_id,
             &command.recipient,
             command.conversation_id,
         )
@@ -430,7 +400,7 @@ impl PostgresStore {
         )
         .bind(command.message_id)
         .bind(command.conversation_id)
-        .bind(command.organization_id.as_str())
+        .bind(partition.as_str())
         .fetch_optional(&mut *transaction)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -501,7 +471,7 @@ impl PostgresStore {
         .bind(receipt_id)
         .bind(command.message_id)
         .bind(command.conversation_id)
-        .bind(command.organization_id.as_str())
+        .bind(partition.as_str())
         .bind(command.recipient.actor_type.as_str())
         .bind(command.recipient.id.as_str())
         .bind(&command.device_id)
@@ -530,7 +500,7 @@ impl PostgresStore {
         {
             enqueue_message_status_delivery_in(
                 &mut transaction,
-                &command.organization_id,
+                &partition,
                 command.conversation_id,
                 command.message_id,
                 receipt_id,
@@ -548,24 +518,24 @@ impl PostgresStore {
     ///
     /// Propagates database failures and reports malformed durable GIF data as
     /// an internal error.
-    pub async fn recent_gifs(
-        &self,
-        organization_id: &OrganizationId,
-        actor: &ActorRef,
-    ) -> AppResult<GifPage> {
+    pub async fn recent_gifs(&self, actor: &ActorRef) -> AppResult<GifPage> {
         if actor.actor_type == ActorType::Silicon {
             return Ok(GifPage { items: Vec::new() });
         }
+        // A Carbon's GIFs may live in several storage partitions (each conversation's);
+        // the newest use of each GIF wins.
         let records = sqlx::query_as::<_, RecentGifRecord>(
             r#"
-            SELECT provider_id, url, preview_url, title
-            FROM recent_gifs
-            WHERE organization_id = $1 AND carbon_id = $2
+            SELECT provider_id, url, preview_url, title FROM (
+                SELECT DISTINCT ON (provider_id) provider_id, url, preview_url, title, last_used_at
+                FROM recent_gifs
+                WHERE carbon_id = $1
+                ORDER BY provider_id, last_used_at DESC
+            ) newest
             ORDER BY last_used_at DESC, provider_id DESC
             LIMIT 20
             "#,
         )
-        .bind(organization_id.as_str())
         .bind(actor.id.as_str())
         .fetch_all(self.pool())
         .await?;
@@ -599,10 +569,10 @@ pub(crate) async fn insert_message_in(
     sender: &ActorRef,
     content: &MessageCreate,
     content_hash: &blake3::Hash,
+    via_app: Option<&str>,
 ) -> AppResult<Uuid> {
     if let Some(recipient) = &content.recipient_id {
-        let participants =
-            participant_records_in(transaction, organization_id, conversation_id).await?;
+        let participants = participant_records_in(transaction, conversation_id).await?;
         let valid = participants.iter().any(|p| {
             let Ok(id) = parse_actor_id(&p.actor_id) else {
                 return false;
@@ -640,11 +610,12 @@ pub(crate) async fn insert_message_in(
             metadata,
             reply_to_message_id,
             sender_address,
-            recipient_address
+            recipient_address,
+            via_app
         )
         VALUES (
             $1, $2, $3, $4::text::actor_kind, $5, 1, 'sent', $6, $7,
-            3, $8, $9, $10, $11, $12
+            3, $8, $9, $10, $11, $12, $13
         )
         "#,
     )
@@ -665,6 +636,7 @@ pub(crate) async fn insert_message_in(
             .as_ref()
             .map(crate::domain::ActorId::as_str),
     )
+    .bind(via_app)
     .execute(&mut **transaction)
     .await
     .map_err(map_constraint_error)?;
@@ -752,8 +724,7 @@ pub(crate) async fn enqueue_message_deliveries_in(
     message_id: Uuid,
     _sender: &ActorRef,
 ) -> AppResult<()> {
-    let participants =
-        participant_records_in(transaction, organization_id, conversation_id).await?;
+    let participants = participant_records_in(transaction, conversation_id).await?;
     for participant in participants {
         let target = ActorRef {
             actor_type: parse_actor_type(&participant.actor_kind)?,
@@ -784,7 +755,7 @@ pub(crate) async fn enqueue_message_deliveries_in(
         .execute(&mut **transaction)
         .await
         .map_err(map_constraint_error)?;
-        notify_actor_in(transaction, organization_id, &target).await?;
+        notify_actor_in(transaction, &target).await?;
     }
     Ok(())
 }
@@ -924,22 +895,17 @@ async fn enqueue_message_status_delivery_in(
     .await
     .map_err(map_constraint_error)?;
     if result.rows_affected() == 1 {
-        notify_actor_in(transaction, organization_id, sender).await?;
+        notify_actor_in(transaction, sender).await?;
     }
     Ok(())
 }
 
+/// Wakes the account's long-polling sync requests and the Ting worker after commit.
 pub(crate) async fn notify_actor_in(
     transaction: &mut Transaction<'_, Postgres>,
-    organization_id: &OrganizationId,
     actor: &ActorRef,
 ) -> AppResult<()> {
-    let payload = serde_json::json!({
-        "org_id": organization_id.as_str(),
-        "actor_type": actor.actor_type.as_str(),
-        "actor_id": actor.id.as_str(),
-    })
-    .to_string();
+    let payload = serde_json::json!({ "account": actor.id.as_str() }).to_string();
     sqlx::query("SELECT pg_notify('dm_delivery', $1)")
         .bind(payload)
         .execute(&mut **transaction)
@@ -949,53 +915,46 @@ pub(crate) async fn notify_actor_in(
 
 async fn participant_records_in(
     transaction: &mut Transaction<'_, Postgres>,
-    organization_id: &OrganizationId,
     conversation_id: Uuid,
 ) -> AppResult<Vec<ParticipantRecord>> {
     sqlx::query_as::<_, ParticipantRecord>(
         r#"
         SELECT actor_kind::text AS actor_kind, actor_id
         FROM effective_conversation_participants
-        WHERE conversation_id = $1 AND organization_id = $2
+        WHERE conversation_id = $1
         ORDER BY actor_kind, actor_id
         "#,
     )
     .bind(conversation_id)
-    .bind(organization_id.as_str())
     .fetch_all(&mut **transaction)
     .await
     .map_err(AppError::Database)
 }
 
+/// Requires an effective participant and returns the conversation's storage partition.
 pub(crate) async fn require_participant_in(
     transaction: &mut Transaction<'_, Postgres>,
-    organization_id: &OrganizationId,
     actor: &ActorRef,
     conversation_id: Uuid,
-) -> AppResult<()> {
-    let allowed = sqlx::query_scalar::<_, bool>(
+) -> AppResult<OrganizationId> {
+    let partition: Option<String> = sqlx::query_scalar(
         r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM effective_conversation_participants
-            WHERE conversation_id = $1
-              AND organization_id = $2
-              AND actor_kind = $3::text::actor_kind
-              AND actor_id = $4
-        )
+        SELECT organization_id
+        FROM effective_conversation_participants
+        WHERE conversation_id = $1
+          AND actor_kind = $2::text::actor_kind
+          AND actor_id = $3
         "#,
     )
     .bind(conversation_id)
-    .bind(organization_id.as_str())
     .bind(actor.actor_type.as_str())
     .bind(actor.id.as_str())
-    .fetch_one(&mut **transaction)
+    .fetch_optional(&mut **transaction)
     .await?;
-    if allowed {
-        Ok(())
-    } else {
-        Err(AppError::NotFound)
-    }
+    partition
+        .ok_or(AppError::NotFound)?
+        .parse()
+        .map_err(|error| super::rows::data_error("conversation partition", error))
 }
 
 fn validate_device_id(device_id: &str) -> AppResult<()> {

@@ -63,16 +63,9 @@ impl PostgresStore {
     ///
     /// Returns not-found when the caller is not a participant or has no draft,
     /// and reports malformed durable data as an internal error.
-    pub async fn get_draft(
-        &self,
-        organization_id: &OrganizationId,
-        actor: &ActorRef,
-        conversation_id: Uuid,
-    ) -> AppResult<Draft> {
-        self.require_participant(organization_id, actor, conversation_id)
-            .await?;
-        self.load_draft(organization_id, actor, conversation_id)
-            .await
+    pub async fn get_draft(&self, owner: &ActorRef, conversation_id: Uuid) -> AppResult<Draft> {
+        let partition = self.require_participant(owner, conversation_id).await?;
+        self.load_draft(&partition, owner, conversation_id).await
     }
 
     /// Creates or replaces a synchronized draft using exact-version compare-and-swap.
@@ -87,6 +80,7 @@ impl PostgresStore {
     pub async fn put_draft(&self, command: PutDraftCommand) -> AppResult<PutDraftOutcome> {
         command.input.validate().map_err(AppError::validation)?;
         let content_hash = command.input.content_digest();
+        let partition = self.partition_of(command.conversation_id).await?;
         let mut transaction = self.pool().begin().await?;
         let participant_exists = sqlx::query_scalar::<_, i32>(
             r#"
@@ -101,7 +95,7 @@ impl PostgresStore {
             "#,
         )
         .bind(command.conversation_id)
-        .bind(command.organization_id.as_str())
+        .bind(partition.as_str())
         .bind(command.actor.actor_type.as_str())
         .bind(command.actor.id.as_str())
         .fetch_optional(&mut *transaction)
@@ -123,7 +117,7 @@ impl PostgresStore {
             "#,
         )
         .bind(command.conversation_id)
-        .bind(command.organization_id.as_str())
+        .bind(partition.as_str())
         .bind(command.actor.actor_type.as_str())
         .bind(command.actor.id.as_str())
         .fetch_optional(&mut *transaction)
@@ -149,7 +143,7 @@ impl PostgresStore {
                     "#,
                 )
                 .bind(command.conversation_id)
-                .bind(command.organization_id.as_str())
+                .bind(partition.as_str())
                 .bind(command.actor.actor_type.as_str())
                 .bind(command.actor.id.as_str())
                 .bind(command.input.message_content.as_deref())
@@ -185,7 +179,7 @@ impl PostgresStore {
                     "#,
                 )
                 .bind(command.conversation_id)
-                .bind(command.organization_id.as_str())
+                .bind(partition.as_str())
                 .bind(command.actor.actor_type.as_str())
                 .bind(command.actor.id.as_str())
                 .bind(command.input.message_content.as_deref())
@@ -197,13 +191,13 @@ impl PostgresStore {
                 .await
                 .map_err(map_constraint_error)?;
 
-                delete_draft_children(&mut transaction, &command).await?;
+                delete_draft_children(&mut transaction, &partition, &command).await?;
             }
             Some(_) => {
                 drop(command.input);
                 let current = load_draft_in(
                     &mut transaction,
-                    &command.organization_id,
+                    &partition,
                     &command.actor,
                     command.conversation_id,
                 )
@@ -213,11 +207,11 @@ impl PostgresStore {
             }
         }
 
-        insert_draft_children(&mut transaction, &command).await?;
+        insert_draft_children(&mut transaction, &partition, &command).await?;
         drop(command.input);
         let saved = load_draft_in(
             &mut transaction,
-            &command.organization_id,
+            &partition,
             &command.actor,
             command.conversation_id,
         )
@@ -231,14 +225,9 @@ impl PostgresStore {
     /// # Errors
     ///
     /// Returns not-found for a non-participant and propagates database errors.
-    pub async fn delete_draft(
-        &self,
-        organization_id: &OrganizationId,
-        actor: &ActorRef,
-        conversation_id: Uuid,
-    ) -> AppResult<()> {
-        self.require_participant(organization_id, actor, conversation_id)
-            .await?;
+    pub async fn delete_draft(&self, actor: &ActorRef, conversation_id: Uuid) -> AppResult<()> {
+        let partition = self.require_participant(actor, conversation_id).await?;
+        let organization_id = &partition;
         let mut transaction = self.pool().begin().await?;
         let advanced = sqlx::query(
             r#"
@@ -409,11 +398,12 @@ async fn load_draft_in(
 
 async fn delete_draft_children(
     transaction: &mut Transaction<'_, Postgres>,
+    partition: &OrganizationId,
     command: &PutDraftCommand,
 ) -> AppResult<()> {
     delete_draft_children_by_owner(
         transaction,
-        &command.organization_id,
+        partition,
         &command.actor,
         command.conversation_id,
     )
@@ -463,11 +453,13 @@ async fn delete_draft_children_by_owner(
 
 async fn insert_draft_children(
     transaction: &mut Transaction<'_, Postgres>,
+    partition: &OrganizationId,
     command: &PutDraftCommand,
 ) -> AppResult<()> {
     for (position, attachment) in command.input.attachments.iter().enumerate() {
         insert_attachment(
             transaction,
+            partition,
             command,
             DraftAttachmentInsert {
                 position,
@@ -484,6 +476,7 @@ async fn insert_draft_children(
     if let Some(voice) = &command.input.voice {
         insert_attachment(
             transaction,
+            partition,
             command,
             DraftAttachmentInsert {
                 position: 100,
@@ -514,7 +507,7 @@ async fn insert_draft_children(
             "#,
         )
         .bind(command.conversation_id)
-        .bind(command.organization_id.as_str())
+        .bind(partition.as_str())
         .bind(command.actor.actor_type.as_str())
         .bind(command.actor.id.as_str())
         .bind(&gif.provider_id)
@@ -530,6 +523,7 @@ async fn insert_draft_children(
 
 async fn insert_attachment(
     transaction: &mut Transaction<'_, Postgres>,
+    partition: &OrganizationId,
     command: &PutDraftCommand,
     input: DraftAttachmentInsert<'_>,
 ) -> AppResult<()> {
@@ -567,7 +561,7 @@ async fn insert_attachment(
         "#,
     )
     .bind(command.conversation_id)
-    .bind(command.organization_id.as_str())
+    .bind(partition.as_str())
     .bind(command.actor.actor_type.as_str())
     .bind(command.actor.id.as_str())
     .bind(position)

@@ -1,37 +1,38 @@
 # silicon-dm-client
 
-Typed Rust client for Silicon DM's HTTP API. DM owns messages, conversations,
-history and permissions; Ting owns incoming connections, local webhook delivery,
-queues, replay and acknowledgements.
+Typed Rust client for DM's HTTP API (contract 4): messages, conversations, groups, drafts,
+receipts, presence, allow-lists and the sync feed between Carbons and Silicons. Every account signs
+in with Silicon Accounts.
 
-The default client is stateless. It can register delivery consent, synchronize
-references, fetch messages, send receipts and renew HTTP presence leases. Its
-`ting` module validates and hydrates DM references inside a generic Ting consumer;
-it never forwards callbacks or acknowledges notifications.
-
-The optional `runtime` feature adds private credential storage, direct setup of
-Ting's installed system daemon, and a durable **outgoing** command relay. There
-is no DM incoming delivery daemon.
-
-This guide describes the Ting migration in this checkout. To develop against it:
+- **Default:** a stateless `Client` authenticated with a DM access token (`with_token`) or, for an
+  app acting for its user, a User verification proof (`with_proof`). Errors keep the service's
+  `code`, `message` and `hint`. The `ting` module validates and hydrates DM references delivered
+  through Ting.
+- **`accounts` feature:** sign in to DM as its public client: the device flow for Carbons,
+  short-lived tokens for Silicons, rotating refresh and revoke.
+- **`runtime` feature:** what the `dm` CLI uses: sign-ins kept per profile (owner-only files,
+  single-flight refresh), the durable outgoing relay (`dm-relay`) and the sync inbox.
 
 ```toml
 [dependencies]
-silicon-dm-client = { path = "../silicon-dm/crates/client" }
-# Add features = ["runtime"] for LocalRuntime and the dm-relay executable.
+silicon-dm-client = { version = "0.15", features = ["accounts"] }
 ```
 
-Use a matching released client/server build when consuming the published crate.
-Rust dependencies are updated through Cargo; Honeycomb manages CLI installation
-and updates.
+```rust,no_run
+use silicon_dm_client::{Client, MessageCreate};
+# async fn example(token: &str) -> silicon_dm_client::Result<()> {
+let dm = Client::new("https://api.dm.teamofsilicons.com")?.with_token(token);
+let me = dm.me().await?;
+dm.send_message("c:ada", &MessageCreate { text: Some("Hello".into()), ..Default::default() }, "send-1").await?;
+# let _ = me;
+# Ok(()) }
+```
 
-See the [client guide](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/client/README.md)
-for HTTP operations, synchronization and the generic Ting consumer contract, and
-the [runtime guide](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/client/runtime.md)
-for separate Ting login and direct destination setup.
+Guides: [client](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/client/README.md),
+[runtime](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/client/runtime.md),
+[signing in](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/accounts.md),
+[HTTP API](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/api/README.md).
 
-Migration: `connect`, `connect_with_generation` and `prewarm_shared` return
-actionable Ting migration guidance without opening a socket. Old incoming queue
-records remain available for explicit migration but are never forwarded. Existing
-DM callback ACK bodies are not Ting acknowledgements; Ting destinations receive
-raw `{"tings":[...]}` batches and accept them with HTTP 204.
+0.15 is a breaking release: contract 4 replaces the earlier sign-in and request scoping
+(`with_auth`, `login`, `refresh`, `logout`, test environments and delivery registration are gone), accounts carry their `uuid`, and the retired WebSocket frame types were removed. The
+`dm` command is installed and updated by Silicon Apps (`silicon-apps install dm`).

@@ -1,27 +1,21 @@
-//! Stable named groups with invitation, tag, and public access rules.
+//! Named groups: co-equal owners, accepted members and pending invitations.
 use super::{ActorId, ActorRef};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-/// Editable group policy. Tag UUIDs remain stable across IAM tag renames.
+/// Editable group settings.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct GroupSettings {
     /// Human-readable group name.
     pub name: String,
     /// Purpose and context for members.
     #[serde(default)]
     pub description: String,
-    /// All active organization Carbons have access. Silicons require invitations.
-    #[serde(default)]
-    pub is_public: bool,
-    /// Any matching IAM tag grants access to a private group.
-    #[serde(default)]
-    pub tag_ids: Vec<Uuid>,
 }
 impl GroupSettings {
-    /// Validates limits and canonicalizes tag IDs for idempotency.
+    /// Validates limits and trims the name.
     /// # Errors
-    /// Rejects empty names, control characters, excessive description/tags, or nil IDs.
+    /// Rejects empty or oversized names, control characters and oversized descriptions.
     pub fn validate(&mut self) -> crate::AppResult<()> {
         self.name = self.name.trim().to_owned();
         if self.name.is_empty()
@@ -29,36 +23,40 @@ impl GroupSettings {
             || self.name.chars().any(char::is_control)
             || self.description.chars().count() > 4000
             || self.description.contains('\0')
-            || self.tag_ids.len() > 100
-            || self.tag_ids.iter().any(Uuid::is_nil)
         {
             return Err(crate::AppError::validation(
-                "group name must be 1–120 characters, description at most 4000, and tag_ids at most 100 non-nil IAM tag UUIDs",
+                "group name must be 1–120 characters without control characters, and the description at most 4000 characters",
             ));
         }
-        self.tag_ids.sort_unstable();
-        self.tag_ids.dedup();
         Ok(())
     }
 }
-/// Group creation input; creator is explicitly invited automatically.
+/// Group creation input. The creator becomes the first owner; `member_ids` are invited
+/// (each invitee accepts or declines; a custodian's own Silicons join at once).
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct GroupCreate {
-    /// Initial group policy.
+    /// Name and description.
     #[serde(flatten)]
     pub settings: GroupSettings,
-    /// Explicit invitations for active IAM organization actors.
+    /// Accounts to invite, by `c:`/`si:` id (or uuid).
     #[serde(default)]
     pub member_ids: Vec<ActorId>,
 }
-/// Group metadata included additively on group conversations.
+/// Group metadata included on group conversations.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct GroupDetails {
-    /// Current group policy.
+    /// Current settings.
     #[serde(flatten)]
     pub settings: GroupSettings,
-    /// Optimistic concurrency version for policy changes.
+    /// Optimistic concurrency version for settings changes.
     pub version: i64,
-    /// Explicit invitations, independent of tag or public access.
-    pub invited_members: Vec<ActorRef>,
+    /// Co-equal owners; at least one.
+    pub owners: Vec<ActorRef>,
+    /// Accepted members, owners included.
+    pub members: Vec<ActorRef>,
+    /// Invitations not yet accepted. Only owners (and the custodians acting for them) see
+    /// these; other members get an empty list.
+    #[serde(default)]
+    pub pending_invitations: Vec<ActorRef>,
 }

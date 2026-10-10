@@ -96,22 +96,19 @@ impl PostgresStore {
             routing_hash: routing_hash.as_ref().map(|hash| hash.as_bytes().as_slice()),
         })?;
         let mut transaction = self.pool().begin().await?;
+        let partition =
+            require_participant_in(&mut transaction, &command.creator, command.conversation_id)
+                .await?;
+        let accounts = OrganizationId::accounts();
         refresh_directory_in(
             &mut transaction,
-            &command.organization_id,
+            &accounts,
             std::slice::from_ref(&command.creator),
-        )
-        .await?;
-        require_participant_in(
-            &mut transaction,
-            &command.organization_id,
-            &command.creator,
-            command.conversation_id,
         )
         .await?;
         let claim = claim(
             &mut transaction,
-            &command.organization_id,
+            &accounts,
             &command.creator,
             CREATE_BUNDLE_OPERATION,
             &command.idempotency_key,
@@ -123,18 +120,19 @@ impl PostgresStore {
             IdempotencyClaim::Acquired => {
                 lock_bundle_members_in(
                     &mut transaction,
-                    &command.organization_id,
+                    &partition,
                     command.conversation_id,
                     &command.bundle.message_ids,
                 )
                 .await?;
                 let display_message_id = insert_message_in(
                     &mut transaction,
-                    &command.organization_id,
+                    &partition,
                     command.conversation_id,
                     &command.creator,
                     &command.bundle.display_message,
                     &display_content_hash,
+                    None,
                 )
                 .await?;
                 let bundle_id = Uuid::now_v7();
@@ -152,7 +150,7 @@ impl PostgresStore {
                 )
                 .bind(bundle_id)
                 .bind(command.conversation_id)
-                .bind(command.organization_id.as_str())
+                .bind(partition.as_str())
                 .bind(command.creator.actor_type.as_str())
                 .bind(command.creator.id.as_str())
                 .execute(&mut *transaction)
@@ -162,7 +160,7 @@ impl PostgresStore {
                     &mut transaction,
                     bundle_id,
                     command.conversation_id,
-                    &command.organization_id,
+                    &partition,
                     display_message_id,
                     "display",
                     0,
@@ -176,7 +174,7 @@ impl PostgresStore {
                         &mut transaction,
                         bundle_id,
                         command.conversation_id,
-                        &command.organization_id,
+                        &partition,
                         *message_id,
                         "member",
                         position,
@@ -185,7 +183,7 @@ impl PostgresStore {
                 }
                 enqueue_message_deliveries_in(
                     &mut transaction,
-                    &command.organization_id,
+                    &partition,
                     command.conversation_id,
                     display_message_id,
                     &command.creator,
@@ -193,7 +191,7 @@ impl PostgresStore {
                 .await?;
                 complete(
                     &mut transaction,
-                    &command.organization_id,
+                    &accounts,
                     &command.creator,
                     CREATE_BUNDLE_OPERATION,
                     &command.idempotency_key,
@@ -208,9 +206,8 @@ impl PostgresStore {
             }
         };
         transaction.commit().await.map_err(map_constraint_error)?;
-        let organization_id = command.organization_id;
         drop(command.bundle);
-        self.load_bundle(&organization_id, command.conversation_id, bundle_id, false)
+        self.load_bundle(&partition, command.conversation_id, bundle_id, false)
             .await
             .map(|detail| Bundle {
                 id: detail.id,
@@ -230,14 +227,13 @@ impl PostgresStore {
     /// and reports malformed durable data as an internal error.
     pub async fn get_bundle(
         &self,
-        organization_id: &OrganizationId,
-        actor: &ActorRef,
+        viewer: &ActorRef,
         conversation_id: Uuid,
         bundle_id: Uuid,
     ) -> AppResult<BundleDetail> {
-        self.require_participant(organization_id, actor, conversation_id)
-            .await?;
-        self.load_bundle(organization_id, conversation_id, bundle_id, true)
+        self.require_reader(viewer, conversation_id).await?;
+        let partition = self.partition_of(conversation_id).await?;
+        self.load_bundle(&partition, conversation_id, bundle_id, true)
             .await
     }
 

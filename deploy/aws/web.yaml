@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Silicon DM Next.js website on the existing ECS cluster and ALB. Retire the old gateway separately after rollback closes.
+Parameters:
+  ClusterArn: {Type: String}
+  VpcId: {Type: 'AWS::EC2::VPC::Id'}
+  SubnetIds: {Type: 'List<AWS::EC2::Subnet::Id>', Description: Private subnets with HTTPS egress}
+  AlbSecurityGroupId: {Type: 'AWS::EC2::SecurityGroup::Id'}
+  HttpsListenerArn: {Type: String}
+  CertificateArn: {Type: String, Description: ACM certificate for dm.teamofsilicons.com}
+  ImageUri: {Type: String, AllowedPattern: '.+@sha256:[a-f0-9]{64}'}
+  WebsiteSecretArn: {Type: String, Description: Secrets Manager JSON with APP_SECRET and SESSION_SECRET}
+  ListenerPriority: {Type: Number, Default: 45}
+  DesiredCount: {Type: Number, Default: 0, AllowedValues: [0, 1], Description: Start at zero until the coordinated Accounts cutover}
+Resources:
+  Logs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties: {LogGroupName: /silicon-dm/production/web, RetentionInDays: 30}
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: DM website receives HTTP from its ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 4315, ToPort: 4315, SourceSecurityGroupId: !Ref AlbSecurityGroupId}
+      SecurityGroupEgress:
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0}
+  AlbEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: {GroupId: !Ref AlbSecurityGroupId, IpProtocol: tcp, FromPort: 4315, ToPort: 4315, DestinationSecurityGroupId: !Ref SecurityGroup}
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - {Effect: Allow, Principal: {Service: ecs-tasks.amazonaws.com}, Action: 'sts:AssumeRole'}
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: website-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - {Effect: Allow, Action: 'secretsmanager:GetSecretValue', Resource: !Ref WebsiteSecretArn}
+  Task:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: silicon-dm-web
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '512'
+      Memory: '1024'
+      RuntimePlatform: {CpuArchitecture: ARM64, OperatingSystemFamily: LINUX}
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: web
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings: [{ContainerPort: 4315, Protocol: tcp}]
+          Environment:
+            - {Name: APP_ID, Value: dm}
+            - {Name: PUBLIC_URL, Value: 'https://dm.teamofsilicons.com'}
+            - {Name: ACCOUNTS_URL, Value: 'https://accounts.teamofsilicons.com'}
+            - {Name: APP_API_URL, Value: 'https://backend.dm.teamofsilicons.com'}
+          Secrets:
+            - {Name: APP_SECRET, ValueFrom: !Sub '${WebsiteSecretArn}:APP_SECRET::'}
+            - {Name: SESSION_SECRET, ValueFrom: !Sub '${WebsiteSecretArn}:SESSION_SECRET::'}
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: {awslogs-group: !Ref Logs, awslogs-region: !Ref 'AWS::Region', awslogs-stream-prefix: web}
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 4315
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckPath: /robots.txt
+      Matcher: {HttpCode: '200'}
+  Certificate:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties: {ListenerArn: !Ref HttpsListenerArn, Certificates: [{CertificateArn: !Ref CertificateArn}]}
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListenerArn
+      Priority: !Ref ListenerPriority
+      Conditions: [{Field: host-header, Values: [dm.teamofsilicons.com]}]
+      Actions: [{Type: forward, TargetGroupArn: !Ref TargetGroup}]
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: ListenerRule
+    Properties:
+      Cluster: !Ref ClusterArn
+      ServiceName: silicon-dm-web
+      TaskDefinition: !Ref Task
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+        DeploymentCircuitBreaker: {Enable: true, Rollback: true}
+      HealthCheckGracePeriodSeconds: 60
+      NetworkConfiguration:
+        AwsvpcConfiguration: {Subnets: !Ref SubnetIds, SecurityGroups: [!Ref SecurityGroup], AssignPublicIp: DISABLED}
+      LoadBalancers: [{ContainerName: web, ContainerPort: 4315, TargetGroupArn: !Ref TargetGroup}]
+Outputs:
+  WebsiteUrl: {Value: 'https://dm.teamofsilicons.com'}
+  TaskArn: {Value: !Ref Task}
+  ServiceName: {Value: !GetAtt Service.Name}

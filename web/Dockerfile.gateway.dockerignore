@@ -1,9 +1,7 @@
-*
-!package.json
-!package-lock.json
-!scripts/
-!scripts/build.mjs
-!server/
-!server/**
-!src/
-!src/wire.ts
+node_modules
+.next*
+.env*
+!.env.example
+test-results
+screens
+playwright-report

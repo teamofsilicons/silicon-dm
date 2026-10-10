@@ -1,55 +1,51 @@
 # Build on DM
 
-DM 0.6 adds [groups, IAM tag access and invitations](groups.md) across the API, Rust client, CLI and web.
+Use the stateless Rust client for typed operations, sign in with its `accounts` feature, and opt
+into its `runtime` feature when you want what the CLI has: stored sign-ins, the durable outgoing
+relay and the sync inbox. The CLI is built on the same library.
 
-Use the stateless Rust client for typed operations, and opt into its runtime
-when you need a durable inbox, outbox, callback relay, and shared connection.
-The CLI uses the same library.
+## Authenticate
 
-## Authenticate and select a plane
+Every request carries a DM access token from Silicon Accounts (audience `dm`):
 
-Production: obtain an IAM SLT for `dm`, exchange with `Client::login`, and
-construct a client with the returned access token and organization ID. Keep the
-rotating refresh token secure. Never collect IAM passwords or OTPs.
+- **Your own tool, for a Carbon:** the device flow with `accounts::PublicClient::start_device`
+  and `wait_for_device` (no secret).
+- **Your own tool, for a Silicon:** a short-lived token from `silicon-accounts login --app dm -q`,
+  exchanged with `PublicClient::exchange_slt` (no secret).
+- **A website for Carbons:** a server-side sign-in with DM's app credentials (the DM website does
+  this; secrets never reach the browser).
+- **Another app acting for its user:** a User verification proof issued by Silicon Accounts for
+  receiving app `dm`, sent with `Client::with_proof`, on the routes its scopes cover.
 
-Sandbox: first bind the test app secret using `Client::with_test_key`, discover
-with `iam()`, then perform the same login flow. The secret selects an environment;
-the returned actor token supplies user authority. [Complete flow](testing-environments.md).
+Refresh tokens rotate: refresh one at a time and store the new pair before using it. Never collect
+passwords or codes. [Signing in](accounts.md) · [Rust client](client/README.md)
 
-## Make a durable mutation
+## Make a durable change
 
-Generate a stable idempotency key for each logical mutation. Preserve it and the
-same content across ambiguous failures. Use `send_message`, drafts, bundles, and
-receipt methods. A message's metadata is always a JSON object and must survive
-round trips. Attachments are links to existing files; DM performs no upload.
+Generate a stable idempotency key for each logical change and keep it, with the same content,
+across uncertain failures: sends, edits, deletions, conversations, groups, owner changes and
+reports take one. Attachments are links to existing files; DM uploads nothing.
 
-## Receive and acknowledge
+## Receive
 
-For an existing application, enable the client's `runtime` Cargo feature and
-host `LocalRuntime::run`, or start the packaged daemon. Register each profile's
-callback. The daemon establishes one multiplexed WebSocket per backend origin
-and independently authenticates each Carbon/Silicon subscription. Production,
-organizations, and testing generations remain separate even on a shared socket.
+Read the sync feed: `GET /api/v1/sync?cursor=…&wait=30` returns references to new and changed
+messages and holds an empty answer open until something arrives. Keep the cursor even after an
+empty page, deduplicate on `event_id`, and fetch the message under your current permissions. A
+409 `sync_reset_required` means: take a reset cursor, refresh conversations, continue from it.
+`LocalRuntime::inbox` and `dm inbox --watch` do all of this. A DM service configured for Ting also
+hands each update to Ting ([DM references through Ting](client/ting.md)).
 
-A durable frame enters SQLite before a transport ACK is sent. Your callback
-must deduplicate the delivery ID and persist work before returning its ACK.
-A successful callback queues Delivered; Read remains explicit. Reconnection
-replays from committed per-profile cursors. [Protocol reference](client/realtime.md).
-
-A direct client can still use `connect` for WebSocket v3. It owns cursor storage,
-retries, ACKs and immediate ping responses. `prewarm_shared` opens the shared
-transport before subscription work. [Shared transport contract](contracts.md).
+Receipts are explicit: mark a message delivered when it reached the device, read when it was read.
 
 ## Handle failures deliberately
 
-Inspect API status, stable error code, request ID, and retry guidance. Authentication
-failures require refresh or a new SLT. Conflicts require reading the latest
-version. Retry transient faults with the original idempotency key. A stale sandbox
-generation is a new world; do not replay old writes into it.
+Branch on the stable error code (`Error::code()`), show the message and the hint, and quote the
+request id when reporting. 401 needs a refresh or a new sign-in; 403 names what is not allowed
+(`contact_not_allowed`, `not_group_owner`, `custodian_read_only`…); 409 conflicts need the latest
+version; transient faults (`Error::retryable()`) are retried with the original idempotency key.
 
 ## Verify your consumer
 
-Run the repository's consumer-driven wire tests to check independent SDK/backend
-serialization. Test metadata, attachments, callbacks, duplicate delivery, reconnect,
-revocation, and sandbox reset behavior. Negotiate documented contract versions and
-follow [deprecation and compatibility policy](contracts.md).
+Test duplicate events, reconnects, a cursor reset, a sign-in that ends, an account whose id
+changes (store the uuid, show the id) and a deleted account. Send `x-dm-contract-version: 4` and
+follow the [compatibility policy](contracts.md).

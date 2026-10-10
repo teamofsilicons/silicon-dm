@@ -9,8 +9,11 @@ fn run(home: &Path, args: &[&str], override_dir: Option<&Path>) -> TestResult<Va
     command
         .env("HOME", home.join("unused-home"))
         .env("SILICON_HOME", home)
+        .env("SILICON_DM_RELAY_HOME", home.join("relay"))
+        .env("DM_TELEMETRY_ENABLED", "false")
         .env_remove("SILICON_DM_HOME")
         .env_remove("SILICON_DM_TEST")
+        .env_remove("DM_TEST_APP_SECRET")
         .args(args);
     if let Some(directory) = override_dir {
         command.env("SILICON_DM_HOME", directory);
@@ -23,30 +26,40 @@ fn run(home: &Path, args: &[&str], override_dir: Option<&Path>) -> TestResult<Va
 }
 
 #[test]
-fn runtime_environment_selects_scope_and_explicit_flag_overrides_it() -> TestResult<()> {
+fn a_retired_test_environment_selection_never_reaches_the_service() -> TestResult<()> {
     let home = std::env::temp_dir().join(format!("dm-scope-test-{}", Uuid::new_v4()));
     fs::create_dir_all(&home)?;
-    run(&home, &["updates", "disable"], None)?;
-    let inherited = Uuid::new_v4().to_string();
-    let explicit = Uuid::new_v4().to_string();
-    for (args, expected) in [
-        (vec!["login", "status", "--json"], inherited.as_str()),
-        (
-            vec!["--test", explicit.as_str(), "login", "status", "--json"],
-            explicit.as_str(),
-        ),
-    ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_dm"))
-            .env("SILICON_HOME", &home)
-            .env_remove("SILICON_DM_HOME")
-            .env("SILICON_DM_TEST", &inherited)
-            .args(args)
-            .output()?;
-        assert!(output.status.success());
-        let status: Value = serde_json::from_slice(&output.stdout)?;
-        assert_eq!(status["testing_environment_id"], expected);
-        assert_eq!(status["authenticated"], false);
-    }
+    let selected = Uuid::new_v4().to_string();
+    let output = Command::new(env!("CARGO_BIN_EXE_dm"))
+        .env("SILICON_HOME", &home)
+        .env("SILICON_DM_RELAY_HOME", home.join("relay"))
+        .env_remove("SILICON_DM_HOME")
+        .env("SILICON_DM_TEST", &selected)
+        .args(["--json", "whoami"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(error["error"]["code"], "testing_environments_retired");
+    // Discovery still answers, signed out.
+    let output = Command::new(env!("CARGO_BIN_EXE_dm"))
+        .env("SILICON_HOME", &home)
+        .env_remove("SILICON_DM_HOME")
+        .env("SILICON_DM_TEST", &selected)
+        .args(["login", "status", "--json"])
+        .output()?;
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout)?,
+        serde_json::json!({"authenticated":false})
+    );
+    // The flag itself is gone.
+    let output = Command::new(env!("CARGO_BIN_EXE_dm"))
+        .env("SILICON_HOME", &home)
+        .env_remove("SILICON_DM_HOME")
+        .env_remove("SILICON_DM_TEST")
+        .args(["--test", &selected, "login", "status", "--json"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
     fs::remove_dir_all(home)?;
     Ok(())
 }
@@ -55,19 +68,19 @@ fn runtime_environment_selects_scope_and_explicit_flag_overrides_it() -> TestRes
 fn silicon_home_and_explicit_overrides_are_isolated() -> TestResult<()> {
     let home = std::env::temp_dir().join(format!("dm-home-test-{}", Uuid::new_v4()));
     fs::create_dir_all(&home)?;
-    run(&home, &["updates", "disable"], None)?;
+    run(&home, &["config", "telemetry", "false"], None)?;
     assert!(home.join(".silicon-dm/config.json").is_file());
     assert!(!home.join("unused-home").exists());
     let status = run(&home, &["login", "status", "--json"], None)?;
     assert_eq!(status["authenticated"], false);
     let explicit = home.join("explicit");
-    run(&home, &["updates", "disable"], Some(&explicit))?;
+    run(&home, &["config", "telemetry", "false"], Some(&explicit))?;
     assert!(explicit.join("config.json").is_file());
     let configured = home.join("configured");
     fs::create_dir_all(&configured)?;
     run(
         &home,
-        &["updates", "disable"],
+        &["config", "telemetry", "false"],
         Some(&configured.join(".silicon-dm")),
     )?;
     run(
@@ -91,11 +104,11 @@ fn silicon_home_and_explicit_overrides_are_isolated() -> TestResult<()> {
         ],
         None,
     )?;
-    run(&home, &["updates", "disable"], None)?;
+    run(&home, &["config", "telemetry", "false"], None)?;
     assert!(configured.join(".silicon-dm/config.json").is_file());
     let saved: Value =
         serde_json::from_slice(&fs::read(configured.join(".silicon-dm/config.json"))?)?;
-    assert_eq!(saved["auto_update"], false);
+    assert_eq!(saved["telemetry_enabled"], false);
     assert!(
         fs::read_dir(configured.join(".silicon-dm"))?
             .all(|entry| entry.is_ok_and(|e| e.path().extension().is_none_or(|ext| ext != "tmp")))
