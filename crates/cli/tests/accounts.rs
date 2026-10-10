@@ -326,7 +326,7 @@ async fn concurrent_commands_refresh_a_rotating_token_once() {
     let runs = futures_join(&home).await;
     for run in &runs {
         assert_eq!(run.code, Some(0), "{}", run.stderr);
-        assert_eq!(run.json()["verified"], true);
+        assert_eq!(run.json()["verified"], true, "{}", run.stdout);
     }
     assert_eq!(stub.with(|s| s.refreshes), 1);
     let rotated =

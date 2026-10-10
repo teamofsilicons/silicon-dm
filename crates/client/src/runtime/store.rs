@@ -760,7 +760,12 @@ impl Store {
         loop {
             match lock.try_lock_exclusive() {
                 Ok(()) => break,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                // fs2 reports ERROR_LOCK_VIOLATION on Windows; Rust does not map it
+                // to WouldBlock. Compare fs2's platform error so contenders wait
+                // instead of returning an unverified, expired stored session.
+                Err(error)
+                    if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await
                 }
                 Err(error) => return Err(error.into()),
