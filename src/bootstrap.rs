@@ -210,8 +210,11 @@ pub(crate) fn build_ting_worker(
     use crate::infrastructure::{ting::TingSocket, ting_publisher::ProofTingPublisher};
     let publisher = state.settings.ting.base_url.clone().map(|base_url| {
         let socket = TingSocket::start(base_url, &state.settings.ting, cancellation);
-        Arc::new(ProofTingPublisher::new(state.identity.clone(), socket))
-            as crate::infrastructure::ting::SharedTingPublisher
+        Arc::new(ProofTingPublisher::new(
+            state.identity.clone(),
+            socket,
+            state.settings.ting.app_id.clone(),
+        )) as crate::infrastructure::ting::SharedTingPublisher
     });
     TingDeliveryWorker::new(state.clone(), publisher)
 }

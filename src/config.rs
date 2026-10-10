@@ -255,12 +255,18 @@ impl DataKey {
     }
 }
 
+/// Ting's app id in Silicon Accounts unless `DM_TING_APP_ID` names another.
+pub const DEFAULT_TING_APP_ID: &str = "ting";
+
 /// Ting delivery transport. Off unless `DM_TING_URL` is set.
 #[derive(Clone, Debug)]
 pub struct TingSettings {
     /// Ting API origin, without a path prefix or credentials. `None` disables delivery
     /// through Ting: messages are still stored and clients sync over `/api/v1/sync`.
     pub base_url: Option<Url>,
+    /// Ting's app id in Silicon Accounts: the receiving app of the proofs DM sends it
+    /// (`DM_TING_APP_ID`, default `ting`).
+    pub app_id: String,
     /// Maximum wait for a connection greeting or send acceptance.
     pub request_timeout: Duration,
 }
@@ -408,6 +414,8 @@ impl Settings {
                         })
                     })
                     .transpose()?,
+                app_id: optional("DM_TING_APP_ID")
+                    .unwrap_or_else(|| DEFAULT_TING_APP_ID.to_owned()),
                 request_timeout: duration_seconds("DM_TING_REQUEST_TIMEOUT_SECONDS", 15)?,
             },
             providers,
@@ -478,15 +486,7 @@ impl Settings {
                 "must be the app's webhook secret from Silicon Accounts (it starts with whsec_)",
             ));
         }
-        if let Some(ting) = &self.ting.base_url {
-            validate_url("DM_TING_URL", ting, self.environment)?;
-            if ting.path() != "/" {
-                return Err(invalid(
-                    "DM_TING_URL",
-                    "must be an origin without a path, query or fragment",
-                ));
-            }
-        }
+        self.validate_ting()?;
         validate_url(
             "DM_GIPHY_API_BASE_URL",
             &self.providers.giphy_api_base_url,
@@ -540,6 +540,28 @@ impl Settings {
                 "DM_DELIVERY_MAX_RETRY_SECONDS",
                 "is outside the supported retry timestamp range",
             ));
+        }
+        Ok(())
+    }
+
+    /// `DM_TING_APP_ID` names another app than DM, and `DM_TING_URL` (when set) is an
+    /// origin this environment may use.
+    fn validate_ting(&self) -> Result<(), SettingsError> {
+        validate_app_id("DM_TING_APP_ID", &self.ting.app_id)?;
+        if self.ting.app_id == self.accounts.app_id {
+            return Err(invalid(
+                "DM_TING_APP_ID",
+                "must be Ting's app id, not DM's own (Silicon Accounts never issues an app a proof for itself)",
+            ));
+        }
+        if let Some(ting) = &self.ting.base_url {
+            validate_url("DM_TING_URL", ting, self.environment)?;
+            if ting.path() != "/" {
+                return Err(invalid(
+                    "DM_TING_URL",
+                    "must be an origin without a path, query or fragment",
+                ));
+            }
         }
         Ok(())
     }
@@ -814,6 +836,7 @@ mod tests {
                     assert_eq!(settings.accounts.issuer, "http://localhost:9590");
                     assert_eq!(settings.accounts.api_url.as_str(), "http://localhost:9590/");
                     assert!(settings.ting.base_url.is_none(), "Ting is off by default");
+                    assert_eq!(settings.ting.app_id, "ting");
                     assert!(
                         settings.accounts.proof_issuers.is_empty(),
                         "no issuer by default"
@@ -867,6 +890,16 @@ mod tests {
                         "invalid environment variable DM_DATA_KEY: must decode to exactly 32 bytes, got 3"
                     );
                 }
+                "ting_app_is_dm" => {
+                    let error = loaded
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default();
+                    assert!(
+                        error.starts_with("invalid environment variable DM_TING_APP_ID: must be Ting's app id, not DM's own"),
+                        "{error}"
+                    );
+                }
                 "bad_proof_issuers" => {
                     let error = loaded
                         .err()
@@ -896,6 +929,7 @@ mod tests {
                         settings.ting.base_url.map(|url| url.to_string()).as_deref(),
                         Some("http://127.0.0.1:4122/")
                     );
+                    assert_eq!(settings.ting.app_id, "ting-staging");
                     assert_eq!(
                         Settings::obsolete_variables_present(),
                         vec!["DM_IAM_APP_SECRET"]
@@ -936,6 +970,7 @@ mod tests {
             &with("DM_ACCOUNTS_WEBHOOK_SECRET", "not-a-webhook-secret"),
         );
         run_child(TEST_NAME, "bad_data_key", &with("DM_DATA_KEY", "AAEC"));
+        run_child(TEST_NAME, "ting_app_is_dm", &with("DM_TING_APP_ID", "dm"));
         run_child(
             TEST_NAME,
             "bad_proof_issuers",
@@ -949,6 +984,7 @@ mod tests {
                 "dm.messages.read=interface, dm.conversations.read=interface",
             ),
             ("DM_TING_URL", "http://127.0.0.1:4122"),
+            ("DM_TING_APP_ID", "ting-staging"),
             ("DM_IAM_APP_SECRET", "left over"),
         ]);
         run_child(TEST_NAME, "with_options", &options);

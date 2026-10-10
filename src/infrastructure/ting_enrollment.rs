@@ -2,8 +2,9 @@
 //!
 //! Ting accepts a recipient only with a proof of the recipient's own agreement: a User
 //! verification proof DM obtains with the account's current DM access token (receiving
-//! app `ting`, scope `tings.subscribe`). DM enrols an account the first time it sees one
-//! of its requests; the proof's refresh token is kept encrypted with `DM_DATA_KEY`.
+//! app Ting, named by `DM_TING_APP_ID`; scope `tings.subscribe`). DM enrols an account
+//! the first time it sees one of its requests; the proof's refresh token is kept
+//! encrypted with `DM_DATA_KEY`.
 
 use std::sync::OnceLock;
 
@@ -66,12 +67,7 @@ async fn enrol(state: &AppState, context: &AuthContext) -> AppResult<()> {
     );
     let proof = match state
         .identity
-        .issue_user_verification(
-            token,
-            crate::infrastructure::ting_publisher::TING_APP_ID,
-            &[SUBSCRIBE_SCOPE],
-            &key,
-        )
+        .issue_user_verification(token, &state.settings.ting.app_id, &[SUBSCRIBE_SCOPE], &key)
         .await
     {
         Ok(proof) => proof,

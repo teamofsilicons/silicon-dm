@@ -48,6 +48,7 @@ See `.env.example` for every setting. Sign-in is Silicon Accounts only:
 | `DM_DATA_KEY` | yes | 32 random bytes, base64: keys sync cursors and the encryption of stored proofs. Keep it stable and backed up |
 | `DM_PROOF_ISSUERS` | no | Apps whose User verification proofs DM accepts, per scope (`dm.messages.write=interface,…`); empty accepts none |
 | `DM_TING_URL` | no | Ting delivery; unset means clients sync with `GET /api/v1/sync` |
+| `DM_TING_APP_ID` | no | Ting's app id in Silicon Accounts: the receiving app of the proofs DM sends Ting (default `ting`) |
 
 Plain `http` is accepted only for this machine. Database, Giphy, body-size, connection pool,
 timeout and worker settings are unchanged. Attachments are external links; no upload credentials

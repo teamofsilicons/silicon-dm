@@ -1,8 +1,8 @@
 //! Publishes durable handoffs to Ting with DM's own App verification proof.
 //!
 //! DM, not the account that caused an event, is the sender, so one App verification proof
-//! (receiving app `ting`, scope `tings.send`) covers every send. It is cached and replaced
-//! shortly before it expires; one refresh runs at a time.
+//! (receiving app Ting, named by `DM_TING_APP_ID`; scope `tings.send`) covers every send.
+//! It is cached and replaced shortly before it expires; one refresh runs at a time.
 
 use std::sync::Arc;
 
@@ -19,8 +19,6 @@ use crate::{
     },
 };
 
-/// The app id of Ting in Silicon Accounts.
-pub const TING_APP_ID: &str = "ting";
 /// Scope DM asks for to send to Ting.
 pub const SEND_SCOPE: &str = "tings.send";
 /// Replace the proof when it has less than this left.
@@ -35,16 +33,20 @@ struct CachedProof {
 pub struct ProofTingPublisher {
     identity: Arc<dyn IdentityProvider>,
     socket: TingSocket,
+    /// Ting's app id in Silicon Accounts (`DM_TING_APP_ID`).
+    ting_app: String,
     proof: Mutex<Option<CachedProof>>,
 }
 
 impl ProofTingPublisher {
-    /// A publisher over one prewarmed socket.
+    /// A publisher over one prewarmed socket; `ting_app` is Ting's app id in Silicon
+    /// Accounts (the receiving app of DM's proof).
     #[must_use]
-    pub fn new(identity: Arc<dyn IdentityProvider>, socket: TingSocket) -> Self {
+    pub fn new(identity: Arc<dyn IdentityProvider>, socket: TingSocket, ting_app: String) -> Self {
         Self {
             identity,
             socket,
+            ting_app,
             proof: Mutex::new(None),
         }
     }
@@ -60,7 +62,7 @@ impl ProofTingPublisher {
             let key = format!("dm-ting-send-{}", uuid::Uuid::now_v7());
             let issued = self
                 .identity
-                .issue_app_verification(TING_APP_ID, &[SEND_SCOPE], &key)
+                .issue_app_verification(&self.ting_app, &[SEND_SCOPE], &key)
                 .await
                 .map_err(|error| {
                     tracing::warn!(code = error.code(), "issuing DM's proof for Ting failed");

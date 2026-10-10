@@ -51,6 +51,7 @@ async fn fixture(request_timeout: Duration) -> TestResult<(TcpListener, Fixture)
     let base_url: url::Url = format!("http://{}", listener.local_addr()?).parse()?;
     let settings = TingSettings {
         base_url: Some(base_url.clone()),
+        app_id: "ting".to_owned(),
         request_timeout,
     };
     Ok((listener, Fixture { base_url, settings }))

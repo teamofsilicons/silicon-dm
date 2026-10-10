@@ -63,6 +63,7 @@ pub fn settings(
         data_key: DataKey::from_bytes([42; 32]),
         ting: TingSettings {
             base_url: None,
+            app_id: "ting".to_owned(),
             request_timeout: Duration::from_secs(5),
         },
         providers: ProviderSettings {
