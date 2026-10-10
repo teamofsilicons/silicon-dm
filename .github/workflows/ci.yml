@@ -220,3 +220,18 @@ jobs:
         run: |
           docker rm --force dm-api dm-worker dm-postgres || true
           docker network rm silicon-dm-ci || true
+
+  web:
+    runs-on: ubuntu-24.04
+    defaults: {run: {working-directory: web}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: {version: 10.33.0}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24, cache: pnpm, cache-dependency-path: web/pnpm-lock.yaml}
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build

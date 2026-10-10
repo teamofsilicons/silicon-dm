@@ -53,7 +53,8 @@ verification proofs (`Authorization: Proof sap_…`, receiving app `dm`) with th
 `dm.conversations.read`, `dm.messages.read`, `dm.messages.write`, `dm.receipts.write`,
 `dm.drafts.write`. DM accepts them only from the apps in `DM_PROOF_ISSUERS`; the stack parameter
 `ProofIssuers` names `interface` for all five, so if Interface's production app id differs, change
-the parameter. Interface builds against `silicon-dm-client` 0.15 (`Client::with_proof`), published
+the parameter. Messages Interface sends this way carry `via_app` with its app id, which the other
+participants see. Interface builds against `silicon-dm-client` 0.15 (`Client::with_proof`), published
 before the window (2.1). Interface builds that send IAM tokens and `X-Org-ID` stop working at the
 switch.
 
@@ -80,6 +81,8 @@ writing its handoff records and marks them discarded (`ting_not_configured`); cl
 sync feed. Nothing about Ting blocks the cutover. To turn delivery back on later, Ting must accept,
 from issuer `dm`, a User verification proof with scope `tings.subscribe` (enrolment, receiving app
 `ting`) and an App verification proof with scope `tings.send`; then set `TingUrl` with a stack update.
+DM names Ting's app id with `DM_TING_APP_ID` (default `ting`); the templates do not pass it, so only
+if Ting is registered at Silicon Accounts under another id does the task definition need it.
 
 ### The website
 
@@ -87,7 +90,7 @@ The SolidJS website and its token gateway sign in with the earlier system and st
 switch. The Next.js website that replaces them is built in the web stage of this migration and must
 deploy in the same window:
 
-- It is a standalone Next.js server (`NEXT_OUTPUT=standalone`) on the gateway host behind the DM
+- It is a standalone Next.js server (`NEXT_OUTPUT=standalone`) in a separate ECS service behind the DM
   ALB, at `https://dm.teamofsilicons.com`; it streams request and response bodies to
   `https://backend.dm.teamofsilicons.com` (messages reach 128 MiB, beyond what Vercel Functions
   accept).
@@ -97,8 +100,9 @@ deploy in the same window:
 - DNS: `dm.teamofsilicons.com` moves from Vercel to the DM ALB, with a listener rule for the host
   and a certificate that covers it. Its sign-in redirect is
   `https://dm.teamofsilicons.com/auth/callback` (2.3).
-- The deployment configuration (`deploy/aws/gateway.yaml` and its bootstrap) is rewritten with the
-  website; until then those files describe the SolidJS gateway.
+- The deployment configuration is `deploy/aws/web.yaml` and `README.web.md`. The old
+  `gateway.yaml` and bootstrap remain for rollback only; never use their stateful runtime
+  configuration with the new standalone image. Start the new stack with zero tasks until cutover.
 
 ### Order relative to the other apps
 
@@ -256,6 +260,11 @@ secret for the day, and register a variant of `silicon-dm-cutover` whose `DB_HOS
 `DB_SECRET_ARN` name the copy. Run `migrate`, `link-identities --dry-run` and `link-identities`
 against it, time them, sign in to a 0.15 service pointed at it if you can, then delete the copy
 and the temporary permission. It proves the mapping on real data and sizes the window.
+
+On the release commit, also run `scripts/e2e-accounts.sh` against a Silicon Accounts stack on a
+workstation ([tests/e2e/README.md](../../tests/e2e/README.md)): its eight scenarios exercise the
+release's sign-ins, webhook, proofs, Ting adapter, archive and restart behaviour with real tokens.
+Stage 4 of the migration ran it: 151/151 checks (progress.md).
 
 ## 3. The window
 
@@ -513,5 +522,6 @@ What changes on a machine that runs `dm` (the fleet's part is in section 1):
   the platform owners).
 - Silicon Interface sending User verification proofs instead of IAM tokens (same window).
 - The Silicon runtime switching to Silicon Apps installs, the new sign-in and `dm inbox --watch`.
-- The Next.js website and its deployment configuration (web stage of this migration).
+- Public-origin verification of the Next.js website and deployment in the coordinated window;
+  local implementation, build and browser evidence are recorded in `web-verification.md`.
 - Ting accepting Silicon Accounts proofs, only to turn Ting delivery back on (not for the cutover).

@@ -467,3 +467,7 @@ realistic documents: the parameter files name exactly the template's parameters.
 - Python tests that import the hyphenated scripts leave `__pycache__/` beside them; it is ignored
   now.
 - `psql` is not on PATH on this Mac: `/opt/homebrew/Cellar/postgresql@16/16.11_1/bin/psql`.
+
+## Recovery completion — Next.js website (2026-10-10)
+
+The web stage is now implemented and locally verified; see [web-verification.md](web-verification.md) for exact evidence, product coverage and release limits. Real backend/CLI checks151/151, frontend units44, TypeScript/lint/standalone build passed. Generic browser checks24 plus the corrected full product journey2/2 passed. Added a separate AWS website stack with the old gateway/state retained for rollback. No production actions performed.

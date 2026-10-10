@@ -279,3 +279,43 @@ with these additions:
 | S23 | The docs site links to `main` (it linked a retired release branch), its preview banner no longer names the earlier sign-in, and its package version follows DM's. | No current page may point at the retired systems. |
 | S24 | The relay's internal type `Tenant` (a home attached to the shared relay) keeps its name. | An internal name for a state directory, never shown; not an account grouping. |
 | S25 | The EC2 user data accepts only standard base64 for `DM_DATA_KEY`; the ECS bootstrap also accepts URL-safe base64, as the service does. | The EC2 template is the alternate path and its user data has a size limit; the documented `openssl rand -base64 32` is standard base64 either way. |
+
+## Stage 4 — end to end against Silicon Accounts (2026-10-10)
+
+A first session wrote the harness, found and fixed the bugs below and ran every scenario green across two runs, then
+stopped before committing; this session reviewed that work, fixed three Clippy findings, wrote the missing guide,
+ran the whole suite once more from a fresh database (151/151) and committed it.
+
+### The harness
+
+| # | Decision | Why |
+| --- | --- | --- |
+| E1 | Python 3 with the standard library only: `scripts/dev-accounts.sh` and `dev-accounts-stop.sh` (`scripts/dev_accounts.py up\|down\|restart\|status\|env`), `scripts/e2e-accounts.sh` (`tests/e2e/accounts_e2e.py`, scenarios 1–8, `--only`, `--keep-running`, `--run`) and `scripts/dev_ting_stub.py`. Identities come from the Silicon Accounts testkit through `tests/e2e/mint.mts` (`carbon`, `app-signin [--existing]`, `slt`), which takes the testkit and stack file from the environment and refuses a stack that is not on this machine. | DM's other operator scripts are Python (packager, release build, docs sync), so nothing new to install; the testkit is the stack's own way to drive the hosted pages and its mock email sender. |
+| E2 | The harness uses the stack the way an app and its people would: Carbons through the hosted pages (code exchange with DM's secret) and the device flow, Silicons created by their custodian (`POST /v1/me/silicons`) and signed in with short-lived tokens, the stack's own `silicon-accounts` CLI for `login --silicon`, `login --app dm -q` and `apps remove dm`. Each Carbon signs in once per run (`--existing` saves an email code). | The stack's per-address and per-network code limits are shared by every app's tests. `mint.mts silicon`/`approve` do the same two calls the harness makes directly. |
+| E3 | `dm-api` runs as a role holding only `deploy/runtime-grants.sql` (migrations as the database owner), on `127.0.0.1:4121` with the database `dm_e2e`. | Production's privileges: a missing grant fails here, not in the window. |
+| E4 | DM's webhook at the stack points at the local `dm-api` only while it runs, and `down` puts the earlier setup back (`http://127.0.0.1:9593/dm/webhooks`). The seeded secret is used; only if the stack refuses it does the script rotate the secret, keeping the new one in `.mig/dev/webhook-secret` (0600, untracked). This stage never rotated it. | The stage's setup; other stages rely on the seeded secret. |
+| E5 | The stack has no `ting` app, so scenario 6 runs `dm-api` with `DM_TING_APP_ID=interface` against a Ting stand-in on `127.0.0.1:4122` that checks every proof DM presents with `POST /v1/proofs/verify` using `interface`'s credentials and refuses a send on request (`recipient_not_registered`, `proof_expired`). | DM issues proofs only to Ting (cross-app matrix); the receiving side must verify them with a real app's credentials, and the testkit's fake `interface` is the only spare app. |
+| E6 | Scenario 7 builds the release CLI during the run and packs it for this machine's target (`macos-aarch64`); `silicon-apps validate` runs with an empty home and an unreachable server. | Linux archives come from the release workflow's native runners; the production sign-in of the `silicon-apps` on this Mac must never be used. |
+| E7 | Results go to `.mig/e2e/run-<n>/` (`result.json`, `transcript.txt`) with every token, short-lived token, STK, proof and secret redacted. CI only checks that the scripts parse. | Running the scenarios needs a Silicon Accounts stack, which CI does not have; the cutover runbook asks for a run on the release commit (2.7). |
+
+### Fixes the scenarios found
+
+| # | Decision | Why |
+| --- | --- | --- |
+| E8 | A token whose `iat` falls in the same second as an account's sign-out cutoff is decided by Silicon Accounts (introspection), and the answer is kept per token and cutoff for 30 minutes; tokens from earlier seconds are refused and from later seconds accepted. This supersedes stage 1's "benefit of the doubt" for the cutoff's own second. Proof requests are unaffected (proofs are verified with Silicon Accounts). | Scenario 5: a Silicon's access token minted just before it removed DM kept working, and its CLI kept saying `verified: true`, because token and removal shared a second. A Silicon that rotates its STK and signs straight back in still works: Silicon Accounts says that new sign-in is live. |
+| E9 | Routes that check the sign-in live (group owner and settings changes, member removal, message deletion, allow-list changes) ask Silicon Accounts on every request and reuse only a negative answer (30 s); a proof on such a route is verified afresh. | Scenario 5: after DM's website signed a Carbon out (`app_revoked`, which sets no cutoff), its next group change still went through for up to 30 s on a cached "active". These requests are rare, so asking each time costs little. |
+| E10 | Messages carry `via_app` (the app that sent it with a User verification proof) in the API, the client model and the OpenAPI document; the UNDERSTANDING proposal says so in one sentence. | Scenario 6: the column (0039) was written but never returned; D3 asks receiving apps to record the issuing app on what it creates, and the other participants should see how a message was sent. |
+| E11 | `DM_TING_APP_ID` (default `ting`) names Ting's app id for enrolment and send proofs; DM's own id is refused at boot. The deployment templates do not pass it (the default applies). | E5, and a staging Ting may be registered under another id. |
+| E12 | The CLI's relay answers a read at once when the profile's sign-in has ended (`authentication_required` with the reason) and keeps a change pending for the same account's next sign-in; a `--wait` that runs out on a pending change prints the last attempt's reason. | Scenario 5: `dm whoami` in a home whose sign-in had ended waited out its whole wait and said only "Request remains durably queued". |
+| E13 | Every visible CLI argument has a help line, and the help test fails for one without. | Positional arguments and several options showed no description in `dm … --help` (D5: help follows the code). |
+
+The first runs also failed on mistakes of the harness itself (a missing `Content-Type`, a CLI flag that does not
+exist, a check reading the wrong field of a delivery, a shadowed variable); those were fixed in the harness, not in
+DM. Nothing was found wrong in Silicon Accounts.
+
+## Website implementation (2026-10-10)
+
+- The shared Next/Arc BFF replaces Solid and the persistent gateway. A separate ECS website service uses `deploy/aws/web.yaml`, port4315 and the existing ALB; retained old gateway state is reserved for rollback. No migration code formats or copies that state.
+- Browser sessions are sealed HttpOnly cookies. A durable local outbox contains only the signed-in account’s pending message content/idempotency keys; it is scoped to the immutable account UUID. Same-origin writes and server-verified Accounts tokens protect service calls.
+- The service remains authoritative for custody, invitation, owner, allow-list and version conflicts. A conflict refreshes the query and preserves the person’s editor values for a deliberate retry.
+- Runtime request forwarding allows the service’s128MiB message body ceiling. One website replica preserves the refresh replay cache semantics; horizontal scaling needs shared coordination first.

@@ -1,10 +1,8 @@
 # Browser gateway and Vercel frontend
 
-> **Being replaced.** This page describes the SolidJS website and its token gateway. The Next.js
-> website that replaces them signs Carbons in with Silicon Accounts and runs as a standalone
-> Next.js server on this host, behind the DM ALB, at `dm.teamofsilicons.com`. Its configuration
-> arrives with the new website; the plan is in
-> [the cutover runbook](../../docs/migration/cutover.md#the-website).
+> **Retired at Accounts cutover.** This is the old Solid gateway. The Next.js website and its
+> separate stack are documented in [README.web.md](README.web.md). Keep this stack and its state
+> only for rollback. Do not run its bootstrap with the new Next standalone image.
 
 The SolidJS frontend runs on Vercel at `https://dm.teamofsilicons.com`.
 Its API and WebSocket traffic connects directly to

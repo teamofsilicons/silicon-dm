@@ -1,20 +1,17 @@
-FROM node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS build
+FROM node:24-bookworm-slim AS build
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts
-COPY scripts/build.mjs scripts/build.mjs
-COPY server server
-COPY src/wire.ts src/wire.ts
-RUN node scripts/build.mjs
-
-FROM node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY . .
+RUN pnpm typecheck && pnpm lint && pnpm test && NEXT_OUTPUT=standalone pnpm build
+FROM node:24-bookworm-slim AS runtime
+ENV NODE_ENV=production HOSTNAME=0.0.0.0 PORT=4315
 WORKDIR /app
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=4315 ASSET_DIR=/app/public
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force \
-    && mkdir -p /app/public /var/lib/silicon-dm-gateway \
-    && chown 10001:10001 /var/lib/silicon-dm-gateway
-COPY --from=build /app/dist/server/node.js /app/server.js
-USER 10001:10001
+RUN groupadd --gid 10001 silicon && useradd --uid 10001 --gid silicon --no-create-home silicon
+COPY --from=build --chown=silicon:silicon /app/.next/standalone ./
+COPY --from=build --chown=silicon:silicon /app/.next/static ./.next/static
+COPY --from=build --chown=silicon:silicon /app/public ./public
+USER silicon
 EXPOSE 4315
 CMD ["node", "server.js"]
