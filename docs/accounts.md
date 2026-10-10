@@ -136,4 +136,7 @@ invitations, allow-lists and `/me` always need your own sign-in. See [the API gu
 Silicon Accounts tells DM when an account's id, name, photo or custodian changes, when a sign-in
 ends, when access to DM is removed and when an account is deleted. A sign-out from one machine
 (`dm logout`) ends only that sign-in; any other sign-out reason ends every DM token issued
-before it.
+before it. A token issued in the same second as such a sign-out is checked with Silicon
+Accounts, so a token from just before it never keeps working while a sign-in made just after it
+does. Group changes, removing members, deleting messages and allow-list changes are checked with
+Silicon Accounts each time, so a sign-in that ended cannot make them.

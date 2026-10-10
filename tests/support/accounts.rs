@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use silicon_dm::domain::{ActorId, ActorRef, ActorType};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{body_partial_json, method, path},
+    matchers::{body_partial_json, body_string_contains, method, path},
 };
 
 pub const APP_ID: &str = "dm";
@@ -225,6 +225,27 @@ impl FakeAccounts {
                 "active": active, "sub": sub, "token_type": "Bearer"})))
             .mount(&self.server)
             .await;
+    }
+
+    /// Introspection of exactly this token answers `active`. With `times`, it answers so
+    /// only that many times and the fake checks it was asked exactly that often; without,
+    /// it is the token's answer whenever no counted one is left.
+    pub async fn introspection_of(&self, token: &str, active: bool, sub: &str, times: Option<u64>) {
+        let mock = Mock::given(method("POST"))
+            .and(path("/v1/oauth/introspect"))
+            .and(body_string_contains(token))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "active": active, "sub": sub, "token_type": "Bearer"})));
+        match times {
+            Some(times) => {
+                mock.with_priority(1)
+                    .up_to_n_times(times)
+                    .expect(times)
+                    .mount(&self.server)
+                    .await;
+            }
+            None => mock.with_priority(5).mount(&self.server).await,
+        }
     }
 
     /// Introspection answers active for every token, with the token's own subject (the

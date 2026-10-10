@@ -77,7 +77,6 @@ impl Directory<'_> {
     /// `session_revoked` / `account_deleted` (401), or storage failures.
     pub async fn admit(&self, context: &AuthContext) -> AppResult<StoredAccount> {
         let store = &self.state.store;
-        let own_token = context.access_token().is_some();
         let (stored, inserted) = store
             .record_authentication(
                 context.actor.id.as_str(),
@@ -92,11 +91,20 @@ impl Directory<'_> {
                 "This Silicon Accounts account was deleted; DM no longer accepts its sign-ins.",
             ));
         }
-        if own_token
-            && let Some(cutoff) = stored.revoked_before
-            && context
-                .issued_at
-                .is_none_or(|issued| issued_before(issued, cutoff))
+        if let (Some(token), Some(cutoff)) = (context.access_token(), stored.revoked_before)
+            && match context.issued_at.map(|issued| order(issued, cutoff)) {
+                None | Some(Order::Before) => true,
+                Some(Order::After) => false,
+                // The token's `iat` is in the cutoff's own second: only Silicon Accounts
+                // knows whether its sign-in ended with it.
+                Some(Order::SameSecond) => {
+                    !self
+                        .state
+                        .identity
+                        .sign_in_live(token, context.actor.id.as_str(), cutoff)
+                        .await?
+                }
+            }
         {
             let at = cutoff.format(&Rfc3339).unwrap_or_default();
             return Err(AppError::unauthenticated(
@@ -354,32 +362,61 @@ impl Directory<'_> {
     }
 }
 
-/// Whether a token issued at `issued` (its `iat`, whole seconds) certainly predates a
-/// sign-in cutoff (the webhook's `occurred_at`, sub-second). A token issued in the same
-/// second as the cutoff is given the benefit of the doubt: a Silicon that rotates its STK
-/// and signs straight back in must not be refused, and sensitive routes still ask
-/// Silicon Accounts live.
-fn issued_before(issued: OffsetDateTime, cutoff: OffsetDateTime) -> bool {
-    issued + time::Duration::SECOND <= cutoff
+/// Where a token issued at `issued` (its `iat`, whole seconds) stands against a sign-in
+/// cutoff (the webhook's `occurred_at`, milliseconds).
+#[derive(Debug, PartialEq, Eq)]
+enum Order {
+    /// Certainly issued before the cutoff: refused.
+    Before,
+    /// Certainly issued after it: accepted.
+    After,
+    /// In the cutoff's own second: either. A token from just before a removal must not
+    /// keep working, and a Silicon that rotates its STK and signs straight back in must
+    /// not be refused, so Silicon Accounts decides (introspection).
+    SameSecond,
+}
+
+fn order(issued: OffsetDateTime, cutoff: OffsetDateTime) -> Order {
+    if issued + time::Duration::SECOND <= cutoff {
+        Order::Before
+    } else if issued > cutoff {
+        Order::After
+    } else {
+        Order::SameSecond
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use time::macros::datetime;
 
-    use super::issued_before;
+    use super::{Order, order};
 
     #[test]
     fn sign_in_cutoffs_compare_at_the_precision_of_iat() {
         let cutoff = datetime!(2026-10-10 12:00:00.700 UTC);
-        assert!(issued_before(datetime!(2026-10-10 11:59:59 UTC), cutoff));
-        assert!(
-            !issued_before(datetime!(2026-10-10 12:00:00 UTC), cutoff),
-            "same second: maybe after the cutoff, so accepted"
+        assert_eq!(
+            order(datetime!(2026-10-10 11:59:59 UTC), cutoff),
+            Order::Before
         );
-        assert!(!issued_before(datetime!(2026-10-10 12:00:01 UTC), cutoff));
+        assert_eq!(
+            order(datetime!(2026-10-10 12:00:00 UTC), cutoff),
+            Order::SameSecond,
+            "issued anywhere in 12:00:00, before or after 12:00:00.700"
+        );
+        assert_eq!(
+            order(datetime!(2026-10-10 12:00:01 UTC), cutoff),
+            Order::After
+        );
         let whole = datetime!(2026-10-10 12:00:00 UTC);
-        assert!(issued_before(datetime!(2026-10-10 11:59:59 UTC), whole));
-        assert!(!issued_before(whole, whole));
+        assert_eq!(
+            order(datetime!(2026-10-10 11:59:59 UTC), whole),
+            Order::Before
+        );
+        assert_eq!(order(whole, whole), Order::SameSecond);
+        assert_eq!(
+            order(datetime!(2026-10-10 12:00:01 UTC), whole),
+            Order::After
+        );
     }
 }

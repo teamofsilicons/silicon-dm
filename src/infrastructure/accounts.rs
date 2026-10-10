@@ -34,8 +34,12 @@ use crate::{
 
 /// Minimum time between two JWKS downloads triggered by unknown key ids.
 const JWKS_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
-/// How long a live answer (introspection or proof verification) is reused.
+/// How long a live answer (introspection or proof verification) is reused. Routes that
+/// check the sign-in live reuse only negative answers (an ended sign-in never comes back).
 const LIVE_CACHE: Duration = Duration::from_secs(30);
+/// How long the answer for a token issued in the same second as a sign-out cutoff is kept
+/// (the longest access token lifetime; the cutoff is part of the key).
+const CUTOFF_DECISIONS: Duration = Duration::from_mins(30);
 /// Lookups DM allows itself per minute (Accounts allows 600 per app).
 const LOOKUPS_PER_MINUTE: u32 = 550;
 const MAX_CREDENTIAL_BYTES: usize = 8192;
@@ -43,7 +47,6 @@ const MAX_CREDENTIAL_BYTES: usize = 8192;
 /// One live verdict cached for a short time.
 #[derive(Clone)]
 enum LiveVerdict {
-    Active,
     Inactive,
     Proof(Box<ProofGrant>),
 }
@@ -80,6 +83,7 @@ struct Inner {
     jwks: RwLock<Option<Arc<Jwks>>>,
     jwks_fetched: Mutex<Option<Instant>>,
     live: Mutex<HashMap<[u8; 32], (Instant, LiveVerdict)>>,
+    cutoff_decisions: Mutex<HashMap<[u8; 32], (Instant, bool)>>,
     budget: Mutex<LookupBudget>,
 }
 
@@ -110,6 +114,7 @@ impl AccountsAdapter {
                 jwks: RwLock::new(None),
                 jwks_fetched: Mutex::new(None),
                 live: Mutex::new(HashMap::new()),
+                cutoff_decisions: Mutex::new(HashMap::new()),
                 budget: Mutex::new(LookupBudget {
                     tokens: f64::from(LOOKUPS_PER_MINUTE),
                     refreshed: Instant::now(),
@@ -251,35 +256,19 @@ impl AccountsAdapter {
             ));
         }
         if requirement.live {
+            // These routes must see a sign-out at once, so Silicon Accounts is asked every
+            // time; only a negative answer is reused (an ended sign-in never comes back).
             let key = *blake3::hash(raw.as_bytes()).as_bytes();
-            let verdict = if let Some(verdict) = self.cached_live(&key).await {
-                verdict
+            let active = if matches!(self.cached_live(&key).await, Some(LiveVerdict::Inactive)) {
+                false
             } else {
-                let app = self
-                    .inner
-                    .client
-                    .as_app(&self.inner.app_id, self.inner.app_secret.expose_secret());
-                let introspection = app.introspect(raw).await.map_err(|error| {
-                    tracing::warn!(
-                        dependency = "accounts",
-                        code = error.code(),
-                        "introspection failed"
-                    );
-                    AppError::DependencyUnavailable {
-                        dependency: "accounts",
-                    }
-                })?;
-                let verdict = if introspection.active
-                    && introspection.sub.as_deref() == Some(claims.sub.as_str())
-                {
-                    LiveVerdict::Active
-                } else {
-                    LiveVerdict::Inactive
-                };
-                self.remember_live(key, verdict.clone()).await;
-                verdict
+                let active = self.introspect(raw, &claims.sub).await?;
+                if !active {
+                    self.remember_live(key, LiveVerdict::Inactive).await;
+                }
+                active
             };
-            if !matches!(verdict, LiveVerdict::Active) {
+            if !active {
                 return Err(AppError::unauthenticated(
                     "session_revoked",
                     "Silicon Accounts says this sign-in has ended (signed out, access removed or account deleted). Sign in to DM again.",
@@ -322,62 +311,14 @@ impl AccountsAdapter {
         let raw = proof.expose_secret();
         let key = *blake3::hash(format!("proof:{raw}").as_bytes()).as_bytes();
         let grant = match self.cached_live(&key).await {
-            Some(LiveVerdict::Proof(grant)) if grant.expires_at > OffsetDateTime::now_utc() => {
+            // A route that checks live never rests on a cached positive answer.
+            Some(LiveVerdict::Proof(grant))
+                if !requirement.live && grant.expires_at > OffsetDateTime::now_utc() =>
+            {
                 grant
             }
             Some(LiveVerdict::Inactive) => return Err(invalid_proof()),
-            _ => {
-                let app = self
-                    .inner
-                    .client
-                    .as_app(&self.inner.app_id, self.inner.app_secret.expose_secret());
-                let verification = app.verify_proof(raw).await.map_err(|error| {
-                    tracing::warn!(
-                        dependency = "accounts",
-                        code = error.code(),
-                        "proof verification failed"
-                    );
-                    AppError::DependencyUnavailable {
-                        dependency: "accounts",
-                    }
-                })?;
-                let ProofVerification::Valid(valid) = verification else {
-                    self.remember_live(key, LiveVerdict::Inactive).await;
-                    return Err(invalid_proof());
-                };
-                let (ProofKind::UserVerification, Some(user)) = (&valid.kind, &valid.user) else {
-                    return Err(AppError::forbidden(
-                        "proof_not_accepted",
-                        "DM accepts only User verification proofs (an app acting for one account), not App verification proofs.",
-                    ));
-                };
-                if valid.receiving_app.app_id != self.inner.app_id {
-                    return Err(invalid_proof());
-                }
-                let kind = match user.kind {
-                    Some(AccountKind::Silicon) => ActorType::Silicon,
-                    Some(AccountKind::Carbon) => ActorType::Carbon,
-                    _ if user.id.starts_with("si:") => ActorType::Silicon,
-                    _ => ActorType::Carbon,
-                };
-                let grant = Box::new(ProofGrant {
-                    actor: ActorRef {
-                        actor_type: kind,
-                        id: ActorId::from_storage_key(user.uuid.clone()),
-                    },
-                    public_id: user.id.clone(),
-                    membership_id: user.membership_id.clone(),
-                    issuing_app: valid.issuing_app.app_id.clone(),
-                    scopes: valid.scopes.iter().cloned().collect(),
-                    expires_at: valid.expires_at,
-                });
-                if !crate::domain::is_account_uuid(&user.uuid) {
-                    return Err(invalid_proof());
-                }
-                self.remember_live(key, LiveVerdict::Proof(grant.clone()))
-                    .await;
-                grant
-            }
+            _ => self.verify_proof_live(raw, key).await?,
         };
         if !grant.scopes.contains(scope) {
             return Err(AppError::forbidden(
@@ -410,6 +351,80 @@ impl AccountsAdapter {
             issued_at: None,
             expires_at: grant.expires_at,
         })
+    }
+
+    /// Asks Silicon Accounts about a proof (`POST /v1/proofs/verify` with DM's credentials)
+    /// and remembers the answer under `key`: a User verification proof made for DM, for an
+    /// account with a valid uuid, becomes a grant; anything else is refused.
+    async fn verify_proof_live(&self, raw: &str, key: [u8; 32]) -> AppResult<Box<ProofGrant>> {
+        let app = self
+            .inner
+            .client
+            .as_app(&self.inner.app_id, self.inner.app_secret.expose_secret());
+        let verification = app.verify_proof(raw).await.map_err(|error| {
+            tracing::warn!(
+                dependency = "accounts",
+                code = error.code(),
+                "proof verification failed"
+            );
+            AppError::DependencyUnavailable {
+                dependency: "accounts",
+            }
+        })?;
+        let ProofVerification::Valid(valid) = verification else {
+            self.remember_live(key, LiveVerdict::Inactive).await;
+            return Err(invalid_proof());
+        };
+        let (ProofKind::UserVerification, Some(user)) = (&valid.kind, &valid.user) else {
+            return Err(AppError::forbidden(
+                "proof_not_accepted",
+                "DM accepts only User verification proofs (an app acting for one account), not App verification proofs.",
+            ));
+        };
+        if valid.receiving_app.app_id != self.inner.app_id
+            || !crate::domain::is_account_uuid(&user.uuid)
+        {
+            return Err(invalid_proof());
+        }
+        let kind = match user.kind {
+            Some(AccountKind::Silicon) => ActorType::Silicon,
+            Some(AccountKind::Carbon) => ActorType::Carbon,
+            _ if user.id.starts_with("si:") => ActorType::Silicon,
+            _ => ActorType::Carbon,
+        };
+        let grant = Box::new(ProofGrant {
+            actor: ActorRef {
+                actor_type: kind,
+                id: ActorId::from_storage_key(user.uuid.clone()),
+            },
+            public_id: user.id.clone(),
+            membership_id: user.membership_id.clone(),
+            issuing_app: valid.issuing_app.app_id.clone(),
+            scopes: valid.scopes.iter().cloned().collect(),
+            expires_at: valid.expires_at,
+        });
+        self.remember_live(key, LiveVerdict::Proof(grant.clone()))
+            .await;
+        Ok(grant)
+    }
+
+    /// Asks Silicon Accounts whether the access token is still live for `sub`.
+    async fn introspect(&self, raw: &str, sub: &str) -> AppResult<bool> {
+        let app = self
+            .inner
+            .client
+            .as_app(&self.inner.app_id, self.inner.app_secret.expose_secret());
+        let introspection = app.introspect(raw).await.map_err(|error| {
+            tracing::warn!(
+                dependency = "accounts",
+                code = error.code(),
+                "introspection failed"
+            );
+            AppError::DependencyUnavailable {
+                dependency: "accounts",
+            }
+        })?;
+        Ok(introspection.active && introspection.sub.as_deref() == Some(sub))
     }
 
     async fn spend_lookup(&self) -> AppResult<()> {
@@ -540,6 +555,36 @@ impl IdentityProvider for AccountsAdapter {
             }
             PresentedCredential::Proof(proof) => self.authenticate_proof(proof, requirement).await,
         }
+    }
+
+    async fn sign_in_live(
+        &self,
+        token: &SecretString,
+        uuid: &str,
+        cutoff: OffsetDateTime,
+    ) -> AppResult<bool> {
+        let raw = token.expose_secret();
+        let key =
+            *blake3::hash(format!("cutoff:{}:{raw}", cutoff.unix_timestamp_nanos()).as_bytes())
+                .as_bytes();
+        {
+            let mut decisions = self.inner.cutoff_decisions.lock().await;
+            if decisions.len() > 10_000 {
+                decisions.retain(|_, (at, _)| at.elapsed() < CUTOFF_DECISIONS);
+            }
+            if let Some((at, live)) = decisions.get(&key)
+                && at.elapsed() < CUTOFF_DECISIONS
+            {
+                return Ok(*live);
+            }
+        }
+        let live = self.introspect(raw, uuid).await?;
+        self.inner
+            .cutoff_decisions
+            .lock()
+            .await
+            .insert(key, (Instant::now(), live));
+        Ok(live)
     }
 
     async fn lookup(&self, uuid: &str) -> AppResult<AccountLookup> {

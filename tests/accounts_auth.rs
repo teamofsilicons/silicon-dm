@@ -172,11 +172,15 @@ async fn sign_outs_cut_off_older_tokens_except_dms_own_revocation() -> Result<()
     assert_eq!(refused.0, StatusCode::UNAUTHORIZED);
     assert_eq!(refused.1["error"]["code"], "session_revoked");
     // A sign-in after the event works, even one in the same second (iat has whole seconds:
-    // a Silicon that rotates its STK and signs straight back in is not refused).
+    // a Silicon that rotates its STK and signs straight back in is not refused); Silicon
+    // Accounts says whether a same-second token's sign-in is the one that ended.
     let same_second = app.accounts.token_with(
         &ada,
         &json!({"iat": event.unix_timestamp(), "nbf": event.unix_timestamp() - 1}),
     );
+    app.accounts
+        .introspection_of(&same_second, true, "a8K", Some(1))
+        .await;
     expect_status(&app.get("/api/v1/me", &same_second).await?, StatusCode::OK)?;
     let later = app
         .accounts
@@ -188,6 +192,86 @@ async fn sign_outs_cut_off_older_tokens_except_dms_own_revocation() -> Result<()
         &json!({"iat": event.unix_timestamp() - 1, "nbf": event.unix_timestamp() - 2}),
     );
     let refused = app.get("/api/v1/me", &second_before).await?;
+    assert_eq!(refused.1["error"]["code"], "session_revoked");
+    app.close().await
+}
+
+#[tokio::test]
+async fn a_token_from_the_cutoffs_own_second_is_decided_by_silicon_accounts() -> Result<(), BoxError>
+{
+    let app = TestApp::start().await?;
+    let ada = TestAccount::carbon("a8K", "c:ada");
+    app.accounts.add_account(&ada).await;
+    let event = time::OffsetDateTime::now_utc();
+    let second = event.unix_timestamp();
+    // Two tokens from the second Ada removed DM's access in: one from the sign-in that the
+    // removal ended, one from a sign-in made just after it. `iat` cannot tell them apart.
+    let ended = app
+        .accounts
+        .token_with(&ada, &json!({"iat": second, "nbf": second - 1}));
+    let fresh = app
+        .accounts
+        .token_with(&ada, &json!({"iat": second, "nbf": second - 1}));
+    app.accounts
+        .introspection_of(&ended, false, "a8K", Some(1))
+        .await;
+    app.accounts
+        .introspection_of(&fresh, true, "a8K", Some(1))
+        .await;
+    // Before any sign-out nothing needs asking.
+    expect_status(&app.get("/api/v1/me", &ended).await?, StatusCode::OK)?;
+    let at = event.format(&time::format_description::well_known::Rfc3339)?;
+    let (headers, body) = webhook(
+        "membership.access_removed",
+        &json!({"uuid": "a8K", "membership_id": "dm:a8K"}),
+        &at,
+    );
+    assert_eq!(app.deliver(&headers, &body).await?, StatusCode::NO_CONTENT);
+    for _ in 0..2 {
+        let refused = app.get("/api/v1/me", &ended).await?;
+        assert_eq!(refused.0, StatusCode::UNAUTHORIZED, "{}", refused.1);
+        assert_eq!(refused.1["error"]["code"], "session_revoked");
+        expect_status(&app.get("/api/v1/me", &fresh).await?, StatusCode::OK)?;
+    }
+    // Each token was asked about once: the answer is kept for that token and cutoff.
+    app.accounts.server.verify().await;
+    app.close().await
+}
+
+#[tokio::test]
+async fn sensitive_routes_never_rest_on_a_cached_live_answer() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let ada = TestAccount::carbon("a8K", "c:ada");
+    let bob = TestAccount::carbon("B0b", "c:bob");
+    let cos = TestAccount::silicon("K1E", "si:cos", &ada);
+    app.accounts.add_accounts(&[&ada, &bob, &cos]).await;
+    let token = app.accounts.token(&cos);
+    // Live for the first change; then the sign-in ends (DM's own sign-out sends no cutoff,
+    // so only Silicon Accounts knows).
+    app.accounts
+        .introspection_of(&token, true, "K1E", Some(1))
+        .await;
+    app.accounts
+        .introspection_of(&token, false, "K1E", None)
+        .await;
+    let allowed = app
+        .post(
+            "/api/v1/allow-list",
+            &token,
+            json!({"account_ids": ["c:bob"]}),
+        )
+        .await?;
+    expect_status(&allowed, StatusCode::OK)?;
+    let refused = app
+        .call(
+            Method::DELETE,
+            "/api/v1/allow-list",
+            Some(&token),
+            Some(json!({"account_ids": ["c:bob"]})),
+            &[],
+        )
+        .await?;
+    assert_eq!(refused.0, StatusCode::UNAUTHORIZED, "{}", refused.1);
     assert_eq!(refused.1["error"]["code"], "session_revoked");
     app.close().await
 }

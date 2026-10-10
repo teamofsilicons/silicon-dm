@@ -147,6 +147,20 @@ pub trait IdentityProvider: Send + Sync {
         requirement: AuthRequirement,
     ) -> AppResult<AuthContext>;
 
+    /// Whether the sign-in behind `token` (an access token of `uuid`) is still live at
+    /// Silicon Accounts. Asked when the token's `iat` (whole seconds) falls in the same
+    /// second as the account's sign-out `cutoff`, so `iat` cannot tell which came first.
+    /// The answer for one token and cutoff is kept for the token's lifetime.
+    ///
+    /// # Errors
+    /// `dependency_unavailable` when Silicon Accounts cannot be asked.
+    async fn sign_in_live(
+        &self,
+        token: &SecretString,
+        uuid: &str,
+        cutoff: OffsetDateTime,
+    ) -> AppResult<bool>;
+
     /// `GET /v1/accounts/{uuid}`.
     async fn lookup(&self, uuid: &str) -> AppResult<AccountLookup>;
 
