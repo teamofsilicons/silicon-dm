@@ -1,8 +1,21 @@
 #!/bin/sh
-# Compatibility entry point. Honeycomb owns installation and updates.
+# Install the dm command. Silicon Apps installs DM and keeps it updated; this
+# script only hands over to it (the docs site serves it at /install.sh).
 set -eu
-if ! command -v honeycomb >/dev/null 2>&1; then
-  printf '%s\n' 'Install Honeycomb first: https://docs.honeycomb.teamofsilicons.com/' >&2
+apps=$(command -v silicon-apps 2>/dev/null || true)
+if [ -z "$apps" ] && [ -x "${SILICON_HOME:-$HOME}/.apps/bin/silicon-apps" ]; then
+  apps="${SILICON_HOME:-$HOME}/.apps/bin/silicon-apps"
+fi
+if [ -z "$apps" ]; then
+  cat >&2 <<'EOF'
+dm is installed and updated by Silicon Apps, which is not installed here.
+Install it, then run this script again (or `silicon-apps install dm`):
+
+  curl -fsSL https://apps.teamofsilicons.com/install.sh -o install-apps.sh
+  bash install-apps.sh --server https://apps.teamofsilicons.com
+
+More: https://developers.teamofsilicons.com/docs/apps/start/install
+EOF
   exit 1
 fi
-exec honeycomb install 'dm'
+exec "$apps" install dm
