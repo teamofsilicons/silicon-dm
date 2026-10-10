@@ -258,3 +258,30 @@ fn retry_delay(attempt: i64, maximum: Duration) -> Duration {
     let shift = u32::try_from(attempt).unwrap_or(31).min(31);
     Duration::from_secs(1_u64 << shift).min(maximum.max(Duration::from_secs(1)))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::retry_delay;
+
+    #[test]
+    fn refused_handoffs_back_off_exponentially_up_to_the_maximum() {
+        let maximum = Duration::from_secs(300);
+        assert_eq!(retry_delay(0, maximum), Duration::from_secs(1));
+        assert_eq!(retry_delay(1, maximum), Duration::from_secs(2));
+        assert_eq!(retry_delay(5, maximum), Duration::from_secs(32));
+        assert_eq!(retry_delay(9, maximum), maximum);
+        assert_eq!(retry_delay(i64::MAX, maximum), maximum);
+        assert_eq!(
+            retry_delay(-1, maximum),
+            maximum,
+            "a corrupt count never busy-loops"
+        );
+        assert_eq!(
+            retry_delay(3, Duration::ZERO),
+            Duration::from_secs(1),
+            "never below a second"
+        );
+    }
+}
