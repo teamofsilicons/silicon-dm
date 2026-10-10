@@ -12,7 +12,9 @@ It reads the cluster, the bootstrap task definition and the task security group 
 stack's outputs and the private subnets from its parameters, starts the task in the app
 security group (the only place that reaches the database), waits for it to stop, prints its
 CloudWatch log and exits with the container's exit code. `--mapping` passes the file as
-DM_IDENTITY_MAPPING. `--print-only` prints the run-task request and starts nothing.
+DM_IDENTITY_MAPPING. `--task-definition` runs another task definition than the stack's
+(for example a one-off one with a newer image, before the stack is updated). `--print-only`
+prints the run-task request and starts nothing.
 
 Uses the AWS CLI with your usual credentials (AWS_PROFILE, AWS_REGION, or --profile/--region).
 """
@@ -123,6 +125,7 @@ def main(argv=None):
     parser.add_argument("--stack", required=True, help="DM's Fargate CloudFormation stack")
     parser.add_argument("--mapping", help="mapping CSV passed as DM_IDENTITY_MAPPING (link-identities)")
     parser.add_argument("--print-only", action="store_true", help="print the run-task request; start nothing")
+    parser.add_argument("--task-definition", help="task definition to run instead of the stack's bootstrap one")
     parser.add_argument("--profile")
     parser.add_argument("--region")
     parser.add_argument("--poll-seconds", type=float, default=10)
@@ -139,6 +142,8 @@ def main(argv=None):
         document = overrides(command, mapping_text)
         stack = aws(["cloudformation", "describe-stacks", "--stack-name", args.stack], args.profile, args.region)
         settings = stack_settings((stack.get("Stacks") or [{}])[0])
+        if args.task_definition:
+            settings["task_definition"] = args.task_definition
         with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="dm-bootstrap-override-") as handle:
             json.dump(document, handle)
             handle.flush()

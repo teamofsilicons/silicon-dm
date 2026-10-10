@@ -111,6 +111,13 @@ class RunBootstrapTask(unittest.TestCase):
                          [{"name": "DM_IDENTITY_MAPPING", "value": "iam_principal_id,accounts_uuid\nc:saket,zQo\n"}])
         self.assertIn("link-identities failed", out)
 
+    def test_another_task_definition_can_be_named(self):
+        code, _, err, calls = self.run_main(["--task-definition", "silicon-dm-cutover", "draft-identity-mapping"])
+        self.assertEqual(code, 0, err)
+        run = calls[1]["args"]
+        self.assertEqual(run[run.index("--task-definition") + 1], "silicon-dm-cutover")
+        self.assertEqual(calls[1]["overrides"]["containerOverrides"][0]["command"], ["draft-identity-mapping"])
+
     def test_print_only_starts_nothing(self):
         code, out, _, calls = self.run_main(["--print-only", "status"])
         self.assertEqual(code, 0)
