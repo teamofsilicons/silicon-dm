@@ -126,10 +126,11 @@ jobs:
             --env DM_PUBLIC_BASE_URL=http://localhost:8080/api/v1
             --env DM_DATABASE_URL=postgres://dm_runtime:runtime-pass@postgres:5432/silicon_dm
             --env DM_DATABASE_MAX_CONNECTIONS=4
-            --env DM_IAM_BASE_URL=http://localhost:8081
-            --env 'DM_IAM_APP_ID=dm'
-            --env DM_IAM_APP_SECRET=ci-only-secret
-            --env DM_IAM_WEBHOOK_SECRET=ci-only-webhook-secret-at-least-thirty-two-characters
+            --env ACCOUNTS_URL=http://localhost:8081
+            --env DM_APP_ID=dm
+            --env DM_APP_SECRET=ci-only-secret
+            --env DM_ACCOUNTS_WEBHOOK_SECRET=whsec_ci-only-webhook-secret
+            --env DM_DATA_KEY=Y2ktb25seS1kYXRhLWtleS10aGlydHktdHdvLWJ5dGU=
             --env DM_GIPHY_API_KEY=ci-only-key
           )
           docker run --detach --name dm-api --network silicon-dm-ci \

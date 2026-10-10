@@ -1,5 +1,5 @@
 //! Local API lifecycle accounting, negotiation, and compatibility discovery.
-use crate::{AppResult, application::state::AppState, config::TingSettings};
+use crate::{AppResult, application::state::AppState};
 use axum::{
     Json,
     extract::{Request, State},
@@ -9,42 +9,46 @@ use axum::{
 };
 use serde_json::{Value, json};
 
+/// The HTTP contract this build speaks (`x-dm-contract-version`).
+pub(crate) const HTTP_CONTRACT_VERSION: i32 = 4;
+
 pub(super) fn is_retired_socket(path: &str) -> bool {
     matches!(path, "/api/v1/ws" | "/api/v1/ws/shared")
 }
 
-pub(super) fn delivery(settings: &TingSettings) -> Value {
+/// How updates reach clients: Ting when configured, otherwise `/api/v1/sync` (with a
+/// long-poll), which works either way.
+pub(super) fn delivery(state: &AppState) -> Value {
+    let ting = state.settings.ting.base_url.as_ref();
     json!({
-        "transport":"ting",
-        "app_id":"ting",
-        "api_base_url":settings.base_url,
-        "browser_origin":"https://ting.teamofsilicons.com",
-        "receiver_authentication":"ting_session",
-        "publisher_authority":"originating_dm_session",
-        "registration_path":"/api/v1/delivery/registration",
-        "sync_path":"/api/v1/sync",
-        "presence_path":"/api/v1/presence/devices/{device_id}",
-        "receipts_path":"/api/v1/conversations/{conversation_id}/messages/{message_id}/receipts",
-        "dm_websocket_supported":false
+        "transport": if ting.is_some() { "ting" } else { "sync" },
+        "ting_enabled": ting.is_some(),
+        "ting_api_base_url": ting,
+        "enrolment": if ting.is_some() { "automatic on sign-in (User verification proof, scope tings.subscribe)" } else { "none: Ting is not configured for this DM" },
+        "sync_path": "/api/v1/sync",
+        "sync_long_poll_seconds": super::sync::MAX_WAIT_SECONDS,
+        "presence_path": "/api/v1/presence/devices/{device_id}",
+        "receipts_path": "/api/v1/conversations/{conversation_id}/messages/{message_id}/receipts",
+        "dm_websocket_supported": false
     })
 }
 
-fn retirement_response(settings: &TingSettings) -> Response {
+fn retirement_response(delivery: &Value) -> Response {
     (StatusCode::GONE, Json(json!({
         "error":{
-            "code":"delivery_moved_to_ting",
-            "message":"DM WebSocket delivery has retired. Enroll with POST /api/v1/delivery/registration, receive updates through Ting, and recover through GET /api/v1/sync. Use DM HTTP routes for messages, receipts, and presence."
+            "code":"delivery_moved",
+            "message":"DM WebSocket delivery has retired. Receive updates with GET /api/v1/sync?wait=30 (or through Ting where configured). Use DM HTTP routes for messages, receipts, and presence."
         },
-        "delivery":delivery(settings)
+        "delivery":delivery
     }))).into_response()
 }
 
 pub(super) async fn retired(State(state): State<AppState>) -> Response {
-    retirement_response(&state.settings.ting)
+    retirement_response(&delivery(&state))
 }
 
 fn selected(request: &Request) -> Result<(&'static str, i32), &'static str> {
-    let (family, current, header) = ("http", 3, "x-dm-contract-version");
+    let (family, current, header) = ("http", HTTP_CONTRACT_VERSION, "x-dm-contract-version");
     let mut values = request.headers().get_all(header).iter();
     let first = values.next();
     if values.next().is_some() {
@@ -74,7 +78,7 @@ pub(super) async fn negotiate(
     }
     let (family,version)=match selected(&request) {
         Ok(selected)=>selected,
-        Err(message)=>return (StatusCode::NOT_ACCEPTABLE,Json(json!({"error":{"code":"unsupported_contract","message":message},"compatible":{"http":[3]}}))).into_response(),
+        Err(message)=>return (StatusCode::NOT_ACCEPTABLE,Json(json!({"error":{"code":"unsupported_contract","message":message},"compatible":{"http":[HTTP_CONTRACT_VERSION]}}))).into_response(),
     };
     if !request.uri().path().ends_with("/contracts") {
         match admit(&state,family,version).await {
@@ -86,7 +90,7 @@ pub(super) async fn negotiate(
     let mut response = next.run(request).await;
     response
         .headers_mut()
-        .insert("x-dm-contract-version", HeaderValue::from_static("3"));
+        .insert("x-dm-contract-version", HeaderValue::from_static("4"));
     response
 }
 
@@ -120,7 +124,7 @@ pub(super) async fn describe(State(state): State<AppState>) -> AppResult<Json<se
             .fetch_all(state.store.pool())
             .await?;
     Ok(Json(
-        json!({"service":"silicon-dm","service_version":env!("CARGO_PKG_VERSION"),"contracts":rows,"compatibility":[{"http":3}],"delivery":delivery(&state.settings.ting),"retired_routes":["/api/v1/ws","/api/v1/ws/shared"],"features":{"groups":{"minimum_client":"0.7.0","id_format":"g:{organization}:{creation-name-slug}","ids_immutable":true,"legacy_uuid_aliases":true,"guide":"https://docs.dm.teamofsilicons.com/groups/"}},"policy":{"breaking_changes":"breaking wire changes require a coordinated client upgrade; retired DM socket routes return 410 delivery_moved_to_ting; unsupported explicit HTTP versions are rejected","additive_changes":"optional fields only","sunset_after_idle_days":7,"deprecation_required":true},"docs":"https://docs.dm.teamofsilicons.com/contracts/"}),
+        json!({"service":"silicon-dm","service_version":env!("CARGO_PKG_VERSION"),"contracts":rows,"compatibility":[{"http":HTTP_CONTRACT_VERSION}],"identity":{"provider":"silicon-accounts","accounts_url":state.settings.accounts.issuer,"app_id":state.settings.accounts.app_id,"bearer":"Silicon Accounts access token issued to the app","proof_scopes":crate::config::PROOF_SCOPES},"delivery":delivery(&state),"retired_routes":["/api/v1/ws","/api/v1/ws/shared","/api/v1/auth/*","/api/v1/iam","/api/v1/testing-environments*","/api/v1/delivery/authorization*","/api/v1/delivery/registration"],"features":{"groups":{"minimum_client":"0.15.0","id_format":"g:{name-slug} (older groups keep g:{org}:{name-slug})","ids_immutable":true,"legacy_uuid_aliases":true,"owners":"co-equal","invitations":"accept or decline","guide":"https://docs.dm.teamofsilicons.com/groups/"},"accounts":{"actor_refs":"{type, id: current c:/si: id, uuid}","custodians":"read their Silicons' conversations","silicon_allow_list":"/api/v1/allow-list"}},"policy":{"breaking_changes":"breaking wire changes require a coordinated client upgrade; contract 4 moved identity to Silicon Accounts; unsupported explicit HTTP versions are rejected","additive_changes":"optional fields only","sunset_after_idle_days":7,"deprecation_required":true},"docs":"https://docs.dm.teamofsilicons.com/contracts/"}),
     ))
 }
 
@@ -130,7 +134,7 @@ mod tests {
     #[test]
     fn negotiation_rejects_unsupported_and_duplicate_versions()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (path, header, good) = ("/api/v1/iam", "x-dm-contract-version", "3");
+        let (path, header, good) = ("/api/v1/me", "x-dm-contract-version", "4");
         let req = Request::builder()
             .uri(path)
             .header(header, good)
@@ -155,17 +159,14 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use axum::{Router, body::Body, routing::get};
         use tower::ServiceExt as _;
-        let settings = TingSettings {
-            base_url: "https://backend.ting.teamofsilicons.com".parse()?,
-            request_timeout: std::time::Duration::from_secs(5),
-        };
+        let delivery = json!({"sync_path": "/api/v1/sync", "dm_websocket_supported": false});
         for path in ["/api/v1/ws", "/api/v1/ws/shared"] {
             assert!(is_retired_socket(path));
-            let settings = settings.clone();
+            let delivery = delivery.clone();
             let router = Router::new()
                 .route(
                     path,
-                    get(move || async move { retirement_response(&settings) }),
+                    get(move || async move { retirement_response(&delivery) }),
                 )
                 .layer(axum::middleware::from_fn(silicon_dm_protocol::responses));
             let response = router
@@ -177,7 +178,7 @@ mod tests {
                 &axum::body::to_bytes(response.into_body(), 16 * 1024).await?,
             )?;
             assert_eq!(body["type"], "error");
-            assert_eq!(body["data"]["error"]["code"], "delivery_moved_to_ting");
+            assert_eq!(body["data"]["error"]["code"], "delivery_moved");
             assert_eq!(body["data"]["delivery"]["sync_path"], "/api/v1/sync");
             assert_eq!(body["data"]["delivery"]["dm_websocket_supported"], false);
         }

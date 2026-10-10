@@ -1,5 +1,7 @@
 //! PostgreSQL pool and durable store.
 
+mod accounts;
+mod allow_list;
 mod bundles;
 mod conversations;
 mod delivery;
@@ -8,8 +10,8 @@ mod drafts;
 mod group_ids;
 pub(crate) mod groups;
 mod http_presence;
-mod iam_directory;
 mod idempotency;
+pub mod link_identities;
 mod messages;
 mod presence;
 mod public_messages;
@@ -28,11 +30,16 @@ use crate::{
     config::{DatabaseSettings, MigrationSettings},
 };
 
-pub use delivery::DeliveryClaim;
+pub use accounts::{Applied, StoredAccount, valid_public_id};
+pub use allow_list::AllowListEntry;
 pub use http_presence::PresenceLease;
+pub use revisions::Reviser;
 pub(crate) use sync::sync_reset_required;
 pub use sync::{SyncEvent, SyncScan};
-pub use ting::{TingDeliveryClaim, TingDeliveryContext};
+pub use ting::{
+    DISCARD_PREPARED_BEFORE_CUTOVER, DISCARD_RECIPIENT_WITHOUT_ACCOUNT,
+    DISCARD_TING_NOT_CONFIGURED, TingDeliveryClaim, TingDeliveryContext,
+};
 
 pub(crate) static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -186,7 +193,7 @@ impl PostgresStore {
                 )));
             }
         }
-        sqlx::query("SELECT 1 FROM organization_snapshots LIMIT 0")
+        sqlx::query("SELECT 1 FROM accounts LIMIT 0")
             .execute(&self.pool)
             .await
             .map(|_| ())

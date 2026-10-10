@@ -9,7 +9,7 @@ use super::{PostgresStore, directory::refresh_directory_in};
 use crate::{
     AppError, AppResult,
     application::{auth::AuthContext, messaging::validate_device_id},
-    domain::{Activity, Presence},
+    domain::{ACCOUNTS_PARTITION, Activity, OrganizationId, Presence},
 };
 
 /// A renewed HTTP lease and the actor's current aggregate presence.
@@ -57,7 +57,7 @@ impl PostgresStore {
         Ok(expired)
     }
 
-    /// Renews only the authenticated actor's named device; each call revalidates IAM.
+    /// Renews only the authenticated account's named device.
     ///
     /// # Errors
     /// Rejects invalid device IDs or durations and reports storage failures.
@@ -76,7 +76,7 @@ impl PostgresStore {
         lock_actor(&mut transaction, auth).await?;
         refresh_directory_in(
             &mut transaction,
-            &auth.organization_id,
+            &OrganizationId::accounts(),
             std::slice::from_ref(&auth.actor),
         )
         .await?;
@@ -116,7 +116,7 @@ impl PostgresStore {
             RETURNING lease_expires_at, activity_expires_at
             "#,
             )
-            .bind(auth.organization_id.as_str())
+            .bind(ACCOUNTS_PARTITION)
             .bind(auth.actor.actor_type.as_str())
             .bind(auth.actor.id.as_str())
             .bind(device)
@@ -127,9 +127,7 @@ impl PostgresStore {
             .await?;
         transaction.commit().await?;
         Ok(PresenceLease {
-            presence: self
-                .get_presence(&auth.organization_id, &auth.actor, &auth.actor.id)
-                .await?,
+            presence: self.get_presence(&auth.actor).await?,
             lease_expires_at,
             activity_expires_at,
         })
@@ -152,7 +150,7 @@ impl PostgresStore {
               AND actor_id = $3 AND device_id = $4 AND disconnected_at IS NULL
             "#,
         )
-        .bind(auth.organization_id.as_str())
+        .bind(ACCOUNTS_PARTITION)
         .bind(auth.actor.actor_type.as_str())
         .bind(auth.actor.id.as_str())
         .bind(device)
@@ -172,7 +170,7 @@ async fn lock_actor(
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2 || chr(31) || $3, 0))",
     )
-    .bind(auth.organization_id.as_str())
+    .bind(ACCOUNTS_PARTITION)
     .bind(auth.actor.actor_type.as_str())
     .bind(auth.actor.id.as_str())
     .execute(&mut **transaction)
@@ -186,7 +184,7 @@ async fn record_offline(
 ) -> AppResult<()> {
     record_actor_offline(
         transaction,
-        auth.organization_id.as_str(),
+        ACCOUNTS_PARTITION,
         auth.actor.actor_type.as_str(),
         auth.actor.id.as_str(),
     )

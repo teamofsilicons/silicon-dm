@@ -1,7 +1,7 @@
-//! Ting v1 reusable OBO WebSocket publisher. The database owns retries.
+//! Ting v1 WebSocket publisher. The database owns retries.
 //!
-//! This adapter deliberately requires fresh authority for each attempt. A live
-//! socket does not provide application authority or solve background issuance.
+//! Each send carries DM's App verification proof for Ting (scope `tings.send`). A live
+//! socket does not provide authority by itself.
 
 use std::{sync::Arc, time::Duration};
 
@@ -27,21 +27,11 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
-/// Dedicated reusable OBO authority and, when applicable, receiver test context.
-/// Never derive Debug or persist this value in the handoff queue.
+/// DM's App verification proof for Ting. Never derive Debug or persist this value in
+/// the handoff queue.
 pub struct TingSendAuthority {
-    /// Reusable OBO access token. The internal legacy field name is retained.
+    /// `sap_…` App verification proof (receiving app `ting`, scope `tings.send`).
     pub proof_token: SecretString,
-    /// Paired audience credentials verified against the intended environment.
-    pub testing: Option<TingTestingHeaders>,
-}
-
-/// Ting's audience test credentials, obtained from verified IAM testing context.
-pub struct TingTestingHeaders {
-    /// Ting's test app secret, not the DM test secret.
-    pub app_secret: SecretString,
-    /// Matching IAM environment key, not a DM-local root key.
-    pub environment_key: SecretString,
 }
 
 /// Evidence of durable Ting acceptance, independent of DM delivered/read receipts.
@@ -73,10 +63,7 @@ pub enum TingFailure {
     /// The prepared request itself is not a bounded keyed object.
     #[error("Ting prepared request is invalid")]
     InvalidRequest,
-    /// The event originator must supply a current consented DM session.
-    #[error("Ting delivery awaits separate IAM authorization by the originator")]
-    OriginatorAuthenticationRequired,
-    /// IAM or the credential store could not safely authorize this attempt.
+    /// Silicon Accounts could not issue DM's proof for Ting right now.
     #[error("Ting delivery authority is temporarily unavailable")]
     AuthorityUnavailable,
 }
@@ -91,7 +78,6 @@ impl TingFailure {
             Self::Protocol => "ting_protocol_error",
             Self::Rejected(code) => code,
             Self::InvalidRequest => "ting_invalid_prepared_request",
-            Self::OriginatorAuthenticationRequired => "ting_authorization_required",
             Self::AuthorityUnavailable => "ting_authority_unavailable",
         }
     }
@@ -117,9 +103,13 @@ impl TingSocket {
     /// Starts the driver. Cancellation closes the connection and abandons no
     /// durable work: callers retain their database leases until expiry/retry.
     #[must_use]
-    pub fn start(settings: &TingSettings, cancellation: CancellationToken) -> Self {
+    pub fn start(
+        base_url: url::Url,
+        settings: &TingSettings,
+        cancellation: CancellationToken,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel(1);
-        tokio::spawn(run(settings.clone(), receiver, cancellation));
+        tokio::spawn(run(base_url, settings.clone(), receiver, cancellation));
         Self {
             requests: sender,
             request_timeout: settings.request_timeout,
@@ -136,13 +126,7 @@ impl TingSocket {
         body: &str,
         authority: TingSendAuthority,
     ) -> Result<TingAcceptance, TingFailure> {
-        if body.len() > MAX_BODY_BYTES
-            || authority.proof_token.expose_secret().is_empty()
-            || authority.testing.as_ref().is_some_and(|testing| {
-                testing.app_secret.expose_secret().is_empty()
-                    || testing.environment_key.expose_secret().is_empty()
-            })
-        {
+        if body.len() > MAX_BODY_BYTES || authority.proof_token.expose_secret().is_empty() {
             return Err(TingFailure::InvalidRequest);
         }
         let value: Value = serde_json::from_str(body).map_err(|_| TingFailure::InvalidRequest)?;
@@ -179,6 +163,7 @@ impl TingSocket {
 }
 
 async fn run(
+    base_url: url::Url,
     settings: TingSettings,
     mut requests: mpsc::Receiver<SendRequest>,
     cancellation: CancellationToken,
@@ -189,7 +174,7 @@ async fn run(
             return;
         }
         let Some(connected) = cancellation
-            .run_until_cancelled(Box::pin(connect(&settings)))
+            .run_until_cancelled(Box::pin(connect(&base_url, &settings)))
             .await
         else {
             return;
@@ -252,8 +237,8 @@ async fn run(
     }
 }
 
-async fn connect(settings: &TingSettings) -> Result<Socket, TingFailure> {
-    let mut endpoint = settings.base_url.clone();
+async fn connect(base_url: &url::Url, settings: &TingSettings) -> Result<Socket, TingFailure> {
+    let mut endpoint = base_url.clone();
     let scheme = match endpoint.scheme() {
         "https" => "wss",
         "http" => "ws",
@@ -289,15 +274,9 @@ async fn send_one(
     request: &SendRequest,
 ) -> Result<TingAcceptance, TingFailure> {
     let request_id = Uuid::new_v4().to_string();
-    let mut frame = json!({"op":"send", "request_id":request_id,
-        "proof_token":request.authority.proof_token.expose_secret(), "body":request.body});
-    if let Some(testing) = &request.authority.testing {
-        frame["headers"] = json!({
-            "IAM_TEST_APP_SECRET":testing.app_secret.expose_secret(),
-            "X-Testing-Environment-Key":testing.environment_key.expose_secret(),
-        });
-    }
-    let frame = frame.to_string();
+    let frame = json!({"op":"send", "request_id":request_id,
+        "proof_token":request.authority.proof_token.expose_secret(), "body":request.body})
+    .to_string();
     if frame.len() > MAX_FRAME_BYTES {
         return Err(TingFailure::InvalidRequest);
     }

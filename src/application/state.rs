@@ -2,8 +2,11 @@
 
 use std::sync::Arc;
 
-use super::ports::{GifProvider, IdentityProvider};
-use crate::{config::Settings, infrastructure::postgres::PostgresStore, realtime::RealtimeHub};
+use super::{
+    accounts::AccountRuntime,
+    ports::{GifProvider, IdentityProvider},
+};
+use crate::{config::Settings, infrastructure::postgres::PostgresStore};
 
 /// Cheaply cloneable dependency container used by handlers and workers.
 #[derive(Clone)]
@@ -16,55 +19,28 @@ pub struct AppState {
     pub telemetry: crate::telemetry::Recorder,
     /// Durable storage.
     pub store: PostgresStore,
-    /// IAM adapter.
+    /// Silicon Accounts.
     pub identity: Arc<dyn IdentityProvider>,
-    /// Production registry for test environment lifecycle and routing.
-    pub testing: Option<Arc<crate::testing::TestingRegistry>>,
-    /// Selected test environment, absent for production.
-    pub testing_environment: Option<uuid::Uuid>,
-    /// Lifecycle generation captured when a request or connection was admitted.
-    pub testing_generation: Option<i64>,
-    /// Internal epoch of the selected credential-backed runtime; never serialized.
-    pub testing_runtime_revision: Option<i64>,
+    /// Process-local accounts throttles.
+    pub accounts: AccountRuntime,
+    /// Wakes long-polling sync requests.
+    pub sync: super::sync_hub::SyncHub,
     /// Giphy adapter.
     pub gifs: Arc<dyn GifProvider>,
-    /// Process-local realtime connection registry.
-    pub realtime: RealtimeHub,
 }
 
 impl AppState {
-    /// Opens separately approved Ting credentials for this exact data plane.
-    /// # Errors
-    /// Rejects invalid encryption material or an incomplete testing context.
-    pub fn ting_authorization(
-        &self,
-    ) -> crate::AppResult<crate::infrastructure::ting_authorization::TingAuthorization> {
-        Ok(crate::infrastructure::ting_authorization::TingAuthorization(self.ting_credentials()?))
-    }
-
-    /// Immutable application/environment binding for delivery and credential storage.
+    /// Producer identity sealed into outgoing Ting requests.
     #[must_use]
     pub fn ting_delivery_context(&self) -> crate::infrastructure::postgres::TingDeliveryContext {
         crate::infrastructure::postgres::TingDeliveryContext {
-            app_id: self.settings.iam.app_id.clone(),
-            testing_environment_id: self.testing_environment,
-            testing_generation: self.testing_generation,
+            app_id: self.settings.accounts.app_id.clone(),
         }
     }
 
-    /// Opens an encrypted access-token cache in the selected data plane.
-    /// The configured secret is encryption key material only; authorization is
-    /// always supplied by the selected identity adapter and reverified by IAM.
-    ///
-    /// # Errors
-    /// Rejects invalid encryption material or environment binding.
-    pub fn ting_credentials(
-        &self,
-    ) -> crate::AppResult<crate::infrastructure::ting_credentials::TingCredentialCache> {
-        crate::infrastructure::ting_credentials::TingCredentialCache::new(
-            self.store.clone(),
-            &self.settings.iam.app_secret,
-            self.ting_delivery_context(),
-        )
+    /// Whether DM hands updates to Ting (only when `DM_TING_URL` is set).
+    #[must_use]
+    pub fn ting_enabled(&self) -> bool {
+        self.settings.ting.base_url.is_some()
     }
 }

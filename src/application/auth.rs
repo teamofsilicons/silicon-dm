@@ -1,84 +1,89 @@
-//! IAM-authenticated request and application-session types.
+//! The authenticated caller of one request.
 
 use std::collections::BTreeSet;
 
 use secrecy::SecretString;
-use serde::Serialize;
-use uuid::Uuid;
+use time::OffsetDateTime;
 
-use crate::domain::{ActorId, ActorRef, OrganizationId};
+use crate::{
+    AppError, AppResult,
+    domain::{ActorRef, ActorType},
+};
 
-/// The IAM application access token presented by this request.
+/// How the caller proved who it is.
 #[derive(Clone, Debug)]
-pub enum PresentedCredential {
-    /// Opaque IAM application bearer token, redacted in diagnostic output.
-    Bearer(SecretString),
+pub enum Credential {
+    /// A Silicon Accounts access token issued to DM (`aud` = DM's app id). Kept only for
+    /// the length of the request, to mint a User verification proof for Ting enrolment.
+    AccessToken(SecretString),
+    /// A User verification proof another app presented to act for the account.
+    Proof {
+        /// The app that obtained the account's agreement and issued the proof.
+        issuing_app: String,
+        /// Scopes the proof carries (DM honours the `dm.*` ones it documents).
+        scopes: BTreeSet<String>,
+    },
 }
 
-/// Authority proven by a fresh IAM application introspection.
+/// Authority of one request, verified with Silicon Accounts.
 #[derive(Clone, Debug)]
 pub struct AuthContext {
-    /// Represented Carbon or Silicon, using IAM's canonical public identifier.
+    /// The account acting (storage key = its Accounts uuid).
     pub actor: ActorRef,
-    /// IAM session identifier when disclosed by introspection.
-    pub session_id: Option<Uuid>,
-    /// Active organization selected by the request.
-    pub organization_id: OrganizationId,
-    /// Current organization role, only when IAM discloses it.
-    pub org_role: Option<String>,
-    /// Tags disclosed for this exact credential; absent disclosure grants no tag access.
-    pub tag_ids: Option<BTreeSet<Uuid>>,
-    /// Actors this credential may represent on a realtime connection.
-    pub represented_actor_ids: BTreeSet<ActorId>,
-    /// Effective IAM scopes; undisclosed authority is never inferred.
-    pub capabilities: BTreeSet<String>,
-    /// Verified DM access token; never a refresh credential.
-    pub credential: PresentedCredential,
-    /// Absolute access-token expiry verified by IAM introspection.
-    pub credential_expires_at: time::OffsetDateTime,
+    /// Its current public id (`c:saket`), for messages and logs.
+    pub public_id: String,
+    /// Membership id with DM (`dm:{uuid}`), when the token carried one.
+    pub membership_id: Option<String>,
+    /// Refresh-token family of the sign-in, when the token carried one.
+    pub token_family: Option<String>,
+    /// Scopes of the access token (profile fields the account shared with DM).
+    pub scopes: BTreeSet<String>,
+    /// How the caller authenticated.
+    pub credential: Credential,
+    /// When the token was issued, when known.
+    pub issued_at: Option<OffsetDateTime>,
+    /// When the credential stops being valid.
+    pub expires_at: OffsetDateTime,
 }
 
 impl AuthContext {
-    /// Whether the principal may represent the requested actor.
+    /// Whether the caller is a Silicon.
     #[must_use]
-    pub fn may_represent(&self, actor_id: &ActorId) -> bool {
-        self.actor.id == *actor_id || self.represented_actor_ids.contains(actor_id)
+    pub fn is_silicon(&self) -> bool {
+        self.actor.actor_type == ActorType::Silicon
     }
 
-    /// Whether IAM granted a named scope.
+    /// The app acting for the account through a proof, if any.
     #[must_use]
-    pub fn has_capability(&self, capability: &str) -> bool {
-        self.capabilities.contains(capability)
+    pub fn via_app(&self) -> Option<&str> {
+        match &self.credential {
+            Credential::Proof { issuing_app, .. } => Some(issuing_app),
+            Credential::AccessToken(_) => None,
+        }
     }
 
-    /// Whether the disclosed current role permits organization administration.
+    /// The caller's own DM access token (absent for proofs).
     #[must_use]
-    pub fn is_org_administrator(&self) -> bool {
-        matches!(
-            self.org_role.as_deref(),
-            Some("owner" | "admin" | "org_owner" | "org_admin" | "org_head")
-        )
+    pub fn access_token(&self) -> Option<&SecretString> {
+        match &self.credential {
+            Credential::AccessToken(token) => Some(token),
+            Credential::Proof { .. } => None,
+        }
     }
-}
 
-/// Application session returned only by login and refresh. Never log this value.
-#[derive(Serialize)]
-pub struct ApplicationSession {
-    /// Opaque IAM application access token.
-    pub access_token: String,
-    /// Rotating IAM application refresh token; persist before using the access token.
-    pub refresh_token: String,
-    /// Always `Bearer`.
-    pub token_type: &'static str,
-    /// Access token lifetime in seconds.
-    pub expires_in: i64,
-    /// Effective space-separated scopes.
-    pub scope: String,
-    /// Verified Carbon or Silicon identity.
-    #[serde(rename = "member")]
-    pub actor: ActorRef,
-    /// Organization to supply as `X-Org-ID` on subsequent requests.
-    pub organization_id: OrganizationId,
-    /// Organizations explicitly selected in IAM and currently authorized.
-    pub organization_ids: Vec<OrganizationId>,
+    /// Refuses a route that an app acting through a proof may not use.
+    ///
+    /// # Errors
+    /// `proof_not_accepted` when the request came with a proof.
+    pub fn require_own_session(&self, what: &str) -> AppResult<()> {
+        match &self.credential {
+            Credential::AccessToken(_) => Ok(()),
+            Credential::Proof { issuing_app, .. } => Err(AppError::forbidden(
+                "proof_not_accepted",
+                format!(
+                    "{what} needs the account's own DM sign-in; {issuing_app} is acting through a User verification proof, which DM does not accept here."
+                ),
+            )),
+        }
+    }
 }

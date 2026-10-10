@@ -1,21 +1,26 @@
 //! Public message addresses and fixed message snapshots. Durable keys stay private.
 use super::PostgresStore;
-use crate::{AppError, AppResult, domain::OrganizationId};
+use crate::{AppError, AppResult};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 impl PostgresStore {
     pub(crate) async fn resolve_bundle_id(
         &self,
-        org: &OrganizationId,
         conversation: Uuid,
         value: &str,
     ) -> AppResult<Uuid> {
         let sequence = silicon_dm_protocol::bundle_sequence(value).ok_or_else(|| {
             AppError::validation("expected a conversation-local bundle code such as 001")
         })?;
-        sqlx::query_scalar("SELECT id FROM message_bundles WHERE organization_id=$1 AND conversation_id=$2 AND sequence=$3")
-            .bind(org.as_str()).bind(conversation).bind(sequence).fetch_optional(self.pool()).await?.ok_or(AppError::NotFound)
+        sqlx::query_scalar(
+            "SELECT id FROM message_bundles WHERE conversation_id=$1 AND sequence=$2",
+        )
+        .bind(conversation)
+        .bind(sequence)
+        .fetch_optional(self.pool())
+        .await?
+        .ok_or(AppError::NotFound)
     }
     async fn public_bundle_reference(&self, value: &mut Value) -> AppResult<()> {
         if let Some(id) = value.as_str().and_then(|v| Uuid::parse_str(v).ok()) {
@@ -33,7 +38,6 @@ impl PostgresStore {
     }
     pub(crate) async fn resolve_message_id(
         &self,
-        org: &OrganizationId,
         conversation: Uuid,
         value: &str,
     ) -> AppResult<Uuid> {
@@ -43,14 +47,17 @@ impl PostgresStore {
         let sequence = silicon_dm_protocol::message_sequence(value).ok_or_else(|| {
             AppError::validation("expected a conversation-local message code such as 00a")
         })?;
-        sqlx::query_scalar("SELECT id FROM messages WHERE organization_id=$1 AND conversation_id=$2 AND sequence=$3")
-            .bind(org.as_str()).bind(conversation).bind(sequence).fetch_optional(self.pool()).await?.ok_or(AppError::NotFound)
+        sqlx::query_scalar("SELECT id FROM messages WHERE conversation_id=$1 AND sequence=$2")
+            .bind(conversation)
+            .bind(sequence)
+            .fetch_optional(self.pool())
+            .await?
+            .ok_or(AppError::NotFound)
     }
 
     /// Normalize reference fields only, never text, metadata or quoted client content.
     pub(crate) async fn resolve_message_input(
         &self,
-        org: &OrganizationId,
         conversation: Uuid,
         value: &mut Value,
     ) -> AppResult<()> {
@@ -60,15 +67,13 @@ impl PostgresStore {
                 .and_then(Value::as_str)
                 .ok_or_else(|| AppError::validation("reply requires message-id"))?
                 .to_owned();
-            value["reply_to_message_id"] =
-                json!(self.resolve_message_id(org, conversation, &id).await?);
+            value["reply_to_message_id"] = json!(self.resolve_message_id(conversation, &id).await?);
         } else if let Some(id) = value
             .get("reply_to_message_id")
             .and_then(Value::as_str)
             .map(str::to_owned)
         {
-            value["reply_to_message_id"] =
-                json!(self.resolve_message_id(org, conversation, &id).await?);
+            value["reply_to_message_id"] = json!(self.resolve_message_id(conversation, &id).await?);
         }
         if let Some(display) = value.get_mut("display_message")
             && let Some(id) = display
@@ -79,14 +84,14 @@ impl PostgresStore {
                 .map(str::to_owned)
         {
             display["reply_to_message_id"] =
-                json!(self.resolve_message_id(org, conversation, &id).await?);
+                json!(self.resolve_message_id(conversation, &id).await?);
         }
         if let Some(ids) = value.get_mut("message_ids").and_then(Value::as_array_mut) {
             for id in ids {
                 let raw = id
                     .as_str()
                     .ok_or_else(|| AppError::validation("message_ids must contain strings"))?;
-                *id = json!(self.resolve_message_id(org, conversation, raw).await?);
+                *id = json!(self.resolve_message_id(conversation, raw).await?);
             }
         }
         Ok(())

@@ -1,302 +1,333 @@
-//! Explicit recipient consent registration through Ting's published OBO contract.
+//! Enrols accounts with Ting (only when `DM_TING_URL` is set).
 //!
-//! Uses the separately approved registration token. Subscription resource
-//! authority remains enforced by Ting on each attempt.
+//! Ting accepts a recipient only with a proof of the recipient's own agreement: a User
+//! verification proof DM obtains with the account's current DM access token (receiving
+//! app `ting`, scope `tings.subscribe`). DM enrols an account the first time it sees one
+//! of its requests; the proof's refresh token is kept encrypted with `DM_DATA_KEY`.
 
-use secrecy::{ExposeSecret as _, SecretString};
-use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+use aes_gcm::{
+    Aes256Gcm, KeyInit as _,
+    aead::{Aead as _, AeadCore as _, OsRng, Payload},
+};
+use secrecy::ExposeSecret as _;
 use serde_json::{Value, json};
-use silicon_iam_client::{Client, Credential, EnvironmentKey, models};
-use uuid::Uuid;
 
 use crate::{
     AppError, AppResult,
     application::{auth::AuthContext, state::AppState},
-    config::TingSettings,
-    domain::IdempotencyKey as DmIdempotencyKey,
 };
 
-const TING_APP_ID: &str = "ting";
-const ENDPOINT_ID: &str = "subscriptions.register";
-const ENDPOINT_PATH: &str = "/v1/subscriptions";
+/// Scope DM asks for when enrolling a recipient.
+pub const SUBSCRIBE_SCOPE: &str = "tings.subscribe";
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
-#[derive(Deserialize, Serialize)]
-struct Subscription {
-    id: String,
-    app_id: String,
-    #[serde(rename = "for")]
-    recipient: String,
-    active: bool,
+fn http() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
 }
 
-/// Records enrollment intent before any upstream mutation and caches its result.
-///
-/// # Errors
-/// An incomplete prior attempt returns a conflict: registering again could
-/// reactivate a grant the recipient revoked after the uncertain acceptance.
-pub(crate) async fn register_cached(
-    state: &AppState,
-    context: &AuthContext,
-    key: &DmIdempotencyKey,
-) -> AppResult<Value> {
-    let authority = state
-        .ting_authorization()?
-        .authority(
-            state.identity.as_ref(),
-            &context.organization_id,
-            &context.actor,
-            ENDPOINT_ID,
-        )
-        .await?;
-    let material = serde_json::to_vec(&json!({
-        "app_id": state.settings.iam.app_id,
-        "ting_origin": state.settings.ting.base_url,
-        "org_id": context.organization_id,
-        "recipient": context.actor,
-        "testing_environment_id": state.testing_environment,
-        "testing_generation": state.testing_generation,
-    }))
-    .map_err(AppError::internal)?;
-    let hash = blake3::hash(&material);
-    let reserved = sqlx::query(
-        "INSERT INTO ting_enrollment_receipts(organization_id,actor_kind,actor_id,idempotency_key,request_hash) \
-         VALUES($1,$2::text::actor_kind,$3,$4,$5) ON CONFLICT DO NOTHING",
-    )
-    .bind(context.organization_id.as_str())
-    .bind(context.actor.actor_type.as_str())
-    .bind(context.actor.id.as_str())
-    .bind(key.as_str())
-    .bind(hash.as_bytes().as_slice())
-    .execute(state.store.pool())
-    .await?
-    .rows_affected() == 1;
-    if !reserved {
-        let receipt: Option<(Vec<u8>, Option<Value>)> = sqlx::query_as(
-            "SELECT request_hash,response FROM ting_enrollment_receipts \
-             WHERE organization_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3 AND idempotency_key=$4",
-        )
-        .bind(context.organization_id.as_str())
-        .bind(context.actor.actor_type.as_str())
-        .bind(context.actor.id.as_str())
-        .bind(key.as_str())
-        .fetch_optional(state.store.pool())
-        .await?;
-        return replay_receipt(receipt, hash.as_bytes());
+/// Starts enrolling the caller with Ting in the background, when Ting is configured and
+/// the caller came with its own access token. Never delays or fails the request.
+pub(crate) fn spawn_enrolment(state: &AppState, context: &AuthContext) {
+    if !state.ting_enabled() || context.access_token().is_none() {
+        return;
     }
-    let body=serde_json::to_vec(&json!({"org_id":context.organization_id,"app_id":state.settings.iam.app_id,"for":context.actor.id})).map_err(AppError::internal)?;
-    let outcome = submit_registration(
-        &state.settings.ting,
-        authority,
-        body,
-        &state.settings.iam.app_id,
-        context.actor.id.as_str(),
-    )
-    .await;
-    let response = match outcome {
-        Ok(response) => response,
+    let state = state.clone();
+    let context = context.clone();
+    tokio::spawn(async move {
+        if let Err(error) = enrol(&state, &context).await {
+            tracing::warn!(
+                code = error.code(),
+                "Ting enrolment failed; it is retried on a later request"
+            );
+        }
+    });
+}
+
+async fn enrol(state: &AppState, context: &AuthContext) -> AppResult<()> {
+    let app_id = state.settings.accounts.app_id.clone();
+    let (Some(ting), Some(token)) = (state.settings.ting.base_url.clone(), context.access_token())
+    else {
+        return Ok(());
+    };
+    if !state
+        .store
+        .reserve_ting_enrolment(&app_id, &context.actor)
+        .await?
+    {
+        return Ok(());
+    }
+    let key = format!(
+        "dm-ting-enrol-{}-{}",
+        context.actor.id,
+        uuid::Uuid::now_v7().simple()
+    );
+    let proof = match state
+        .identity
+        .issue_user_verification(
+            token,
+            crate::infrastructure::ting_publisher::TING_APP_ID,
+            &[SUBSCRIBE_SCOPE],
+            &key,
+        )
+        .await
+    {
+        Ok(proof) => proof,
         Err(error) => {
-            if matches!(
-                error,
-                AppError::Forbidden
-                    | AppError::RateLimited
-                    | AppError::Validation(_)
-                    | AppError::Conflict(_)
-            ) {
-                // These rejections establish that no registration was accepted.
-                // An uncertain transport/storage result retains the reservation.
-                sqlx::query("DELETE FROM ting_enrollment_receipts WHERE organization_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3 AND idempotency_key=$4 AND request_hash=$5 AND response IS NULL")
-                    .bind(context.organization_id.as_str()).bind(context.actor.actor_type.as_str())
-                    .bind(context.actor.id.as_str()).bind(key.as_str()).bind(hash.as_bytes().as_slice())
-                    .execute(state.store.pool()).await?;
-            }
+            state
+                .store
+                .finish_ting_enrolment(&app_id, &context.actor, None, Some(error.code()))
+                .await?;
             return Err(error);
         }
     };
-    let saved = sqlx::query("UPDATE ting_enrollment_receipts SET response=$6,completed_at=clock_timestamp() WHERE organization_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3 AND idempotency_key=$4 AND request_hash=$5 AND response IS NULL")
-        .bind(context.organization_id.as_str()).bind(context.actor.actor_type.as_str())
-        .bind(context.actor.id.as_str()).bind(key.as_str()).bind(hash.as_bytes().as_slice())
-        .bind(&response).execute(state.store.pool()).await?.rows_affected();
-    if saved != 1 {
-        return Err(AppError::conflict(
-            "Ting enrollment context changed before its result was saved",
-        ));
-    }
-    Ok(response)
-}
-
-fn replay_receipt(receipt: Option<(Vec<u8>, Option<Value>)>, hash: &[u8]) -> AppResult<Value> {
-    let Some((previous_hash, response)) = receipt else {
-        return Err(AppError::conflict(
-            "Ting enrollment context changed during this request",
-        ));
-    };
-    if previous_hash != hash {
-        return Err(AppError::conflict(
-            "Ting enrollment idempotency key was used with different input",
-        ));
-    }
-    response.ok_or_else(|| AppError::conflict(
-        "Ting enrollment is still running or its result is uncertain; a new explicit registration requires a new idempotency key",
-    ))
-}
-
-async fn submit_registration(
-    settings: &TingSettings,
-    authority: super::ting::TingSendAuthority,
-    body: Vec<u8>,
-    app_id: &str,
-    recipient: &str,
-) -> AppResult<Value> {
-    let http = reqwest::Client::builder()
-        .timeout(settings.request_timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| unavailable())?;
-    let url = settings
-        .base_url
-        .join(ENDPOINT_PATH)
-        .map_err(|_| unavailable())?;
-    let mut request = http
-        .post(url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .bearer_auth(authority.proof_token.expose_secret())
-        .body(body);
-    if let Some(testing) = authority.testing {
-        request = request
-            .header("IAM_TEST_APP_SECRET", testing.app_secret.expose_secret())
-            .header(
-                "X-Testing-Environment-Key",
-                testing.environment_key.expose_secret(),
-            );
-    }
-    let mut response = request.send().await.map_err(|_| unavailable())?;
-    if !matches!(response.status().as_u16(), 200 | 201) {
-        return Err(match response.status().as_u16() {
-            403 => AppError::Forbidden,
-            409 => AppError::conflict("Ting rejected the registration attempt"),
-            429 => AppError::RateLimited,
-            // A rejected downstream proof is not evidence that the DM session
-            // expired. Never turn a Ting/IAM integration failure into logout.
-            _ => unavailable(),
-        });
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| unavailable())? {
-        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err(unavailable());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    subscription_result(&bytes, app_id, recipient)
-}
-
-pub(crate) async fn validate_testing_context(
-    iam: &Client,
-    expected: Option<Uuid>,
-    testing: Option<&models::OboTestingContext>,
-) -> AppResult<()> {
-    match (expected, testing) {
-        (None, None) => Ok(()),
-        (Some(expected), Some(testing)) if testing.app_id == TING_APP_ID => {
-            let environment =
-                EnvironmentKey::new(&testing.iam_test_key).map_err(|_| AppError::Forbidden)?;
-            let audience = iam
-                .with_credential(Credential::Application {
-                    app_id: TING_APP_ID.to_owned(),
-                    secret: SecretString::from(testing.app_secret.clone()),
-                })
-                .with_environment(environment);
-            let context = audience
-                .applications()
-                .testing_context()
-                .await
-                .map_err(map_iam_error)?;
-            if context.environment_id != expected || context.application.app_id != TING_APP_ID {
-                return Err(AppError::Forbidden);
-            }
-            Ok(())
-        }
-        // Neither missing test context nor an unsolicited one may select a
-        // different plane or release a test secret to a production request.
-        _ => Err(AppError::Forbidden),
-    }
-}
-
-fn subscription_result(bytes: &[u8], app_id: &str, recipient: &str) -> AppResult<Value> {
-    let subscription: Subscription = serde_json::from_slice(bytes).map_err(|_| unavailable())?;
-    if subscription.id.is_empty()
-        || subscription.id.len() > 255
-        || subscription.id.chars().any(char::is_control)
-        || subscription.app_id != app_id
-        || subscription.recipient != recipient
-        || !subscription.active
-    {
-        return Err(unavailable());
-    }
-    // Return only the public contract fields, never arbitrary upstream fields.
-    serde_json::to_value(subscription).map_err(AppError::internal)
-}
-
-fn unavailable() -> AppError {
-    AppError::DependencyUnavailable { dependency: "ting" }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn map_iam_error(error: silicon_iam_client::Error) -> AppError {
-    match error.api().map(|error| error.status) {
-        Some(403 | 404) => AppError::Forbidden,
-        Some(429) => AppError::RateLimited,
-        _ => AppError::DependencyUnavailable { dependency: "iam" },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, header, method, path},
-    };
-    #[tokio::test]
-    async fn enrollment_uses_dedicated_token_and_keeps_subscription_identity_bound()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let server = MockServer::start().await;
-        let settings = TingSettings {
-            base_url: server.uri().parse()?,
-            request_timeout: std::time::Duration::from_secs(2),
-        };
-        let body = json!({"org_id":"tos","app_id":"dm","for":"c:alice"});
-        Mock::given(method("POST"))
-            .and(path("/v1/subscriptions"))
-            .and(header("authorization", "Bearer oba_approved_registration"))
-            .and(body_json(&body))
-            .respond_with(ResponseTemplate::new(201).set_body_json(
-                json!({"id":"sub_fixture","app_id":"dm","for":"c:alice","active":true}),
-            ))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let result = submit_registration(
-            &settings,
-            super::super::ting::TingSendAuthority {
-                proof_token: SecretString::from("oba_approved_registration"),
-                testing: None,
-            },
-            serde_json::to_vec(&body)?,
-            "dm",
-            "c:alice",
-        )
-        .await?;
-        assert_eq!(result["for"], "c:alice");
-        assert!(
-            subscription_result(
-                br#"{"id":"sub_fixture","app_id":"other","for":"c:alice","active":true}"#,
-                "dm",
-                "c:alice"
+    if let Some(refresh) = &proof.refresh_token {
+        let (nonce, ciphertext) = seal(
+            state,
+            &app_id,
+            context.actor.id.as_str(),
+            refresh.expose_secret(),
+        )?;
+        state
+            .store
+            .save_ting_proof_grant(
+                &app_id,
+                &context.actor,
+                SUBSCRIBE_SCOPE,
+                &proof.proof_id,
+                &nonce,
+                &ciphertext,
+                proof.refresh_expires_at,
             )
-            .is_err()
-        );
-        Ok(())
+            .await?;
     }
+    let outcome = subscribe(
+        state,
+        ting,
+        &proof.token,
+        &app_id,
+        context.actor.id.as_str(),
+        Some(context.public_id.as_str()),
+    )
+    .await;
+    match outcome {
+        Ok(subscription) => {
+            state
+                .store
+                .finish_ting_enrolment(&app_id, &context.actor, Some(&subscription), None)
+                .await
+        }
+        Err(code) => {
+            state
+                .store
+                .finish_ting_enrolment(&app_id, &context.actor, None, Some(&code))
+                .await?;
+            Err(AppError::DependencyUnavailable { dependency: "ting" })
+        }
+    }
+}
+
+/// `POST {ting}/v1/subscriptions` with a User verification proof; the subscription id or
+/// a short failure code.
+async fn subscribe(
+    state: &AppState,
+    mut endpoint: url::Url,
+    proof: &secrecy::SecretString,
+    app_id: &str,
+    account: &str,
+    public_id: Option<&str>,
+) -> Result<String, String> {
+    endpoint.set_path("/v1/subscriptions");
+    let response = http()
+        .post(endpoint)
+        .timeout(state.settings.ting.request_timeout)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Proof {}", proof.expose_secret()),
+        )
+        .json(&json!({ "app_id": app_id, "for": { "uuid": account, "id": public_id } }))
+        .send()
+        .await
+        .map_err(|_| "ting_unreachable".to_owned())?;
+    if !response.status().is_success() {
+        return Err(format!("ting_http_{}", response.status().as_u16()));
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|_| "ting_unreachable".to_owned())?;
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err("ting_response_too_large".to_owned());
+    }
+    serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|value| value.get("id").and_then(Value::as_str).map(str::to_owned))
+        .filter(|id| !id.is_empty() && id.len() <= 255)
+        .ok_or_else(|| "ting_invalid_subscription".to_owned())
+}
+
+/// AES-256-GCM with a key derived from `DM_DATA_KEY`, bound to the app and account.
+fn seal(
+    state: &AppState,
+    app_id: &str,
+    account: &str,
+    secret: &str,
+) -> AppResult<(Vec<u8>, Vec<u8>)> {
+    let key = state
+        .settings
+        .data_key
+        .derive("silicon-dm ting proof refresh tokens v1");
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(AppError::internal)?;
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let aad = format!("{app_id}\u{1f}{account}\u{1f}{SUBSCRIBE_SCOPE}");
+    let ciphertext = cipher
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: secret.as_bytes(),
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| {
+            AppError::internal(anyhow::anyhow!("proof refresh token encryption failed"))
+        })?;
+    Ok((nonce.to_vec(), ciphertext))
+}
+
+fn open(
+    state: &AppState,
+    app_id: &str,
+    account: &str,
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> AppResult<String> {
+    let key = state
+        .settings
+        .data_key
+        .derive("silicon-dm ting proof refresh tokens v1");
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(AppError::internal)?;
+    let nonce: [u8; 12] = nonce.try_into().map_err(|_| {
+        AppError::internal(anyhow::anyhow!("stored proof nonce has the wrong length"))
+    })?;
+    let aad = format!("{app_id}\u{1f}{account}\u{1f}{SUBSCRIBE_SCOPE}");
+    let plaintext = cipher
+        .decrypt(
+            &aes_gcm::Nonce::from(nonce),
+            Payload {
+                msg: ciphertext,
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| {
+            AppError::internal(anyhow::anyhow!(
+                "stored proof refresh token cannot be decrypted (was DM_DATA_KEY rotated?)"
+            ))
+        })?;
+    String::from_utf8(plaintext).map_err(AppError::internal)
+}
+
+/// Ting no longer knows a recipient: enrol it again with the stored proof refresh token
+/// (no live session needed). Without a usable stored proof the enrolment is forgotten and
+/// the recipient's next request enrols it.
+///
+/// A proof refresh token works once (presenting a used one revokes the proof), so one
+/// re-enrolment per account runs at a time across every DM process (a session advisory
+/// lock); a second caller returns at once.
+pub(crate) async fn reenrol(state: &AppState, target: &crate::domain::ActorRef) -> AppResult<()> {
+    if state.settings.ting.base_url.is_none() {
+        return Ok(());
+    }
+    let lock = format!(
+        "dm.ting.reenrol\u{1f}{}\u{1f}{}",
+        state.settings.accounts.app_id, target.id
+    );
+    let mut connection = state.store.pool().acquire().await?;
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+        .bind(&lock)
+        .fetch_one(&mut *connection)
+        .await?;
+    if !locked {
+        return Ok(());
+    }
+    let result = reenrol_locked(state, target).await;
+    if sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(&lock)
+        .execute(&mut *connection)
+        .await
+        .is_err()
+    {
+        // Closing the session releases the lock for certain.
+        let _ = connection.close().await;
+    }
+    result
+}
+
+async fn reenrol_locked(state: &AppState, target: &crate::domain::ActorRef) -> AppResult<()> {
+    let app_id = state.settings.accounts.app_id.clone();
+    let Some(ting) = state.settings.ting.base_url.clone() else {
+        return Ok(());
+    };
+    let grant = state
+        .store
+        .ting_proof_grant(&app_id, target, SUBSCRIBE_SCOPE)
+        .await?;
+    let Some((nonce, ciphertext)) = grant else {
+        return state.store.forget_ting_enrolment(&app_id, target).await;
+    };
+    let refreshed = match open(state, &app_id, target.id.as_str(), &nonce, &ciphertext) {
+        Ok(refresh) => {
+            state
+                .identity
+                .refresh_proof(&secrecy::SecretString::from(refresh))
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    let proof = match refreshed {
+        Ok(proof) => proof,
+        Err(error) => {
+            tracing::info!(
+                code = error.code(),
+                "stored Ting proof unusable; the recipient re-enrols on its next request"
+            );
+            return state.store.forget_ting_enrolment(&app_id, target).await;
+        }
+    };
+    if let Some(refresh) = &proof.refresh_token {
+        let (nonce, ciphertext) =
+            seal(state, &app_id, target.id.as_str(), refresh.expose_secret())?;
+        state
+            .store
+            .save_ting_proof_grant(
+                &app_id,
+                target,
+                SUBSCRIBE_SCOPE,
+                &proof.proof_id,
+                &nonce,
+                &ciphertext,
+                proof.refresh_expires_at,
+            )
+            .await?;
+    }
+    let current_id = state
+        .store
+        .stored_account(target.id.as_str())
+        .await?
+        .and_then(|stored| stored.current_id);
+    let accepted = subscribe(
+        state,
+        ting,
+        &proof.token,
+        &app_id,
+        target.id.as_str(),
+        current_id.as_deref(),
+    )
+    .await
+    .is_ok();
+    if !accepted {
+        state.store.forget_ting_enrolment(&app_id, target).await?;
+    }
+    Ok(())
 }

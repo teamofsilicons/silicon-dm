@@ -214,9 +214,10 @@ impl LocalRuntime {
                     .all(|b| b.is_ascii_graphic()),
             "Ting login idempotency key must contain 16-200 visible ASCII bytes"
         );
+        // Test environments were retired with the move to Silicon Accounts.
         ensure!(
-            options.testing.is_some() == options.testing_environment_id.is_some(),
-            "Ting test credentials are required together only for the selected test environment"
+            options.testing.is_none() && options.testing_environment_id.is_none(),
+            "Ting testing credentials and test environments are no longer accepted: they were retired with the move to Silicon Accounts"
         );
         let selection = self
             .delivery_selection(options.profile, options.testing_environment_id)
@@ -236,31 +237,7 @@ impl LocalRuntime {
                 .is_none(),
             "Ting delivery is already logged in; use delivery_status or delivery_logout before a new login"
         );
-        let mut testing = TestHeaders::default();
-        if let Some(credentials) = &options.testing {
-            let iam = silicon_iam_client::Client::builder(&selection.info.iam_base_url)?
-                .credential(silicon_iam_client::Credential::application(
-                    "ting",
-                    credentials.app_secret,
-                ))
-                .environment(silicon_iam_client::EnvironmentKey::new(
-                    credentials.environment_key,
-                )?)
-                .telemetry(false)
-                .build()?;
-            let context =
-                iam.applications().testing_context().await.map_err(|_| {
-                    anyhow::anyhow!("IAM could not verify Ting's testing credentials")
-                })?;
-            ensure!(
-                Some(context.environment_id) == options.testing_environment_id
-                    && context.application.app_id == "ting"
-                    && ting_client::api_origin(&context.application.base_url)? == client.origin,
-                "IAM Ting audience, environment or backend does not match DM's selected context"
-            );
-            testing.app_secret = Some(credentials.app_secret.to_owned());
-            testing.key = Some(credentials.environment_key.to_owned());
-        }
+        let testing = TestHeaders::default();
         let discovery = client
             .json("GET", "/v1/iam", None, None, &TestHeaders::default())
             .await?;

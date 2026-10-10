@@ -1,6 +1,6 @@
 [package]
 name = "silicon-dm-client"
-version = "0.14.1"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.98"
 license = "LicenseRef-Proprietary"
@@ -10,7 +10,7 @@ repository = "https://github.com/teamofsilicons/silicon-dm"
 
 [features]
 default = []
-runtime = ["silicon-dm-protocol/http", "dep:anyhow", "dep:axum", "dep:blake3", "dep:fs2", "dep:libc", "dep:rusqlite", "dep:semver", "dep:silicon-iam-client", "dep:silicon-ting-client", "tokio/macros", "tokio/rt-multi-thread", "tokio/signal", "tokio/sync", "tokio/process"]
+runtime = ["silicon-dm-protocol/http", "dep:anyhow", "dep:axum", "dep:blake3", "dep:fs2", "dep:libc", "dep:rusqlite", "dep:semver", "dep:silicon-ting-client", "tokio/macros", "tokio/rt-multi-thread", "tokio/signal", "tokio/sync", "tokio/process"]
 
 [[bin]]
 name = "dm-relay"
@@ -18,8 +18,7 @@ path = "src/bin/dm_relay.rs"
 required-features = ["runtime"]
 
 [dependencies]
-silicon-dm-protocol = { path = "../protocol", version = "0.12.0" }
-silicon-iam-client = { version = "=5.0.0", path = "../../vendor/silicon-iam-client", optional = true }
+silicon-dm-protocol = { path = "../protocol", version = "0.13.0" }
 silicon-ting-client = { version = "=0.1.2", optional = true }
 anyhow = { version = "1.0.100", optional = true }
 axum = { version = "0.8.9", features = ["json", "tokio", "http1"], optional = true }

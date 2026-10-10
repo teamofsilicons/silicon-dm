@@ -1,124 +1,191 @@
-//! External service interfaces used by application workflows.
+//! External service interfaces used by application workflows. No SDK type crosses them.
 
 use async_trait::async_trait;
 use secrecy::SecretString;
+use time::OffsetDateTime;
 
 use crate::{
     AppResult,
-    application::auth::{ApplicationSession, AuthContext},
-    domain::{ActorId, ActorRef, Gif, OrganizationId},
+    application::auth::AuthContext,
+    domain::{ActorType, Gif},
 };
 
-/// Parsed inbound authentication material.
-pub enum AuthenticationRequest<'a> {
-    /// End-user bearer token.
-    Bearer {
-        /// Token value.
-        token: &'a SecretString,
-        /// Selected organization.
-        organization_id: &'a OrganizationId,
-    },
+/// Credential material presented with a request.
+pub enum PresentedCredential<'a> {
+    /// `Authorization: Bearer <Silicon Accounts access token>`.
+    Bearer(&'a SecretString),
+    /// `Authorization: Proof <sap_… User verification proof>` from another app.
+    Proof(&'a SecretString),
 }
 
-/// Identity and authorization operations owned by Silicon IAM.
+/// What one route requires of the credential.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AuthRequirement {
+    /// The proof scope that lets another app call this route for an account; `None` means
+    /// only the account's own access token is accepted.
+    pub proof_scope: Option<&'static str>,
+    /// Check the token with Silicon Accounts (introspection, cached ≤ 30 s) instead of only
+    /// verifying it locally, so a sign-out is seen at once (sensitive routes).
+    pub live: bool,
+}
+
+/// What an account shares with DM by signing in to it (DM's user base). Lookups never
+/// carry a name or photo; an account that removed DM's access has no profile here.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MemberProfile {
+    /// Display name, when set.
+    pub display_name: Option<String>,
+    /// Photo URL, when set.
+    pub pfp_url: Option<String>,
+}
+
+/// An account as Silicon Accounts describes it to DM (lookups and token claims).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountLookup {
+    /// Permanent uuid.
+    pub uuid: String,
+    /// Carbon or Silicon.
+    pub kind: ActorType,
+    /// Current public id; `None` when deleted.
+    pub id: Option<String>,
+    /// Display name, when shared with DM.
+    pub display_name: Option<String>,
+    /// Photo URL, when shared with DM.
+    pub pfp_url: Option<String>,
+    /// A Silicon's custodian: `(uuid, current id)`.
+    pub custodian: Option<(String, String)>,
+    /// The account was deleted.
+    pub deleted: bool,
+}
+
+/// A verified Silicon Accounts webhook delivery.
+#[derive(Clone, Debug)]
+pub struct VerifiedEvent {
+    /// Dedupe key: the same on every retry and replay.
+    pub event_id: String,
+    /// The event type as sent.
+    pub event_type: String,
+    /// When the change happened.
+    pub occurred_at: Option<OffsetDateTime>,
+    /// What changed.
+    pub event: AccountEvent,
+}
+
+/// The app events DM acts on.
+#[derive(Clone, Debug)]
+pub enum AccountEvent {
+    /// `account.id_changed`.
+    IdChanged {
+        /// Account uuid.
+        uuid: String,
+        /// Carbon or Silicon, when sent.
+        kind: Option<ActorType>,
+        /// The new public id.
+        new_id: String,
+    },
+    /// `account.updated` (profile as DM may see it now).
+    Updated {
+        /// Account uuid.
+        uuid: String,
+        /// The account after the change, when sent.
+        account: Option<AccountLookup>,
+        /// Monotonic profile version.
+        version: i64,
+    },
+    /// `account.deleted`.
+    Deleted {
+        /// Account uuid.
+        uuid: String,
+    },
+    /// `membership.signed_out`.
+    SignedOut {
+        /// Account uuid.
+        uuid: String,
+        /// Why (`app_revoked`, `stk_rotated`, …).
+        reason: Option<String>,
+    },
+    /// `membership.access_removed`.
+    AccessRemoved {
+        /// Account uuid.
+        uuid: String,
+    },
+    /// `silicon.custodian_changed`.
+    CustodianChanged {
+        /// The Silicon's uuid.
+        uuid: String,
+        /// The new custodian `(uuid, id)`.
+        to: Option<(String, String)>,
+    },
+    /// `ping` (a test delivery).
+    Ping,
+    /// A type DM does not act on.
+    Unknown,
+}
+
+/// A proof DM obtained from Silicon Accounts (for Ting).
+pub struct IssuedProof {
+    /// Proof family id (revoke with it).
+    pub proof_id: String,
+    /// `sap_…`: sent to the receiving app.
+    pub token: SecretString,
+    /// When `token` expires.
+    pub expires_at: Option<OffsetDateTime>,
+    /// `sapr_…`: rotates on every use; kept encrypted when DM needs the proof later.
+    pub refresh_token: Option<SecretString>,
+    /// When the refresh token stops working.
+    pub refresh_expires_at: Option<OffsetDateTime>,
+}
+
+/// Identity, lookups, proofs and webhooks: everything DM asks of Silicon Accounts.
 #[async_trait]
 pub trait IdentityProvider: Send + Sync {
-    /// Authenticates and authorizes a normal API request.
-    async fn authenticate(&self, request: AuthenticationRequest<'_>) -> AppResult<AuthContext>;
+    /// Verifies the credential for a route (the accounts cache and sign-out cutoffs are the
+    /// application's job, see [`crate::application::accounts`]).
+    async fn authenticate(
+        &self,
+        credential: PresentedCredential<'_>,
+        requirement: AuthRequirement,
+    ) -> AppResult<AuthContext>;
 
-    /// Exchanges a single-use IAM SLT using the backend's application secret.
-    async fn login(
-        &self,
-        slt: &SecretString,
-        idempotency_key: &str,
-    ) -> AppResult<ApplicationSession>;
+    /// `GET /v1/accounts/{uuid}`.
+    async fn lookup(&self, uuid: &str) -> AppResult<AccountLookup>;
 
-    /// Rotates an existing application session, preserving retry identity.
-    async fn refresh(
-        &self,
-        token: &SecretString,
-        idempotency_key: &str,
-    ) -> AppResult<ApplicationSession>;
+    /// `GET /v1/accounts/by-id/{id}` (current ids only).
+    async fn lookup_by_id(&self, id: &str) -> AppResult<AccountLookup>;
 
-    /// Revokes an application access token or an entire refresh-token family.
-    async fn logout(&self, token: &SecretString, idempotency_key: &str) -> AppResult<()>;
+    /// `GET /v1/apps/{app_id}/users/{uuid}`: the profile a member shared with DM, or
+    /// `None` for an account that never signed in to DM or removed its access.
+    async fn member_profile(&self, uuid: &str) -> AppResult<Option<MemberProfile>>;
 
-    /// Explicitly enrolls this recipient's consented DM identity with Ting.
-    /// The attempt key identifies a fresh OBO exchange; it is not a delivery proof.
-    async fn register_ting_delivery(
-        &self,
-        _context: &AuthContext,
-        _settings: &crate::config::TingSettings,
-        _exchange_attempt_key: &str,
-    ) -> AppResult<serde_json::Value> {
-        Err(crate::AppError::DependencyUnavailable { dependency: "ting" })
-    }
-
-    /// Issues a fresh Ting send proof using this originator's active DM session.
-    /// The caller supplies a new exchange attempt key and exact persisted bytes.
-    async fn issue_ting_send_proof(
-        &self,
-        _context: &AuthContext,
-        _request_body: &str,
-        _attempt_key: &str,
-    ) -> AppResult<crate::infrastructure::ting::TingSendAuthority> {
-        Err(crate::AppError::DependencyUnavailable { dependency: "ting" })
-    }
-
-    /// Starts explicit Ting endpoint consent as the requesting application.
-    async fn authorize_ting(
-        &self,
-        _request: &silicon_iam_client::models::OboAuthorizationRequest,
-        _key: &str,
-    ) -> AppResult<silicon_iam_client::models::OboConsentDetail> {
-        Err(crate::AppError::DependencyUnavailable { dependency: "iam" })
-    }
-    /// Reads the original application's pending consent context.
-    async fn ting_authorization(
-        &self,
-        _id: uuid::Uuid,
-    ) -> AppResult<silicon_iam_client::models::OboConsentDetail> {
-        Err(crate::AppError::DependencyUnavailable { dependency: "iam" })
-    }
-    /// Exchanges or rotates only dedicated Ting OBO credentials.
-    async fn ting_tokens(
-        &self,
-        _request: silicon_iam_client::models::OboTokenRequest,
-        _key: &str,
-    ) -> AppResult<silicon_iam_client::models::OboTokenResponse> {
-        Err(crate::AppError::DependencyUnavailable { dependency: "iam" })
-    }
-    /// Verifies paired provider testing credentials against this exact environment.
-    async fn validate_ting_context(
-        &self,
-        _testing: Option<&silicon_iam_client::models::OboTestingContext>,
-    ) -> AppResult<()> {
-        Err(crate::AppError::DependencyUnavailable { dependency: "iam" })
-    }
-
-    /// Authenticates exact webhook bytes and binds the event to this IAM plane.
+    /// Verifies a webhook delivery's signature over the raw body and parses it.
     ///
     /// # Errors
-    /// Rejects invalid signatures, expired deliveries, and mismatched IAM planes.
-    fn verify_webhook(
-        &self,
-        headers: &http::HeaderMap,
-        body: &[u8],
-    ) -> AppResult<silicon_iam_client::models::WebhookEvent>;
+    /// 401 for a bad or stale signature, 400 for a body that is not an event.
+    fn verify_webhook(&self, headers: &http::HeaderMap, body: &[u8]) -> AppResult<VerifiedEvent>;
 
-    /// Resolves and authorizes active actors for one conversation.
-    async fn authorize_participants(
+    /// A User verification proof for `receiving_app`, for the account behind
+    /// `subject_token` (its current DM access token).
+    async fn issue_user_verification(
         &self,
-        context: &AuthContext,
-        actor_ids: &[ActorId],
-    ) -> AppResult<Vec<ActorRef>>;
+        subject_token: &SecretString,
+        receiving_app: &str,
+        scopes: &[&str],
+        idempotency_key: &str,
+    ) -> AppResult<IssuedProof>;
 
-    /// Verifies that the caller may observe another actor's presence.
-    async fn authorize_presence(
+    /// An App verification proof (DM itself, no account) for `receiving_app`.
+    async fn issue_app_verification(
         &self,
-        context: &AuthContext,
-        actor_id: &ActorId,
-    ) -> AppResult<ActorRef>;
+        receiving_app: &str,
+        scopes: &[&str],
+        idempotency_key: &str,
+    ) -> AppResult<IssuedProof>;
+
+    /// Exchanges a proof refresh token for a new proof (the refresh token rotates).
+    async fn refresh_proof(&self, refresh_token: &SecretString) -> AppResult<IssuedProof>;
+
+    /// Revokes a proof DM issued.
+    async fn revoke_proof(&self, proof_id: &str) -> AppResult<()>;
 }
 
 /// Giphy operations required by DM.

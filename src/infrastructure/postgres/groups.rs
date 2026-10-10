@@ -1,4 +1,11 @@
-//! Group policy, invitation mutation, and token-scoped access checks.
+//! Groups: co-equal owners, invitations that must be accepted, members leaving, and a
+//! group never left without an owner. Membership is the accepted invitation; the
+//! conversation roster keeps an immutable anchor row per account that ever joined.
+use serde::Serialize;
+use sqlx::{FromRow, Postgres, Transaction};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
 use super::{
     PostgresStore,
     directory::refresh_directory_in,
@@ -7,112 +14,220 @@ use super::{
 };
 use crate::{
     AppError, AppResult,
-    application::auth::AuthContext,
-    domain::{ActorRef, Conversation, GroupDetails, GroupSettings, IdempotencyKey, OrganizationId},
+    domain::{
+        ActorId, ActorRef, ActorType, Conversation, GroupDetails, GroupSettings, IdempotencyKey,
+        OrganizationId,
+    },
 };
-use sqlx::{Postgres, Transaction};
-use uuid::Uuid;
 
-/// Only IAM-disclosed organization owners and administrators manage groups.
-pub(crate) fn require_group_admin(auth: &AuthContext) -> AppResult<()> {
-    if matches!(
-        auth.org_role.as_deref(),
-        Some("owner" | "admin" | "org_owner" | "org_admin")
-    ) {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden)
+/// An account to add to a group, and whether it joins at once (a custodian adding its
+/// own Silicon) or must accept first.
+#[derive(Clone, Debug, Serialize)]
+pub struct Invitee {
+    /// The account.
+    pub actor: ActorRef,
+    /// Joins without an acceptance step.
+    pub accepted: bool,
+}
+
+/// A pending invitation as the invitee sees it.
+#[derive(Clone, Debug, Serialize)]
+pub struct Invitation {
+    /// The group (rendered as its group id).
+    pub conversation_id: Uuid,
+    /// Group name.
+    pub name: String,
+    /// Group description.
+    pub description: String,
+    /// The invited account (the caller, or a Silicon it is custodian of).
+    pub invitee: ActorRef,
+    /// Who invited it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invited_by: Option<ActorRef>,
+    /// When.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub invited_at: Option<OffsetDateTime>,
+    /// The group's owners.
+    pub owners: Vec<ActorRef>,
+}
+
+#[derive(FromRow)]
+struct InvitationRow {
+    conversation_id: Uuid,
+    name: String,
+    description: String,
+    actor_kind: String,
+    actor_id: String,
+    invited_by_kind: Option<String>,
+    invited_by_id: Option<String>,
+    invited_at: Option<OffsetDateTime>,
+}
+
+#[derive(FromRow)]
+struct MemberRow {
+    actor_kind: String,
+    actor_id: String,
+}
+
+fn reference(kind: &str, id: &str) -> ActorRef {
+    ActorRef {
+        actor_type: if kind == "silicon" {
+            ActorType::Silicon
+        } else {
+            ActorType::Carbon
+        },
+        id: ActorId::from_storage_key(id.to_owned()),
     }
 }
+
 impl PostgresStore {
-    /// Checks group policy against this exact credential, never broader cached tag disclosure.
-    /// Direct conversations retain their existing participant checks.
+    /// Whether `actor` manages the group: an owner, or the custodian of a Silicon owner.
+    ///
     /// # Errors
-    /// Rejects inaccessible or cross-organization conversations.
-    pub async fn check_group_access(&self, auth: &AuthContext, id: Uuid) -> AppResult<()> {
-        let tags: Vec<Uuid> = auth.tag_ids.iter().flatten().copied().collect();
-        let allowed:bool=sqlx::query_scalar("SELECT NOT c.is_group OR EXISTS (SELECT 1 FROM groups g WHERE g.conversation_id=c.id AND (EXISTS(SELECT 1 FROM group_invitations i WHERE i.conversation_id=g.conversation_id AND i.actor_kind=$3::text::actor_kind AND i.actor_id=$4) OR (g.is_public AND $3='carbon') OR (NOT g.is_public AND g.tag_ids && $5))) FROM conversations c WHERE c.id=$1 AND c.organization_id=$2")
-            .bind(id).bind(auth.organization_id.as_str()).bind(auth.actor.actor_type.as_str()).bind(auth.actor.id.as_str()).bind(tags).fetch_optional(self.pool()).await?.unwrap_or(false);
-        if allowed {
-            Ok(())
-        } else {
-            Err(AppError::NotFound)
-        }
+    /// Database failures.
+    pub async fn manages_group(&self, actor: &ActorRef, id: Uuid) -> AppResult<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM group_owners o
+                WHERE o.conversation_id = $1 AND (
+                    (o.actor_kind = $2::text::actor_kind AND o.actor_id = $3)
+                    OR (o.actor_kind = 'silicon' AND $2 = 'carbon' AND EXISTS (
+                        SELECT 1 FROM accounts a WHERE a.uuid = o.actor_id AND a.custodian_uuid = $3)))
+                  AND NOT EXISTS (SELECT 1 FROM accounts gone WHERE gone.uuid = o.actor_id AND gone.status = 'deleted'))",
+        )
+        .bind(id)
+        .bind(actor.actor_type.as_str())
+        .bind(actor.id.as_str())
+        .fetch_one(self.pool())
+        .await?)
     }
-    /// Reads metadata without history; callers must independently authorize access or administration.
+
+    /// Group settings, owners and members; pending invitations only for those who manage
+    /// the group.
+    ///
     /// # Errors
-    /// Propagates storage and metadata decoding failures.
+    /// Database failures.
     pub async fn group_details(
         &self,
-        org: &OrganizationId,
+        viewer: &ActorRef,
         id: Uuid,
     ) -> AppResult<Option<GroupDetails>> {
-        let row:Option<sqlx::types::Json<GroupDetails>>=sqlx::query_scalar("SELECT jsonb_build_object('name',g.name,'description',g.description,'is_public',g.is_public,'tag_ids',g.tag_ids,'version',g.version,'invited_members',COALESCE((SELECT jsonb_agg(jsonb_build_object('type',i.actor_kind::text,'id',i.actor_id) ORDER BY i.actor_kind,i.actor_id) FROM group_invitations i WHERE i.conversation_id=g.conversation_id),'[]'::jsonb)) FROM groups g WHERE g.conversation_id=$1 AND g.organization_id=$2")
-            .bind(id).bind(org.as_str()).fetch_optional(self.pool()).await?;
-        Ok(row.map(|row| row.0))
+        let Some((name, description, version)): Option<(String, String, i64)> = sqlx::query_as(
+            "SELECT name, description, version FROM groups WHERE conversation_id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await?
+        else {
+            return Ok(None);
+        };
+        let rows = |sql: &'static str| {
+            sqlx::query_as::<_, MemberRow>(sql)
+                .bind(id)
+                .fetch_all(self.pool())
+        };
+        let owners = rows(
+            "SELECT o.actor_kind::text AS actor_kind, o.actor_id FROM group_owners o
+             WHERE o.conversation_id = $1
+               AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.uuid = o.actor_id AND a.status = 'deleted')
+             ORDER BY o.added_at, o.actor_id",
+        )
+        .await?;
+        let members = rows(
+            "SELECT DISTINCT e.actor_kind::text AS actor_kind, e.actor_id FROM eligible_group_members e
+             WHERE e.conversation_id = $1 ORDER BY 1, 2",
+        )
+        .await?;
+        let pending = if self.manages_group(viewer, id).await? {
+            rows(
+                "SELECT i.actor_kind::text AS actor_kind, i.actor_id FROM group_invitations i
+                 WHERE i.conversation_id = $1 AND i.status = 'pending' ORDER BY i.invited_at, i.actor_id",
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        let to_refs = |rows: Vec<MemberRow>| {
+            rows.iter()
+                .map(|row| reference(&row.actor_kind, &row.actor_id))
+                .collect::<Vec<_>>()
+        };
+        Ok(Some(GroupDetails {
+            settings: GroupSettings { name, description },
+            version,
+            owners: to_refs(owners),
+            members: to_refs(members),
+            pending_invitations: to_refs(pending),
+        }))
     }
-    /// Creates a named group with a stable public address and internal conversation UUID and idempotent invitations.
+
+    /// Creates a group in the @accounts partition with the creator as first owner. Every
+    /// invitee is a pending invitation except those that join at once.
+    ///
     /// # Errors
-    /// Rejects unauthorized creators, invalid policies/actors, and conflicting retries.
+    /// Invalid settings, conflicting retries, or durable invariant failures.
     pub async fn create_group(
         &self,
-        auth: &AuthContext,
+        creator: &ActorRef,
         mut settings: GroupSettings,
-        members: Vec<ActorRef>,
+        mut invitees: Vec<Invitee>,
         key: &IdempotencyKey,
     ) -> AppResult<Conversation> {
-        require_group_admin(auth)?;
         settings.validate()?;
-        let mut members = members;
-        members.push(auth.actor.clone());
-        members.sort_by(|a, b| {
-            (a.actor_type.as_str(), a.id.as_str()).cmp(&(b.actor_type.as_str(), b.id.as_str()))
+        invitees.retain(|invitee| invitee.actor != *creator);
+        invitees.sort_by(|a, b| {
+            (a.actor.actor_type.as_str(), a.actor.id.as_str())
+                .cmp(&(b.actor.actor_type.as_str(), b.actor.id.as_str()))
         });
-        members.dedup();
-        let hash = request_hash(&(&settings, &members))?;
+        invitees.dedup_by(|a, b| a.actor == b.actor);
+        let hash = request_hash(&(&settings, &invitees))?;
+        let partition = OrganizationId::accounts();
+        let mut anchors = vec![creator.clone()];
+        anchors.extend(invitees.iter().map(|invitee| invitee.actor.clone()));
         let mut tx = self.pool().begin().await?;
-        refresh_directory_in(&mut tx, &auth.organization_id, &members).await?;
-        let id = match claim(
-            &mut tx,
-            &auth.organization_id,
-            &auth.actor,
-            "groups.create",
-            key,
-            &hash,
-        )
-        .await?
-        {
+        refresh_directory_in(&mut tx, &partition, &anchors).await?;
+        let id = match claim(&mut tx, &partition, creator, "groups.create", key, &hash).await? {
             IdempotencyClaim::Replay(id) => id,
             IdempotencyClaim::Acquired => {
                 let id = Uuid::now_v7();
                 let digest = blake3::hash(id.as_bytes());
-                sqlx::query("INSERT INTO conversations(id,organization_id,participant_set_hash,created_by_kind,created_by_id,is_group) VALUES($1,$2,$3,$4::text::actor_kind,$5,true)").bind(id).bind(auth.organization_id.as_str()).bind(digest.as_bytes().as_slice()).bind(auth.actor.actor_type.as_str()).bind(auth.actor.id.as_str()).execute(&mut *tx).await?;
-                sqlx::query("INSERT INTO groups(conversation_id,organization_id,name,description,is_public,tag_ids) VALUES($1,$2,$3,$4,$5,$6)").bind(id).bind(auth.organization_id.as_str()).bind(&settings.name).bind(&settings.description).bind(settings.is_public).bind(&settings.tag_ids).execute(&mut *tx).await.map_err(map_constraint_error)?;
-                invite_in(&mut tx, &auth.organization_id, id, &members).await?;
-                complete_group(&mut tx, auth, "groups.create", key, id).await?;
+                sqlx::query("INSERT INTO conversations(id,organization_id,participant_set_hash,created_by_kind,created_by_id,is_group) VALUES($1,$2,$3,$4::text::actor_kind,$5,true)")
+                    .bind(id).bind(partition.as_str()).bind(digest.as_bytes().as_slice())
+                    .bind(creator.actor_type.as_str()).bind(creator.id.as_str())
+                    .execute(&mut *tx).await.map_err(map_constraint_error)?;
+                sqlx::query("INSERT INTO groups(conversation_id,organization_id,name,description) VALUES($1,$2,$3,$4)")
+                    .bind(id).bind(partition.as_str()).bind(&settings.name).bind(&settings.description)
+                    .execute(&mut *tx).await.map_err(map_constraint_error)?;
+                sqlx::query("INSERT INTO group_owners(conversation_id,actor_kind,actor_id,added_by_id) VALUES($1,$2::text::actor_kind,$3,$3)")
+                    .bind(id).bind(creator.actor_type.as_str()).bind(creator.id.as_str())
+                    .execute(&mut *tx).await.map_err(map_constraint_error)?;
+                let mut everyone = vec![Invitee {
+                    actor: creator.clone(),
+                    accepted: true,
+                }];
+                everyone.extend(invitees.iter().cloned());
+                invite_in(&mut tx, &partition, id, creator, &everyone).await?;
+                complete_group(&mut tx, creator, "groups.create", key, id, 201).await?;
                 id
             }
         };
-        sqlx::query("SELECT sync_group_participants($1)")
-            .bind(auth.organization_id.as_str())
-            .execute(&mut *tx)
-            .await?;
+        sync_in(&mut tx, id).await?;
         tx.commit().await.map_err(map_constraint_error)?;
-        self.get_conversation(&auth.organization_id, &auth.actor, id)
-            .await
+        self.get_conversation(creator, id).await
     }
-    /// Updates name, description and access policy using an exact version.
+
+    /// Changes name and description at an exact version (the caller manages the group).
+    ///
     /// # Errors
-    /// Rejects unauthorized callers, stale versions and conflicting retry bodies.
+    /// Stale versions, invalid settings, conflicting retries.
     pub async fn update_group(
         &self,
-        auth: &AuthContext,
+        actor: &ActorRef,
         id: Uuid,
         mut settings: GroupSettings,
         version: i64,
         key: &IdempotencyKey,
     ) -> AppResult<GroupDetails> {
-        require_group_admin(auth)?;
         settings.validate()?;
         if version < 1 {
             return Err(AppError::validation(
@@ -121,141 +236,403 @@ impl PostgresStore {
         }
         let hash = request_hash(&(id, &settings, version))?;
         let mut tx = self.pool().begin().await?;
-        lock_group(&mut tx, &auth.organization_id, id).await?;
-        if matches!(
-            claim(
-                &mut tx,
-                &auth.organization_id,
-                &auth.actor,
-                "groups.update",
-                key,
-                &hash
-            )
-            .await?,
-            IdempotencyClaim::Acquired
-        ) {
-            let changed=sqlx::query("UPDATE groups SET name=$3,description=$4,is_public=$5,tag_ids=$6,version=version+1 WHERE conversation_id=$1 AND organization_id=$2 AND version=$7").bind(id).bind(auth.organization_id.as_str()).bind(&settings.name).bind(&settings.description).bind(settings.is_public).bind(&settings.tag_ids).bind(version).execute(&mut *tx).await?;
+        lock_group(&mut tx, id).await?;
+        if acquired(&mut tx, actor, "groups.update", key, &hash).await? {
+            let changed = sqlx::query("UPDATE groups SET name=$2,description=$3,version=version+1 WHERE conversation_id=$1 AND version=$4")
+                .bind(id).bind(&settings.name).bind(&settings.description).bind(version)
+                .execute(&mut *tx).await?;
             if changed.rows_affected() != 1 {
                 return Err(AppError::conflict(
                     "group version changed; fetch the group and retry with its current version",
                 ));
             }
-            complete_group(&mut tx, auth, "groups.update", key, id).await?;
+            complete_group(&mut tx, actor, "groups.update", key, id, 200).await?;
         }
-        finish_group(&mut tx, &auth.organization_id, id).await?;
+        finish_group(&mut tx, id).await?;
         tx.commit().await.map_err(map_constraint_error)?;
-        self.group_details(&auth.organization_id, id)
+        self.group_details(actor, id)
             .await?
             .ok_or(AppError::NotFound)
     }
-    /// Adds explicit invitations or removes one invitation; tag/public grants remain independent.
+
+    /// Invites accounts (the caller manages the group). Existing members stay as they are;
+    /// a pending invitation of an account that may join at once is accepted.
+    ///
     /// # Errors
-    /// Rejects unauthorized administrators, cross-organization groups and conflicting retries.
-    pub async fn change_group_members(
+    /// Conflicting retries or durable invariant failures.
+    pub async fn invite_to_group(
         &self,
-        auth: &AuthContext,
+        actor: &ActorRef,
         id: Uuid,
-        members: Vec<ActorRef>,
-        remove: bool,
+        invitees: Vec<Invitee>,
         key: &IdempotencyKey,
     ) -> AppResult<GroupDetails> {
-        require_group_admin(auth)?;
-        let mut members = members;
-        members.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
-        members.dedup();
-        let operation = if remove {
-            "groups.uninvite"
-        } else {
-            "groups.invite"
-        };
-        let hash = request_hash(&(id, &members))?;
+        let hash = request_hash(&(id, &invitees))?;
         let mut tx = self.pool().begin().await?;
-        lock_group(&mut tx, &auth.organization_id, id).await?;
-        if matches!(
-            claim(
-                &mut tx,
-                &auth.organization_id,
-                &auth.actor,
-                operation,
-                key,
-                &hash
-            )
-            .await?,
-            IdempotencyClaim::Acquired
-        ) {
-            if remove {
-                for actor in &members {
-                    sqlx::query("DELETE FROM group_invitations WHERE conversation_id=$1 AND organization_id=$2 AND actor_kind=$3::text::actor_kind AND actor_id=$4").bind(id).bind(auth.organization_id.as_str()).bind(actor.actor_type.as_str()).bind(actor.id.as_str()).execute(&mut *tx).await?;
-                }
-            } else {
-                refresh_directory_in(&mut tx, &auth.organization_id, &members).await?;
-                invite_in(&mut tx, &auth.organization_id, id, &members).await?;
-            }
-            sqlx::query("UPDATE groups SET version=version+1 WHERE conversation_id=$1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-            complete_group(&mut tx, auth, operation, key, id).await?;
+        let partition = lock_group(&mut tx, id).await?;
+        if acquired(&mut tx, actor, "groups.invite", key, &hash).await? {
+            let anchors: Vec<ActorRef> = invitees.iter().map(|i| i.actor.clone()).collect();
+            refresh_directory_in(&mut tx, &partition, &anchors).await?;
+            invite_in(&mut tx, &partition, id, actor, &invitees).await?;
+            bump(&mut tx, id).await?;
+            complete_group(&mut tx, actor, "groups.invite", key, id, 200).await?;
         }
-        finish_group(&mut tx, &auth.organization_id, id).await?;
+        finish_group(&mut tx, id).await?;
         tx.commit().await.map_err(map_constraint_error)?;
-        self.group_details(&auth.organization_id, id)
+        self.group_details(actor, id)
             .await?
             .ok_or(AppError::NotFound)
     }
 }
-async fn lock_group(
-    tx: &mut Transaction<'_, Postgres>,
-    org: &OrganizationId,
-    id: Uuid,
-) -> AppResult<()> {
-    let found:Option<Uuid>=sqlx::query_scalar("SELECT c.id FROM conversations c JOIN groups g ON g.conversation_id=c.id WHERE c.id=$1 AND c.organization_id=$2 FOR UPDATE OF c,g").bind(id).bind(org.as_str()).fetch_optional(&mut **tx).await?;
-    found.ok_or(AppError::NotFound).map(|_| ())
+
+impl PostgresStore {
+    /// Removes members or cancels their invitations. Refused when it would leave the group
+    /// without an owner.
+    ///
+    /// # Errors
+    /// `last_owner` (409), conflicting retries, durable failures.
+    pub async fn remove_from_group(
+        &self,
+        actor: &ActorRef,
+        id: Uuid,
+        members: &[ActorRef],
+        key: &IdempotencyKey,
+    ) -> AppResult<GroupDetails> {
+        let hash = request_hash(&(id, members))?;
+        let mut tx = self.pool().begin().await?;
+        lock_group(&mut tx, id).await?;
+        if acquired(&mut tx, actor, "groups.uninvite", key, &hash).await? {
+            for member in members {
+                sqlx::query("DELETE FROM group_invitations WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3")
+                    .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str())
+                    .execute(&mut *tx).await?;
+                sqlx::query("DELETE FROM group_owners WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3")
+                    .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str())
+                    .execute(&mut *tx).await?;
+            }
+            require_an_owner(&mut tx, id).await?;
+            bump(&mut tx, id).await?;
+            complete_group(&mut tx, actor, "groups.uninvite", key, id, 200).await?;
+        }
+        finish_group(&mut tx, id).await?;
+        tx.commit().await.map_err(map_constraint_error)?;
+        self.group_details(actor, id)
+            .await?
+            .ok_or(AppError::NotFound)
+    }
+
+    /// The invitee accepts (joins with full history) or declines (the invitation goes).
+    ///
+    /// # Errors
+    /// Not found when there is no pending invitation for this account.
+    pub async fn respond_to_invitation(
+        &self,
+        invitee: &ActorRef,
+        id: Uuid,
+        accept: bool,
+    ) -> AppResult<()> {
+        let mut tx = self.pool().begin().await?;
+        lock_group(&mut tx, id).await?;
+        let changed = if accept {
+            sqlx::query("UPDATE group_invitations SET status='accepted', accepted_at=clock_timestamp() WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3 AND status='pending'")
+        } else {
+            sqlx::query("DELETE FROM group_invitations WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3 AND status='pending'")
+        }
+        .bind(id)
+        .bind(invitee.actor_type.as_str())
+        .bind(invitee.id.as_str())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(AppError::refused(
+                http::StatusCode::NOT_FOUND,
+                "invitation_not_found",
+                "There is no pending invitation to this group for this account (it may have been accepted, declined or cancelled already).",
+            ));
+        }
+        bump(&mut tx, id).await?;
+        finish_group(&mut tx, id).await?;
+        tx.commit().await.map_err(map_constraint_error)?;
+        Ok(())
+    }
+
+    /// A member leaves. The last owner cannot leave (make someone else an owner first).
+    ///
+    /// # Errors
+    /// `last_owner` (409), not a member (404).
+    pub async fn leave_group(&self, member: &ActorRef, id: Uuid) -> AppResult<()> {
+        let mut tx = self.pool().begin().await?;
+        lock_group(&mut tx, id).await?;
+        let left = sqlx::query("DELETE FROM group_invitations WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3 AND status='accepted'")
+            .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str())
+            .execute(&mut *tx).await?.rows_affected();
+        if left != 1 {
+            return Err(AppError::NotFound);
+        }
+        sqlx::query("DELETE FROM group_owners WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3")
+            .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str())
+            .execute(&mut *tx).await?;
+        require_an_owner(&mut tx, id).await?;
+        bump(&mut tx, id).await?;
+        finish_group(&mut tx, id).await?;
+        tx.commit().await.map_err(map_constraint_error)?;
+        Ok(())
+    }
+
+    /// Promotes accepted members to owners, or demotes owners (never the last one).
+    ///
+    /// # Errors
+    /// `not_a_member` (409) for promoting a non-member, `last_owner` (409).
+    pub async fn set_group_owners(
+        &self,
+        actor: &ActorRef,
+        id: Uuid,
+        members: &[ActorRef],
+        promote: bool,
+        key: &IdempotencyKey,
+    ) -> AppResult<GroupDetails> {
+        let operation = if promote {
+            "groups.owners.add"
+        } else {
+            "groups.owners.remove"
+        };
+        let hash = request_hash(&(id, members))?;
+        let mut tx = self.pool().begin().await?;
+        lock_group(&mut tx, id).await?;
+        if acquired(&mut tx, actor, operation, key, &hash).await? {
+            for member in members {
+                if promote {
+                    let is_member: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM eligible_group_members WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3)")
+                        .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str())
+                        .fetch_one(&mut *tx).await?;
+                    if !is_member {
+                        return Err(AppError::refused(
+                            http::StatusCode::CONFLICT,
+                            "not_a_member",
+                            "Only members who accepted their invitation can become owners.",
+                        ));
+                    }
+                    sqlx::query("INSERT INTO group_owners(conversation_id,actor_kind,actor_id,added_by_id) VALUES($1,$2::text::actor_kind,$3,$4) ON CONFLICT DO NOTHING")
+                        .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str()).bind(actor.id.as_str())
+                        .execute(&mut *tx).await?;
+                } else {
+                    sqlx::query("DELETE FROM group_owners WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3")
+                        .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str())
+                        .execute(&mut *tx).await?;
+                }
+            }
+            require_an_owner(&mut tx, id).await?;
+            bump(&mut tx, id).await?;
+            complete_group(&mut tx, actor, operation, key, id, 200).await?;
+        }
+        finish_group(&mut tx, id).await?;
+        tx.commit().await.map_err(map_constraint_error)?;
+        self.group_details(actor, id)
+            .await?
+            .ok_or(AppError::NotFound)
+    }
+
+    /// Pending invitations of these accounts (the caller, or a Silicon it looks after).
+    ///
+    /// # Errors
+    /// Database failures.
+    pub async fn invitations_for(&self, invitee: &ActorRef) -> AppResult<Vec<Invitation>> {
+        let rows: Vec<InvitationRow> = sqlx::query_as(
+            "SELECT i.conversation_id, g.name, g.description, i.actor_kind::text AS actor_kind, i.actor_id,
+                    i.invited_by_kind::text AS invited_by_kind, i.invited_by_id, i.invited_at
+             FROM group_invitations i JOIN groups g USING (conversation_id)
+             WHERE i.actor_kind = $1::text::actor_kind AND i.actor_id = $2 AND i.status = 'pending'
+             ORDER BY i.invited_at, i.conversation_id",
+        )
+        .bind(invitee.actor_type.as_str())
+        .bind(invitee.id.as_str())
+        .fetch_all(self.pool())
+        .await?;
+        let mut invitations = Vec::with_capacity(rows.len());
+        for row in rows {
+            let owners: Vec<MemberRow> = sqlx::query_as(
+                "SELECT actor_kind::text AS actor_kind, actor_id FROM group_owners WHERE conversation_id = $1 ORDER BY added_at, actor_id",
+            )
+            .bind(row.conversation_id)
+            .fetch_all(self.pool())
+            .await?;
+            invitations.push(Invitation {
+                conversation_id: row.conversation_id,
+                name: row.name,
+                description: row.description,
+                invitee: reference(&row.actor_kind, &row.actor_id),
+                invited_by: row
+                    .invited_by_kind
+                    .zip(row.invited_by_id)
+                    .map(|(kind, id)| reference(&kind, &id)),
+                invited_at: row.invited_at,
+                owners: owners
+                    .iter()
+                    .map(|owner| reference(&owner.actor_kind, &owner.actor_id))
+                    .collect(),
+            });
+        }
+        Ok(invitations)
+    }
 }
+
+/// Locks the group and returns its storage partition.
+async fn lock_group(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> AppResult<OrganizationId> {
+    let partition: Option<String> = sqlx::query_scalar(
+        "SELECT c.organization_id FROM conversations c JOIN groups g ON g.conversation_id=c.id WHERE c.id=$1 FOR UPDATE OF c,g",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    partition
+        .ok_or(AppError::NotFound)?
+        .parse()
+        .map_err(|error| super::rows::data_error("group partition", error))
+}
+
+async fn acquired(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &ActorRef,
+    operation: &str,
+    key: &IdempotencyKey,
+    hash: &[u8; 32],
+) -> AppResult<bool> {
+    let accounts = OrganizationId::accounts();
+    refresh_directory_in(tx, &accounts, std::slice::from_ref(actor)).await?;
+    Ok(matches!(
+        claim(tx, &accounts, actor, operation, key, hash).await?,
+        IdempotencyClaim::Acquired
+    ))
+}
+
 async fn invite_in(
     tx: &mut Transaction<'_, Postgres>,
-    org: &OrganizationId,
+    partition: &OrganizationId,
     id: Uuid,
-    members: &[ActorRef],
+    inviter: &ActorRef,
+    invitees: &[Invitee],
 ) -> AppResult<()> {
-    for actor in members {
-        sqlx::query("INSERT INTO group_invitations(conversation_id,organization_id,actor_kind,actor_id) VALUES($1,$2,$3::text::actor_kind,$4) ON CONFLICT DO NOTHING").bind(id).bind(org.as_str()).bind(actor.actor_type.as_str()).bind(actor.id.as_str()).execute(&mut **tx).await?;
+    refresh_directory_in(tx, partition, std::slice::from_ref(inviter)).await?;
+    for invitee in invitees {
+        let status = if invitee.accepted {
+            "accepted"
+        } else {
+            "pending"
+        };
+        sqlx::query(
+            "INSERT INTO group_invitations(conversation_id,organization_id,actor_kind,actor_id,status,invited_by_kind,invited_by_id,invited_at,accepted_at)
+             VALUES($1,$2,$3::text::actor_kind,$4,$5,$6::text::actor_kind,$7,clock_timestamp(),CASE WHEN $5='accepted' THEN clock_timestamp() END)
+             ON CONFLICT (conversation_id,actor_kind,actor_id) DO UPDATE SET
+                status = CASE WHEN group_invitations.status = 'accepted' OR EXCLUDED.status = 'accepted' THEN 'accepted' ELSE 'pending' END,
+                accepted_at = COALESCE(group_invitations.accepted_at, EXCLUDED.accepted_at)",
+        )
+        .bind(id)
+        .bind(partition.as_str())
+        .bind(invitee.actor.actor_type.as_str())
+        .bind(invitee.actor.id.as_str())
+        .bind(status)
+        .bind(inviter.actor_type.as_str())
+        .bind(inviter.id.as_str())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_constraint_error)?;
     }
     Ok(())
 }
+
 async fn complete_group(
     tx: &mut Transaction<'_, Postgres>,
-    auth: &AuthContext,
+    actor: &ActorRef,
     op: &str,
     key: &IdempotencyKey,
     id: Uuid,
+    status: u16,
 ) -> AppResult<()> {
     complete(
         tx,
-        &auth.organization_id,
-        &auth.actor,
+        &OrganizationId::accounts(),
+        actor,
         op,
         key,
         IdempotencyResult {
             resource_type: "conversation",
             resource_id: id,
-            response_status: 200,
+            response_status: status,
         },
     )
     .await
 }
-async fn finish_group(
-    tx: &mut Transaction<'_, Postgres>,
-    org: &OrganizationId,
-    id: Uuid,
-) -> AppResult<()> {
-    sqlx::query("SELECT sync_group_participants($1)")
-        .bind(org.as_str())
+
+async fn bump(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> AppResult<()> {
+    sqlx::query("UPDATE groups SET version=version+1 WHERE conversation_id=$1")
+        .bind(id)
         .execute(&mut **tx)
         .await?;
+    Ok(())
+}
+
+async fn sync_in(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> AppResult<()> {
+    sqlx::query("SELECT sync_group_conversation($1)")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn finish_group(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> AppResult<()> {
+    sync_in(tx, id).await?;
     sqlx::query("UPDATE conversations SET updated_at=clock_timestamp() WHERE id=$1")
         .bind(id)
         .execute(&mut **tx)
         .await?;
+    Ok(())
+}
+
+async fn require_an_owner(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> AppResult<()> {
+    let owners: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM group_owners o WHERE o.conversation_id=$1
+         AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.uuid = o.actor_id AND a.status = 'deleted')",
+    )
+    .bind(id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if owners == 0 {
+        return Err(AppError::refused(
+            http::StatusCode::CONFLICT,
+            "last_owner",
+            "A group always keeps at least one owner. Make another member an owner first (POST /api/v1/groups/{group}/owners).",
+        ));
+    }
+    Ok(())
+}
+
+/// After an account was deleted: if the group lost its last owner, its longest-standing
+/// member becomes owner (nothing happens to a group with no members left).
+pub(crate) async fn ensure_owner_in(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> AppResult<()> {
+    let has_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM group_owners o WHERE o.conversation_id = $1
+            AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.uuid = o.actor_id AND a.status = 'deleted'))",
+    )
+    .bind(id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if has_owner {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO group_owners (conversation_id, actor_kind, actor_id)
+         SELECT e.conversation_id, e.actor_kind, e.actor_id
+         FROM eligible_group_members e
+         LEFT JOIN group_invitations i USING (conversation_id, actor_kind, actor_id)
+         LEFT JOIN conversation_participants p USING (conversation_id, actor_kind, actor_id)
+         WHERE e.conversation_id = $1
+         ORDER BY COALESCE(i.accepted_at, i.invited_at, p.added_at) NULLS LAST, e.actor_id
+         LIMIT 1
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(id)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }

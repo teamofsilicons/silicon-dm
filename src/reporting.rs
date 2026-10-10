@@ -1,4 +1,5 @@
-//! Authenticated reports persist before acknowledgement; sandbox delivery is simulated.
+//! Authenticated reports persist before acknowledgement. Outside production, without
+//! Postmark configured, reports are stored and marked simulated (no email is sent).
 use axum::{Json, extract::State, http::StatusCode};
 use secrecy::ExposeSecret as _;
 use serde::{Deserialize, Serialize};
@@ -60,7 +61,8 @@ pub(crate) async fn submit(
             ));
         }
     }
-    let simulated = state.testing_environment.is_some();
+    let simulated = state.settings.reporting.is_none()
+        && state.settings.environment != crate::config::RuntimeEnvironment::Production;
     if !simulated && state.settings.reporting.is_none() {
         return Err(AppError::DependencyUnavailable {
             dependency: "postmark_configuration",
@@ -70,14 +72,11 @@ pub(crate) async fn submit(
     let mut tx = state.store.pool().begin().await?;
     // Serialize one reporter's retries and rate budget across API replicas.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 29))")
-        .bind(format!(
-            "report:{}:{}",
-            actor.organization_id, actor.actor.id
-        ))
+        .bind(format!("report:{}", actor.actor.id))
         .execute(&mut *tx)
         .await?;
-    let old = sqlx::query("SELECT id,payload,status FROM bug_reports WHERE organization_id=$1 AND actor_id=$2 AND idempotency_key=$3")
-        .bind(actor.organization_id.as_str()).bind(actor.actor.id.as_str()).bind(key.as_str()).fetch_optional(&mut *tx).await?;
+    let old = sqlx::query("SELECT id,payload,status FROM bug_reports WHERE organization_id='@accounts' AND actor_id=$1 AND idempotency_key=$2")
+        .bind(actor.actor.id.as_str()).bind(key.as_str()).fetch_optional(&mut *tx).await?;
     let (id, status): (Uuid, String) = if let Some(old) = old {
         if old.get::<Value, _>("payload") != payload {
             return Err(AppError::conflict(
@@ -86,15 +85,15 @@ pub(crate) async fn submit(
         }
         (old.get("id"), old.get("status"))
     } else {
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM bug_reports WHERE organization_id=$1 AND actor_id=$2 AND created_at>now()-interval '1 hour'")
-            .bind(actor.organization_id.as_str()).bind(actor.actor.id.as_str()).fetch_one(&mut *tx).await?;
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM bug_reports WHERE actor_id=$1 AND created_at>now()-interval '1 hour'")
+            .bind(actor.actor.id.as_str()).fetch_one(&mut *tx).await?;
         if count >= 10 {
             return Err(AppError::RateLimited);
         }
         let id = Uuid::now_v7();
         let status = if simulated { "simulated" } else { "queued" };
-        sqlx::query("INSERT INTO bug_reports(id,organization_id,actor_id,idempotency_key,payload,status) VALUES($1,$2,$3,$4,$5,$6)")
-            .bind(id).bind(actor.organization_id.as_str()).bind(actor.actor.id.as_str()).bind(key.as_str()).bind(payload).bind(status).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO bug_reports(id,organization_id,actor_id,idempotency_key,payload,status) VALUES($1,'@accounts',$2,$3,$4,$5)")
+            .bind(id).bind(actor.actor.id.as_str()).bind(key.as_str()).bind(payload).bind(status).execute(&mut *tx).await?;
         (id, status.to_owned())
     };
     tx.commit().await?;
@@ -109,15 +108,11 @@ pub(crate) async fn submit(
 /// # Errors
 /// Returns a redacted database error; provider failures remain queued for retry.
 pub async fn deliver_one(state: &AppState) -> AppResult<()> {
-    // Defense in depth: even a queued row inside a sandbox cannot send real mail.
-    if state.testing_environment.is_some() {
-        return Ok(());
-    }
     let Some(settings) = &state.settings.reporting else {
         return Ok(());
     };
     let mut tx = state.store.pool().begin().await?;
-    let Some(row) = sqlx::query("SELECT id,payload,actor_id,organization_id FROM bug_reports WHERE status='queued' AND next_attempt_at<=now() ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1")
+    let Some(row) = sqlx::query("SELECT r.id,r.payload,r.actor_id,COALESCE(a.current_id, r.actor_id) AS reporter FROM bug_reports r LEFT JOIN accounts a ON a.uuid = r.actor_id WHERE r.status='queued' AND r.next_attempt_at<=now() ORDER BY r.next_attempt_at FOR UPDATE OF r SKIP LOCKED LIMIT 1")
         .fetch_optional(&mut *tx).await? else { return Ok(()); };
     let id: Uuid = row.get("id");
     let payload: Value = row.get("payload");
@@ -131,7 +126,7 @@ pub async fn deliver_one(state: &AppState) -> AppResult<()> {
         .header("Accept", "application/json")
         .json(&json!({"From":"dm@teamofsilicons.com","To":RECIPIENTS,
             "Subject":format!("Silicon DM bug report {id}"),
-            "TextBody":format!("Report {id}\nActor: {}@{}\nClient: {}\n\n{}\n\nPR: {}\nRepository: {REPOSITORY}",row.get::<String,_>("actor_id"),row.get::<String,_>("organization_id"),payload["client_version"].as_str().unwrap_or_default(),payload["message"].as_str().unwrap_or_default(),payload["pr"].as_str().unwrap_or("No PR supplied; contributions welcome.")),
+            "TextBody":format!("Report {id}\nReporter: {} (account {})\nClient: {}\n\n{}\n\nPR: {}\nRepository: {REPOSITORY}",row.get::<String,_>("reporter"),row.get::<String,_>("actor_id"),payload["client_version"].as_str().unwrap_or_default(),payload["message"].as_str().unwrap_or_default(),payload["pr"].as_str().unwrap_or("No PR supplied; contributions welcome.")),
             "TrackOpens":false,"TrackLinks":"None","MessageStream":"outbound","Metadata":{"report_id":id.to_string()}}))
         .send().await;
     let delivered = match response {

@@ -1,73 +1,101 @@
-//! Connects durable handoffs to the initiating account's current IAM authority.
+//! Publishes durable handoffs to Ting with DM's own App verification proof.
+//!
+//! DM, not the account that caused an event, is the sender, so one App verification proof
+//! (receiving app `ting`, scope `tings.send`) covers every send. It is cached and replaced
+//! shortly before it expires; one refresh runs at a time.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use secrecy::SecretString;
+use time::OffsetDateTime;
+use tokio::sync::Mutex;
 
 use crate::{
-    AppError,
     application::ports::IdentityProvider,
     infrastructure::{
         postgres::TingDeliveryClaim,
-        ting::{TingAcceptance, TingFailure, TingPublisher, TingSocket},
-        ting_credentials::TingCredentialCache,
+        ting::{TingAcceptance, TingFailure, TingPublisher, TingSendAuthority, TingSocket},
     },
 };
 
-/// Each attempt revalidates only credentials belonging to its immutable originator.
-/// The broker rotates only dedicated OBO credentials. It never rotates an
-/// ordinary login or borrows another account's grant.
-pub struct AuthenticatedTingPublisher {
-    credentials: super::ting_authorization::TingAuthorization,
-    identity: Arc<dyn IdentityProvider>,
-    socket: TingSocket,
+/// The app id of Ting in Silicon Accounts.
+pub const TING_APP_ID: &str = "ting";
+/// Scope DM asks for to send to Ting.
+pub const SEND_SCOPE: &str = "tings.send";
+/// Replace the proof when it has less than this left.
+const REFRESH_MARGIN: time::Duration = time::Duration::seconds(60);
+
+struct CachedProof {
+    token: SecretString,
+    expires_at: Option<OffsetDateTime>,
 }
 
-impl AuthenticatedTingPublisher {
-    /// Constructs the publisher from one selected application's data/auth plane.
+/// Sends with DM's App verification proof for Ting.
+pub struct ProofTingPublisher {
+    identity: Arc<dyn IdentityProvider>,
+    socket: TingSocket,
+    proof: Mutex<Option<CachedProof>>,
+}
+
+impl ProofTingPublisher {
+    /// A publisher over one prewarmed socket.
     #[must_use]
-    pub fn new(
-        credentials: TingCredentialCache,
-        identity: Arc<dyn IdentityProvider>,
-        socket: TingSocket,
-    ) -> Self {
+    pub fn new(identity: Arc<dyn IdentityProvider>, socket: TingSocket) -> Self {
         Self {
-            credentials: super::ting_authorization::TingAuthorization(credentials),
             identity,
             socket,
+            proof: Mutex::new(None),
         }
+    }
+
+    async fn authority(&self) -> Result<TingSendAuthority, TingFailure> {
+        let mut cached = self.proof.lock().await;
+        let fresh = cached.as_ref().is_some_and(|proof| {
+            proof
+                .expires_at
+                .is_none_or(|expires| expires - REFRESH_MARGIN > OffsetDateTime::now_utc())
+        });
+        if !fresh {
+            let key = format!("dm-ting-send-{}", uuid::Uuid::now_v7());
+            let issued = self
+                .identity
+                .issue_app_verification(TING_APP_ID, &[SEND_SCOPE], &key)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(code = error.code(), "issuing DM's proof for Ting failed");
+                    TingFailure::AuthorityUnavailable
+                })?;
+            *cached = Some(CachedProof {
+                token: issued.token,
+                expires_at: issued.expires_at,
+            });
+        }
+        let proof = cached.as_ref().ok_or(TingFailure::AuthorityUnavailable)?;
+        Ok(TingSendAuthority {
+            proof_token: proof.token.clone(),
+        })
+    }
+
+    /// Forgets the cached proof (after Ting refused it).
+    async fn forget(&self) {
+        *self.proof.lock().await = None;
     }
 }
 
 #[async_trait]
-impl TingPublisher for AuthenticatedTingPublisher {
+impl TingPublisher for ProofTingPublisher {
     async fn publish(&self, claim: &TingDeliveryClaim) -> Result<TingAcceptance, TingFailure> {
-        let originator = claim
-            .originator
-            .as_ref()
-            .ok_or(TingFailure::OriginatorAuthenticationRequired)?;
-        let body: serde_json::Value =
-            serde_json::from_str(&claim.request_body).map_err(|_| TingFailure::InvalidRequest)?;
-        if body["org_id"] != claim.organization_id.as_str()
-            || body["type"] != format!("{}.sync.changed", self.credentials.0.context.app_id)
-        {
-            return Err(TingFailure::InvalidRequest);
-        }
-        let authority = self
-            .credentials
-            .authority(
-                self.identity.as_ref(),
-                &claim.organization_id,
-                originator,
-                "tings.send",
+        let authority = self.authority().await?;
+        let result = self.socket.send(&claim.request_body, authority).await;
+        if let Err(TingFailure::Rejected(code)) = &result
+            && matches!(
+                code.as_str(),
+                "invalid_proof" | "unauthorized" | "proof_expired"
             )
-            .await
-            .map_err(|error| match error {
-                AppError::TingAuthorizationRequired
-                | AppError::Unauthorized
-                | AppError::Forbidden => TingFailure::OriginatorAuthenticationRequired,
-                _ => TingFailure::AuthorityUnavailable,
-            })?;
-        self.socket.send(&claim.request_body, authority).await
+        {
+            self.forget().await;
+        }
+        result
     }
 }

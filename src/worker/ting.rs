@@ -1,85 +1,68 @@
 //! Durable DM-to-Ting handoff processing, independent of connected DM clients.
+//!
+//! With Ting configured, pending handoffs are sent with DM's App verification proof; with
+//! Ting not configured (the default until Ting accepts Silicon Accounts proofs), they are
+//! marked discarded with a reason, never deleted, and clients sync over `/api/v1/sync`.
 
-use std::{future::pending, sync::Arc, time::Duration};
+use std::{future::pending, time::Duration};
 
-use sqlx::{Postgres, Transaction, postgres::PgListener};
+use sqlx::postgres::PgListener;
 use time::OffsetDateTime;
 use tokio::time::{Instant, MissedTickBehavior, interval, interval_at, timeout_at};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     AppError, AppResult,
-    config::WorkerSettings,
+    application::state::AppState,
     infrastructure::{
-        postgres::{PostgresStore, TingDeliveryContext},
+        postgres::{DISCARD_TING_NOT_CONFIGURED, TingDeliveryContext},
         ting::{SharedTingPublisher, TingFailure},
     },
-    testing::TestingRegistry,
 };
 
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
+const DISCARD_BATCH: i64 = 500;
 
 /// Persists handoff acceptance only after Ting confirms durable storage.
 /// PostgreSQL notifications reduce latency; durable polling remains authoritative.
 pub struct TingDeliveryWorker {
-    store: PostgresStore,
-    publisher: SharedTingPublisher,
+    state: AppState,
+    publisher: Option<SharedTingPublisher>,
     context: TingDeliveryContext,
-    owner: Arc<str>,
-    settings: WorkerSettings,
-    testing: Option<Arc<TestingRegistry>>,
-    runtime_revision: Option<i64>,
 }
 
 impl TingDeliveryWorker {
-    /// Constructs a worker with explicit publisher authority and data context.
+    /// A worker that sends through `publisher`, or (`None`, Ting not configured) marks
+    /// handoffs discarded.
     #[must_use]
-    pub fn new(
-        store: PostgresStore,
-        publisher: SharedTingPublisher,
-        context: TingDeliveryContext,
-        owner: Arc<str>,
-        settings: WorkerSettings,
-    ) -> Self {
+    pub fn new(state: AppState, publisher: Option<SharedTingPublisher>) -> Self {
+        let context = state.ting_delivery_context();
         Self {
-            store,
+            state,
             publisher,
             context,
-            owner,
-            settings,
-            testing: None,
-            runtime_revision: None,
         }
     }
 
-    /// Binds sandbox attempts to the live generation/lifecycle lock. A sandbox
-    /// worker without this registry cannot claim or send any handoff.
-    #[must_use]
-    pub fn with_testing_registry(mut self, registry: Arc<TestingRegistry>) -> Self {
-        self.testing = Some(registry);
-        self
-    }
-
-    /// Captures the credential/lifecycle epoch independently of the shared generation.
-    #[must_use]
-    pub fn with_runtime_revision(mut self, revision: i64) -> Self {
-        self.runtime_revision = Some(revision);
-        self
-    }
-
-    /// Claims disconnected and connected recipients alike until shutdown.
+    /// Runs until shutdown.
     ///
     /// # Errors
     /// Returns durable-storage/configuration failures. Publisher failures leave
     /// handoffs retryable and never fail a DM message or fabricate a receipt.
     pub async fn run(&self, cancellation: CancellationToken) -> AppResult<()> {
+        if self.publisher.is_none() {
+            tracing::info!(
+                "Ting delivery is disabled (DM_TING_URL is not set): handoffs are kept and marked discarded; clients sync with GET /api/v1/sync"
+            );
+        }
         let Some(mut listener) = cancellation
             .run_until_cancelled(self.open_delivery_listener())
             .await
         else {
             return Ok(());
         };
-        let mut poll = interval(self.settings.poll_interval.max(Duration::from_millis(10)));
+        let settings = &self.state.settings.worker;
+        let mut poll = interval(settings.poll_interval.max(Duration::from_millis(10)));
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut maintenance =
             interval_at(Instant::now() + MAINTENANCE_INTERVAL, MAINTENANCE_INTERVAL);
@@ -125,7 +108,7 @@ impl TingDeliveryWorker {
     }
 
     async fn open_delivery_listener(&self) -> Option<PgListener> {
-        match self.store.subscribe_delivery_wakeups().await {
+        match self.state.store.subscribe_delivery_wakeups().await {
             Ok(listener) => listener,
             Err(error) => {
                 tracing::warn!(
@@ -138,82 +121,22 @@ impl TingDeliveryWorker {
         }
     }
 
-    /// Expires presence and retained legacy delivery/idempotency state while
-    /// retaining pending Ting handoffs and all explicit DM receipt state.
+    /// Expires presence and retained delivery/idempotency state; sunsets idle contracts.
     ///
     /// # Errors
-    /// Reports storage failures or a changed sandbox lifecycle/generation.
+    /// Reports storage failures.
     pub async fn maintain_once(&self) -> AppResult<()> {
-        let _fence = self.lifecycle_fence().await?;
-        let schema: String = sqlx::query_scalar("SELECT current_schema()")
-            .fetch_one(self.store.pool())
-            .await?;
-        let expected = self
-            .context
-            .testing_environment_id
-            .map_or_else(|| "dm".to_owned(), |id| format!("dm_test_{}", id.simple()));
-        if schema != expected {
-            return Err(AppError::conflict(
-                "Ting maintenance context does not match the DM data plane",
-            ));
-        }
+        let store = &self.state.store;
         sqlx::query("UPDATE contract_versions SET status='sunset',sunset_at=clock_timestamp() WHERE status='deprecated' AND GREATEST(COALESCE(last_request_at,introduced_at),deprecated_at)<=clock_timestamp()-INTERVAL '7 days'")
-            .execute(self.store.pool()).await?;
-        let expired_sessions = self.store.expire_realtime_sessions().await?;
-        let expired_http_leases = self.store.expire_http_presence_leases().await?;
-        let compacted = self.store.compact_delivery_state().await?;
-
-        if expired_sessions > 0 || expired_http_leases > 0 || compacted > 0 {
+            .execute(store.pool()).await?;
+        let expired_http_leases = store.expire_http_presence_leases().await?;
+        let compacted = store.compact_delivery_state().await?;
+        if expired_http_leases > 0 || compacted > 0 {
             tracing::info!(
-                expired_sessions,
                 expired_http_leases,
                 compacted_rows = compacted,
                 "Ting worker maintenance completed"
             );
-        }
-        Ok(())
-    }
-
-    async fn lifecycle_fence(&self) -> AppResult<Option<Transaction<'static, Postgres>>> {
-        match (
-            self.context.testing_environment_id,
-            self.context.testing_generation,
-        ) {
-            (None, None) => Ok(None),
-            (Some(id), Some(generation)) => {
-                let registry = self.testing.as_ref().ok_or_else(|| {
-                    AppError::validation(
-                        "sandbox Ting publisher requires a live testing lifecycle registry",
-                    )
-                })?;
-                Ok(Some(
-                    registry
-                        .local_runtime_fence(
-                            id,
-                            generation,
-                            self.runtime_revision.ok_or(AppError::Unauthorized)?,
-                        )
-                        .await?,
-                ))
-            }
-            _ => Err(AppError::validation(
-                "Ting environment and generation must be paired",
-            )),
-        }
-    }
-
-    async fn shared_readiness(&self) -> Result<(), TingFailure> {
-        if let (Some(registry), Some(id), Some(generation)) = (
-            &self.testing,
-            self.context.testing_environment_id,
-            self.context.testing_generation,
-        ) {
-            // IAM outages and rate limits leave the durable claim retryable. Only
-            // local lifecycle/epoch revocation terminates this cached worker.
-            registry
-                .ensure_active(id, generation)
-                .await
-                .map_err(|_| TingFailure::AuthorityUnavailable)?;
         }
         Ok(())
     }
@@ -225,43 +148,54 @@ impl TingDeliveryWorker {
     /// Returns durable-storage/configuration failures; lost leases are harmless
     /// and are recovered by the next owner with the unchanged event key/body.
     pub async fn process_once(&self) -> AppResult<usize> {
+        let Some(publisher) = &self.publisher else {
+            let discarded = self
+                .state
+                .store
+                .discard_ting_handoffs(DISCARD_TING_NOT_CONFIGURED, DISCARD_BATCH)
+                .await?;
+            return Ok(usize::try_from(discarded).unwrap_or(usize::MAX));
+        };
+        let settings = &self.state.settings.worker;
         let mut processed = 0;
         let reserve = Duration::from_millis(500);
-        let available = self
-            .settings
+        let available = settings
             .lease_duration
             .checked_sub(reserve)
             .filter(|duration| !duration.is_zero())
             .ok_or_else(|| AppError::validation("Ting lease must exceed 500 milliseconds"))?;
-        for _ in 0..self.settings.batch_size.get().min(100) {
-            let _fence = self.lifecycle_fence().await?;
+        for _ in 0..settings.batch_size.get().min(100) {
             let deadline = Instant::now() + available;
             let Some(claim) = self
+                .state
                 .store
-                .claim_ting_deliveries(&self.owner, 1, self.settings.lease_duration, &self.context)
+                .claim_ting_deliveries(
+                    &self.state.instance_id,
+                    1,
+                    settings.lease_duration,
+                    &self.context,
+                )
                 .await?
                 .pop()
             else {
                 break;
             };
-            let authorized = self.store.ting_delivery_authorized(&claim).await?;
+            let authorized = self.state.store.ting_delivery_authorized(&claim).await?;
             let outcome = if Instant::now() >= deadline {
                 Err(TingFailure::Timeout)
             } else if authorized {
-                timeout_at(deadline, async {
-                    self.shared_readiness().await?;
-                    self.publisher.publish(&claim).await
-                })
-                .await
-                .unwrap_or(Err(TingFailure::Timeout))
+                timeout_at(deadline, publisher.publish(&claim))
+                    .await
+                    .unwrap_or(Err(TingFailure::Timeout))
             } else {
                 Err(TingFailure::Rejected(
-                    "ting_recipient_authority_changed".into(),
+                    "ting_recipient_no_longer_participant".into(),
                 ))
             };
             let stored = match outcome {
                 Ok(acceptance) => {
-                    self.store
+                    self.state
+                        .store
                         .accept_ting_delivery(
                             claim.delivery_id,
                             claim.lease_id,
@@ -272,12 +206,29 @@ impl TingDeliveryWorker {
                         .await
                 }
                 Err(error) => {
-                    let delay = retry_delay(claim.attempt_count, self.settings.max_retry_delay);
+                    if matches!(&error, TingFailure::Rejected(code) if code == "recipient_not_registered")
+                    {
+                        let state = self.state.clone();
+                        let target = claim.target.clone();
+                        tokio::spawn(async move {
+                            if let Err(error) =
+                                crate::infrastructure::ting_enrollment::reenrol(&state, &target)
+                                    .await
+                            {
+                                tracing::warn!(
+                                    code = error.code(),
+                                    "re-enrolling a Ting recipient failed"
+                                );
+                            }
+                        });
+                    }
+                    let delay = retry_delay(claim.attempt_count, settings.max_retry_delay);
                     let next = OffsetDateTime::now_utc()
                         + time::Duration::try_from(delay).map_err(AppError::internal)?;
                     tracing::warn!(delivery_id = %claim.delivery_id, code = error.code(),
                         "Ting handoff remains pending");
-                    self.store
+                    self.state
+                        .store
                         .retry_ting_delivery(claim.delivery_id, claim.lease_id, next, error.code())
                         .await
                 }

@@ -225,12 +225,18 @@ async fn login_requires_explicit_ting_context_without_production_fallback() -> R
             .delivery_login(&fixture.options())
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("environment and generation"));
-        // An accepted remote exchange with an unverified plane never becomes a
-        // trusted local session. The original attempt remains safely replayable.
         let profile = fixture.profile()?;
         assert!(profile.read::<Session>("session.json")?.is_none());
         assert!(profile.read::<Binding>("dm-binding.json")?.is_none());
+        if selected.is_some() {
+            // Test environments were retired: refused before any request.
+            assert!(error.to_string().contains("no longer accepted"), "{error}");
+            assert!(fixture.state.lock().unwrap().logins.is_empty());
+            continue;
+        }
+        assert!(error.to_string().contains("environment and generation"));
+        // An accepted remote exchange with an unverified plane never becomes a
+        // trusted local session. The original attempt remains safely replayable.
         assert!(profile.read::<Value>("dm-login-attempt.json")?.is_some());
     }
     Ok(())
@@ -238,7 +244,8 @@ async fn login_requires_explicit_ting_context_without_production_fallback() -> R
 
 #[tokio::test]
 async fn every_daemon_action_rechecks_ting_context_after_login() -> Result<()> {
-    for selected in [None, Some(Uuid::new_v4())] {
+    // Test environments were retired, so only the production context can log in.
+    for selected in [None] {
         let fixture = Fixture::new(selected).await?;
         fixture.runtime.delivery_login(&fixture.options()).await?;
         let url: Url = "http://cos.tos.localhost/ting".parse()?;
@@ -476,50 +483,22 @@ async fn member_kind_organization_and_unverified_session_cannot_cross_bindings()
 }
 
 #[tokio::test]
-async fn sandbox_credentials_are_iam_verified_and_generation_fenced_before_slt_or_ipc() -> Result<()>
-{
-    let fixture = Fixture::new(Some(Uuid::new_v4())).await?;
-    fixture.state.lock().unwrap().iam_environment = Some(Uuid::new_v4());
-    assert!(
-        fixture
-            .runtime
-            .delivery_login(&fixture.options())
-            .await
-            .is_err()
-    );
-    assert!(fixture.state.lock().unwrap().logins.is_empty());
-    fixture.state.lock().unwrap().iam_environment = fixture.test;
-    fixture.state.lock().unwrap().iam_app = "other".into();
-    assert!(
-        fixture
-            .runtime
-            .delivery_login(&fixture.options())
-            .await
-            .is_err()
-    );
-    assert!(fixture.state.lock().unwrap().logins.is_empty());
-    fixture.state.lock().unwrap().iam_app = "ting".into();
-    fixture.runtime.delivery_login(&fixture.options()).await?;
-    assert_eq!(fixture.state.lock().unwrap().iam_calls, 3);
-    fixture.state.lock().unwrap().generation = Some(2);
-    let url: Url = "http://127.0.0.1/ting".parse()?;
-    assert!(
-        fixture
-            .runtime
-            .delivery_attach_with(&fixture.attach(&url), |_| async {
-                panic!("stale generation cannot attach")
-            })
-            .await
-            .is_err()
-    );
-    let production = Fixture::new(None).await?;
-    let mut options = production.options();
-    options.testing = Some(DeliveryTestCredentials {
-        app_secret: "secret",
-        environment_key: "a",
-    });
-    assert!(production.runtime.delivery_login(&options).await.is_err());
-    assert!(production.state.lock().unwrap().logins.is_empty());
+async fn sandbox_credentials_are_refused_before_any_request() -> Result<()> {
+    // Test environments were retired with the move to Silicon Accounts: sandbox
+    // credentials are refused locally, before the SLT or any credential leaves.
+    for selected in [Some(Uuid::new_v4()), None] {
+        let fixture = Fixture::new(selected).await?;
+        let mut options = fixture.options();
+        options.testing = Some(DeliveryTestCredentials {
+            app_secret: "fixture-ting-app-secret",
+            environment_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        });
+        let error = fixture.runtime.delivery_login(&options).await.unwrap_err();
+        assert!(error.to_string().contains("no longer accepted"), "{error}");
+        let state = fixture.state.lock().unwrap();
+        assert!(state.logins.is_empty());
+        assert_eq!(state.iam_calls, 0);
+    }
     Ok(())
 }
 

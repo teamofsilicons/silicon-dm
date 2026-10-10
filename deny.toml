@@ -1,5 +1,12 @@
 [advisories]
 yanked = "deny"
+ignore = [
+  # RUSTSEC-2023-0071 (Marvin): timing side channel in RSA private-key operations. `rsa`
+  # arrives through jsonwebtoken's rust_crypto backend (silicon-accounts-client); DM only
+  # verifies EdDSA tokens with public keys and performs no RSA private-key operation. No
+  # fixed `rsa` release exists.
+  { id = "RUSTSEC-2023-0071", reason = "EdDSA public-key verification only; no RSA private-key operations" },
+]
 
 [bans]
 multiple-versions = "warn"

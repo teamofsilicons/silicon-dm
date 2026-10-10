@@ -25,15 +25,15 @@ pub struct Settings {
     pub server: ServerSettings,
     /// PostgreSQL settings.
     pub database: DatabaseSettings,
-    /// IAM integration settings.
-    pub iam: IamSettings,
-    /// Ting owns all recipient delivery after accepting a DM event.
+    /// Silicon Accounts: sign-in, token verification, lookups, proofs and webhooks.
+    pub accounts: AccountsSettings,
+    /// Key material for the sync-cursor MAC and at-rest encryption of stored proofs.
+    pub data_key: DataKey,
+    /// Ting delivery; disabled unless `DM_TING_URL` is set.
     pub ting: TingSettings,
-    /// Optional shared testing-plane configuration.
-    pub testing: Option<TestingSettings>,
     /// Giphy settings.
     pub providers: ProviderSettings,
-    /// Realtime protocol policy.
+    /// Presence lease policy (named after the retired realtime protocol it came from).
     pub realtime: RealtimeSettings,
     /// Delivery-worker policy.
     pub worker: WorkerSettings,
@@ -56,7 +56,7 @@ pub struct TelemetrySettings {
     pub home: std::path::PathBuf,
 }
 
-/// Server-only Postmark credentials. Sandboxes never use this transport.
+/// Server-only Postmark credentials.
 #[derive(Clone, Debug)]
 pub struct ReportingSettings {
     /// Postmark email endpoint; production requires HTTPS.
@@ -117,41 +117,150 @@ pub struct DatabaseSettings {
     pub statement_timeout: Duration,
 }
 
-/// Shared testing database and secret encryption settings.
+/// Silicon Accounts settings. DM is the app `dm`; Carbons and Silicons sign in with
+/// Silicon Accounts and send its access tokens (`aud` = the app id) as bearer tokens.
 #[derive(Clone, Debug)]
-pub struct TestingSettings {
-    /// Dedicated Honeycomb service credential, independent of test sessions.
-    pub honeycomb_service_token: Option<SecretString>,
-    /// Honeycomb origin for durable activity reports.
-    pub honeycomb_base_url: Option<Url>,
-    /// Separate database shared by all isolated test schemas.
-    pub database: DatabaseSettings,
-    /// Base64-encoded 256-bit encryption key for retrievable secrets.
-    pub encryption_key: SecretString,
-}
-
-/// IAM authentication settings.
-#[derive(Clone, Debug)]
-pub struct IamSettings {
-    /// IAM API base URL.
-    pub base_url: Url,
-    /// DM application identifier.
+pub struct AccountsSettings {
+    /// Public origin of Silicon Accounts (`ACCOUNTS_URL`), exactly the `iss` of its tokens.
+    pub issuer: String,
+    /// Origin DM calls server to server (`ACCOUNTS_API_URL`, default `ACCOUNTS_URL`).
+    pub api_url: Url,
+    /// This app's id (`DM_APP_ID`, default `dm`).
     pub app_id: String,
-    /// DM application secret.
+    /// This app's secret (`DM_APP_SECRET`); never leaves the server.
     pub app_secret: SecretString,
-    /// Shared IAM webhook signing secret.
+    /// The app webhook signing secret (`DM_ACCOUNTS_WEBHOOK_SECRET`, `whsec_…`).
     pub webhook_secret: SecretString,
-    /// IAM webhook secret version.
-    pub webhook_key_version: i64,
-    /// Outbound IAM deadline.
+    /// Deadline of one call to Silicon Accounts.
     pub request_timeout: Duration,
+    /// Apps whose User verification proofs DM accepts, per scope (`DM_PROOF_ISSUERS`).
+    pub proof_issuers: ProofIssuers,
 }
 
-/// Outbound Ting delivery transport. Credentials are obtained from IAM per operation.
+/// The proof scopes DM honours on its routes (see the API reference).
+pub const PROOF_SCOPES: [&str; 5] = [
+    "dm.conversations.read",
+    "dm.messages.read",
+    "dm.messages.write",
+    "dm.receipts.write",
+    "dm.drafts.write",
+];
+
+/// Per-scope allow-list of issuing apps for inbound User verification proofs.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProofIssuers(std::collections::BTreeMap<String, std::collections::BTreeSet<String>>);
+
+impl ProofIssuers {
+    /// Parses `scope=app,scope=app,…` (repeat a scope to allow several apps). Empty = deny all.
+    ///
+    /// # Errors
+    /// Names the entry, the unknown scope or the malformed app id.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let mut issuers =
+            std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+        for entry in value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+        {
+            let Some((scope, app)) = entry.split_once('=') else {
+                return Err(format!(
+                    "entry `{entry}` is not scope=app (for example dm.messages.read=interface)"
+                ));
+            };
+            let (scope, app) = (scope.trim(), app.trim());
+            if !PROOF_SCOPES.contains(&scope) {
+                return Err(format!(
+                    "scope `{scope}` is not one DM honours; use one of {}",
+                    PROOF_SCOPES.join(", ")
+                ));
+            }
+            if !valid_app_id(app) {
+                return Err(format!(
+                    "`{app}` in `{entry}` is not an app id (lowercase letters, digits, - and _, starting with a letter)"
+                ));
+            }
+            issuers
+                .entry(scope.to_owned())
+                .or_default()
+                .insert(app.to_owned());
+        }
+        Ok(Self(issuers))
+    }
+
+    /// Whether `app` may present proofs carrying `scope`.
+    #[must_use]
+    pub fn allows(&self, scope: &str, app: &str) -> bool {
+        self.0.get(scope).is_some_and(|apps| apps.contains(app))
+    }
+
+    /// Whether any issuer is configured at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The configured allow-list, for discovery and diagnostics.
+    #[must_use]
+    pub fn entries(
+        &self,
+    ) -> &std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+        &self.0
+    }
+}
+
+/// 256-bit key material (`DM_DATA_KEY`, base64). Purpose keys are derived from it, so
+/// rotating the Accounts app secret never invalidates cursors or stored ciphertext.
+#[derive(Clone)]
+pub struct DataKey([u8; 32]);
+
+impl std::fmt::Debug for DataKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DataKey(redacted)")
+    }
+}
+
+impl DataKey {
+    /// Wraps raw key bytes (tests and tools).
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Parses standard or URL-safe base64 of exactly 32 bytes.
+    ///
+    /// # Errors
+    /// Says what is wrong with the value, never the value itself.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        use base64::Engine as _;
+        let value = value.trim();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .or_else(|_| {
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(value.trim_end_matches('='))
+            })
+            .map_err(|_| {
+                "must be base64 (generate one with `openssl rand -base64 32`)".to_owned()
+            })?;
+        let bytes: [u8; 32] = decoded.try_into().map_err(|bytes: Vec<u8>| {
+            format!("must decode to exactly 32 bytes, got {}", bytes.len())
+        })?;
+        Ok(Self(bytes))
+    }
+
+    /// A 256-bit key for one purpose (BLAKE3 key derivation with a fixed context).
+    #[must_use]
+    pub fn derive(&self, context: &str) -> [u8; 32] {
+        blake3::derive_key(context, &self.0)
+    }
+}
+
+/// Ting delivery transport. Off unless `DM_TING_URL` is set.
 #[derive(Clone, Debug)]
 pub struct TingSettings {
-    /// Ting API origin, without a path prefix or credentials.
-    pub base_url: Url,
+    /// Ting API origin, without a path prefix or credentials. `None` disables delivery
+    /// through Ting: messages are still stored and clients sync over `/api/v1/sync`.
+    pub base_url: Option<Url>,
     /// Maximum wait for a connection greeting or send acceptance.
     pub request_timeout: Duration,
 }
@@ -169,14 +278,14 @@ pub struct ProviderSettings {
     pub trending_cache_ttl: Duration,
 }
 
-/// WebSocket protocol settings.
+/// Presence lease settings.
 #[derive(Clone, Debug)]
 pub struct RealtimeSettings {
-    /// Server ping interval.
+    /// Expected presence renewal interval.
     pub heartbeat_interval: Duration,
-    /// Maximum time without a matching pong.
+    /// Presence lease lifetime without a renewal.
     pub heartbeat_timeout: Duration,
-    /// Bounded outbound frames buffered per WebSocket.
+    /// Retained for configuration compatibility; DM no longer serves sockets.
     pub outbound_capacity: NonZeroUsize,
     /// Expiry for activity such as typing when no refresh arrives.
     pub activity_ttl: Duration,
@@ -196,6 +305,22 @@ pub struct WorkerSettings {
     /// Maximum retry delay.
     pub max_retry_delay: Duration,
 }
+
+/// Environment variables of the IAM/Honeycomb era that DM 0.15 no longer reads.
+pub const OBSOLETE_VARIABLES: [&str; 12] = [
+    "DM_IAM_BASE_URL",
+    "DM_IAM_APP_ID",
+    "DM_IAM_APP_SECRET",
+    "DM_IAM_WEBHOOK_SECRET",
+    "DM_IAM_WEBHOOK_KEY_VERSION",
+    "DM_IAM_REQUEST_TIMEOUT_SECONDS",
+    "DM_TEST_DATABASE_URL",
+    "DM_TEST_DATABASE_MAX_CONNECTIONS",
+    "DM_TEST_KEY_ENCRYPTION_KEY",
+    "DM_HONEYCOMB_SERVICE_TOKEN",
+    "DM_HONEYCOMB_BASE_URL",
+    "DM_TING_BASE_URL",
+];
 
 /// Configuration load or validation error with secrets redacted.
 #[derive(Debug, Error)]
@@ -229,14 +354,27 @@ impl Settings {
             shutdown_timeout: duration_seconds("DM_SHUTDOWN_TIMEOUT_SECONDS", 30)?,
         };
         let database = database_settings()?;
-        let iam = IamSettings {
-            base_url: parse_required("DM_IAM_BASE_URL")?,
-            app_id: required("DM_IAM_APP_ID")?,
-            app_secret: SecretString::from(required("DM_IAM_APP_SECRET")?),
-            webhook_secret: SecretString::from(required("DM_IAM_WEBHOOK_SECRET")?),
-            webhook_key_version: parse_or("DM_IAM_WEBHOOK_KEY_VERSION", "1")?,
-            request_timeout: duration_seconds("DM_IAM_REQUEST_TIMEOUT_SECONDS", 5)?,
+        let issuer = required("ACCOUNTS_URL")?.trim_end_matches('/').to_owned();
+        let issuer_url: Url = issuer
+            .parse()
+            .map_err(|error| invalid("ACCOUNTS_URL", format!("is not a URL ({error})")))?;
+        let accounts = AccountsSettings {
+            api_url: match optional("ACCOUNTS_API_URL") {
+                Some(value) => value.parse().map_err(|error| {
+                    invalid("ACCOUNTS_API_URL", format!("is not a URL ({error})"))
+                })?,
+                None => issuer_url,
+            },
+            issuer,
+            app_id: optional("DM_APP_ID").unwrap_or_else(|| "dm".to_owned()),
+            app_secret: SecretString::from(required("DM_APP_SECRET")?),
+            webhook_secret: SecretString::from(required("DM_ACCOUNTS_WEBHOOK_SECRET")?),
+            request_timeout: duration_seconds("DM_ACCOUNTS_REQUEST_TIMEOUT_SECONDS", 5)?,
+            proof_issuers: ProofIssuers::parse(&optional("DM_PROOF_ISSUERS").unwrap_or_default())
+                .map_err(|reason| invalid("DM_PROOF_ISSUERS", reason))?,
         };
+        let data_key = DataKey::parse(&required("DM_DATA_KEY")?)
+            .map_err(|reason| invalid("DM_DATA_KEY", reason))?;
         let providers = ProviderSettings {
             giphy_api_base_url: parse_or("DM_GIPHY_API_BASE_URL", "https://api.giphy.com/v1/gifs")?,
             giphy_api_key: SecretString::from(required("DM_GIPHY_API_KEY")?),
@@ -256,40 +394,22 @@ impl Settings {
             max_attempts: parse_or("DM_DELIVERY_MAX_ATTEMPTS", "20")?,
             max_retry_delay: duration_seconds("DM_DELIVERY_MAX_RETRY_SECONDS", 300)?,
         };
-        let testing = optional("DM_TEST_DATABASE_URL")
-            .map(|url| {
-                let mut test_database = database.clone();
-                test_database.url = SecretString::from(url);
-                test_database.max_connections = parse_or("DM_TEST_DATABASE_MAX_CONNECTIONS", "4")?;
-                test_database.min_connections = 0;
-                Ok::<_, SettingsError>(TestingSettings {
-                    honeycomb_service_token: optional("DM_HONEYCOMB_SERVICE_TOKEN")
-                        .map(SecretString::from),
-                    honeycomb_base_url: optional("DM_HONEYCOMB_BASE_URL")
-                        .map(|value| {
-                            value
-                                .parse()
-                                .map_err(|_| invalid("DM_HONEYCOMB_BASE_URL", "invalid URL"))
-                        })
-                        .transpose()?,
-                    database: test_database,
-                    encryption_key: SecretString::from(required("DM_TEST_KEY_ENCRYPTION_KEY")?),
-                })
-            })
-            .transpose()?;
         let settings = Self {
             environment,
             server,
             database,
-            iam,
+            accounts,
+            data_key,
             ting: TingSettings {
-                base_url: parse_or(
-                    "DM_TING_BASE_URL",
-                    "https://backend.ting.teamofsilicons.com",
-                )?,
+                base_url: optional("DM_TING_URL")
+                    .map(|value| {
+                        value.parse().map_err(|error| {
+                            invalid("DM_TING_URL", format!("is not a URL ({error})"))
+                        })
+                    })
+                    .transpose()?,
                 request_timeout: duration_seconds("DM_TING_REQUEST_TIMEOUT_SECONDS", 15)?,
             },
-            testing,
             providers,
             realtime,
             worker,
@@ -315,6 +435,17 @@ impl Settings {
         Ok(settings)
     }
 
+    /// Obsolete IAM/Honeycomb-era variables that are set in this environment. They are
+    /// ignored; the process logs them once at start so an operator can remove them.
+    #[must_use]
+    pub fn obsolete_variables_present() -> Vec<&'static str> {
+        OBSOLETE_VARIABLES
+            .iter()
+            .copied()
+            .filter(|name| optional(name).is_some())
+            .collect()
+    }
+
     fn validate(&self) -> Result<(), SettingsError> {
         if let Some(reporting) = &self.reporting {
             validate_url(
@@ -328,20 +459,34 @@ impl Settings {
             &self.server.public_base_url,
             self.environment,
         )?;
-        validate_url("DM_IAM_BASE_URL", &self.iam.base_url, self.environment)?;
-        validate_url("DM_TING_BASE_URL", &self.ting.base_url, self.environment)?;
-        if !self.ting.base_url.username().is_empty()
-            || self.ting.base_url.password().is_some()
-            || self.ting.base_url.path() != "/"
-            || self.ting.base_url.query().is_some()
-            || self.ting.base_url.fragment().is_some()
+        let issuer: Url = self
+            .accounts
+            .issuer
+            .parse()
+            .map_err(|error| invalid("ACCOUNTS_URL", format!("is not a URL ({error})")))?;
+        validate_url("ACCOUNTS_URL", &issuer, self.environment)?;
+        validate_url("ACCOUNTS_API_URL", &self.accounts.api_url, self.environment)?;
+        validate_app_id("DM_APP_ID", &self.accounts.app_id)?;
+        if !self
+            .accounts
+            .webhook_secret
+            .expose_secret()
+            .starts_with("whsec_")
         {
             return Err(invalid(
-                "DM_TING_BASE_URL",
-                "must be an origin without credentials, path, query or fragment",
+                "DM_ACCOUNTS_WEBHOOK_SECRET",
+                "must be the app's webhook secret from Silicon Accounts (it starts with whsec_)",
             ));
         }
-        validate_app_id("DM_IAM_APP_ID", &self.iam.app_id)?;
+        if let Some(ting) = &self.ting.base_url {
+            validate_url("DM_TING_URL", ting, self.environment)?;
+            if ting.path() != "/" {
+                return Err(invalid(
+                    "DM_TING_URL",
+                    "must be an origin without a path, query or fragment",
+                ));
+            }
+        }
         validate_url(
             "DM_GIPHY_API_BASE_URL",
             &self.providers.giphy_api_base_url,
@@ -360,18 +505,6 @@ impl Settings {
             ));
         }
         validate_database_transport(&self.database.url, self.environment)?;
-        if self.iam.webhook_key_version < 1 {
-            return Err(invalid("DM_IAM_WEBHOOK_KEY_VERSION", "must be positive"));
-        }
-        if let Some(testing) = &self.testing {
-            validate_database_transport(&testing.database.url, self.environment)?;
-            if testing.database.url.expose_secret() == self.database.url.expose_secret() {
-                return Err(invalid(
-                    "DM_TEST_DATABASE_URL",
-                    "must differ from the production database",
-                ));
-            }
-        }
         if self.realtime.heartbeat_timeout <= self.realtime.heartbeat_interval {
             return Err(invalid(
                 "DM_HEARTBEAT_TIMEOUT_SECONDS",
@@ -381,13 +514,13 @@ impl Settings {
         if self.realtime.heartbeat_interval != HEARTBEAT_INTERVAL {
             return Err(invalid(
                 "DM_HEARTBEAT_INTERVAL_SECONDS",
-                "must be 30 seconds for WebSocket protocol version 2",
+                "must be 30 seconds (the presence renewal interval clients use)",
             ));
         }
         if self.realtime.heartbeat_timeout != HEARTBEAT_TIMEOUT {
             return Err(invalid(
                 "DM_HEARTBEAT_TIMEOUT_SECONDS",
-                "must be 120 seconds for WebSocket protocol version 2",
+                "must be 120 seconds (the presence lease clients expect)",
             ));
         }
         if self.worker.max_attempts == 0 {
@@ -525,33 +658,47 @@ fn validate_url(
         return Err(invalid(name, "must not contain embedded credentials"));
     }
     let secure = url.scheme() == "https";
-    let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
     if environment == RuntimeEnvironment::Production && !secure {
         return Err(invalid(name, "must use HTTPS in production"));
     }
-    if !secure && !local {
+    if !secure && !is_loopback(url) {
         return Err(invalid(
             name,
-            "plain HTTP is allowed only for local development",
+            "must use HTTPS; plain HTTP is allowed only for this machine (localhost, *.localhost or a loopback address)",
         ));
     }
     Ok(())
 }
 
+/// Whether a URL names this machine (where plain HTTP to a local stack is acceptable).
+#[must_use]
+pub fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain == "localhost" || domain.ends_with(".localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
+/// Whether `value` has the shape of a Silicon Apps / Silicon Accounts app id.
+#[must_use]
+pub fn valid_app_id(value: &str) -> bool {
+    (1..=80).contains(&value.len())
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
 fn validate_app_id(name: &'static str, value: &str) -> Result<(), SettingsError> {
-    let valid_part = |part: &str| {
-        !part.is_empty()
-            && part.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-            })
-    };
-    if !(1..=80).contains(&value.len())
-        || !value.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
-        || !valid_part(value)
-    {
+    if !valid_app_id(value) {
         return Err(invalid(
             name,
-            "must be a bare IAM application handle, such as dm",
+            "must be the app id registered with Silicon Accounts, such as dm (lowercase letters, digits, - and _, starting with a letter)",
         ));
     }
     Ok(())
@@ -604,52 +751,207 @@ mod tests {
     use url::Url;
 
     use super::{
-        RuntimeEnvironment, Settings, SettingsError, validate_app_id, validate_database_transport,
-        validate_url,
+        DataKey, ProofIssuers, RuntimeEnvironment, Settings, SettingsError, is_loopback,
+        validate_app_id, validate_database_transport, validate_url,
     };
 
-    #[test]
-    fn giphy_api_key_is_required() {
-        const CHILD_MARKER: &str = "DM_CONFIG_GIPHY_REQUIRED_TEST_CHILD";
-        const TEST_NAME: &str = "config::tests::giphy_api_key_is_required";
+    const CHILD_SCENARIO: &str = "DM_CONFIG_TEST_SCENARIO";
 
-        if std::env::var_os(CHILD_MARKER).is_some() {
-            assert!(matches!(
-                Settings::from_env(),
-                Err(SettingsError::Missing("DM_GIPHY_API_KEY"))
-            ));
-            return;
-        }
-
+    /// Runs `scenario` of `test_name` in a child process with exactly `environment`, so
+    /// the parent's variables never leak into configuration loading.
+    fn run_child(test_name: &str, scenario: &str, environment: &[(&str, &str)]) {
         let Ok(test_binary) = std::env::current_exe() else {
             panic!("the current test executable should be available");
         };
-        let Ok(output) = Command::new(test_binary)
-            .args(["--exact", TEST_NAME, "--nocapture"])
+        let mut command = Command::new(test_binary);
+        command
+            .args(["--exact", test_name, "--nocapture"])
             .env_clear()
-            .env(CHILD_MARKER, "1")
-            .env("DM_ENVIRONMENT", "test")
-            .env("DM_PUBLIC_BASE_URL", "http://localhost:8080")
-            .env("DM_DATABASE_URL", "postgres://user:secret@localhost/dm")
-            .env("DM_IAM_BASE_URL", "http://localhost:8081")
-            .env("DM_IAM_APP_ID", "dm")
-            .env("DM_IAM_APP_SECRET", "test-secret")
-            .env(
-                "DM_IAM_WEBHOOK_SECRET",
-                "test-webhook-secret-at-least-thirty-two-characters",
-            )
-            .env_remove("DM_GIPHY_API_KEY")
-            .output()
-        else {
+            .env(CHILD_SCENARIO, scenario);
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+        let Ok(output) = command.output() else {
             panic!("the isolated configuration test process should start");
         };
-
         assert!(
             output.status.success(),
-            "isolated configuration test failed:\nstdout:\n{}\nstderr:\n{}",
+            "isolated configuration scenario {scenario} failed:\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn base_environment() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("DM_ENVIRONMENT", "test"),
+            ("DM_PUBLIC_BASE_URL", "http://localhost:4121/api/v1"),
+            ("DM_DATABASE_URL", "postgres://user:secret@localhost/dm"),
+            ("ACCOUNTS_URL", "http://localhost:9590"),
+            ("DM_APP_SECRET", "sa_app_test"),
+            ("DM_ACCOUNTS_WEBHOOK_SECRET", "whsec_test"),
+            (
+                "DM_DATA_KEY",
+                "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+            ),
+            ("DM_GIPHY_API_KEY", "giphy"),
+        ]
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one table of boot scenarios, each run in a child process"
+    )]
+    fn configuration_scenarios_load_and_fail_exactly() {
+        const TEST_NAME: &str = "config::tests::configuration_scenarios_load_and_fail_exactly";
+        if let Ok(scenario) = std::env::var(CHILD_SCENARIO) {
+            let loaded = Settings::from_env();
+            match scenario.as_str() {
+                "complete" => {
+                    let settings = loaded.unwrap_or_else(|error| panic!("{error}"));
+                    assert_eq!(settings.accounts.app_id, "dm");
+                    assert_eq!(settings.accounts.issuer, "http://localhost:9590");
+                    assert_eq!(settings.accounts.api_url.as_str(), "http://localhost:9590/");
+                    assert!(settings.ting.base_url.is_none(), "Ting is off by default");
+                    assert!(
+                        settings.accounts.proof_issuers.is_empty(),
+                        "no issuer by default"
+                    );
+                }
+                "missing_giphy" => assert!(matches!(
+                    loaded,
+                    Err(SettingsError::Missing("DM_GIPHY_API_KEY"))
+                )),
+                "missing_secret" => {
+                    assert!(matches!(
+                        loaded,
+                        Err(SettingsError::Missing("DM_APP_SECRET"))
+                    ));
+                }
+                "missing_accounts_url" => {
+                    assert!(matches!(
+                        loaded,
+                        Err(SettingsError::Missing("ACCOUNTS_URL"))
+                    ));
+                }
+                "public_http_accounts" => {
+                    let error = loaded
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default();
+                    assert!(
+                        error.starts_with(
+                            "invalid environment variable ACCOUNTS_URL: must use HTTPS"
+                        ),
+                        "{error}"
+                    );
+                }
+                "bad_webhook_secret" => {
+                    let error = loaded
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default();
+                    assert_eq!(
+                        error,
+                        "invalid environment variable DM_ACCOUNTS_WEBHOOK_SECRET: must be the app's webhook secret from Silicon Accounts (it starts with whsec_)"
+                    );
+                }
+                "bad_data_key" => {
+                    let error = loaded
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default();
+                    assert_eq!(
+                        error,
+                        "invalid environment variable DM_DATA_KEY: must decode to exactly 32 bytes, got 3"
+                    );
+                }
+                "bad_proof_issuers" => {
+                    let error = loaded
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default();
+                    assert!(
+                        error.contains("scope `dm.everything` is not one DM honours"),
+                        "{error}"
+                    );
+                }
+                "with_options" => {
+                    let settings = loaded.unwrap_or_else(|error| panic!("{error}"));
+                    assert_eq!(settings.accounts.api_url.as_str(), "http://127.0.0.1:9589/");
+                    assert!(
+                        settings
+                            .accounts
+                            .proof_issuers
+                            .allows("dm.messages.read", "interface")
+                    );
+                    assert!(
+                        !settings
+                            .accounts
+                            .proof_issuers
+                            .allows("dm.messages.write", "interface")
+                    );
+                    assert_eq!(
+                        settings.ting.base_url.map(|url| url.to_string()).as_deref(),
+                        Some("http://127.0.0.1:4122/")
+                    );
+                    assert_eq!(
+                        Settings::obsolete_variables_present(),
+                        vec!["DM_IAM_APP_SECRET"]
+                    );
+                }
+                other => panic!("unknown scenario {other}"),
+            }
+            return;
+        }
+        let base = base_environment();
+        let without = |name: &str| -> Vec<(&str, &str)> {
+            base.iter()
+                .copied()
+                .filter(|(key, _)| *key != name)
+                .collect()
+        };
+        let with = |name: &'static str, value: &'static str| -> Vec<(&'static str, &'static str)> {
+            let mut environment: Vec<_> = base
+                .iter()
+                .copied()
+                .filter(|(key, _)| *key != name)
+                .collect();
+            environment.push((name, value));
+            environment
+        };
+        run_child(TEST_NAME, "complete", &base);
+        run_child(TEST_NAME, "missing_giphy", &without("DM_GIPHY_API_KEY"));
+        run_child(TEST_NAME, "missing_secret", &without("DM_APP_SECRET"));
+        run_child(TEST_NAME, "missing_accounts_url", &without("ACCOUNTS_URL"));
+        run_child(
+            TEST_NAME,
+            "public_http_accounts",
+            &with("ACCOUNTS_URL", "http://accounts.example.test"),
+        );
+        run_child(
+            TEST_NAME,
+            "bad_webhook_secret",
+            &with("DM_ACCOUNTS_WEBHOOK_SECRET", "not-a-webhook-secret"),
+        );
+        run_child(TEST_NAME, "bad_data_key", &with("DM_DATA_KEY", "AAEC"));
+        run_child(
+            TEST_NAME,
+            "bad_proof_issuers",
+            &with("DM_PROOF_ISSUERS", "dm.everything=interface"),
+        );
+        let mut options = base.clone();
+        options.extend([
+            ("ACCOUNTS_API_URL", "http://127.0.0.1:9589"),
+            (
+                "DM_PROOF_ISSUERS",
+                "dm.messages.read=interface, dm.conversations.read=interface",
+            ),
+            ("DM_TING_URL", "http://127.0.0.1:4122"),
+            ("DM_IAM_APP_SECRET", "left over"),
+        ]);
+        run_child(TEST_NAME, "with_options", &options);
     }
 
     #[test]
@@ -675,22 +977,73 @@ mod tests {
     #[test]
     fn service_base_urls_require_http_without_query_parameters() {
         assert!(Url::parse("ftp://localhost/service").is_ok_and(|url| {
-            validate_url("DM_IAM_BASE_URL", &url, RuntimeEnvironment::Development).is_err()
+            validate_url("ACCOUNTS_URL", &url, RuntimeEnvironment::Development).is_err()
         }));
         assert!(
             Url::parse("http://localhost/service?token=secret").is_ok_and(|url| {
-                validate_url("DM_IAM_BASE_URL", &url, RuntimeEnvironment::Development).is_err()
+                validate_url("ACCOUNTS_URL", &url, RuntimeEnvironment::Development).is_err()
             })
         );
         assert!(Url::parse("http://localhost/service").is_ok_and(|url| {
-            validate_url("DM_IAM_BASE_URL", &url, RuntimeEnvironment::Development).is_ok()
+            validate_url("ACCOUNTS_URL", &url, RuntimeEnvironment::Development).is_ok()
         }));
     }
 
     #[test]
-    fn iam_application_identifiers_follow_the_published_contract() {
-        assert!(validate_app_id("DM_IAM_APP_ID", "dm").is_ok());
-        assert!(validate_app_id("DM_IAM_APP_ID", "Silicon-DM").is_err());
-        assert!(validate_app_id("DM_IAM_APP_ID", "tos>dm").is_err());
+    fn plain_http_is_only_for_this_machine() -> Result<(), url::ParseError> {
+        for local in [
+            "http://localhost:9590",
+            "http://dm.localhost",
+            "http://127.0.0.1:9589",
+            "http://[::1]:1",
+        ] {
+            assert!(is_loopback(&Url::parse(local)?), "{local}");
+        }
+        for remote in [
+            "http://accounts.teamofsilicons.com",
+            "http://10.0.0.2",
+            "http://localhost.example.com",
+        ] {
+            assert!(!is_loopback(&Url::parse(remote)?), "{remote}");
+        }
+        assert!(
+            validate_url(
+                "ACCOUNTS_URL",
+                &Url::parse("http://localhost:9590")?,
+                RuntimeEnvironment::Production
+            )
+            .is_err(),
+            "production always needs HTTPS"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn app_ids_follow_the_published_contract() {
+        assert!(validate_app_id("DM_APP_ID", "dm").is_ok());
+        assert!(validate_app_id("DM_APP_ID", "Silicon-DM").is_err());
+        assert!(validate_app_id("DM_APP_ID", "tos>dm").is_err());
+    }
+
+    #[test]
+    fn proof_issuers_are_per_scope_and_deny_by_default() {
+        let empty = ProofIssuers::parse("").unwrap_or_default();
+        assert!(!empty.allows("dm.messages.read", "interface"));
+        let parsed = ProofIssuers::parse("dm.messages.read=interface,dm.messages.read=other")
+            .unwrap_or_default();
+        assert!(parsed.allows("dm.messages.read", "interface"));
+        assert!(parsed.allows("dm.messages.read", "other"));
+        assert!(!parsed.allows("dm.drafts.write", "interface"));
+        assert!(ProofIssuers::parse("dm.messages.read").is_err());
+        assert!(ProofIssuers::parse("dm.messages.read=Bad App").is_err());
+    }
+
+    #[test]
+    fn data_keys_need_exactly_32_bytes_and_derive_per_purpose() {
+        let key = DataKey::parse("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
+            .unwrap_or_else(|reason| panic!("{reason}"));
+        assert_ne!(key.derive("a"), key.derive("b"));
+        assert_eq!(format!("{key:?}"), "DataKey(redacted)");
+        assert!(DataKey::parse("not base64!").is_err());
     }
 }

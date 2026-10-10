@@ -40,7 +40,7 @@ use secrecy::ExposeSecret as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -76,40 +76,7 @@ pub fn record(state: &AppState, source: &str, event: &str, fields: Value) {
         return;
     }
     let value = diagnostic(state, source, event, fields);
-    if state.testing_environment.is_some() {
-        // Separate sandbox storage: a test operation cannot produce a production event.
-        static PENDING: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-        let limit = PENDING
-            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(128)))
-            .clone();
-        let Ok(permit) = limit.try_acquire_owned() else {
-            return;
-        };
-        let selected = state.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            let (Some(registry), Some(id), Some(generation)) = (
-                &selected.testing,
-                selected.testing_environment,
-                selected.testing_generation,
-            ) else {
-                return;
-            };
-            let Some(revision) = selected.testing_runtime_revision else {
-                return;
-            };
-            let Ok(_fence) = registry
-                .request_runtime_fence(id, generation, revision)
-                .await
-            else {
-                return;
-            };
-            let _ = sqlx::query("INSERT INTO telemetry_events(event) VALUES($1)")
-                .bind(value)
-                .execute(selected.store.pool())
-                .await;
-        });
-    } else if let Some(client) = &state.telemetry.0 {
+    if let Some(client) = &state.telemetry.0 {
         client.record(value);
     }
 }
@@ -119,7 +86,12 @@ fn safe_fields(fields: Value) -> serde_json::Map<String, Value> {
         for (key, value) in fields {
             let allowed = match key.as_str() {
                 "duration_ms" | "status" | "count" | "sequence" | "attempt" => value.is_u64(),
-                "success" | "is_public" => value.is_boolean(),
+                "success" => value.is_boolean(),
+                "outcome" | "event_type" => value.as_str().is_some_and(|s| {
+                    s.len() <= 80
+                        && s.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                }),
                 "group_id" => value
                     .as_str()
                     .is_some_and(silicon_dm_protocol::valid_group_id),
@@ -151,14 +123,14 @@ fn diagnostic(state: &AppState, source: &str, event: &str, fields: Value) -> Val
         "group.created",
         "group.updated",
         "group.members_invited",
-        "group.invitations_removed",
+        "group.members_removed",
         "http.completed",
         "websocket.opened",
         "websocket.closed",
         "websocket.received",
         "delivery.sent",
         "delivery.acknowledged",
-        "iam.webhook_applied",
+        "accounts.webhook_applied",
         "command",
         "connection",
         "callback",
@@ -177,9 +149,15 @@ fn diagnostic(state: &AppState, source: &str, event: &str, fields: Value) -> Val
         "diagnostic"
     };
     json!({"schema_version":1,"app":"silicon-dm","version":env!("CARGO_PKG_VERSION"),
-        "source":source,"event":event,"environment":if state.testing_environment.is_some(){"testing"}else{"production"},
-        "testing_environment_id":state.testing_environment,"testing_generation":state.testing_generation,
+        "source":source,"event":event,"environment":environment(state),
         "instance_id":state.instance_id.as_ref(),"context":safe})
+}
+fn environment(state: &AppState) -> &'static str {
+    match state.settings.environment {
+        crate::config::RuntimeEnvironment::Production => "production",
+        crate::config::RuntimeEnvironment::Test => "test",
+        crate::config::RuntimeEnvironment::Development => "development",
+    }
 }
 pub(crate) fn requested(headers: &HeaderMap) -> bool {
     headers.get("x-dm-telemetry").is_none_or(|v| v != "off")

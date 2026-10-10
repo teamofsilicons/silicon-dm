@@ -1,4 +1,9 @@
-//! Actor and organization identity types.
+//! Account identity types.
+//!
+//! An [`ActorRef`]'s `id` is the account's **storage key**: its Silicon Accounts uuid
+//! (`zQo`) for everything written by DM 0.15, or an IAM-era public id (`c:saket`) on legacy
+//! rows not yet linked by `dm-migrate link-identities`. Public ids are resolved to uuids at
+//! the API boundary and rendered back from the accounts cache in responses.
 
 use std::{fmt, str::FromStr};
 
@@ -6,14 +11,14 @@ use serde::{Deserialize, Serialize};
 use sqlx::Type;
 use thiserror::Error;
 
-/// Whether an actor is a human Carbon or an AI Silicon.
+/// Whether an account is a Carbon or a Silicon.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "actor_kind", rename_all = "snake_case")]
 pub enum ActorType {
-    /// A human account.
+    /// A Carbon (`c:` id).
     Carbon,
-    /// An AI-agent account.
+    /// A Silicon (`si:` id).
     Silicon,
 }
 
@@ -54,10 +59,23 @@ impl FromStr for ActorType {
 #[serde(try_from = "String", into = "String")]
 pub struct ActorId(String);
 
-/// Stable public organization identifier.
+/// Storage partition of a conversation and its rows (the `organization_id` column).
+///
+/// Legacy rows keep the IAM organization they were written in; every conversation created
+/// by DM 0.15 lives in [`ACCOUNTS_PARTITION`]. Partitions are internal: no request or
+/// response names one.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct OrganizationId(String);
+
+/// The partition of everything created from DM 0.15 on (IAM handles never contain `@`).
+pub const ACCOUNTS_PARTITION: &str = "@accounts";
+
+/// Whether `value` has the shape of a Silicon Accounts uuid (`a-z`, `A-Z`, `0-9`, 3+).
+#[must_use]
+pub fn is_account_uuid(value: &str) -> bool {
+    (3..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
 
 /// A typed actor reference returned by the public API.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -92,7 +110,7 @@ impl ActorId {
                     || isi
                         .chars()
                         .any(|c| c.is_whitespace() || matches!(c, ':' | '@'))
-                    || !actor.starts_with("si:")
+                    || !(actor.starts_with("si:") || is_account_uuid(actor))
                 {
                     return Err("silicon address must be ISI@si:handle with a non-empty ISI");
                 }
@@ -100,6 +118,10 @@ impl ActorId {
             }
             None => (self.0.as_str(), None),
         };
+        if is_account_uuid(actor) {
+            // Internal form: the account uuid DM stores in place of the public id.
+            return Ok((actor, isi));
+        }
         let handle = actor
             .strip_prefix("si:")
             .or_else(|| actor.strip_prefix("c:"));
@@ -115,7 +137,7 @@ impl ActorId {
         }
         Ok((actor, isi))
     }
-    /// Canonical IAM identity underlying an optional ISI address.
+    /// The account (public id or uuid) underlying an optional ISI address.
     ///
     /// # Errors
     /// Returns an error when the routing address or underlying account is invalid.
@@ -135,9 +157,21 @@ impl ActorId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Wraps a storage key read from DM's own database (an account uuid, which the schema
+    /// constrains to `[A-Za-z0-9]{3,64}`), without re-validating it.
+    pub(crate) fn from_storage_key(value: String) -> Self {
+        Self(value)
+    }
 }
 
 impl OrganizationId {
+    /// The partition of everything created by DM 0.15.
+    #[must_use]
+    pub fn accounts() -> Self {
+        Self(ACCOUNTS_PARTITION.to_owned())
+    }
+
     /// Borrows the normalized identifier.
     #[must_use]
     pub fn as_str(&self) -> &str {
