@@ -129,7 +129,9 @@ An app you use can act for you at DM with a User verification proof that Silicon
 issues (`Authorization: Proof sap_…`), limited to the scopes DM honours:
 `dm.conversations.read`, `dm.messages.read`, `dm.messages.write`, `dm.receipts.write`,
 `dm.drafts.write`, and only for the apps the DM service allows for each scope. Group changes,
-invitations, allow-lists and `/me` always need your own sign-in. See [the API guide](api/README.md).
+invitations, allow-lists and `/me` always need your own sign-in. A message an app sends for you
+names that app (`via_app`), so everyone in the conversation sees how it was sent. See
+[the API guide](api/README.md).
 
 ## What the service hears from Silicon Accounts
 

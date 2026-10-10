@@ -348,6 +348,10 @@ async fn proofs_from_allowed_apps_act_for_the_account_on_their_scopes_only() -> 
     expect_status(&sent, StatusCode::ACCEPTED)?;
     assert_eq!(sent.1["sender"]["id"], "c:ada");
     assert_eq!(sent.1["sender"]["uuid"], "a8K");
+    assert_eq!(
+        sent.1["via_app"], "interface",
+        "the message names the app that sent it"
+    );
     let stored: Option<String> =
         sqlx::query_scalar("SELECT via_app FROM messages ORDER BY created_at DESC LIMIT 1")
             .fetch_one(app.state.store.pool())
@@ -368,6 +372,32 @@ async fn proofs_from_allowed_apps_act_for_the_account_on_their_scopes_only() -> 
         .await?;
     expect_status(&listed, StatusCode::OK)?;
     assert_eq!(listed.1["items"].as_array().map(Vec::len), Some(1));
+    // The other participant sees which app sent it; what an account sends itself names none.
+    let bob_token = app.accounts.token(&bob);
+    let own = app
+        .post(
+            "/api/v1/messages",
+            &bob_token,
+            json!({"recipient_id": "c:ada", "message": "hi Ada"}),
+        )
+        .await?;
+    expect_status(&own, StatusCode::ACCEPTED)?;
+    assert!(own.1.get("via_app").is_none(), "{}", own.1);
+    let read = app
+        .get("/api/v1/conversations/c:ada/messages", &bob_token)
+        .await?;
+    expect_status(&read, StatusCode::OK)?;
+    let via: Vec<_> = read.1["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|message| (message["message"].clone(), message["via_app"].clone()))
+        .collect();
+    assert!(
+        via.contains(&(json!("hi from Interface"), json!("interface")))
+            && via.contains(&(json!("hi Ada"), serde_json::Value::Null)),
+        "{via:?}"
+    );
 
     // An issuer DM_PROOF_ISSUERS does not list.
     let refused = app

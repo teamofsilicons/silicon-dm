@@ -275,6 +275,9 @@ pub struct Message {
     pub history: Vec<Value>,
     pub updated_at: Option<String>,
     pub deleted_at: Option<String>,
+    /// The app that sent the message for its sender with a User verification proof (for
+    /// example `interface`); `None` when the sender sent it itself.
+    pub via_app: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(remote = "Message")]
@@ -306,6 +309,8 @@ struct MessageWire {
     pub updated_at: Option<String>,
     #[serde(default)]
     pub deleted_at: Option<String>,
+    #[serde(default)]
+    pub via_app: Option<String>,
 }
 impl<'de> Deserialize<'de> for Message {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -342,13 +347,17 @@ impl Serialize for Message {
         if deleted {
             attachments.clear();
         }
-        serde_json::json!({"message-id":self.id,"conversation_id":self.conversation_id,
+        let mut value = serde_json::json!({"message-id":self.id,"conversation_id":self.conversation_id,
             "recipient_id":self.content.recipient_id,"sender":self.sender,
             "message":if deleted {None} else {Some(self.content.text.as_deref().unwrap_or(""))},
             "attachments":attachments,"voice_transcript":if deleted {None} else {self.content.voice_transcript.as_deref()},
             "reply":self.reply,"bundle":self.bundle,"history":self.history,"created_at":self.created_at,"updated_at":self.updated_at,
             "deleted_at":self.deleted_at,"delivered_at":self.delivered_at,"read_at":self.read_at
-        }).serialize(serializer)
+        });
+        if let Some(app) = &self.via_app {
+            value["via_app"] = Value::String(app.clone());
+        }
+        value.serialize(serializer)
     }
 }
 

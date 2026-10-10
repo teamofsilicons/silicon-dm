@@ -190,7 +190,7 @@ pub struct Message {
     pub conversation_id: Uuid,
     /// Typed sender.
     pub sender: ActorRef,
-    /// Optional qualified sender address; sender.id always identifies the IAM account.
+    /// Optional qualified sender address; sender.id always identifies the account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_id: Option<super::ActorId>,
     /// Optional intended recipient address. Conversation visibility is unchanged.
@@ -231,6 +231,10 @@ pub struct Message {
     /// Stable operator-facing failure category, never a secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
+    /// The app that sent the message for its sender with a User verification proof (for
+    /// example `interface`); absent when the sender sent it itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_app: Option<String>,
 }
 
 /// Cursor-paginated messages.

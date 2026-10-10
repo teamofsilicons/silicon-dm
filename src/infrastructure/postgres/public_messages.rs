@@ -255,6 +255,10 @@ impl PostgresStore {
             "updated_at":value["updated_at"],
             "deleted_at":value["deleted_at"], "delivered_at":value["delivered_at"], "read_at":value["read_at"]
         });
+        // Sent for its sender by another app with a User verification proof.
+        if let Some(app) = value.get("via_app").filter(|app| app.is_string()) {
+            output["via_app"] = app.clone();
+        }
         // Transport fields are moved into the envelope by the realtime adapter.
         for key in [
             "delivery_id",

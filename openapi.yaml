@@ -1412,6 +1412,7 @@ components:
         delivered_at: {type: [string, 'null'], format: date-time, description: When every recipient had it on a device.}
         read_at: {type: [string, 'null'], format: date-time, description: When every recipient read it.}
         history: {type: array, items: {$ref: '#/components/schemas/MessageHistoryEntry'}, description: 'Previous content, oldest first; hidden once deleted.'}
+        via_app: {type: string, description: 'The app that sent this message for its sender with a User verification proof (for example `interface`); absent when the sender sent it itself.'}
     MessageHistoryEntry:
       type: object
       required: [message, attachments, voice_transcript, reply, created_at]
