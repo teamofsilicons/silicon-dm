@@ -10,7 +10,6 @@ fn run(home: &Path, args: &[&str], override_dir: Option<&Path>) -> TestResult<Va
         .env("HOME", home.join("unused-home"))
         .env("SILICON_HOME", home)
         .env("SILICON_DM_RELAY_HOME", home.join("relay"))
-        .env("DM_TELEMETRY_ENABLED", "false")
         .env_remove("SILICON_DM_HOME")
         .env_remove("SILICON_DM_TEST")
         .env_remove("DM_TEST_APP_SECRET")
@@ -68,19 +67,19 @@ fn a_retired_test_environment_selection_never_reaches_the_service() -> TestResul
 fn silicon_home_and_explicit_overrides_are_isolated() -> TestResult<()> {
     let home = std::env::temp_dir().join(format!("dm-home-test-{}", Uuid::new_v4()));
     fs::create_dir_all(&home)?;
-    run(&home, &["config", "telemetry", "false"], None)?;
+    run(&home, &["profiles", "list"], None)?;
     assert!(home.join(".silicon-dm/config.json").is_file());
     assert!(!home.join("unused-home").exists());
     let status = run(&home, &["login", "status", "--json"], None)?;
     assert_eq!(status["authenticated"], false);
     let explicit = home.join("explicit");
-    run(&home, &["config", "telemetry", "false"], Some(&explicit))?;
+    run(&home, &["profiles", "list"], Some(&explicit))?;
     assert!(explicit.join("config.json").is_file());
     let configured = home.join("configured");
     fs::create_dir_all(&configured)?;
     run(
         &home,
-        &["config", "telemetry", "false"],
+        &["profiles", "list"],
         Some(&configured.join(".silicon-dm")),
     )?;
     run(
@@ -104,10 +103,12 @@ fn silicon_home_and_explicit_overrides_are_isolated() -> TestResult<()> {
         ],
         None,
     )?;
-    run(&home, &["config", "telemetry", "false"], None)?;
+    fs::remove_file(configured.join(".silicon-dm/config.json"))?;
+    run(&home, &["profiles", "list"], None)?;
     assert!(configured.join(".silicon-dm/config.json").is_file());
     let saved: Value =
         serde_json::from_slice(&fs::read(configured.join(".silicon-dm/config.json"))?)?;
+    // Written as off so an older dm reading this home sends no diagnostics.
     assert_eq!(saved["telemetry_enabled"], false);
     assert!(
         fs::read_dir(configured.join(".silicon-dm"))?
@@ -123,6 +124,28 @@ fn silicon_home_and_explicit_overrides_are_isolated() -> TestResult<()> {
         )
         .is_err()
     );
+    fs::remove_dir_all(home)?;
+    Ok(())
+}
+
+#[test]
+fn the_retired_telemetry_switch_succeeds_without_touching_state() -> TestResult<()> {
+    let home = std::env::temp_dir().join(format!("dm-telemetry-test-{}", Uuid::new_v4()));
+    fs::create_dir_all(&home)?;
+    for value in ["true", "false"] {
+        let output = run(&home, &["config", "telemetry", value], None)?;
+        assert_eq!(
+            output["message"],
+            "Telemetry was removed from DM; there is nothing to turn on or off."
+        );
+        assert_eq!(output["telemetry_enabled"], false);
+    }
+    assert!(!home.join(".silicon-dm").exists());
+    let help = Command::new(env!("CARGO_BIN_EXE_dm"))
+        .args(["config", "--help"])
+        .output()?;
+    assert!(help.status.success());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("telemetry"));
     fs::remove_dir_all(home)?;
     Ok(())
 }

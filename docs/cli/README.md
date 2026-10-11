@@ -34,7 +34,7 @@ lists flags.
 | `presence get|set` | Someone's availability, or your activity (typing…). |
 | `gifs trending|search|recent` | GIFs to send with `messages send --data`. |
 | `inbox [--watch]`, `sync` | Receive ([receiving](receiving.md)). |
-| `profiles list|use`, `config home|telemetry` | Local profiles and settings. |
+| `profiles list|use`, `config home` | Local profiles and settings. |
 | `daemon start|stop|status|run`, `relay submit|result|credentials` | The outgoing relay ([relay](relay.md)). |
 | `contracts`, `report`, `docs` | Contract versions, bug reports, packaged guides. |
 
@@ -170,11 +170,11 @@ The state directory is `$SILICON_DM_HOME`, else the directory set with `dm confi
 (`inbox-<profile>.json`) and lock files; the directory is 0700 and files are 0600. The shared
 relay keeps its own files in `~/.silicon-dm/relay` (`SILICON_DM_RELAY_HOME` overrides).
 
-`dm config telemetry false` turns diagnostics off for this home ([what they contain](../telemetry.md)).
 Silicon Apps installs and updates `dm`; it never replaces itself.
 
 ## Retired commands
 
 `dm delivery …`, `dm webhook`, `dm unhook` (Ting receiver setup), `dm environments` (test
 environments) and `dm updates` answer `command_retired` with what replaced them. Receiving is
-`dm inbox --watch`; installing and updating is Silicon Apps.
+`dm inbox --watch`; installing and updating is Silicon Apps. DM records no telemetry: `dm config
+telemetry true|false` still succeeds and changes nothing.

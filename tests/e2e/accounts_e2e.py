@@ -290,7 +290,7 @@ def mint(*args):
 def cli_env(home, extra=None):
     return {"PATH": "/usr/bin:/bin", "HOME": str(home), "SILICON_HOME": str(home),
             "SILICON_DM_RELAY_HOME": str(home / "relay"), "DM_API_URL": CONFIG["api"],
-            "ACCOUNTS_URL": CONFIG["accounts_url"], "DM_TELEMETRY_ENABLED": "false", **(extra or {})}
+            "ACCOUNTS_URL": CONFIG["accounts_url"], **(extra or {})}
 
 
 def dm(home, *args, stdin=None, timeout=120, binary=None, env=None):

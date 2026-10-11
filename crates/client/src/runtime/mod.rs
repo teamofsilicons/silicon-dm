@@ -209,38 +209,24 @@ impl LocalRuntime {
     pub fn store(&self) -> &store::Store {
         &self.store
     }
-    /// Persist the diagnostic opt-in for CLI and daemon requests.
-    pub fn set_telemetry(&self, enabled: bool) -> Result<()> {
-        self.store.update(|config| {
-            config.telemetry_enabled = enabled;
-            Ok(())
-        })
+    /// Does nothing: DM records no telemetry, so there is nothing to turn on or off.
+    #[deprecated(since = "0.16.0", note = "DM records no telemetry; this does nothing")]
+    pub fn set_telemetry(&self, _enabled: bool) -> Result<()> {
+        Ok(())
     }
-    /// Best-effort, bounded diagnostics for a signed-in profile, spooled locally and uploaded
-    /// by the relay. A command never waits on the network for its own diagnostic.
+    /// Does nothing and records nothing: DM records no telemetry.
+    #[deprecated(
+        since = "0.16.0",
+        note = "DM records no telemetry; this records nothing"
+    )]
     pub fn record_diagnostic(
         &self,
-        profile: &str,
-        source: &'static str,
-        event: &str,
-        success: bool,
-        duration_ms: u64,
+        _profile: &str,
+        _source: &'static str,
+        _event: &str,
+        _success: bool,
+        _duration_ms: u64,
     ) {
-        let Ok(config) = self.store.load() else {
-            return;
-        };
-        if store::profile(&config, profile).is_err() || !config.telemetry() {
-            return;
-        }
-        if let Ok(queue) = queue::Queue::open(&self.store) {
-            let _ = queue.record_diagnostic(
-                &store::session_key(profile),
-                source,
-                event,
-                success,
-                duration_ms,
-            );
-        }
     }
     /// Durably queues `request` and returns without waiting for the backend.
     ///
@@ -332,13 +318,12 @@ impl LocalRuntime {
         daemon::start(&self.store, launch, port).await
     }
 
-    /// DM's public client at the target's Silicon Accounts, with this home's telemetry choice.
+    /// DM's public client at the target's Silicon Accounts.
     pub fn public_client(&self, target: &SignInTarget) -> Result<accounts::PublicClient> {
-        let telemetry = self.store.load().map(|c| c.telemetry()).unwrap_or(true);
         Ok(accounts::PublicClient::new(
             &target.accounts_url,
             &target.app_id,
-            telemetry,
+            false,
         )?)
     }
 
@@ -347,7 +332,7 @@ impl LocalRuntime {
     /// another Silicon Accounts or app id, or predates Silicon Accounts, is refused; an
     /// unreachable one is reported and signing in goes ahead.
     pub async fn check_service(target: &SignInTarget) -> Result<ServiceCheck> {
-        let client = crate::Client::new(&target.api_url)?.with_source("cli");
+        let client = crate::Client::new(&target.api_url)?;
         match client.accounts().await {
             Ok(discovery) => {
                 let trusted = accounts::normalize_accounts_url(&discovery.accounts_url)
@@ -501,7 +486,7 @@ impl LocalRuntime {
         if let Some((accounts_url, app_id, refresh)) = replaced
             && refresh != session.refresh_token
         {
-            let revoked = match accounts::PublicClient::new(&accounts_url, &app_id, true) {
+            let revoked = match accounts::PublicClient::new(&accounts_url, &app_id, false) {
                 Ok(client) => client.revoke(&refresh).await.is_ok(),
                 Err(_) => false,
             };
@@ -635,14 +620,11 @@ impl LocalRuntime {
             .as_ref()
             .map(|t| t.refresh_token.clone())
             .unwrap_or_default();
-        let revoked = match accounts::PublicClient::new(
-            &profile.accounts_url,
-            &profile.app_id,
-            config.telemetry(),
-        ) {
-            Ok(client) => client.revoke(&refresh).await,
-            Err(error) => Err(error),
-        };
+        let revoked =
+            match accounts::PublicClient::new(&profile.accounts_url, &profile.app_id, false) {
+                Ok(client) => client.revoke(&refresh).await,
+                Err(error) => Err(error),
+            };
         self.store.update(|config| {
             if let Some(stored) = config.profiles.get_mut(&key)
                 && stored.tokens.as_ref().map(|t| &t.refresh_token) == Some(&refresh)

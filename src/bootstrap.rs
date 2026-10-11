@@ -33,14 +33,15 @@ pub async fn build_app_state(settings: Settings) -> AppResult<AppState> {
             "these obsolete variables are set but DM no longer reads them; remove them"
         );
     }
-    let telemetry = crate::telemetry::Recorder::new(&settings.telemetry)?;
+    // rustls is built with both ring and aws-lc-rs here, so it cannot pick a process default
+    // by itself; pin ring for every TLS client (PostgreSQL, Silicon Accounts, Ting).
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let identity = Arc::new(AccountsAdapter::new(&settings.accounts)?);
     let gifs = Arc::new(GiphyClient::new(&settings.providers)?);
     let store = PostgresStore::connect(&settings.database).await?;
     store.readiness().await?;
     Ok(AppState {
         instance_id: new_instance_id(),
-        telemetry,
         settings: Arc::new(settings),
         store,
         identity,

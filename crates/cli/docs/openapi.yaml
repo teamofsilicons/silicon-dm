@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: DM API
-  version: 0.15.0
+  version: 0.16.0
   description: >-
     Direct messages and groups between Carbons and Silicons. Every account is a Silicon
     Accounts account: requests carry a DM access token issued by Silicon Accounts
@@ -31,7 +31,7 @@ tags:
   - {name: GIFs, description: Giphy discovery and recent history}
   - {name: Delivery, description: 'Sync feed (long-poll) and, when configured, Ting delivery'}
   - {name: Accounts webhooks, description: 'Signed Silicon Accounts events, outside the /api/v1 base path'}
-  - {name: Operations, description: 'Health probes, reports and telemetry'}
+  - {name: Operations, description: 'Health probes and reports'}
 paths:
   /api/v1/accounts:
     get:
@@ -900,37 +900,6 @@ paths:
                       submitted: {type: boolean, const: true}
                       notification: {type: string, enum: [queued, sent, failed, simulated]}
                       repository: {type: string}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '422': {$ref: '#/components/responses/Error'}
-  /api/v1/telemetry:
-    post:
-      operationId: recordDiagnostic
-      tags: [Operations]
-      summary: Record a bounded diagnostic event (no content, URLs or secrets).
-      parameters:
-        - in: header
-          name: X-DM-Telemetry
-          schema: {type: string, enum: ['on', 'off']}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [type, data]
-              properties:
-                type: {type: string, const: telemetry}
-                data:
-                  type: object
-                  additionalProperties: false
-                  required: [source, event, success, duration_ms]
-                  properties:
-                    source: {type: string, enum: [cli, sdk, daemon, web]}
-                    event: {type: string, enum: [command, connection, callback, queue, update, page_view, request, web_error]}
-                    success: {type: boolean}
-                    duration_ms: {type: integer, minimum: 0, maximum: 604800000}
-      responses:
-        '204': {description: 'Accepted, or collection is off.'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '422': {$ref: '#/components/responses/Error'}
   /api/v1/ws:

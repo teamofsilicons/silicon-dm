@@ -134,7 +134,7 @@ Replace "Since all IAM apps can both be used as is" with "Since all the apps can
 
 ## Telemetry
 
-Replace "All IAM apps use Space Station" with "All the apps use Space Station".
+DM records no telemetry since 0.16, so this section no longer describes DM; its wording is the Carbon's to decide.
 
 ## Updates
 

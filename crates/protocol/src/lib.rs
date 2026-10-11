@@ -39,7 +39,6 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
         ("PUT", ["presence", "devices", _]) => "renew_presence",
         ("DELETE", ["presence", "devices", _]) => "close_presence",
         (_, ["reports"]) => "report",
-        (_, ["telemetry"]) => "telemetry",
         (_, ["invitations"]) => "invitations",
         ("POST", ["allow-list"]) => "allow_list_add",
         ("DELETE", ["allow-list"]) => "allow_list_remove",

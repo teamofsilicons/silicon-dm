@@ -80,8 +80,9 @@ fn open_database(state: &store::Store) -> Result<Connection> {
             [],
         )?;
     }
-    conn.execute_batch("CREATE INDEX IF NOT EXISTS outbox_session_pending ON outbox(session,state);
-      CREATE TABLE IF NOT EXISTS diagnostics(id INTEGER PRIMARY KEY,session TEXT NOT NULL,source TEXT NOT NULL,event TEXT NOT NULL,success INTEGER NOT NULL,duration_ms INTEGER NOT NULL,created INTEGER NOT NULL);")?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS outbox_session_pending ON outbox(session,state);",
+    )?;
     Ok(conn)
 }
 
@@ -128,17 +129,6 @@ pub(crate) fn lane(operation: &crate::relay::Operation) -> String {
     }
 }
 
-/// One locally recorded diagnostic awaiting upload by the relay.
-pub(crate) struct Diagnostic {
-    pub id: i64,
-    pub session: String,
-    pub source: String,
-    pub event: String,
-    pub success: bool,
-    pub duration_ms: u64,
-}
-/// Diagnostics are best effort: keep at most this many unsent events.
-const DIAGNOSTIC_BACKLOG: i64 = 1000;
 impl Queue {
     pub fn enqueue(&self, request: &RelayRequest, original: &Value) -> Result<()> {
         if request.testing_environment_id.is_some() {
@@ -308,52 +298,6 @@ impl Queue {
 impl Queue {
     pub fn retry(&self, id: Uuid, error: &Value) -> Result<()> {
         self.database()?.execute("UPDATE outbox SET attempts=attempts+1,next_attempt=?2+MIN(60,1 << MIN(attempts,6)),error=?3 WHERE request_id=?1",params![id.to_string(),(store::now() as i64),serde_json::to_string(error)?])?;
-        Ok(())
-    }
-}
-impl Queue {
-    /// Records a diagnostic locally in microseconds; the relay uploads it later
-    /// so no command waits on the network for telemetry.
-    pub(crate) fn record_diagnostic(
-        &self,
-        session: &str,
-        source: &str,
-        event: &str,
-        success: bool,
-        duration_ms: u64,
-    ) -> Result<()> {
-        let conn = self.database()?;
-        conn.execute(
-            "INSERT INTO diagnostics(session,source,event,success,duration_ms,created) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![session, source, event, success, duration_ms.min(i64::MAX as u64) as i64, store::now() as i64],
-        )?;
-        conn.execute(
-            "DELETE FROM diagnostics WHERE id <= (SELECT MAX(id) FROM diagnostics) - ?1",
-            params![DIAGNOSTIC_BACKLOG],
-        )?;
-        Ok(())
-    }
-    pub(crate) fn pending_diagnostics(&self, limit: u32) -> Result<Vec<Diagnostic>> {
-        let conn = self.database()?;
-        let mut stmt = conn.prepare(
-            "SELECT id,session,source,event,success,duration_ms FROM diagnostics ORDER BY id LIMIT ?1",
-        )?;
-        Ok(stmt
-            .query_map(params![limit], |r| {
-                Ok(Diagnostic {
-                    id: r.get(0)?,
-                    session: r.get(1)?,
-                    source: r.get(2)?,
-                    event: r.get(3)?,
-                    success: r.get(4)?,
-                    duration_ms: r.get::<_, i64>(5)?.max(0) as u64,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-    pub(crate) fn forget_diagnostic(&self, id: i64) -> Result<()> {
-        self.database()?
-            .execute("DELETE FROM diagnostics WHERE id=?1", params![id])?;
         Ok(())
     }
 }
@@ -602,23 +546,6 @@ mod lane_tests {
         )?;
         retry_later(&queue, &old)?;
         assert!(candidates(&queue)?.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn diagnostics_are_spooled_locally_and_bounded() -> Result<()> {
-        let queue = queue()?;
-        for i in 0..(DIAGNOSTIC_BACKLOG + 5) {
-            queue.record_diagnostic("default:production", "cli", "command", true, i as u64)?;
-        }
-        let pending = queue.pending_diagnostics(u32::MAX)?;
-        assert_eq!(pending.len() as i64, DIAGNOSTIC_BACKLOG);
-        assert_eq!(
-            pending[0].duration_ms, 5,
-            "the oldest events are dropped first"
-        );
-        queue.forget_diagnostic(pending[0].id)?;
-        assert_eq!(queue.pending_diagnostics(1)?[0].duration_ms, 6);
         Ok(())
     }
 }

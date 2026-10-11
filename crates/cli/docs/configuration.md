@@ -16,7 +16,8 @@ needs something else.
 | `SILICON_DM_RELAY_HOME` | `~/.silicon-dm/relay` of the OS user | Where the shared relay keeps its files |
 | `--profile NAME` / `dm profiles use` | `default` | Which signed-in account a command uses |
 | `--wait-seconds N` | 30 | How long a command waits for the relay; on timeout the request stays queued |
-| `dm config telemetry false` / `DM_TELEMETRY_ENABLED=false` | on | Diagnostics ([what they contain](telemetry.md)) |
+
+DM records no telemetry.
 
 Plain `http` URLs are accepted only for this machine (`localhost`, `*.localhost`, loopback
 addresses). Keep the state directory on a durable local disk: it holds the sign-ins and the

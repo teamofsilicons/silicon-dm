@@ -18,7 +18,7 @@ spec.loader.exec_module(bootstrap)
 CONFIG = (REPO / "src" / "config.rs").read_text()
 # Every variable the service refuses to start without (required(...) and parse_required(...)).
 SERVICE_REQUIRED = set(re.findall(r'(?:parse_required|required)\("([A-Z0-9_]+)"\)', CONFIG))
-# Variables of the IAM/Honeycomb era the service ignores and logs.
+# Variables the service no longer reads (IAM/Honeycomb era, telemetry); it logs them.
 OBSOLETE = set(re.findall(r'"([A-Z0-9_]+)"', CONFIG.split("OBSOLETE_VARIABLES", 1)[1].split("];", 1)[0]))
 DATA_KEY = base64.b64encode(bytes(range(32))).decode()
 APP = {
@@ -39,7 +39,7 @@ LEGACY_RUNTIME = {
     "DM_TEST_DATABASE_URL": "postgresql://dm_testing:x@test.fixture:5432/silicon_dm_test",
 }
 RUNTIME_KEYS = {"DM_APP_SECRET", "DM_ACCOUNTS_WEBHOOK_SECRET", "DM_DATA_KEY", "DM_GIPHY_API_KEY",
-                "DM_SPACE_STATION_TABLE_KEY", "DM_POSTMARK_SERVER_TOKEN", "DM_DATABASE_URL"}
+                "DM_POSTMARK_SERVER_TOKEN", "DM_DATABASE_URL"}
 
 
 def runtime(app=None, current=None):
@@ -50,7 +50,7 @@ class RuntimeSecret(unittest.TestCase):
     def test_first_use_publishes_exactly_the_accounts_settings(self):
         document = runtime()
         self.assertEqual(set(document), RUNTIME_KEYS)
-        self.assertEqual(document["DM_SPACE_STATION_TABLE_KEY"], "")
+        self.assertNotIn("DM_SPACE_STATION_TABLE_KEY", document, "DM records no telemetry")
         self.assertTrue(document["DM_DATABASE_URL"].startswith("postgresql://dm_runtime:runtime%20pass%2Fword@db.fixture:5432/silicon_dm?"))
         self.assertIn("sslmode=verify-full", document["DM_DATABASE_URL"])
         self.assertNotIn("DM_RUNTIME_DATABASE_PASSWORD", document)
@@ -103,7 +103,8 @@ class RuntimeSecret(unittest.TestCase):
 class Templates(unittest.TestCase):
     def test_config_rs_was_read(self):
         self.assertTrue({"ACCOUNTS_URL", "DM_APP_SECRET", "DM_DATA_KEY"} <= SERVICE_REQUIRED, SERVICE_REQUIRED)
-        self.assertTrue({"DM_IAM_APP_SECRET", "DM_TEST_DATABASE_URL", "DM_HONEYCOMB_BASE_URL"} <= OBSOLETE, OBSOLETE)
+        self.assertTrue({"DM_IAM_APP_SECRET", "DM_TEST_DATABASE_URL", "DM_HONEYCOMB_BASE_URL",
+                         "DM_TELEMETRY_ENABLED", "DM_SPACE_STATION_TABLE_KEY"} <= OBSOLETE, OBSOLETE)
 
     def test_fargate_tasks_read_only_what_the_bootstrap_publishes(self):
         text = (HERE / "fargate.yaml").read_text()

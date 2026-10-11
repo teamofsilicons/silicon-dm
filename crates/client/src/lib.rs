@@ -130,8 +130,6 @@ pub struct Client {
     http: HttpClient,
     base: Url,
     credential: Option<Credential>,
-    telemetry_enabled: bool,
-    telemetry_source: &'static str,
 }
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -155,8 +153,6 @@ impl Client {
             http: http_client()?,
             base: api_base(base.as_ref())?,
             credential: None,
-            telemetry_enabled: true,
-            telemetry_source: "sdk",
         })
     }
     /// The normalized `/api/v1/` base of this client.
@@ -164,8 +160,8 @@ impl Client {
         &self.base
     }
     /// Sends through a caller-owned connection pool. A long-lived process (the
-    /// local relay) keeps one pool so every request, refresh and diagnostic
-    /// reuses an open TLS connection instead of paying a new handshake.
+    /// local relay) keeps one pool so every request and refresh reuses an open
+    /// TLS connection instead of paying a new handshake.
     #[cfg_attr(not(feature = "runtime"), allow(dead_code))]
     pub(crate) fn with_http_client(mut self, http: HttpClient) -> Self {
         self.http = http;
@@ -208,28 +204,20 @@ impl Client {
         self.credential = None;
         self
     }
-    /// Disable diagnostic collection for requests from this client.
-    pub fn with_telemetry(mut self, enabled: bool) -> Self {
-        self.telemetry_enabled = enabled;
+    /// Does nothing: DM records no telemetry. Every request says `X-DM-Telemetry: off`.
+    #[deprecated(since = "0.16.0", note = "DM records no telemetry; this does nothing")]
+    pub fn with_telemetry(self, _enabled: bool) -> Self {
         self
     }
-    /// Select a known diagnostic source without accepting arbitrary identifying text.
-    pub fn with_source(mut self, source: &'static str) -> Self {
-        self.telemetry_source = match source {
-            "cli" | "daemon" | "web" => source,
-            _ => "sdk",
-        };
+    /// Does nothing: the source only labelled telemetry, which DM no longer records.
+    #[deprecated(since = "0.16.0", note = "DM records no telemetry; this does nothing")]
+    pub fn with_source(self, _source: &'static str) -> Self {
         self
     }
-    /// Submit a bounded diagnostic event; callers choose whether to wait or drop on failure.
-    /// No message content, token or account id is included.
-    pub async fn telemetry(&self, event: &str, success: bool, duration_ms: u64) -> Result<()> {
-        if !self.telemetry_enabled {
-            return Ok(());
-        }
-        self.empty(self.request(Method::POST, "telemetry")?
-            .timeout(Duration::from_millis(500))
-            .json(&json!({"source":self.telemetry_source,"event":event,"success":success,"duration_ms":duration_ms}))).await
+    /// Does nothing and sends nothing: DM records no telemetry.
+    #[deprecated(since = "0.16.0", note = "DM records no telemetry; this sends nothing")]
+    pub async fn telemetry(&self, _event: &str, _success: bool, _duration_ms: u64) -> Result<()> {
+        Ok(())
     }
     fn endpoint(&self, path: &str) -> Result<Url> {
         self.base
@@ -241,11 +229,9 @@ impl Client {
             .http
             .request(method, self.endpoint(path)?)
             .header("X-DM-Contract-Version", CONTRACT_VERSION)
-            .header(
-                "X-DM-Telemetry",
-                if self.telemetry_enabled { "on" } else { "off" },
-            )
-            .header("X-DM-Source", self.telemetry_source);
+            // DM records no telemetry; this keeps a service that predates the removal from
+            // recording this request.
+            .header("X-DM-Telemetry", "off");
         match &self.credential {
             Some(Credential::Bearer(token)) => request = request.bearer_auth(token),
             Some(Credential::Proof(proof)) => {

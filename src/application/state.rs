@@ -15,8 +15,6 @@ pub struct AppState {
     pub instance_id: Arc<str>,
     /// Validated immutable settings.
     pub settings: Arc<Settings>,
-    /// Nonblocking observability exporter.
-    pub telemetry: crate::telemetry::Recorder,
     /// Durable storage.
     pub store: PostgresStore,
     /// Silicon Accounts.

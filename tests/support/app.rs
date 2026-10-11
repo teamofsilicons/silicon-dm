@@ -17,8 +17,8 @@ use silicon_dm::{
     application::{accounts::AccountRuntime, state::AppState, sync_hub::SyncHub},
     config::{
         AccountsSettings, DataKey, DatabaseSettings, ProofIssuers, ProviderSettings,
-        RealtimeSettings, RuntimeEnvironment, ServerSettings, Settings, TelemetrySettings,
-        TingSettings, WorkerSettings,
+        RealtimeSettings, RuntimeEnvironment, ServerSettings, Settings, TingSettings,
+        WorkerSettings,
     },
     infrastructure::{accounts::AccountsAdapter, giphy::GiphyClient, postgres::PostgresStore},
 };
@@ -85,11 +85,6 @@ pub fn settings(
             max_attempts: 20,
             max_retry_delay: Duration::from_secs(5),
         },
-        telemetry: TelemetrySettings {
-            enabled: false,
-            table_key: None,
-            home: std::env::temp_dir().join("silicon-dm-test-telemetry"),
-        },
         reporting: None,
         log_filter: "warn".to_owned(),
     })
@@ -141,7 +136,6 @@ impl TestApp {
         store.migrate().await?;
         let state = AppState {
             instance_id: Arc::from("test-instance"),
-            telemetry: silicon_dm::telemetry::Recorder::default(),
             identity: Arc::new(AccountsAdapter::new(&settings.accounts)?),
             gifs: Arc::new(GiphyClient::new(&settings.providers)?),
             settings: Arc::new(settings),

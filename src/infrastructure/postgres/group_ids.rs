@@ -1,6 +1,6 @@
 //! Public conversation addresses: group ids and direct addresses ↔ conversation UUIDs.
 use super::PostgresStore;
-use crate::{AppError, AppResult};
+use crate::AppResult;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
@@ -40,14 +40,6 @@ impl PostgresStore {
             .fetch_optional(self.pool())
             .await?,
         )
-    }
-
-    pub(crate) async fn public_group_id(&self, id: Uuid) -> AppResult<String> {
-        sqlx::query_scalar("SELECT public_id FROM groups WHERE conversation_id=$1")
-            .bind(id)
-            .fetch_optional(self.pool())
-            .await?
-            .ok_or(AppError::NotFound)
     }
 
     /// Translate only contract-owned conversation id fields, never user metadata, text or

@@ -110,7 +110,6 @@ impl Fixture {
             "tokens":{"access_token":"access-0","refresh_token":refresh,"expires_in":1800}
         }))?;
         self.store()?.update(|config| {
-            config.telemetry_enabled = false;
             config
                 .profiles
                 .insert(store::session_key("default"), profile);
@@ -138,6 +137,8 @@ fn a_profile_from_before_silicon_accounts_loads_signed_out_and_keeps_its_old_id(
     )?;
     let config = state.load()?;
     assert_eq!(config.default_profile, "work");
+    // The retired telemetry setting is ignored and written back as off.
+    assert_eq!(serde_json::to_value(&config)?["telemetry_enabled"], false);
     let work = &config.profiles["work:production"];
     assert!(!work.signed_in());
     assert!(work.tokens.is_none());

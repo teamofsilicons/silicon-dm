@@ -54,7 +54,7 @@ values in template parameters, committed files, shell arguments, or outputs.
 | `DM_DATA_KEY` | Standard base64 of 32 random bytes (`openssl rand -base64 32`); keep stable and back up |
 | `DM_GIPHY_API_KEY` | Real Giphy application key |
 | `DM_RUNTIME_DATABASE_PASSWORD` | Independently generated production runtime password |
-| `DM_SPACE_STATION_TABLE_KEY`, `DM_POSTMARK_SERVER_TOKEN` | Optional diagnostics and report-mail keys |
+| `DM_POSTMARK_SERVER_TOKEN` | Optional report-mail key |
 
 Bootstrap reads secrets through the host instance role. It creates `dm_runtime`
 with no DDL/role-management privileges in production. RDS manages the database

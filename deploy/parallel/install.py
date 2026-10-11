@@ -19,6 +19,7 @@ import urllib.request
 APP = 'dm'
 ROOT = Path('/opt/silicon-accounts-apps') / APP
 BUCKET_PREFIX = f's3://silicon-hook-standalone-artifacts-lxpfsbc0jpuk/parallel-accounts-20261010/{APP}'
+DM_RETIRED_TELEMETRY = ('DM_TELEMETRY_ENABLED', 'DM_TELEMETRY_HOME', 'DM_SPACE_STATION_TABLE_KEY')
 
 
 def run(args, **kwargs):
@@ -74,11 +75,13 @@ def make_settings(secret):
         worker = None
         migrator = dict(api)
     else:
+        # DM records no telemetry; settings for it left in the shared secret are not passed on.
+        shared = {k: v for k, v in shared.items() if k not in DM_RETIRED_TELEMETRY}
         api = {**accounts, **shared, 'DM_ENVIRONMENT': 'production',
                'DM_BIND_ADDR': '0.0.0.0:8081', 'DM_PUBLIC_BASE_URL': 'https://api.dm.teamofsilicons.com/api/v1/',
                'DM_DATABASE_URL': dburl('dm_accounts_runtime'), 'DM_DATABASE_MAX_CONNECTIONS': '4',
                'DM_DATABASE_MIN_CONNECTIONS': '0', 'DM_DATA_KEY': secret['data_key'],
-               'DM_TELEMETRY_ENABLED': 'false', 'DM_LOG_FILTER': 'silicon_dm=info',
+               'DM_LOG_FILTER': 'silicon_dm=info',
                'DM_PROOF_ISSUERS': 'dm.conversations.read=interface,dm.messages.read=interface,dm.messages.write=interface,dm.receipts.write=interface,dm.drafts.write=interface'}
         worker = dict(api)
         migrator = {'DM_ENVIRONMENT': 'production', 'DM_DATABASE_URL': dburl('dm_accounts_migrator')}

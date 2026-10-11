@@ -17,7 +17,7 @@ const unpublished=new Set(['history','migration']);
 async function collect(dir){for(const entry of await readdir(dir,{withFileTypes:true})){const file=join(dir,entry.name);if(entry.isDirectory()){if(dir===join(root,'docs')&&unpublished.has(entry.name))continue;await collect(file);continue;}if(entry.name.endsWith('.md')){const source=relative(join(root,'docs'),file);const text=await readFile(file,'utf8');const route=source==='README.md'?'/':`/${source.replace(/README\.md$/,'').replace(/\.md$/,'').replace(/\/$/,'')}/`;pages.push({source,text,route,title:text.match(/^# (.+)$/m)?.[1]||entry.name});}}}
 await collect(join(root,'docs'));
 const bySource=new Map(pages.map(p=>[p.source,p.route]));
-const groups=[['Start here',['README.md','getting-started.md','accounts.md']],['Use DM',['cli/README.md','cli/receiving.md','cli/relay.md','groups.md','configuration.md','telemetry.md']],['Build with DM',['building.md','client/README.md','client/runtime.md','client/ting.md','api/README.md','wire-format.md','contracts.md']],['Operate',['deployment.md','releasing.md']]];
+const groups=[['Start here',['README.md','getting-started.md','accounts.md']],['Use DM',['cli/README.md','cli/receiving.md','cli/relay.md','groups.md','configuration.md']],['Build with DM',['building.md','client/README.md','client/runtime.md','client/ting.md','api/README.md','wire-format.md','contracts.md']],['Operate',['deployment.md','releasing.md']]];
 await rm(out,{recursive:true,force:true});await mkdir(out,{recursive:true});
 await cp(join(here,'style.css'),join(out,'style.css'));
 await cp(join(here,'fonts'),join(out,'fonts'),{recursive:true});

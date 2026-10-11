@@ -56,9 +56,7 @@ impl Fixture {
         })
     }
     fn client(&self) -> Result<Client> {
-        Ok(Client::new(&self.base)?
-            .with_token("access-jwt")
-            .with_telemetry(false))
+        Ok(Client::new(&self.base)?.with_token("access-jwt"))
     }
     fn seen(&self) -> Vec<Seen> {
         self.requests.lock().map(|r| r.clone()).unwrap_or_default()
@@ -183,10 +181,10 @@ async fn requests_carry_the_bearer_or_proof_and_contract_4_and_discovery_carries
     let me = fixture.client()?.me().await?;
     assert_eq!(me.account.uuid.as_deref(), Some("K1E"));
     assert_eq!(me.custodian.and_then(|c| c.uuid).as_deref(), Some("Ada"));
-    Client::new(&fixture.base)?
-        .with_proof("sap_fixture-proof")
-        .me()
-        .await?;
+    // The retired telemetry switch is accepted and changes nothing.
+    #[allow(deprecated)]
+    let opted_in = Client::new(&fixture.base)?.with_telemetry(true);
+    opted_in.with_proof("sap_fixture-proof").me().await?;
     let seen = fixture.seen();
     assert!(
         seen[0].headers.get("authorization").is_none(),
@@ -197,6 +195,8 @@ async fn requests_carry_the_bearer_or_proof_and_contract_4_and_discovery_carries
     for request in &seen {
         assert_eq!(request.headers["x-dm-contract-version"], "4");
         assert!(request.headers.get("x-org-id").is_none());
+        assert_eq!(request.headers["x-dm-telemetry"], "off");
+        assert!(request.headers.get("x-dm-source").is_none());
     }
     Ok(())
 }

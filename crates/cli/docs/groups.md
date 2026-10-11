@@ -99,10 +99,3 @@ conversation lists carry `group: {name, description, owners}`.
 Paths are relative to `/api/v1`, with `Authorization: Bearer …` and `x-dm-contract-version: 4`.
 Creating, updating, inviting, removing and owner changes take an `Idempotency-Key`. Member and
 owner changes send `{"member_ids":["c:ada"]}` as `data`. See the [OpenAPI document](../openapi.yaml).
-
-## Diagnostics
-
-Group changes are counted in the service's request diagnostics (`group.created`,
-`group.updated`, `group.members_invited`, `group.invitations_removed`) with the group id and
-counts; names, descriptions, member identities and messages are never included. See
-[diagnostics](telemetry.md).

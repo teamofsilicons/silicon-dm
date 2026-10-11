@@ -53,11 +53,6 @@ fn route_families() -> Vec<(Method, &'static str, Option<Value>)> {
             "/api/v1/reports",
             Some(json!({"message": "broken", "client_version": "dm 0.15.0"})),
         ),
-        (
-            Method::POST,
-            "/api/v1/telemetry",
-            Some(json!({"source": "cli", "event": "command", "success": true, "duration_ms": 5})),
-        ),
     ]
 }
 
@@ -335,30 +330,16 @@ async fn reports_and_diagnostics_are_kept_per_account() -> Result<(), BoxError> 
         .await?;
     assert_eq!(limited.0, StatusCode::TOO_MANY_REQUESTS, "{}", limited.1);
 
-    // Client diagnostics need a sign-in and a known event; nothing names the account.
+    // DM records no telemetry: the diagnostics route older clients post to is gone.
     let telemetry = app
         .call(
             Method::POST,
             "/api/v1/telemetry",
             Some(&ada_token),
-            Some(
-                json!({"source": "web", "event": "page_view", "success": true, "duration_ms": 12}),
-            ),
+            Some(json!({"source": "cli", "event": "command", "success": true, "duration_ms": 5})),
             &[],
         )
         .await?;
-    assert!(telemetry.0.is_success(), "{}", telemetry.1);
-    let unknown = app
-        .call(
-            Method::POST,
-            "/api/v1/telemetry",
-            Some(&ada_token),
-            Some(
-                json!({"source": "web", "event": "keystrokes", "success": true, "duration_ms": 1}),
-            ),
-            &[],
-        )
-        .await?;
-    assert_eq!(unknown.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", unknown.1);
+    assert_eq!(telemetry.0, StatusCode::NOT_FOUND, "{}", telemetry.1);
     app.close().await
 }

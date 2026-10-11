@@ -57,10 +57,6 @@ fn build_api_router(state: AppState) -> Router {
             "/reports",
             post(crate::reporting::submit).layer(DefaultBodyLimit::max(65536)),
         )
-        .route(
-            "/telemetry",
-            post(crate::telemetry::receive).layer(DefaultBodyLimit::max(2048)),
-        )
         .route("/contracts", get(super::contracts::describe))
         .route(
             "/presence/devices/{device_id}",
@@ -138,10 +134,6 @@ fn build_api_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             super::contracts::negotiate,
-        ))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::telemetry::observe,
         ))
         .with_state(state)
 }
