@@ -55,7 +55,7 @@ Start at [docs/README.md](docs/README.md):
 - [HTTP API](docs/api/README.md), with the [OpenAPI document](openapi.yaml).
 - [Rust client](docs/client/README.md) and [runtime](docs/client/runtime.md).
 - [CLI](docs/cli/README.md), [receiving](docs/cli/receiving.md) and the [relay](docs/cli/relay.md).
-- [Groups](docs/groups.md), [configuration](docs/configuration.md), [diagnostics](docs/telemetry.md).
+- [Groups](docs/groups.md) and [configuration](docs/configuration.md). DM records no telemetry.
 - [Releasing](docs/releasing.md): one Silicon Apps archive per target, the crates and the docs site.
 - [Web frontend](web/README.md).
 

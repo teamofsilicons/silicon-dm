@@ -48,7 +48,6 @@ dm inbox --watch                          # new messages as JSON lines
 - [Wire format](wire-format.md): exact JSON envelopes.
 - [Contracts](contracts.md): versions, compatibility and sunset.
 - [Configuration](configuration.md): CLI and service settings.
-- [Diagnostics](telemetry.md): what is collected and how to turn it off.
 - [Deployment](deployment.md): running the DM service.
 - [Releasing](releasing.md): Silicon Apps archives, the Rust crates and the docs site.
 

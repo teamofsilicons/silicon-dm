@@ -49,5 +49,17 @@ class IsolationTests(unittest.TestCase):
             self.assertNotIn("COMMIT_APP_SECRET", worker)
             self.assertNotIn("COMMIT_ACCOUNTS_WEBHOOK_SECRET", worker)
 
+    def test_dm_passes_on_no_telemetry_settings(self):
+        if installer.APP != "dm":
+            self.skipTest("DM only")
+        value = self.fixture()
+        value["legacy_shared_service_settings"] = {
+            "DM_GIPHY_API_KEY": "giphy", "DM_SPACE_STATION_TABLE_KEY": "left-over",
+            "DM_TELEMETRY_ENABLED": "true", "DM_TELEMETRY_HOME": "/var/lib/silicon-dm/telemetry"}
+        api, worker, migration = installer.make_settings(value)
+        for environment in [api, worker, migration]:
+            self.assertFalse([key for key in environment if "TELEMETRY" in key or "SPACE_STATION" in key])
+        self.assertEqual(api["DM_GIPHY_API_KEY"], "giphy")
+
 if __name__ == "__main__":
     unittest.main()

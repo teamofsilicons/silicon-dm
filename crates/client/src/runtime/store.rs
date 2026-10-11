@@ -332,7 +332,13 @@ pub struct Config {
     /// This home's private bearer; the shared relay routes requests by it.
     #[serde(default = "new_relay_token")]
     pub relay_token: String,
-    #[serde(default = "enabled")]
+    /// Ignored: DM records no telemetry. Never read, and always written as false so an
+    /// older `dm` or relay that reads this home sends no diagnostics either.
+    #[deprecated(
+        since = "0.16.0",
+        note = "DM records no telemetry; this setting is ignored"
+    )]
+    #[serde(default, skip_deserializing)]
     pub telemetry_enabled: bool,
     // Settings of retired features (test environment keys, webhook secrets, update checks)
     // are ignored when read and dropped at the next write.
@@ -346,24 +352,26 @@ fn default_relay_port() -> u16 {
 fn new_relay_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
-fn enabled() -> bool {
-    true
-}
 impl Default for Config {
+    #[allow(deprecated, reason = "the retired telemetry field is always false")]
     fn default() -> Self {
         Self {
             default_profile: default_profile_name(),
             profiles: BTreeMap::new(),
             relay_port: DEFAULT_RELAY_PORT,
             relay_token: new_relay_token(),
-            telemetry_enabled: true,
+            telemetry_enabled: false,
         }
     }
 }
 impl Config {
-    /// Whether diagnostics may be sent: this home's setting and `DM_TELEMETRY_ENABLED`.
+    /// Always false: DM records no telemetry.
+    #[deprecated(
+        since = "0.16.0",
+        note = "DM records no telemetry; this is always false"
+    )]
     pub fn telemetry(&self) -> bool {
-        self.telemetry_enabled && std::env::var("DM_TELEMETRY_ENABLED").as_deref() != Ok("false")
+        false
     }
 }
 
@@ -434,15 +442,12 @@ fn signed_out_reason(profile: &Profile) -> SessionError {
     }
     SessionError::not_signed_in(&profile.name)
 }
-/// A DM client for the profile's current access token.
-pub fn client(config: &Config, profile: &Profile) -> Result<Client> {
+/// A DM client for the profile's current access token. `_config` is no longer read.
+pub fn client(_config: &Config, profile: &Profile) -> Result<Client> {
     let token = profile
         .access_token()
         .ok_or_else(|| signed_out_reason(profile))?;
-    Ok(Client::new(&profile.base_url)?
-        .with_telemetry(config.telemetry())
-        .with_source("cli")
-        .with_token(token))
+    Ok(Client::new(&profile.base_url)?.with_token(token))
 }
 pub fn relay(config: &Config) -> Result<crate::relay::RelayClient> {
     Ok(crate::relay::RelayClient::new(
@@ -803,11 +808,7 @@ impl Store {
             .as_ref()
             .map(|tokens| tokens.refresh_token.clone())
             .unwrap_or_default();
-        let client = accounts::PublicClient::new(
-            &current.accounts_url,
-            &current.app_id,
-            config.telemetry(),
-        )?;
+        let client = accounts::PublicClient::new(&current.accounts_url, &current.app_id, false)?;
         let outcome = client.refresh(&refresh_token).await;
         let result = match outcome {
             Ok(session) => {

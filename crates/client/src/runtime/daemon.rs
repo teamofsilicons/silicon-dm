@@ -98,7 +98,7 @@ struct RuntimeContext {
 }
 
 /// The relay's one HTTP connection pool, shared by every home, profile,
-/// request, token refresh and diagnostic upload. Reusing an open TLS
+/// request and token refresh. Reusing an open TLS
 /// connection removes a full handshake (several round trips) from every send.
 ///
 /// A pooled connection can silently die while the machine sleeps. The pool
@@ -522,7 +522,7 @@ pub async fn run(state: store::Store) -> Result<()> {
         }
     }));
     let maintenance_host = host.clone();
-    let mut telemetry_task = AbortOnDrop(tokio::spawn(async move {
+    let mut maintenance_task = AbortOnDrop(tokio::spawn(async move {
         maintenance(maintenance_host).await;
     }));
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
@@ -534,8 +534,8 @@ pub async fn run(state: store::Store) -> Result<()> {
     );
     let served = tokio::select! {result=server=>result.map_err(Into::into),_=tokio::signal::ctrl_c()=>{let _=shutdown.send(true);Ok(())}};
     attach_task.0.abort();
-    telemetry_task.0.abort();
-    let _ = tokio::join!(&mut attach_task.0, &mut telemetry_task.0);
+    maintenance_task.0.abort();
+    let _ = tokio::join!(&mut attach_task.0, &mut maintenance_task.0);
     host::retract(&home, pid);
     let tenants: Vec<_> = std::mem::take(&mut *host.homes()).into_values().collect();
     for tenant in &tenants {
@@ -836,12 +836,11 @@ fn schedule(
 
 /// Background upkeep that keeps the send path free of network setup:
 /// refreshes access tokens well before they expire, keeps one warm connection
-/// per backend, replaces the pool after sleep, and uploads locally recorded
-/// diagnostics. None of this runs while a command waits.
+/// per backend and replaces the pool after sleep. None of this runs while a
+/// command waits.
 async fn maintenance(host: Arc<Host>) {
     let mut timer = tokio::time::interval(Duration::from_secs(5));
     let mut last_tick = store::now();
-    let mut last_heartbeat = 0;
     // Open a connection as soon as the relay starts so its first send is warm.
     let mut warm_now = true;
     loop {
@@ -869,7 +868,6 @@ async fn maintenance(host: Arc<Host>) {
                     let _ = context.store.fresh_profile_within(key, margin).await;
                 }
             }
-            upload_diagnostics(context, &config).await;
         }
         if warm_now || host.http.idle_for() >= KEEPALIVE.as_secs() {
             warm_now = false;
@@ -882,62 +880,9 @@ async fn maintenance(host: Arc<Host>) {
                 }
             }
         }
-        if now.saturating_sub(last_heartbeat) >= 60 {
-            last_heartbeat = now;
-            for tenant in &tenants {
-                let Ok(config) = tenant.context.store.load() else {
-                    continue;
-                };
-                for profile in config.profiles.values().filter(|p| p.signed_in()) {
-                    if let Ok(client) = pooled_client(&tenant.context, &config, profile) {
-                        let _ = client
-                            .with_source("daemon")
-                            .telemetry("queue", true, 0)
-                            .await;
-                    }
-                }
-            }
-        }
     }
 }
 
-/// Sends diagnostics that CLI commands recorded locally instead of posting
-/// them before exiting. Events for a missing or logged-out profile are dropped.
-async fn upload_diagnostics(context: &RuntimeContext, config: &store::Config) {
-    let Ok(pending) = context.queue.pending_diagnostics(100) else {
-        return;
-    };
-    for diagnostic in pending {
-        let profile = config
-            .profiles
-            .get(&diagnostic.session)
-            .filter(|p| p.signed_in());
-        if let Some(profile) = profile
-            && let Ok(client) = pooled_client(context, config, profile)
-        {
-            let source = match diagnostic.source.as_str() {
-                "cli" => "cli",
-                "daemon" => "daemon",
-                "web" => "web",
-                _ => "sdk",
-            };
-            if client
-                .with_source(source)
-                .telemetry(
-                    &diagnostic.event,
-                    diagnostic.success,
-                    diagnostic.duration_ms,
-                )
-                .await
-                .is_err()
-            {
-                // Keep it for the next pass; the backlog is bounded.
-                return;
-            }
-        }
-        let _ = context.queue.forget_diagnostic(diagnostic.id);
-    }
-}
 fn transient_request(request: &RelayRequest) -> bool {
     matches!(request.request, crate::relay::Operation::SetPresence { .. })
 }
@@ -1098,7 +1043,6 @@ mod tests {
             .local_addr()?
             .port();
         state.update(|config| {
-            config.telemetry_enabled = false;
             config.relay_port = port;
             config
                 .profiles

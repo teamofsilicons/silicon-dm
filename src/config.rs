@@ -37,23 +37,10 @@ pub struct Settings {
     pub realtime: RealtimeSettings,
     /// Delivery-worker policy.
     pub worker: WorkerSettings,
-    /// Context-rich, opt-out observability.
-    pub telemetry: TelemetrySettings,
     /// Optional Postmark notification transport for durable bug reports.
     pub reporting: Option<ReportingSettings>,
     /// Tracing filter directive.
     pub log_filter: String,
-}
-
-/// Space Station exporter configuration. No ingest key is shipped to consumers.
-#[derive(Clone, Debug)]
-pub struct TelemetrySettings {
-    /// Enable diagnostic recording (default true).
-    pub enabled: bool,
-    /// Write-only key for this deployment's dedicated table.
-    pub table_key: Option<SecretString>,
-    /// Private spool location for the official SDK's daemon.
-    pub home: std::path::PathBuf,
 }
 
 /// Server-only Postmark credentials.
@@ -312,8 +299,9 @@ pub struct WorkerSettings {
     pub max_retry_delay: Duration,
 }
 
-/// Environment variables of the IAM/Honeycomb era that DM 0.15 no longer reads.
-pub const OBSOLETE_VARIABLES: [&str; 12] = [
+/// Environment variables DM no longer reads: those of the IAM/Honeycomb era, and the
+/// telemetry settings (DM records no telemetry since 0.16).
+pub const OBSOLETE_VARIABLES: [&str; 15] = [
     "DM_IAM_BASE_URL",
     "DM_IAM_APP_ID",
     "DM_IAM_APP_SECRET",
@@ -326,6 +314,9 @@ pub const OBSOLETE_VARIABLES: [&str; 12] = [
     "DM_HONEYCOMB_SERVICE_TOKEN",
     "DM_HONEYCOMB_BASE_URL",
     "DM_TING_BASE_URL",
+    "DM_TELEMETRY_ENABLED",
+    "DM_TELEMETRY_HOME",
+    "DM_SPACE_STATION_TABLE_KEY",
 ];
 
 /// Configuration load or validation error with secrets redacted.
@@ -421,11 +412,6 @@ impl Settings {
             providers,
             realtime,
             worker,
-            telemetry: TelemetrySettings {
-                enabled: parse_or("DM_TELEMETRY_ENABLED", "true")?,
-                table_key: optional("DM_SPACE_STATION_TABLE_KEY").map(SecretString::from),
-                home: parse_or("DM_TELEMETRY_HOME", "/tmp/silicon-dm-telemetry")?,
-            },
             reporting: optional("DM_POSTMARK_SERVER_TOKEN")
                 .map(|token| {
                     Ok::<_, SettingsError>(ReportingSettings {
@@ -443,7 +429,7 @@ impl Settings {
         Ok(settings)
     }
 
-    /// Obsolete IAM/Honeycomb-era variables that are set in this environment. They are
+    /// Obsolete variables that are set in this environment. They are
     /// ignored; the process logs them once at start so an operator can remove them.
     #[must_use]
     pub fn obsolete_variables_present() -> Vec<&'static str> {
@@ -932,7 +918,7 @@ mod tests {
                     assert_eq!(settings.ting.app_id, "ting-staging");
                     assert_eq!(
                         Settings::obsolete_variables_present(),
-                        vec!["DM_IAM_APP_SECRET"]
+                        vec!["DM_IAM_APP_SECRET", "DM_SPACE_STATION_TABLE_KEY"]
                     );
                 }
                 other => panic!("unknown scenario {other}"),
@@ -986,6 +972,7 @@ mod tests {
             ("DM_TING_URL", "http://127.0.0.1:4122"),
             ("DM_TING_APP_ID", "ting-staging"),
             ("DM_IAM_APP_SECRET", "left over"),
+            ("DM_SPACE_STATION_TABLE_KEY", "left over"),
         ]);
         run_child(TEST_NAME, "with_options", &options);
     }

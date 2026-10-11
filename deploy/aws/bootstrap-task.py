@@ -31,18 +31,18 @@ MAPPING_HEADER = 'iam_principal_id,accounts_uuid'
 # Fields of the operator-managed application secret (AppSecretArn).
 REQUIRED = ['DM_APP_SECRET', 'DM_ACCOUNTS_WEBHOOK_SECRET', 'DM_DATA_KEY',
             'DM_GIPHY_API_KEY', 'DM_RUNTIME_DATABASE_PASSWORD']
-OPTIONAL = ['DM_SPACE_STATION_TABLE_KEY', 'DM_POSTMARK_SERVER_TOKEN']
+OPTIONAL = ['DM_POSTMARK_SERVER_TOKEN']
 # Runtime keys a bootstrap must never change once published: a new database URL
 # would cut off running tasks, and a new data key resets every sync cursor and
 # makes stored proofs unreadable. Rotations are separately reviewed procedures.
 CONTINUOUS = ['DM_DATABASE_URL', 'DM_DATA_KEY']
-# Runtime keys from before Silicon Accounts. DM 0.15 reads none of them, but the
-# 0.14 task definitions still name them, so they are carried over unchanged and a
-# rollback to those task definitions can start. Remove them after the rollback
-# window (docs/migration/cutover.md).
+# Runtime keys DM no longer reads: those from before Silicon Accounts, and the telemetry
+# key (DM records no telemetry since 0.16). Earlier task definitions still name them,
+# so they are carried over unchanged and a rollback to those task definitions can
+# start. Remove them after the rollback window (docs/migration/cutover.md).
 RETIRED = ['DM_IAM_APP_ID', 'DM_IAM_APP_SECRET', 'DM_IAM_WEBHOOK_SECRET', 'DM_IAM_WEBHOOK_KEY_VERSION',
            'DM_TEST_KEY_ENCRYPTION_KEY', 'DM_TEST_DATABASE_URL',
-           'DM_HONEYCOMB_SERVICE_TOKEN', 'DM_HONEYCOMB_BASE_URL']
+           'DM_HONEYCOMB_SERVICE_TOKEN', 'DM_HONEYCOMB_BASE_URL', 'DM_SPACE_STATION_TABLE_KEY']
 
 
 def database_url(user, password, host, database):

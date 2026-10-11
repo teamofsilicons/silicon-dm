@@ -616,7 +616,7 @@ Resources:
                 raise SystemExit('DM_DATA_KEY must be standard base64 (openssl rand -base64 32)') from None
             if len(key_bytes) != 32:
                 raise SystemExit('DM_DATA_KEY must encode exactly 32 bytes')
-            for key in ['DM_SPACE_STATION_TABLE_KEY', 'DM_POSTMARK_SERVER_TOKEN']:
+            for key in ['DM_POSTMARK_SERVER_TOKEN']:
                 value = app.get(key, '')
                 if not isinstance(value, str) or any(c in value for c in '\r\n\x00'):
                     raise SystemExit('Invalid optional Secrets Manager field: ' + key)
@@ -701,7 +701,6 @@ Resources:
                 'DM_PROOF_ISSUERS': os.environ['PROOF_ISSUERS'],
                 'DM_TING_URL': os.environ['TING_URL'],
                 'DM_GIPHY_API_KEY': app['DM_GIPHY_API_KEY'].strip(),
-                'DM_SPACE_STATION_TABLE_KEY': app.get('DM_SPACE_STATION_TABLE_KEY', '').strip(),
                 'DM_POSTMARK_SERVER_TOKEN': app.get('DM_POSTMARK_SERVER_TOKEN', '').strip(),
                 'DM_LOG_FILTER': 'info,silicon_dm=info',
             }

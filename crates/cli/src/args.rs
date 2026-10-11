@@ -179,7 +179,7 @@ pub enum Command {
         #[command(subcommand)]
         command: Profiles,
     },
-    /// Where DM keeps its state, and whether it sends diagnostics.
+    /// Where DM keeps its state.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -736,9 +736,10 @@ pub enum ConfigCommand {
         /// An existing directory; DM keeps its state in LOCATION/.silicon-dm.
         location: PathBuf,
     },
-    /// Turn diagnostics (no message content, no tokens) on or off for this home.
+    /// Retired: DM records no telemetry. Accepted and does nothing.
+    #[command(hide = true)]
     Telemetry {
-        /// true to send diagnostics, false not to.
+        /// Ignored.
         #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },

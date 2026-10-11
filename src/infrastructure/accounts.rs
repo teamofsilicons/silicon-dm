@@ -99,6 +99,8 @@ impl AccountsAdapter {
             .timeout(settings.request_timeout)
             .connect_timeout(settings.request_timeout)
             .user_agent(format!("silicon-dm/{}", env!("CARGO_PKG_VERSION")))
+            // DM records no telemetry and opts out of Silicon Accounts' own.
+            .telemetry(false)
             .build()
             .map_err(|error| {
                 AppError::validation(format!("ACCOUNTS_API_URL cannot be used: {error}"))

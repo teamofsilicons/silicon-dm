@@ -371,7 +371,6 @@ impl Home {
             .env("SILICON_DM_RELAY_HOME", self.dir.path().join("relay"))
             .env("DM_API_URL", &self.base)
             .env("ACCOUNTS_URL", &self.base)
-            .env("DM_TELEMETRY_ENABLED", "false")
             .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())

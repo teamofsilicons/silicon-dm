@@ -89,12 +89,6 @@ pub async fn receive(
             outcome,
         )
         .await?;
-    crate::telemetry::record(
-        &state,
-        "backend",
-        "accounts.webhook_applied",
-        serde_json::json!({"event_type": event.event_type, "outcome": outcome, "success": true}),
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 

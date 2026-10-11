@@ -1,6 +1,6 @@
 # Rust client guide
 
-`silicon-dm-client` 0.15 is a typed client for DM's HTTP contract 4. The default build is
+`silicon-dm-client` 0.16 is a typed client for DM's HTTP contract 4. The default build is
 stateless: it saves no credentials, opens no incoming connection and starts no process.
 
 | Feature | Adds |
@@ -10,7 +10,7 @@ stateless: it saves no credentials, opens no incoming connection and starts no p
 | `runtime` | `runtime::LocalRuntime`: stored sign-ins, the durable outgoing relay, the sync inbox (what the CLI uses). Implies `accounts`. |
 
 ```toml
-silicon-dm-client = { version = "0.15", features = ["accounts"] }
+silicon-dm-client = { version = "0.16", features = ["accounts"] }
 ```
 
 ## Credentials
@@ -86,7 +86,10 @@ The runtime does this under a file lock ([runtime](runtime.md)).
 | Allow-lists | `allow_list`, `allow`, `disallow` (each with an optional Silicon for its custodian) |
 | Updates | `sync(&SyncRequest { cursor, limit, reset, wait })`, `sync_reset` |
 | Presence and GIFs | `presence`, `renew_presence`, `close_presence`, `gifs` |
-| Other | `report`, `telemetry` |
+| Other | `report` |
+
+DM records no telemetry; `with_telemetry`, `with_source` and `telemetry` remain as deprecated
+methods that do nothing.
 
 Accounts appear as `Actor { actor_type, id, uuid, display_name, pfp_url, deleted, legacy }`: key
 on `uuid`, show `id` (`Actor::same_account` compares by uuid). Conversations carry

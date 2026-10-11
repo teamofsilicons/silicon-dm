@@ -11,11 +11,7 @@ use crate::{
     domain::{Account, ActorId, ActorRef, Conversation, GroupCreate, GroupDetails, GroupSettings},
     infrastructure::postgres::groups::{Invitation, Invitee},
 };
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-};
+use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -60,7 +56,6 @@ pub(super) async fn get(
 
 pub(super) async fn create(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Authenticated(auth): Authenticated,
     Idempotency(key): Idempotency,
     ApiJson(input): ApiJson<GroupCreate>,
@@ -71,20 +66,11 @@ pub(super) async fn create(
         .store
         .create_group(&auth.actor, input.settings, invitees, &key)
         .await?;
-    event(
-        &state,
-        &headers,
-        "group.created",
-        conversation.id,
-        input.member_ids.len(),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(conversation)))
 }
 
 pub(super) async fn update(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Authenticated(auth): Authenticated,
     ApiPath(path): ApiPath<GroupPath>,
     IfMatch(version): IfMatch,
@@ -98,14 +84,12 @@ pub(super) async fn update(
         .store
         .update_group(&auth.actor, path.group_id, settings, version, &key)
         .await?;
-    event(&state, &headers, "group.updated", path.group_id, 0).await;
     Ok(Json(group))
 }
 
 /// `POST /groups/{group}/members`: owners invite accounts.
 pub(super) async fn invite(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Authenticated(auth): Authenticated,
     ApiPath(path): ApiPath<GroupPath>,
     Idempotency(key): Idempotency,
@@ -117,14 +101,6 @@ pub(super) async fn invite(
         .store
         .invite_to_group(&auth.actor, path.group_id, invitees, &key)
         .await?;
-    event(
-        &state,
-        &headers,
-        "group.members_invited",
-        path.group_id,
-        input.member_ids.len(),
-    )
-    .await;
     Ok(Json(group))
 }
 
@@ -132,7 +108,6 @@ pub(super) async fn invite(
 /// custodian may take its own Silicons out.
 pub(super) async fn remove(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Authenticated(auth): Authenticated,
     ApiPath(path): ApiPath<GroupPath>,
     Idempotency(key): Idempotency,
@@ -154,14 +129,6 @@ pub(super) async fn remove(
         .store
         .remove_from_group(&auth.actor, path.group_id, &refs, &key)
         .await?;
-    event(
-        &state,
-        &headers,
-        "group.members_removed",
-        path.group_id,
-        refs.len(),
-    )
-    .await;
     Ok(Json(group))
 }
 
@@ -317,18 +284,4 @@ async fn invitees(
         });
     }
     Ok(invitees)
-}
-
-async fn event(state: &AppState, headers: &HeaderMap, name: &str, id: Uuid, count: usize) {
-    if crate::telemetry::requested(headers) && state.settings.telemetry.enabled {
-        let Ok(id) = state.store.public_group_id(id).await else {
-            return;
-        };
-        crate::telemetry::record(
-            state,
-            "backend",
-            name,
-            serde_json::json!({"group_id": id, "count": count, "success": true}),
-        );
-    }
 }

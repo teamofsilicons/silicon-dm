@@ -263,8 +263,6 @@ def service_env(config, database_url=None, ting=False):
         "DM_PROOF_ISSUERS": config["proof_issuers"],
         # GIF routes answer provider errors without a real key; nothing else needs Giphy.
         "DM_GIPHY_API_KEY": "development-without-giphy",
-        "DM_TELEMETRY_ENABLED": "false",
-        "DM_TELEMETRY_HOME": str(files["state"] / "telemetry"),
     }
     if ting:
         env["DM_TING_URL"] = f"http://127.0.0.1:{config['ting_port']}"
@@ -541,7 +539,6 @@ def summary(config, **extra):
 def env_command(config, _args):
     print(f"export DM_API_URL={config['api_url']}")
     print(f"export ACCOUNTS_URL={config['accounts_url']}")
-    print("export DM_TELEMETRY_ENABLED=false")
 
 
 def main():

@@ -196,7 +196,7 @@ aws secretsmanager put-secret-value --secret-id "$APP_SECRET_ARN" --secret-strin
 rm -f app.json app.next.json
 ```
 
-`DM_GIPHY_API_KEY`, `DM_RUNTIME_DATABASE_PASSWORD` and the optional Space Station and Postmark keys
+`DM_GIPHY_API_KEY`, `DM_RUNTIME_DATABASE_PASSWORD` and the optional Postmark key
 are already there and keep their names. The 0.14 fields stay until section 5.
 
 ### 2.5 Draft and review the identity mapping

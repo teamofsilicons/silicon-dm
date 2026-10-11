@@ -70,7 +70,7 @@ The application secret (`AppSecretArn`) is a JSON object with these fields:
 | `DM_DATA_KEY` | `openssl rand -base64 32`; keep it stable and backed up (sync cursors and stored proofs depend on it) |
 | `DM_GIPHY_API_KEY` | Giphy application key |
 | `DM_RUNTIME_DATABASE_PASSWORD` | Independently generated production runtime password |
-| `DM_SPACE_STATION_TABLE_KEY`, `DM_POSTMARK_SERVER_TOKEN` | Optional, see below |
+| `DM_POSTMARK_SERVER_TOKEN` | Optional, see below |
 
 Bootstrap validates these fields (the webhook secret must start with `whsec_`, the data key must
 decode to 32 bytes) and publishes the runtime secret the tasks read: the app secret, webhook
@@ -247,20 +247,14 @@ References: [Fargate IP target groups](https://docs.aws.amazon.com/AmazonECS/lat
 [CreationPolicy timing](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-creationpolicy.html).
 
 
-## DM 0.5 diagnostics and report configuration
+## Report configuration
 
-The application secret may include `DM_SPACE_STATION_TABLE_KEY` and
-`DM_POSTMARK_SERVER_TOKEN`. Bootstrap validates and copies these optional fields
-into the restricted runtime secret without rotating database credentials. Missing
-values become empty strings: telemetry export stays inactive without its key,
-and production report submission returns unavailable without a Postmark token.
-After changing either value, rerun bootstrap and replace the API/worker tasks so
-ECS injects the updated secret version.
+The application secret may include `DM_POSTMARK_SERVER_TOKEN`. Bootstrap validates
+and copies this optional field into the restricted runtime secret without rotating
+database credentials. A missing value becomes an empty string, and production
+report submission returns unavailable without a Postmark token. After changing it,
+rerun bootstrap and replace the API/worker tasks so ECS injects the updated secret
+version.
 
-The runtime image creates `/var/lib/silicon-dm/telemetry` as UID 10001, mode 0700,
-and declares it as a Docker volume. Each Fargate task mounts its own writable
-`telemetry` volume at that exact path, preserving image ownership while keeping
-the root filesystem read-only. The spool survives a process restart within the
-task; unsent diagnostics can be lost when the task is replaced. It contains no
-message payloads or authentication credentials. Message durability is independent
-of this best-effort telemetry spool.
+DM records no telemetry. A `DM_SPACE_STATION_TABLE_KEY` left in the runtime secret
+by an earlier bootstrap is carried over for a rollback and is otherwise unused.

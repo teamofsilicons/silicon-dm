@@ -52,8 +52,6 @@ enum Topic {
     Contracts,
     /// CLI and service settings.
     Configuration,
-    /// Diagnostics, what they contain and how to turn them off.
-    Telemetry,
     /// Deploying the DM service.
     Deployment,
     /// Releasing DM: Silicon Apps archives, the Rust crates and the docs site.
@@ -110,7 +108,6 @@ const GUIDES: &[Guide] = &[
     guide!("wire-format", "DM JSON wire format", "wire-format.md"),
     guide!("contracts", "Contracts and compatibility", "contracts.md"),
     guide!("configuration", "Configure DM", "configuration.md"),
-    guide!("telemetry", "Diagnostics and analytics", "telemetry.md"),
     guide!("deployment", "Deploying the DM service", "deployment.md"),
     guide!("releasing", "Release DM", "releasing.md"),
 ];

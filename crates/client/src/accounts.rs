@@ -229,7 +229,6 @@ pub struct PublicClient {
     http: reqwest::Client,
     base: String,
     app_id: String,
-    telemetry: bool,
 }
 impl std::fmt::Debug for PublicClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -241,9 +240,10 @@ impl std::fmt::Debug for PublicClient {
 }
 
 impl PublicClient {
-    /// `accounts_url` must be https, or http for this machine. `telemetry` false sends
-    /// `X-Accounts-Telemetry: off` with every request.
-    pub fn new(accounts_url: &str, app_id: &str, telemetry: bool) -> Result<Self, SignInError> {
+    /// `accounts_url` must be https, or http for this machine. Every request carries
+    /// `X-Accounts-Telemetry: off`: DM records no telemetry and opts out of Silicon
+    /// Accounts' own. The third argument is ignored and kept for compatibility.
+    pub fn new(accounts_url: &str, app_id: &str, _telemetry: bool) -> Result<Self, SignInError> {
         let base = normalize_accounts_url(accounts_url)?;
         let app_id = app_id.trim().to_owned();
         if app_id.is_empty() {
@@ -256,7 +256,7 @@ impl PublicClient {
         let accounts = AccountsClient::builder()
             .base_url(&base)
             .user_agent(format!("dm/{}", env!("CARGO_PKG_VERSION")))
-            .telemetry(telemetry)
+            .telemetry(false)
             .build()
             .map_err(|error| accounts_error(&error, "configure the Silicon Accounts client"))?;
         let http = reqwest::Client::builder()
@@ -276,7 +276,6 @@ impl PublicClient {
             http,
             base,
             app_id,
-            telemetry,
         })
     }
     /// The normalized Silicon Accounts URL (no trailing slash).
@@ -474,15 +473,11 @@ impl PublicClient {
         path: &str,
         form: &[(&str, &str)],
     ) -> Result<reqwest::Response, SignInError> {
-        let mut request = self
-            .http
+        self.http
             .post(format!("{}/{path}", self.base))
             .header(reqwest::header::ACCEPT, "application/json")
-            .form(form);
-        if !self.telemetry {
-            request = request.header("X-Accounts-Telemetry", "off");
-        }
-        request
+            .header(silicon_accounts_client::TELEMETRY_HEADER, "off")
+            .form(form)
             .send()
             .await
             .map_err(|e| transport(&e, "reach Silicon Accounts"))

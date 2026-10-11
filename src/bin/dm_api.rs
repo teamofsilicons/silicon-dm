@@ -12,8 +12,8 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if silicon_dm::telemetry::init(settings.environment, &settings.log_filter).is_err() {
-        eprintln!("DM API telemetry initialization failed");
+    if silicon_dm::logging::init(settings.environment, &settings.log_filter).is_err() {
+        eprintln!("DM API logging initialization failed");
         return ExitCode::FAILURE;
     }
 

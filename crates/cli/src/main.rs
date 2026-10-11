@@ -127,6 +127,12 @@ fn offline(cli: &Cli) -> Option<i32> {
             }
             None
         }
+        Command::Config {
+            command: ConfigCommand::Telemetry { .. },
+        } => {
+            output::print_json(&telemetry_removed(), compact);
+            Some(0)
+        }
         Command::Delivery { .. } | Command::Webhook { .. } | Command::Unhook { .. } => {
             output::print_error(
                 &anyhow::Error::new(runtime::store::SessionError {
@@ -164,6 +170,14 @@ fn offline(cli: &Cli) -> Option<i32> {
     }
 }
 
+/// `dm config telemetry <bool>` is kept so existing scripts still succeed.
+fn telemetry_removed() -> Value {
+    json!({
+        "telemetry_enabled": false,
+        "message": "Telemetry was removed from DM; there is nothing to turn on or off.",
+    })
+}
+
 /// The profile a command uses, read without creating any state.
 fn profile_name_offline(cli: &Cli) -> Result<String> {
     let name = match &cli.profile {
@@ -196,32 +210,7 @@ fn refuse_retired_environment() -> Result<()> {
 
 async fn run_and_report(cli: Cli) -> i32 {
     let compact = cli.json;
-    let foreground = matches!(
-        &cli.command,
-        Command::Daemon {
-            command: Daemon::Run
-        }
-    );
-    let diagnostic_profile = cli.profile.clone();
-    let started = std::time::Instant::now();
-    let result = run(cli).await;
-    if !foreground && let Ok(local) = LocalRuntime::from_environment() {
-        let profile = diagnostic_profile.unwrap_or_else(|| {
-            local
-                .store()
-                .load()
-                .map(|c| c.default_profile)
-                .unwrap_or_default()
-        });
-        local.record_diagnostic(
-            &profile,
-            "cli",
-            "command",
-            result.is_ok(),
-            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        );
-    }
-    match result {
+    match run(cli).await {
         Ok(outcome) => {
             if !outcome.value.is_null() {
                 output::print_json(&outcome.value, compact);
@@ -302,10 +291,7 @@ async fn run(cli: Cli) -> Result<Outcome> {
         Command::Logout => local.logout(&name).await.map(Outcome::ok),
         Command::Refresh => local.refresh(&name).await.map(Outcome::ok),
         Command::Config { command } => match command {
-            ConfigCommand::Telemetry { enabled } => {
-                local.set_telemetry(enabled)?;
-                Ok(Outcome::ok(json!({"telemetry_enabled":enabled})))
-            }
+            ConfigCommand::Telemetry { .. } => Ok(Outcome::ok(telemetry_removed())),
             ConfigCommand::Home { location } => {
                 let directory = runtime::store::set_home_directory(&location)?;
                 Ok(Outcome::ok(json!({"home_directory": directory})))
@@ -375,9 +361,7 @@ async fn run(cli: Cli) -> Result<Outcome> {
                 .unwrap_or_else(|_| {
                     std::env::var("DM_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.into())
                 });
-            Ok(Outcome::ok(
-                Client::new(&base)?.with_source("cli").contracts().await?,
-            ))
+            Ok(Outcome::ok(Client::new(&base)?.contracts().await?))
         }
         Command::Report { message, pr } => {
             if pr.is_none() {

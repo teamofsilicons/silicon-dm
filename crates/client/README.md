@@ -15,7 +15,7 @@ in with Silicon Accounts.
 
 ```toml
 [dependencies]
-silicon-dm-client = { version = "0.15", features = ["accounts"] }
+silicon-dm-client = { version = "0.16", features = ["accounts"] }
 ```
 
 ```rust,no_run
@@ -36,3 +36,6 @@ Guides: [client](https://github.com/teamofsilicons/silicon-dm/blob/main/docs/cli
 0.15 is a breaking release: contract 4 replaces the earlier sign-in and request scoping
 (`with_auth`, `login`, `refresh`, `logout`, test environments and delivery registration are gone), accounts carry their `uuid`, and the retired WebSocket frame types were removed. The
 `dm` command is installed and updated by Silicon Apps (`silicon-apps install dm`).
+
+0.16 records no telemetry: `with_telemetry`, `with_source` and `telemetry` are deprecated and do
+nothing, and every request sends `X-DM-Telemetry: off`.
