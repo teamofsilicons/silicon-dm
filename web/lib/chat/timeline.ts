@@ -37,9 +37,17 @@ export interface TimelineOptions {
 
 const FIVE_MINUTES = 5 * 60_000;
 
+// One formatter per time zone: making one costs far more than using it, and a long thread asks for every message's day.
+const dayFormats = new Map<string, Intl.DateTimeFormat>();
+
 /** The calendar day of a time in a time zone, as YYYY-MM-DD. */
 export function dayOf(date: Date, timeZone?: string): string {
-  const parts = new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", timeZone }).formatToParts(date);
+  let format = dayFormats.get(timeZone ?? "");
+  if (!format) {
+    format = new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", timeZone });
+    dayFormats.set(timeZone ?? "", format);
+  }
+  const parts = format.formatToParts(date);
   const get = (type: string) => parts.find(part => part.type === type)?.value ?? "00";
   return `${get("year")}-${get("month")}-${get("day")}`;
 }

@@ -1,61 +1,63 @@
 "use client";
 
 /**
- * New conversation (N, `/c?new=1`): name the accounts by id and DM opens their one conversation (it finds the
- * existing one when you already talk). Anyone can start one with a Carbon; a Silicon only with its custodian, the
- * custodian's other Silicons and the accounts it allows. The service says why when it refuses.
+ * New conversation (N, `/c?new=1`): choose the accounts (people you talk to, or any id) and DM opens their one
+ * conversation; when you already talk, the conversation you have opens. Anyone can start one with a Carbon; a Silicon
+ * only with its custodian, the custodian's other Silicons and the accounts it allows. A refusal is shown in the
+ * service's words, which say who can allow you.
+ *
+ * In a custodian's "Viewing as" the website is read only: the dialog says so and offers the way back.
  */
-import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useRef, useState } from "react";
 import { Button } from "@/components/silicon-ui/button/button";
 import { Dialog, DialogContent } from "@/components/silicon-ui/dialog/dialog";
+import { ButtonLink } from "@/components/foundation/button-link";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
-import { ShareWithAccounts } from "@/components/foundation/account/share-with-accounts";
-import { conversationHref } from "@/lib/chat/address";
-import { createConversation } from "@/lib/chat/api";
-import { chatKeys } from "@/lib/chat/keys";
+import { accountName, inboxHref } from "@/lib/chat/address";
+import type { AccountRef } from "@/lib/chat/types";
 import { ApiError } from "@/lib/errors";
 import { useChat } from "../shell/chat-context";
-import { closeDialog } from "./store";
+import { AccountPicker, type AccountPickerHandle } from "./account-picker";
+import { idsNamedIn } from "./contacts";
+import { useStartConversation } from "./open-conversation";
+import { useShowWhenSet } from "./show-when-set";
+import { closeDialog, forgetOpener, returnFocus } from "./store";
+import { useKnownAccounts } from "./use-known-accounts";
 import styles from "./dialogs.module.css";
 
-export function NewConversationDialog({ open }: { open: boolean }) {
+const FIELD = "new-conversation-to";
+
+function NewConversationForm() {
   const { me } = useChat();
-  const router = useRouter();
-  const queryClient = useQueryClient();
-  const [ids, setIds] = useState<string[]>([]);
+  const known = useKnownAccounts();
+  const start = useStartConversation();
+  const picker = useRef<AccountPickerHandle>(null);
+  const [accounts, setAccounts] = useState<AccountRef[]>([]);
   const [error, setError] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(false);
-  const [key, setKey] = useState(() => crypto.randomUUID());
-  // The id typed last is added when the field loses focus (pressing the button): read the list as it is then.
-  const latest = useRef(ids);
-  useEffect(() => {
-    latest.current = ids;
-  }, [ids]);
+  const errorBox = useShowWhenSet<HTMLDivElement>(error);
+  // One Idempotency-Key per set of accounts: a retry of the same set is the same request; a changed set is a new one.
+  const attempt = useRef<{ ids: string; key: string } | null>(null);
 
-  const reset = () => {
-    setIds([]);
-    setError(null);
-    setBusy(false);
-    setKey(crypto.randomUUID());
-  };
-
-  const start = async () => {
-    await new Promise(resolve => setTimeout(resolve, 0));
-    const ids = latest.current;
-    if (!ids.length) {
-      setError(new ApiError({ status: 0, code: "no_accounts", message: "Name at least one account to talk with.", hint: "Type a c: id for a Carbon or an si: id for a Silicon, then press Enter." }));
+  const submit = async () => {
+    // One request at a time: Enter in the field while one is on its way does nothing.
+    if (busy) return;
+    const { accounts: chosen, problem } = picker.current?.commit() ?? { accounts, problem: null };
+    if (problem) return;
+    if (!chosen.length) {
+      setError(new ApiError({ status: 0, code: "no_accounts", message: "Choose who the conversation is with first.", hint: "Type a name or an id (c: for a Carbon, si: for a Silicon) and press Enter, or pick someone from the list." }));
+      picker.current?.focus();
       return;
     }
+    const ids = chosen.map(account => account.id);
+    const signature = [...ids].sort().join(" ");
+    if (attempt.current?.ids !== signature) attempt.current = { ids: signature, key: crypto.randomUUID() };
     setBusy(true);
     setError(null);
     try {
-      const conversation = await createConversation(ids, key);
-      await queryClient.invalidateQueries({ queryKey: chatKeys.conversations() });
+      forgetOpener();
+      await start(ids, attempt.current.key);
       closeDialog("new-conversation");
-      reset();
-      router.push(conversationHref(conversation.id));
     } catch (failure) {
       setError(ApiError.from(failure));
       setBusy(false);
@@ -63,17 +65,44 @@ export function NewConversationDialog({ open }: { open: boolean }) {
   };
 
   return (
-    <Dialog open={open} onOpenChange={next => { if (!next) { closeDialog("new-conversation"); reset(); } }}>
-      <DialogContent title="New conversation" description="With a Carbon, or with a Silicon that allows you. If you already talk, the conversation you have opens."
-        onOpenAutoFocus={event => { event.preventDefault(); document.getElementById("new-conversation-to")?.focus(); }}>
-        <form className={styles.form} onSubmit={event => { event.preventDefault(); void start(); }}>
-          <ShareWithAccounts id="new-conversation-to" label="To" description="Type a c: or si: id and press Enter. Add more than one for a conversation of several." ids={ids} onIdsChange={setIds} selfId={me.account.id} max={20} />
-          {error ? <ErrorAlert error={error} title="The conversation could not be opened" /> : null}
-          <div className={styles.actions}>
-            <Button type="button" variant="ghost" onClick={() => { closeDialog("new-conversation"); reset(); }}>Cancel</Button>
-            <Button type="submit" loading={busy}>Start conversation</Button>
-          </div>
-        </form>
+    <form className={styles.form} onSubmit={event => { event.preventDefault(); void submit(); }}>
+      <AccountPicker ref={picker} id={FIELD} label="To" value={accounts} onChange={next => { setAccounts(next); setError(null); }}
+        suggestions={known} exclude={[me.account]} excludedReason={account => `${account.id} is you. Choose who you want to talk with.`}
+        flagged={error ? idsNamedIn(`${error.message} ${error.hint ?? ""}`, accounts) : []}
+        description="Choose more than one for a conversation of several. A Silicon answers only the accounts it allows." />
+      {error ? <div ref={errorBox}><ErrorAlert error={error} title="The conversation could not be opened" /></div> : null}
+      <div className={styles.actions}>
+        <Button type="button" variant="ghost" onClick={() => closeDialog("new-conversation")}>Cancel</Button>
+        <Button type="submit" loading={busy}>Start conversation</Button>
+      </div>
+    </form>
+  );
+}
+
+/** What a custodian sees in a Silicon's read-only view: starting a conversation is something you do as yourself. */
+export function ReadOnlyNote({ view, what }: { view: string; what: string }) {
+  const { viewed } = useChat();
+  const name = viewed ? accountName(viewed) : view;
+  return (
+    <div className={styles.form}>
+      <p className={styles.text}>You are viewing {name}&apos;s conversations as its custodian, read only. {what} as yourself from your own conversations.</p>
+      <div className={styles.actions}>
+        <Button type="button" variant="ghost" onClick={() => closeDialog()}>Cancel</Button>
+        <ButtonLink href={inboxHref(null)} onClick={() => closeDialog()}>Back to your conversations</ButtonLink>
+      </div>
+    </div>
+  );
+}
+
+export function NewConversationDialog({ open }: { open: boolean }) {
+  const { view } = useChat();
+  return (
+    <Dialog open={open} onOpenChange={next => { if (!next) closeDialog("new-conversation"); }}>
+      <DialogContent title="New conversation" description="With a Carbon, or with a Silicon that allows you. If you already talk, that conversation opens."
+        className={styles.dialog}
+        onOpenAutoFocus={event => { event.preventDefault(); document.getElementById(FIELD)?.focus(); }}
+        onCloseAutoFocus={returnFocus}>
+        {view ? <ReadOnlyNote view={view} what="Start a conversation" /> : <NewConversationForm />}
       </DialogContent>
     </Dialog>
   );

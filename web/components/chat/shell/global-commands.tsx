@@ -6,7 +6,7 @@
  */
 import { useRouter } from "next/navigation";
 import { useCallback } from "react";
-import { BookOpen, CircleUserRound, Copy, Eye, Inbox, Keyboard, LogOut, Mail, MessageCircle, MessageSquarePlus, PanelRight, Settings2, Terminal, Users, Volume2 } from "lucide-react";
+import { AudioLines, BookOpen, CircleUserRound, Copy, Eye, Headphones, Inbox, Keyboard, LogOut, Mail, MessageCircle, MessageSquarePlus, Mic, PanelRight, Settings2, Terminal, Users, Volume2 } from "lucide-react";
 import { appConfig } from "@/lib/app.config";
 import { accountName, conversationHref, conversationTitle, inboxHref, kindWord, conversationKind, shellQuote } from "@/lib/chat/address";
 import { unreadOf } from "@/lib/chat/cache";
@@ -15,7 +15,7 @@ import { markAllRead } from "@/lib/chat/receipts";
 import { useSignOut } from "@/lib/client/session";
 import { toggleCommandPalette, useRegisterCommands, type ShellCommand } from "@/lib/commands";
 import { notify, notifyError } from "@/lib/notify";
-import { isShortcutAvailable, useShortcut, useShortcutAvailability } from "@/lib/shortcuts/react";
+import { isShortcutAvailable, runShortcut, useShortcut, useShortcutAvailability } from "@/lib/shortcuts/react";
 import { openDialog } from "../dialogs/store";
 import { useOpenAddress } from "../sidebar/conversations-pane";
 import { useChat } from "./chat-context";
@@ -49,7 +49,8 @@ export function GlobalCommands() {
   const openAddress = useOpenAddress();
   const details = useDetails();
   const { signOut } = useSignOut();
-  useShortcutAvailability();
+  // Voice actions appear in the palette once the voice area provides them (deps below re-register then).
+  const available = useShortcutAvailability();
 
   const go = useCallback((href: string) => router.push(href), [router]);
 
@@ -109,7 +110,10 @@ export function GlobalCommands() {
       { id: "go.account", label: "Your account", description: "Silicon Accounts, in a new tab", group: "Go to", icon: icon(CircleUserRound), keywords: ["profile", "photo"], run: () => void window.open(accountsUrl, "_blank", "noopener") },
       { id: "account.signout", label: "Sign out", description: `Sign this browser out of ${appConfig.name}`, group: "Account", icon: icon(LogOut), keywords: ["log out", "logout"], run: () => void signOut().catch(failure => notifyError(failure, "Could not sign out")) },
     );
-    if (isShortcutAvailable("listen.mode")) commands.push({ id: "listen.mode", label: "Listen mode", group: "Actions", icon: icon(Volume2), shortcutId: "listen.mode", run: () => undefined });
+    // The voice actions run the same handlers as their keys (the open conversation's header and composer attach them).
+    if (open && isShortcutAvailable("listen.mode")) commands.push({ id: "listen.mode", label: "Listen mode", description: "Speak new messages from Silicons in this conversation", group: "This conversation", icon: icon(Headphones), shortcutId: "listen.mode", keywords: ["voice", "speak", "hear", "headphones"], run: () => void runShortcut("listen.mode") });
+    if (open && !readOnly && isShortcutAvailable("composer.record")) commands.push({ id: "composer.record", label: "Record a voice message", group: "This conversation", icon: icon(Mic), shortcutId: "composer.record", keywords: ["voice", "microphone", "audio"], run: () => void runShortcut("composer.record") });
+    if (open && !readOnly && isShortcutAvailable("composer.dictate")) commands.push({ id: "composer.dictate", label: "Dictate", description: "Speak, and the words go in the message field", group: "This conversation", icon: icon(AudioLines), shortcutId: "composer.dictate", keywords: ["voice", "speech to text", "transcribe"], run: () => void runShortcut("composer.dictate") });
     for (const silicon of me.custodian_of) {
       if (view === silicon.id) continue;
       commands.push({ id: `view.${silicon.id}`, label: `View as ${silicon.id}`, description: `${accountName(silicon)}'s conversations, read only`, group: "Viewing as", icon: icon(Eye), keywords: ["custodian", "silicon", silicon.display_name ?? ""], run: () => go(inboxHref(silicon.id)) });
@@ -128,7 +132,7 @@ export function GlobalCommands() {
       });
     }
     return commands;
-  }, [items, open, view, me.custodian_of, perspective, details.open, details.toggle, go, accountsUrl, signOut]);
+  }, [items, open, view, me.custodian_of, perspective, details.open, details.toggle, go, accountsUrl, signOut, readOnly, available]);
 
   return null;
 }

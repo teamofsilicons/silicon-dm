@@ -2,21 +2,22 @@
 
 /**
  * The thread's header (spec §6.3): back to the list (phones), the face, the name (the page's h1), the kind in words,
- * and a status line (online, last seen, typing…, recording a voice message…, N members), then Listen mode, the details
- * panel (ⓘ, ⌘.) and a menu of the rest (copy the address, the link, the CLI command; mark read).
+ * and a status line (online, last seen…, typing…, recording a voice message…, N members, or in a group who is busy),
+ * then Listen mode, the details panel (ⓘ, ⌘.) and a menu of the rest (copy the address, the link, the CLI command;
+ * mark read). What someone starts doing is announced politely; presence coming and going is not.
  */
 import Link from "next/link";
-import { ArrowLeft, Ellipsis, Info, Terminal, Copy, Link2, CheckCheck } from "lucide-react";
+import { ArrowLeft, CheckCheck, Copy, Ellipsis, Info, Link2, Terminal } from "lucide-react";
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuRoot, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/silicon-ui/dropdown-menu/dropdown-menu";
 import { Tooltip } from "@/components/silicon-ui/tooltip/tooltip";
-import { conversationHref, firstName, inboxHref, kindWord, shellQuote, type ConversationKind } from "@/lib/chat/address";
+import { conversationHref, inboxHref, kindWord, shellQuote, type ConversationKind } from "@/lib/chat/address";
 import { lastSeen } from "@/lib/chat/format";
-import { activityWords } from "@/lib/chat/presence";
 import type { AccountRef, ConversationSummary, Presence } from "@/lib/chat/types";
 import { ConversationAvatar } from "../common/avatars";
 import { IconAction } from "../common/icon-action";
 import { useDetails } from "../shell/details";
 import { ListenModeToggle } from "../voice/voice-parts";
+import { activityStatus, busyWords, type Busy } from "./thread-model";
 import styles from "./thread.module.css";
 
 export interface ThreadHeaderProps {
@@ -27,32 +28,34 @@ export interface ThreadHeaderProps {
   conversation: ConversationSummary | undefined;
   others: AccountRef[];
   presence: Map<string, Presence>;
+  /** Who is busy right now (typing, recording…). */
+  busy: Busy[];
   onCopy: (text: string, what: string) => void;
   onMarkRead: (() => void) | null;
 }
 
-/** What the line under the name says. */
-function statusLine(kind: ConversationKind, others: AccountRef[], presence: Map<string, Presence>, conversation: ConversationSummary | undefined): { text: string; live: boolean } {
-  const active = others.map(account => ({ account, presence: presence.get(account.id) })).find(entry => entry.presence?.activity);
-  if (active?.presence?.activity) {
-    const words = activityWords(active.presence.activity);
-    return { text: kind === "group" ? `${firstName(active.account)} is ${words}` : words, live: true };
-  }
+/** What the line under the name says, and whether it is someone doing something (shown in the accent, announced). */
+function statusLine(kind: ConversationKind, others: AccountRef[], presence: Map<string, Presence>, busy: Busy[], conversation: ConversationSummary | undefined): { text: string; extra?: string; live: boolean; online: boolean } {
+  if (busy.length) return { text: kind === "group" || others.length !== 1 ? busyWords(busy) : activityStatus(busy[0]!.activity), live: true, online: true };
   if (kind === "group" || others.length !== 1) {
     const count = conversation?.participants.length ?? others.length + 1;
-    return { text: `${count} ${count === 1 ? "member" : "members"}`, live: false };
+    const here = others.filter(account => presence.get(account.id)?.availability === "online").length;
+    return { text: `${count} ${count === 1 ? "member" : "members"}`, extra: here ? `, ${here} online` : undefined, live: false, online: false };
   }
   const state = presence.get(others[0]!.id);
-  if (!state) return { text: kindWord(kind), live: false };
-  return { text: state.availability === "online" ? "online" : lastSeen(state.last_seen_at), live: false };
+  if (!state) return { text: "", live: false, online: false };
+  if (state.availability === "online") return { text: "online", live: false, online: true };
+  // Never seen on a device (a Silicon on the CLI, say): nothing to say rather than a bare "offline".
+  return { text: state.last_seen_at ? lastSeen(state.last_seen_at) : "", live: false, online: false };
 }
 
-export function ThreadHeader({ address, view, title, kind, conversation, others, presence, onCopy, onMarkRead }: ThreadHeaderProps) {
+export function ThreadHeader({ address, view, title, kind, conversation, others, presence, busy, onCopy, onMarkRead }: ThreadHeaderProps) {
   const details = useDetails();
-  const status = statusLine(kind, others, presence, conversation);
+  const status = statusLine(kind, others, presence, busy, conversation);
   const single = kind !== "group" && others.length === 1 ? others[0]! : null;
   const link = typeof window === "undefined" ? conversationHref(address, { view }) : `${window.location.origin}${conversationHref(address, { view })}`;
-  const cli = `dm messages send ${shellQuote(address)} --text 'hello'`;
+  // A custodian's view is read only: its command reads the conversation (a custodian may), it does not send as the Silicon.
+  const cli = view ? `dm messages list ${shellQuote(address)}` : `dm messages send ${shellQuote(address)} --text 'hello'`;
   return (
     <header className={styles.header}>
       <Link href={inboxHref(view)} className={styles.back} data-sq="surface" aria-label="Back to conversations">
@@ -64,11 +67,13 @@ export function ThreadHeader({ address, view, title, kind, conversation, others,
           <h1 className={styles.title} id="thread-title">{title}</h1>
           <span className={styles.kind} data-kind={kind} data-sq="surface">{kindWord(kind)}</span>
         </div>
-        <p className={styles.status} data-live={status.live ? "" : undefined} aria-live="polite">
+        <p className={styles.status} data-live={status.live ? "" : undefined} data-online={status.online ? "" : undefined}>
+          {/* On a phone the kind chip gives way to the title: the line says the kind instead of the id. */}
+          <span className={styles.statusKind}>{kindWord(kind)}</span>
           {single && single.id !== title ? <span className={styles.statusId}>{single.id}</span> : null}
-          {single && single.id !== title ? <span className={styles.statusDot} aria-hidden="true">·</span> : null}
-          <span>{status.text}</span>
+          {status.text ? <span className={styles.statusText}>{status.text}{status.extra ? <span className={styles.statusExtra}>{status.extra}</span> : null}</span> : null}
         </p>
+        <span className="sr-only" role="status">{status.live ? `${title}: ${status.text}` : ""}</span>
       </div>
       <div className={styles.headerActions}>
         <ListenModeToggle address={address} />

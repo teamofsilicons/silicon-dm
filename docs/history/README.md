@@ -4,7 +4,7 @@ Records from before DM moved to Silicon Accounts and Silicon Apps (DM 0.14 and e
 notes, verification reports, deployment records, earlier designs and the guides of retired
 features. They are kept as they were written, so they describe services, commands and settings DM
 no longer uses. Nothing here is a current instruction: the current guides start at
-[docs/README.md](../README.md), and the move itself is recorded in [docs/migration/](../migration/).
+[docs/index.md](../index.md), and the move itself is recorded in [docs/migration/](../migration/).
 
 The documentation site and the CLI's packaged guides leave this directory out.
 

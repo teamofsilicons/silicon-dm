@@ -1,36 +1,50 @@
 /*
- * Settings: one calm column of sections divided by hairlines, the page title in the blue serif, a list of the sections
- * beside it on wide screens. Rows of label and description with the control at the end, as on the family's sites.
+ * Settings: one calm column of sections divided by hairlines, the page title in the blue serif, Silicon UI's nav list
+ * of the sections beside it on wide screens and a line of their names under the title on narrower ones. Rows of label
+ * and description with the control at the end, as on the family's sites.
  */
 .page { position: relative; min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-top: var(--space-6); }
 .layout { display: grid; width: min(100%, 1000px); margin: 0 auto; padding: var(--space-8) var(--gutter) var(--space-16); column-gap: var(--space-10); grid-template-columns: 200px minmax(0, 1fr); grid-template-areas: "toc header" "toc sections"; }
-.header { display: grid; gap: var(--space-2); padding-bottom: var(--space-6); grid-area: header; }
+.header { display: grid; min-width: 0; gap: var(--space-2); padding-bottom: var(--space-6); grid-area: header; }
 .back { display: none; width: fit-content; align-items: center; gap: 6px; margin-bottom: var(--space-2); color: var(--text-secondary); font-size: var(--text-sm); text-decoration: none; }
-.back:hover { color: var(--foreground); }
+.back:hover, .back:focus-visible { color: var(--foreground); text-decoration: underline; text-underline-offset: 3px; outline: none; }
 .title { color: var(--accent-ink); font-family: var(--font-serif); font-size: clamp(2rem, 3.4vw, 2.75rem); font-weight: 400; letter-spacing: -.01em; line-height: 1.05; }
-.lede { color: var(--text-secondary); }
+.lede { color: var(--text-secondary); text-wrap: pretty; }
 .toc { position: sticky; top: var(--space-8); align-self: start; grid-area: toc; }
 .sections { display: grid; min-width: 0; grid-area: sections; }
 
+/* Narrower than the nav list: the sections' names as one wrapping line of links. */
+.jumps { display: none; margin-top: var(--space-3); }
+.jumps ul { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin: 0; padding: 0; list-style: none; }
+.jumps a { color: var(--text-secondary); font-size: var(--text-sm); text-decoration: none; text-underline-offset: 4px; }
+.jumps a:hover, .jumps a:focus-visible { color: var(--foreground); text-decoration: underline; outline: none; }
+.jumps a[aria-current] { color: var(--foreground); font-weight: 500; }
+
 .section { display: grid; min-width: 0; gap: var(--space-5); border-top: 1px solid var(--border-subtle); padding: var(--space-8) 0; scroll-margin-top: var(--space-6); }
 .sectionHead { display: grid; gap: var(--space-1); }
-.sectionTitle { font-size: var(--text-lg); font-weight: 500; letter-spacing: -.01em; }
-.sectionDescription { color: var(--text-muted); font-size: var(--text-sm); }
+.sectionTitle { font-size: var(--text-lg); font-weight: 500; letter-spacing: -.01em; outline: none; }
+.sectionDescription { color: var(--text-muted); font-size: var(--text-sm); text-wrap: pretty; }
 
-.stack { display: grid; gap: var(--space-4); }
+.stack { display: grid; min-width: 0; gap: var(--space-4); }
 .text { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.55; text-wrap: pretty; }
-.quiet { color: var(--text-muted); font-size: var(--text-sm); }
+.note { color: var(--text-muted); font-size: var(--text-xs); line-height: 1.5; text-wrap: pretty; }
+.quiet { color: var(--text-muted); font-size: var(--text-sm); line-height: 1.5; text-wrap: pretty; }
 .done { color: var(--success); font-size: var(--text-sm); }
+/* A version or an id never breaks at its hyphen. */
+.whole { white-space: nowrap; }
 .warning { display: grid; gap: var(--space-1); border-left: 2px solid var(--warning); padding: var(--space-1) var(--space-3); color: var(--warning); font-size: var(--text-sm); }
 .warning strong { font-weight: 500; }
+.buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 
-.rows { display: grid; }
+.rows { display: grid; gap: var(--space-2); }
 .row { display: flex; min-height: 64px; align-items: center; justify-content: space-between; gap: var(--space-6); }
 .rowText { display: grid; min-width: 0; gap: 2px; }
 .rowLabel { font-size: var(--text-sm); font-weight: 500; }
 .rowDescription { color: var(--text-muted); font-size: var(--text-xs); line-height: 1.45; text-wrap: pretty; }
 
 /* Keyboard */
+.keyFilter { max-width: 420px; }
+.keyFilter label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .keyGroup { display: grid; gap: var(--space-2); }
 .keyGroupTitle { color: var(--text-muted); font-size: var(--text-xs); font-weight: 500; }
 .keyRows { display: grid; margin: 0; padding: 0; list-style: none; }
@@ -42,32 +56,50 @@
 .keyControl > div { min-width: 0; }
 .sequence { display: inline-flex; }
 .fixed { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
-.fixedNote { color: var(--text-muted); font-size: var(--text-xs); }
+.fixedNote { color: var(--text-muted); font-size: var(--text-xs); text-decoration: none; }
+.fixedNote:hover, .fixedNote:focus-visible { color: var(--foreground); text-decoration: underline; text-underline-offset: 3px; outline: none; }
 .or { color: var(--text-muted); font-size: var(--text-xs); }
+.also { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .keyFooter { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
 
-/* Reach */
-.reach { display: grid; gap: var(--space-4); }
+/* Reach: one block per Silicon. */
+.reach { display: grid; min-width: 0; gap: var(--space-8); }
+.silicon { display: grid; min-width: 0; gap: var(--space-3); }
+.silicon + .silicon { border-top: 1px solid var(--border-subtle); padding-top: var(--space-6); }
+.siliconHead { display: flex; min-width: 0; align-items: center; gap: var(--space-3); }
+.siliconText { display: grid; min-width: 0; gap: 1px; }
+.siliconName { overflow: hidden; font-size: var(--text-base); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .allowed { display: grid; margin: 0; padding: 0; list-style: none; }
 .allowedRow { display: flex; min-height: 56px; align-items: center; gap: var(--space-3); border-top: 1px solid var(--border-subtle); padding: var(--space-2) 0; }
 .allowedRow:first-child { border-top: 0; }
 .allowedText { display: grid; min-width: 0; flex: 1; gap: 1px; }
 .allowedName { overflow: hidden; font-size: var(--text-sm); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-.allowedMeta { overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
-.addRow { display: flex; align-items: flex-end; gap: var(--space-2); }
-.addRow > :first-child { min-width: 0; flex: 1; }
-.accountRow { display: flex; align-items: center; gap: var(--space-3); }
+.allowedMeta { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 2px var(--space-2); color: var(--text-muted); font-size: var(--text-xs); }
+.addForm { display: grid; min-width: 0; gap: var(--space-3); }
+.addActions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.cliHint { min-width: 0; color: var(--text-muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
+/* The command moves to its own line whole when it does not fit beside "From the CLI:" (it breaks only when wider than the column). */
+.cliHint code { display: inline-block; max-width: 100%; color: var(--text-secondary); font-family: var(--font-mono); font-size: .95em; vertical-align: bottom; }
+
+/* Account */
+.accountRow { display: flex; min-width: 0; align-items: center; gap: var(--space-3); }
+.accountText { display: grid; min-width: 0; gap: 2px; }
+.accountName { overflow: hidden; font-size: var(--text-base); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (max-width: 1099px) {
   .layout { display: block; width: min(100%, 720px); }
   .toc { display: none; }
+  .jumps { display: block; }
 }
 
 @media (max-width: 767px) {
-  .layout { padding-top: calc(var(--space-4) + env(safe-area-inset-top, 0px)); }
+  .layout { padding-top: calc(var(--space-4) + env(safe-area-inset-top, 0px)); padding-bottom: calc(var(--space-16) + env(safe-area-inset-bottom, 0px)); }
   .back { display: inline-flex; }
-  .row { align-items: flex-start; }
+  .section { padding: var(--space-6) 0; }
+  .row { align-items: flex-start; gap: var(--space-4); }
   .keyRow { flex-wrap: wrap; }
   .keyControl { width: 100%; justify-content: flex-start; }
-  .addRow { flex-wrap: wrap; }
+  .keyFilter { max-width: none; }
+  .addActions { flex-direction: column-reverse; align-items: stretch; }
+  .addActions > button { width: 100%; }
 }

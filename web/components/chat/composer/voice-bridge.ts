@@ -35,3 +35,33 @@ export interface ComposerVoiceControls {
   /** Start dictation: record, transcribe, insert the words at the caret. */
   dictate: () => void;
 }
+
+/** What the composer does for the bridge (each reads the composer as it is when called). */
+export interface VoiceBridgeHost {
+  dispatchTray: (action: TrayAction) => void;
+  /** Ask for a send: now, or as soon as the tray is ready (the composer's SendLatch makes it exactly one). */
+  requestSend: () => void;
+  insertText: (text: string) => void;
+  focusField: () => void;
+  /** Keep the microphone's controls (the slash commands /voice and /dictate start them). */
+  registerControls: (controls: ComposerVoiceControls | null) => void;
+}
+
+/** The bridge the composer renders `<ComposerVoice bridge={…} />` with. A read-only view takes nothing from it. */
+export function createVoiceBridge(address: string, disabledReason: string | null, host: VoiceBridgeHost): ComposerVoiceBridge {
+  return {
+    address,
+    disabledReason,
+    dispatchTray: action => {
+      if (!disabledReason) host.dispatchTray(action);
+    },
+    sendWhenReady: () => {
+      if (!disabledReason) host.requestSend();
+    },
+    insertText: text => {
+      if (!disabledReason && text) host.insertText(text);
+    },
+    focusField: () => host.focusField(),
+    registerControls: controls => host.registerControls(controls),
+  };
+}

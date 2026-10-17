@@ -42,6 +42,166 @@
       "source": "/docs/:path*",
       "destination": "/:path*",
       "permanent": true
+    },
+    {
+      "source": "/getting-started/",
+      "destination": "/start/silicon-quickstart/",
+      "permanent": true
+    },
+    {
+      "source": "/getting-started",
+      "destination": "/start/silicon-quickstart/",
+      "permanent": true
+    },
+    {
+      "source": "/accounts/",
+      "destination": "/start/sign-in/",
+      "permanent": true
+    },
+    {
+      "source": "/accounts",
+      "destination": "/start/sign-in/",
+      "permanent": true
+    },
+    {
+      "source": "/cli/",
+      "destination": "/start/cli/",
+      "permanent": true
+    },
+    {
+      "source": "/cli",
+      "destination": "/start/cli/",
+      "permanent": true
+    },
+    {
+      "source": "/cli/receiving/",
+      "destination": "/start/receiving/",
+      "permanent": true
+    },
+    {
+      "source": "/cli/receiving",
+      "destination": "/start/receiving/",
+      "permanent": true
+    },
+    {
+      "source": "/cli/relay/",
+      "destination": "/learn/relay/",
+      "permanent": true
+    },
+    {
+      "source": "/cli/relay",
+      "destination": "/learn/relay/",
+      "permanent": true
+    },
+    {
+      "source": "/groups/",
+      "destination": "/start/groups/",
+      "permanent": true
+    },
+    {
+      "source": "/groups",
+      "destination": "/start/groups/",
+      "permanent": true
+    },
+    {
+      "source": "/building/",
+      "destination": "/start/building/",
+      "permanent": true
+    },
+    {
+      "source": "/building",
+      "destination": "/start/building/",
+      "permanent": true
+    },
+    {
+      "source": "/client/",
+      "destination": "/reference/rust-client/",
+      "permanent": true
+    },
+    {
+      "source": "/client",
+      "destination": "/reference/rust-client/",
+      "permanent": true
+    },
+    {
+      "source": "/client/runtime/",
+      "destination": "/reference/rust-runtime/",
+      "permanent": true
+    },
+    {
+      "source": "/client/runtime",
+      "destination": "/reference/rust-runtime/",
+      "permanent": true
+    },
+    {
+      "source": "/client/ting/",
+      "destination": "/reference/ting/",
+      "permanent": true
+    },
+    {
+      "source": "/client/ting",
+      "destination": "/reference/ting/",
+      "permanent": true
+    },
+    {
+      "source": "/api/",
+      "destination": "/reference/api/",
+      "permanent": true
+    },
+    {
+      "source": "/api",
+      "destination": "/reference/api/",
+      "permanent": true
+    },
+    {
+      "source": "/wire-format/",
+      "destination": "/reference/wire-format/",
+      "permanent": true
+    },
+    {
+      "source": "/wire-format",
+      "destination": "/reference/wire-format/",
+      "permanent": true
+    },
+    {
+      "source": "/contracts/",
+      "destination": "/reference/contracts/",
+      "permanent": true
+    },
+    {
+      "source": "/contracts",
+      "destination": "/reference/contracts/",
+      "permanent": true
+    },
+    {
+      "source": "/configuration/",
+      "destination": "/reference/configuration/",
+      "permanent": true
+    },
+    {
+      "source": "/configuration",
+      "destination": "/reference/configuration/",
+      "permanent": true
+    },
+    {
+      "source": "/deployment/",
+      "destination": "/operations/deployment/",
+      "permanent": true
+    },
+    {
+      "source": "/deployment",
+      "destination": "/operations/deployment/",
+      "permanent": true
+    },
+    {
+      "source": "/releasing/",
+      "destination": "/operations/releasing/",
+      "permanent": true
+    },
+    {
+      "source": "/releasing",
+      "destination": "/operations/releasing/",
+      "permanent": true
     }
   ]
 }

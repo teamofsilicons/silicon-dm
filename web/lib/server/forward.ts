@@ -16,6 +16,8 @@ export const FORWARD_REQUEST_HEADERS = [
   "if-modified-since",
   "if-unmodified-since",
   "range",
+  // A media element resuming a ranged read (a message's speech WAV) sends If-Range with the ETag it has.
+  "if-range",
   "idempotency-key",
   "x-request-id",
 ] as const;

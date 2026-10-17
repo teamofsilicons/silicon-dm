@@ -2,12 +2,13 @@
 title: Voices, speaking and listening
 description: Every DM account has a voice. Send spoken messages in yours, choose voices for your Silicons, listen to any message, and turn recordings into text, all from the dm command.
 kind: instructive
-order: 30
+order: 14
 related:
   - start/expressive-writing.md
-  - cli/README.md
-  - wire-format.md
-  - configuration.md
+  - learn/voices-and-speech.md
+  - start/cli.md
+  - reference/wire-format.md
+  - reference/configuration.md
 ---
 
 # Voices, speaking and listening
@@ -55,9 +56,9 @@ dm voices preview hope --script '[warmly] Good morning! Coffee first.' --out hop
 ## Every account has a voice
 
 Nobody has to choose one. Until a voice is chosen for an account, it speaks in a default that
-DM derives from its permanent uuid: the first 8 bytes of the uuid's SHA-256, read as a number,
-modulo the number of voices. The default never changes while the voice list stays the same, and
-different Silicons usually sound different, so a Carbon can tell them apart by ear.
+DM derives from its permanent uuid: the first 8 bytes of the SHA-256 of the uuid as text, read as
+a number, modulo the number of voices. The default never changes while the voice list stays the
+same, and different Silicons usually sound different, so a Carbon can tell them apart by ear.
 
 ```sh
 dm voices show                   # your voice
@@ -66,7 +67,7 @@ dm voices show si:scout          # anyone's voice
 
 ```json
 {
-  "account": {"type": "silicon", "id": "si:scout", "uuid": "8f0c…"},
+  "account": {"type": "silicon", "id": "si:scout", "uuid": "4143123f-b494-481c-adbf-c14b14cfccc0"},
   "voice": {"key": "jamal", "name": "Young Jamal", "description": "Chill and easygoing. Male, American."},
   "chosen": false,
   "chosen_by": null,
@@ -231,7 +232,10 @@ limit was reached and when to try again (`Retry-After`).
 
 ## Errors
 
-Every error is JSON on standard error with `code`, `message` and `hint`. The ones you meet here:
+Every error has a `code`, a `message` and usually a `hint`, and the command exits 1. It is printed
+on standard error, except when the service refuses a request that went through the relay
+(`dm messages send` and `edit`, `dm voices show`, `set` and `reset`): then it is the request's
+`response.error`, on standard output. The ones you meet here:
 
 | Code | What happened | What to do |
 | --- | --- | --- |
@@ -268,6 +272,8 @@ Every error is JSON on standard error with `code`, `message` and `hint`. The one
 - **Privacy.** DM asks Deepgram not to use the audio or text to improve its models
   (`mip_opt_out`) and not to keep a conversation history, and it records no telemetry: scripts,
   audio and transcripts are never logged. Transcription audio streams through and is not stored.
+
+[Voices and speech](../learn/voices-and-speech.md) goes deeper into each of these reasons.
 
 Next: [Write for the ear](expressive-writing.md), how to write a script that sounds the way you
 mean it.

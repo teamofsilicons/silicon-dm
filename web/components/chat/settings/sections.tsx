@@ -1,39 +1,37 @@
 "use client";
 
 /**
- * The settings that live in this browser (Sending, Notifications) and the account's (your Silicons' reach, the account,
- * reporting a problem). Settings → Keyboard is keyboard-section.tsx; Voice and Listening come from the voice area.
+ * The smaller settings: Sending and Notifications (this browser's), the Account (from Silicon Accounts) and Report a
+ * problem. Settings → Keyboard is keyboard-section.tsx, your Silicons' reach reach-section.tsx; Voice and Listening come
+ * from the voice area (components/chat/voice/settings-parts.tsx).
  */
 import { useState, useSyncExternalStore } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { ExternalLink } from "lucide-react";
 import { Button } from "@/components/silicon-ui/button/button";
-import { ConfirmMorph } from "@/components/silicon-ui/confirm-morph/confirm-morph";
 import { Input } from "@/components/silicon-ui/input/input";
 import { RadioCards } from "@/components/silicon-ui/radio-cards/radio-cards";
-import { Select } from "@/components/silicon-ui/select/select";
 import { Switch } from "@/components/silicon-ui/switch/switch";
 import { Textarea } from "@/components/silicon-ui/textarea/textarea";
+import { KindMarker } from "@/components/foundation/account/account-chip";
+import { ButtonLink } from "@/components/foundation/button-link";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { appConfig } from "@/lib/app.config";
 import { accountName } from "@/lib/chat/address";
-import { allowAccounts, disallowAccounts, submitReport } from "@/lib/chat/api";
-import { fullTime } from "@/lib/chat/format";
-import { useAllowList } from "@/lib/chat/hooks";
-import { chatKeys } from "@/lib/chat/keys";
+import { submitReport } from "@/lib/chat/api";
 import { disableNotifications, enableNotifications, notificationState, type NotificationState } from "@/lib/chat/notifications";
 import { updateChatSettings, useChatSettings } from "@/lib/chat/settings";
 import { useSignOut } from "@/lib/client/session";
 import { ApiError } from "@/lib/errors";
-import { kindNoun } from "@/lib/format";
-import { parseAccountId } from "@/lib/ids";
 import { notify, notifyError } from "@/lib/notify";
 import { usePlatform } from "@/lib/shortcuts/react";
 import { AccountAvatar } from "../common/avatars";
+import { listWords } from "../details/silicon-facts";
+import { useShowWhenSet } from "../dialogs/show-when-set";
 import { useChat } from "../shell/chat-context";
+import { PULL_REQUESTS, pullRequestProblem, WEB_VERSION } from "./report";
 import styles from "./settings.module.css";
 
-/** The website's version, as reports quote it. */
-export const WEB_VERSION = "0.17.0";
+export { WEB_VERSION };
 
 /* Sending ----------------------------------------------------------------------------------------------------------- */
 
@@ -68,7 +66,14 @@ export function NotificationsSection() {
   const why =
     current === "unsupported" ? "This browser cannot show notifications."
       : current === "denied" ? "This browser blocks notifications from DM. Allow them in the site's settings (the icon before the address), then switch this on."
-        : "Only while this tab is hidden or another conversation is open. Nothing leaves your browser: it shows what it already has.";
+        : "A message from someone else, while this tab is hidden or another conversation is open. Your own messages and the conversation on screen never notify.";
+  const test = () => {
+    try {
+      new Notification("DM", { body: "This is how a new message shows. Choose it to open the conversation.", tag: "dm:test", icon: "/apple-icon" });
+    } catch {
+      notify.info("This browser shows notifications only from installed apps", "New messages still show in the tab's title as (n) DM.");
+    }
+  };
   return (
     <div className={styles.rows}>
       <div className={styles.row}>
@@ -87,79 +92,8 @@ export function NotificationsSection() {
           }}
         />
       </div>
-    </div>
-  );
-}
-
-/* Your Silicons' reach ---------------------------------------------------------------------------------------------- */
-
-function Reach({ silicon }: { silicon: string }) {
-  const list = useAllowList(silicon);
-  const queryClient = useQueryClient();
-  const [value, setValue] = useState("");
-  const [problem, setProblem] = useState<string | null>(null);
-  const [error, setError] = useState<ApiError | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const add = async () => {
-    const check = parseAccountId(value);
-    if (!check.ok) {
-      setProblem(check.message);
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await allowAccounts(silicon, [check.value.id]);
-      queryClient.setQueryData(chatKeys.allowList(silicon), next);
-      setValue("");
-      notify.success(`${check.value.id} can reach ${silicon}`);
-    } catch (failure) {
-      setError(ApiError.from(failure));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const remove = async (account: string) => {
-    const next = await disallowAccounts(silicon, [account]);
-    queryClient.setQueryData(chatKeys.allowList(silicon), next);
-  };
-
-  return (
-    <div className={styles.reach}>
-      {list.error ? <ErrorAlert error={ApiError.from(list.error)} title="The list could not be loaded" /> : null}
-      <ul role="list" className={styles.allowed} aria-label={`Accounts that can reach ${silicon}`}>
-        {list.data?.items.map(entry => (
-          <li key={entry.account.uuid ?? entry.account.id} className={styles.allowedRow}>
-            <AccountAvatar account={entry.account} size="small" decorative />
-            <span className={styles.allowedText}>
-              <span className={styles.allowedName}>{accountName(entry.account)}</span>
-              <span className={styles.allowedMeta}>{entry.account.id} · {kindNoun(entry.account.type)} · since {fullTime(entry.added_at)}</span>
-            </span>
-            <ConfirmMorph label="Remove" prompt={`Remove ${entry.account.id}?`} confirmLabel="Remove" pendingLabel="Removing" doneLabel="Removed" onConfirm={() => remove(entry.account.id)} />
-          </li>
-        ))}
-        {list.data && !list.data.items.length ? <li className={styles.quiet}>Only you and your other Silicons can reach {silicon} now.</li> : null}
-      </ul>
-      <form className={styles.addRow} onSubmit={event => { event.preventDefault(); void add(); }}>
-        <Input label="Allow another account" placeholder="c:ada or si:scout" value={value} autoComplete="off" spellCheck={false} error={problem ?? undefined} onChange={event => { setValue(event.target.value); setProblem(null); }} />
-        <Button type="submit" variant="secondary" loading={busy}>Allow</Button>
-      </form>
-      {error ? <ErrorAlert error={error} title="That account was not added" /> : null}
-    </div>
-  );
-}
-
-export function ReachSection() {
-  const { me } = useChat();
-  const [silicon, setSilicon] = useState(me.custodian_of[0]?.id ?? "");
-  if (!me.custodian_of.length) return <p className={styles.quiet}>The Silicons you look after appear here once they sign in to DM.</p>;
-  return (
-    <div className={styles.stack}>
-      {me.custodian_of.length > 1 ? (
-        <Select label="Silicon" value={silicon} onValueChange={setSilicon} options={me.custodian_of.map(account => ({ value: account.id, label: `${accountName(account)}${accountName(account) === account.id ? "" : ` (${account.id})`}` }))} />
-      ) : null}
-      {silicon ? <Reach key={silicon} silicon={silicon} /> : null}
+      <p className={styles.note}>Nothing leaves your browser for this: it shows what this tab already has. The tab&apos;s title counts what is unread either way.</p>
+      {on ? <div><Button size="sm" variant="ghost" onClick={test}>Show a test notification</Button></div> : null}
     </div>
   );
 }
@@ -169,21 +103,28 @@ export function ReachSection() {
 export function AccountSection() {
   const { me, account, accountsUrl } = useChat();
   const { signOut, pending } = useSignOut();
+  const name = account.display_name || account.id;
   return (
     <div className={styles.stack}>
       <div className={styles.accountRow}>
-        <AccountAvatar account={me.account} size="header" decorative />
-        <span className={styles.allowedText}>
-          <span className={styles.allowedName}>{account.display_name || account.id}</span>
-          <span className={styles.allowedMeta}>{account.id} · {kindNoun(account.kind)}</span>
+        <AccountAvatar account={me.account} size="row" decorative />
+        <span className={styles.accountText}>
+          <span className={styles.accountName}>{name}</span>
+          <span className={styles.allowedMeta}><span>{account.id}</span><KindMarker kind={account.kind} size="xs" /></span>
         </span>
       </div>
+      {me.custodian_of.length ? (
+        <p className={styles.text}>
+          You look after {listWords(me.custodian_of.map(accountName))}. You choose their voices and who may reach them, and you can read their
+          conversations with Viewing as, under the conversation list.
+        </p>
+      ) : null}
       <p className={styles.text}>
-        Your name, photo and sign-in are managed by <a href={accountsUrl} target="_blank" rel="noopener">Silicon Accounts</a>. {appConfig.name} records no
-        telemetry.
+        Your name, photo and sign-in come from Silicon Accounts; change them there. {appConfig.name} records no telemetry.
       </p>
-      <div>
-        <Button variant="secondary" loading={pending} onClick={() => void signOut().catch(failure => notifyError(failure, "Could not sign out"))}>Sign out of this browser</Button>
+      <div className={styles.buttons}>
+        <ButtonLink href={accountsUrl} variant="secondary" external target="_blank" rel="noopener">Manage your account<ExternalLink size={14} strokeWidth={1.75} aria-hidden="true" /></ButtonLink>
+        <Button variant="ghost" loading={pending} onClick={() => void signOut().catch(failure => notifyError(failure, "Could not sign out"))}>Sign out of this browser</Button>
       </div>
     </div>
   );
@@ -191,22 +132,39 @@ export function AccountSection() {
 
 /* Report a problem -------------------------------------------------------------------------------------------------- */
 
+const MESSAGE = "report-message";
+const PULL_REQUEST = "report-pr";
+
 export function ReportSection() {
+  const { account } = useChat();
   const [message, setMessage] = useState("");
+  const [messageProblem, setMessageProblem] = useState<string | null>(null);
   const [pr, setPr] = useState("");
+  const [prProblem, setPrProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
-  const [sent, setSent] = useState<string | null>(null);
+  const [sent, setSent] = useState<{ repository: string; simulated: boolean } | null>(null);
+  const errorBox = useShowWhenSet<HTMLDivElement>(error);
   const send = async () => {
+    if (busy) return;
+    // Each problem is said at its field, and the keyboard goes there.
     if (!message.trim()) {
-      setError(new ApiError({ status: 0, code: "empty_report", message: "Say what happened first.", hint: "What you did, what you expected, and what happened instead." }));
+      setMessageProblem("Say what happened first: what you did, what you expected, and what happened instead.");
+      document.getElementById(MESSAGE)?.focus();
+      return;
+    }
+    const linkProblem = pullRequestProblem(pr);
+    if (linkProblem) {
+      setPrProblem(linkProblem);
+      document.getElementById(PULL_REQUEST)?.focus();
       return;
     }
     setBusy(true);
     setError(null);
+    setSent(null);
     try {
       const result = await submitReport(message.trim(), `web-${WEB_VERSION}`, pr.trim() || null);
-      setSent(result.repository);
+      setSent({ repository: result.repository, simulated: result.notification === "simulated" });
       setMessage("");
       setPr("");
     } catch (failure) {
@@ -216,11 +174,21 @@ export function ReportSection() {
     }
   };
   return (
-    <form className={styles.stack} onSubmit={event => { event.preventDefault(); void send(); }}>
-      <Textarea label="What happened?" description="What you did, what you expected, and what happened instead. A link to a fix is welcome too." value={message} onChange={event => setMessage(event.target.value)} rows={4} maxLength={20000} />
-      <Input label="Pull request (optional)" placeholder="https://github.com/…" value={pr} onChange={event => setPr(event.target.value)} inputMode="url" autoComplete="off" />
-      {error ? <ErrorAlert error={error} title="The report was not sent" /> : null}
-      {sent ? <p className={styles.done} role="status">Thank you. The report was sent{sent ? `; DM's code is at ${sent}` : ""}.</p> : null}
+    <form className={styles.stack} noValidate onSubmit={event => { event.preventDefault(); void send(); }}>
+      <Textarea id={MESSAGE} label="What happened?" description="What you did, what you expected, and what happened instead." value={message} rows={4} maxLength={20000}
+        error={messageProblem ?? undefined} onChange={event => { setMessage(event.target.value); setMessageProblem(null); setSent(null); }} />
+      <Input id={PULL_REQUEST} label="Pull request (optional)" description="A pull request in teamofsilicons/silicon-dm that fixes it, if you made one." placeholder={`${PULL_REQUESTS}123`}
+        value={pr} inputMode="url" autoComplete="off" spellCheck={false} error={prProblem ?? undefined}
+        onChange={event => { setPr(event.target.value); setPrProblem(null); }} onBlur={() => setPrProblem(pullRequestProblem(pr))} />
+      <p className={styles.note}>The report carries what you write, this website&apos;s version (<span className={styles.whole}>web-{WEB_VERSION}</span>) and your id (<span className={styles.whole}>{account.id}</span>). Nothing else.</p>
+      {error ? <div ref={errorBox}><ErrorAlert error={error} title="The report was not sent" /></div> : null}
+      {sent ? (
+        <p className={styles.done} role="status">
+          {sent.simulated
+            ? "Thank you. The report was sent to this DM service, which keeps it without emailing anyone: it has no email set up for reports."
+            : `Thank you. The report was sent; the people who build DM get it by email. DM's code is at ${sent.repository}.`}
+        </p>
+      ) : null}
       <div><Button type="submit" loading={busy}>Send report</Button></div>
     </form>
   );

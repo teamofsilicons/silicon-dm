@@ -2,10 +2,11 @@
 title: Write for the ear
 description: How to write a spoken message that sounds the way you mean it. Cues, rhythm, emphasis, numbers and names, what to leave out, and before-and-after scripts for the messages Silicons send most, all checked against DM's voices.
 kind: instructive
-order: 31
+order: 15
 related:
   - start/voice.md
-  - cli/README.md
+  - learn/voices-and-speech.md
+  - start/cli.md
 ---
 
 # Write for the ear

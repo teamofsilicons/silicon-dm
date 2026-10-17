@@ -1,19 +1,31 @@
-/* The chat's dialogs: one column of fields, the primary action last on the right (full width on phones). */
-.form { display: grid; gap: var(--space-5); }
-.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+/*
+ * The chat's dialogs: one column of fields, the primary action last on the right (full width on phones), invitations
+ * as rows divided by hairlines.
+ */
+.dialog.dialog { width: min(560px, calc(100vw - 32px)); }
+.form { display: grid; min-width: 0; gap: var(--space-5); }
+.text { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.55; text-wrap: pretty; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
+/* An id stays on one line when it fits (it moves to the next line whole), and only breaks when it cannot fit at all. */
+.mono { display: inline-block; max-width: 100%; font-family: var(--font-mono); font-size: .92em; overflow-wrap: anywhere; vertical-align: bottom; }
 
-.invitations { display: grid; margin: 0; padding: 0; list-style: none; }
-.invitation { display: grid; align-items: center; gap: var(--space-3); border-top: 1px solid var(--border-subtle); padding: var(--space-4) 0; grid-template-columns: minmax(0, 1fr) auto; }
-.invitation:first-child { border-top: 0; padding-top: 0; }
+/* One column that never grows past the dialog: a long word in a group's name or description (a link, a slug) wraps
+   instead of widening the row under its buttons. */
+.invitations { display: grid; min-width: 0; margin: 0; padding: 0; list-style: none; grid-template-columns: minmax(0, 1fr); }
+.invitation { display: grid; min-width: 0; align-items: start; gap: var(--space-1) var(--space-3); border-top: 1px solid var(--border-subtle); padding: var(--space-4) 0; grid-template-columns: auto minmax(0, 1fr) auto; }
+.invitation:first-child { border-top: 0; padding-top: var(--space-1); }
 .invitationText { display: grid; min-width: 0; gap: 2px; }
-.invitationName { font-weight: 500; }
-.invitationDescription { color: var(--text-secondary); font-size: var(--text-sm); }
-.invitationMeta { overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
-.invitationActions { display: flex; gap: var(--space-2); }
-.invitationError { grid-column: 1 / -1; }
-.quiet { color: var(--text-muted); font-size: var(--text-sm); }
+.invitationName { font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
+/* A description can run to 4000 characters; three lines say what the group is for (the whole text is in its details). */
+.invitationDescription { display: -webkit-box; overflow: hidden; color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.45; overflow-wrap: anywhere; text-wrap: pretty; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; }
+.invitationMeta { color: var(--text-muted); font-size: var(--text-xs); line-height: 1.45; overflow-wrap: anywhere; }
+.invitationActions { display: flex; align-items: center; gap: var(--space-1); }
+.invitationError { grid-column: 2 / -1; }
+.quiet { color: var(--text-muted); font-size: var(--text-sm); line-height: 1.5; text-wrap: pretty; }
 
 @media (max-width: 520px) {
   .actions > :last-child { flex: 1; }
-  .invitation { grid-template-columns: minmax(0, 1fr); }
+  .invitation { grid-template-columns: auto minmax(0, 1fr); }
+  .invitationActions { grid-column: 2; justify-content: flex-start; }
+  .invitationError { grid-column: 1 / -1; }
 }

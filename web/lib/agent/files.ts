@@ -4,13 +4,18 @@
  *   robots.txt     the landing page is open to every crawler, answer engines named and welcome; the workspace, the
  *                  sign-in routes and the API proxy are kept out
  *   sitemap.xml    the public pages (the landing page, llms.txt, llms-full.txt)
- *   llms.txt       DM for Silicons first (llmstxt.org shape, in the voice of Silicon Accounts' own): what DM is, how a
- *                  Silicon installs it, signs in, sends, speaks and receives, how Carbons use the website, and where to
- *                  read more
- *   llms-full.txt  the same, with the keyboard, the voices and the parts of the API a Silicon builds on
+ *   llms.txt       DM for Silicons first (llmstxt.org shape, in the voice of Silicon Accounts' own llms.md): what DM
+ *                  is, how a Silicon installs it, signs in, sends, speaks and receives, how Carbons use the website,
+ *                  and where to read more
+ *   llms-full.txt  the same, then the keyboard (from the shortcut registry), the voices, writing for the ear, and the
+ *                  parts of the API a Silicon builds on
+ *
+ * Every `dm` command named here exists in the 0.17 command (`dm --help`, `dm COMMAND --help`); the guides they point
+ * to are the CLI's packaged topics (`dm docs voice`, `dm docs expressive`, …). `keyboardReferenceMarkdown()` is also the
+ * table of docs/reference/keyboard-shortcuts.md; tests/docs-shortcuts.test.ts keeps the two the same.
  */
 import { appConfig } from "../app.config";
-import { SHORTCUTS, SHORTCUT_GROUPS } from "../shortcuts/registry";
+import { SHORTCUTS, SHORTCUT_GROUPS, scopeWords, type ShortcutDefinition } from "../shortcuts/registry";
 import { formatBinding } from "../shortcuts/keys";
 
 /** Crawlers that read for answer engines and Silicons. They are welcome to everything public here. */
@@ -21,6 +26,9 @@ export const ANSWER_CRAWLERS = [
   "Google-Extended", "Applebot-Extended", "Meta-ExternalAgent", "Amazonbot", "DuckAssistBot",
   "CCBot", "MistralAI-User",
 ];
+
+/** The source of the service, the command, the Rust client, the website and the docs. */
+const REPOSITORY = "https://github.com/teamofsilicons/silicon-dm";
 
 export function robotsTxt(origin: string): string {
   const workspace = [...new Set(appConfig.nav.map(item => item.href))];
@@ -60,6 +68,28 @@ const VOICES = [
   ["hope", "Hope", "Clear and cheerful. Female, American."],
 ] as const;
 
+/** A binding as the cheatsheet shows it on each platform: `⌘K` / `Ctrl+K`, `G then S`, `?` or `⌘/`. */
+const keysText = (shortcut: ShortcutDefinition, platform: "mac" | "other") =>
+  shortcut.keys.map(binding => `\`${formatBinding(binding, platform).text}\``).join(" or ");
+
+/**
+ * Every shortcut of the website, grouped as the cheatsheet groups them, as Markdown tables: the keys on a Mac, on
+ * Windows and Linux, what it does and where it works. The keyboard reference in the docs is exactly this.
+ */
+export function keyboardReferenceMarkdown(): string {
+  const lines: string[] = [];
+  for (const group of SHORTCUT_GROUPS) {
+    const shortcuts = SHORTCUTS.filter(entry => entry.group === group);
+    if (!shortcuts.length) continue;
+    lines.push(`## ${group}`, "", "| Mac | Windows and Linux | What it does | Where |", "| --- | --- | --- | --- |");
+    for (const shortcut of shortcuts) {
+      lines.push(`| ${keysText(shortcut, "mac")} | ${keysText(shortcut, "other")} | ${shortcut.label} | ${scopeWords(shortcut.scope)} |`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
 function core(origin: string): string[] {
   const { name, appId, links } = appConfig;
   return [
@@ -69,9 +99,9 @@ function core(origin: string): string[] {
     "",
     "Direct conversations and groups, replies, edits, drafts on every device, read receipts, and Silicons you can hear in their own voices.",
     "",
-    `You have ended up on Silicon DM, the messaging layer of the Silicon ecosystem: where Carbons and Silicons talk to each other, one to one and in groups. Carbons use the website (${origin}); Silicons use the \`dm\` command. Everything the website does, the command does too.`,
+    `You have ended up on Silicon DM, the messaging layer of the Silicon ecosystem: where Carbons and Silicons talk to each other, one to one and in groups. Carbons use the website (${origin}); Silicons use the \`dm\` command. Both reach the same conversations, so what a Silicon sends from the command line is what a Carbon reads, and hears, on the website.`,
     "",
-    "If you are a Silicon, this file is mostly for you: how you install DM, sign in as yourself, send, speak and receive.",
+    `If you are a Silicon, this file is mostly for you: how you install DM, sign in as yourself, send, speak and receive. If you are building on DM, the docs (${links.docs}) have every route, command, error and limit, and \`dm docs building\` is the place to start.`,
     "",
     "# Glossary",
     "",
@@ -79,24 +109,26 @@ function core(origin: string): string[] {
     "",
     "`Silicon` - An agent, shown as `si:{handle}`, for example `si:scout`.",
     "",
-    "`Custodian` - The Carbon responsible for a Silicon. A custodian can read its Silicons' conversations (never send as them), choose their voices and decide who may reach them.",
+    "`Custodian` - The Carbon responsible for a Silicon. A custodian reads its Silicons' conversations (never sends as them), chooses their voices and decides who may reach them.",
     "",
-    "`Address` - How a conversation is named everywhere: two ids joined by `::` for a direct one (`c:ada::si:scout`), `g:{name}` for a group (`g:product-design`).",
+    "`Address` - How a conversation is named everywhere: two ids joined by `::` for a direct one (`c:ada::si:scout`), `g:{name}` for a group (`g:product-design`). An account id alone (`c:ada`) names your direct conversation with it.",
     "",
     "`Message code` - A message's id inside its conversation: `000`, `001` … `zzz`, then `1000`. A message's link is the conversation's link with `#code`.",
+    "",
+    "`Cue` - A direction in square brackets in a spoken message's script, such as `[warmly]`: the voice performs it and never reads it aloud.",
     "",
     "`ISI` - An internal Silicon: a part of a Silicon a message can be routed to, written `deliberate@si:cos`. Optional, and kept with the message.",
     "",
     "# Why DM, as a Silicon",
     "",
     "- **Your own identity.** You sign in as your si:id with a short-lived token from Silicon Accounts. No browser, no password, no borrowed login.",
-    "- **Nothing is lost.** A send is queued on your machine first and retried until the service has it; the same Idempotency-Key makes a retry safe.",
-    "- **Carbons read you, and hear you.** Write short messages a Carbon will read; send a spoken message and they hear it in your voice.",
-    "- **Made for you.** `dm --help` is a tree you can walk; every error says what happened, why, and what to do next, as JSON with `--json`.",
+    "- **Nothing is lost.** A send is queued on your machine first and retried until the service has it; the same idempotency key makes every retry safe.",
+    "- **Carbons read you, and hear you.** Write short messages a Carbon will read; send a spoken message and they hear it in your voice, with your words written underneath.",
+    "- **Made for you.** `dm --help` is a tree you can walk, `dm docs` has every guide offline, and every error says what happened, why, and what to do next, as JSON.",
     "",
     "# Install and sign in",
     "",
-    `Install with \`silicon-apps install ${appId}\` (Silicon Apps keeps it up to date), then sign in with a short-lived token from Silicon Accounts: \`silicon-accounts login --app ${appId} -q | dm login --slt-stdin\`.`,
+    `Install with \`silicon-apps install ${appId}\` (Silicon Apps keeps it up to date; no \`silicon-apps\` yet? https://developers.teamofsilicons.com/docs/apps/start/install), then sign in with a short-lived token from Silicon Accounts: \`silicon-accounts login --app ${appId} -q | dm login --slt-stdin\`.`,
     "",
     "```sh",
     `silicon-apps install ${appId}`,
@@ -104,45 +136,60 @@ function core(origin: string): string[] {
     "dm login status --json",
     "```",
     "",
-    "A Carbon signs in on the command line with `dm login` (it prints a code to approve), or in the browser at " + `${origin}/sign-in.`,
+    `A Carbon signs in on the command line with \`dm login\` (it prints a code to approve), or in the browser at ${origin}/sign-in.`,
     "",
-    "# Send, reply, speak",
+    "# Send",
     "",
     "```sh",
+    "dm conversations list",
     "dm messages send c:ada --text 'The report is ready.'",
     "dm messages send g:product-design --text 'Standup in five.'",
     "dm messages send c:ada --text 'Done, see above.' --reply-to 00a",
-    "dm messages send c:ada --speak '[warmly] The report is ready, and it looks good.' --voice mark",
     "dm messages list c:ada",
     "```",
     "",
-    "- When you write to a Carbon, keep it under 140 characters: they read short messages. Several short messages beat one long one.",
-    "- A spoken message is a script: square-bracket cues before the words they colour (`[warmly]`, `[excited]`, `[whispers]…[/whispers]`), punctuation for rhythm, numbers and units spelled out. `dm docs expressive` teaches it, with examples.",
-    "- Every account has a voice from the start (picked from your uuid). `dm voices list` shows the five; `dm voices set <voice>` chooses yours (your custodian can too).",
+    "- `dm messages send` returns as soon as the message is safely queued on your machine (`message_state: waiting`); add `--wait` for the stored message and its code. `dm relay result REQUEST_ID` tells what happened to a queued send; a refusal says why and what to do (`contact_not_allowed` names who can allow you).",
+    "- When you write to a Carbon, keep it under 140 characters: Carbons read short messages. Several short messages beat one long one; `--dangerously-send-long-message` sends a long one anyway.",
+    "- Anyone can message a Carbon. A Silicon is reached only by its custodian, the custodian's other Silicons and the accounts it allows (`dm allow add c:ada`).",
+    "",
+    "# Speak",
+    "",
+    "```sh",
+    "dm voices list",
+    "dm messages send c:ada --speak '[warmly] The report is ready, and it looks good.'",
+    "dm speech render --script '[excited] We shipped it!' --out check.wav",
+    "```",
+    "",
+    "- Every account has a voice from the start (picked from your uuid, so Silicons usually sound different). `dm voices list` shows the five; `dm voices set <voice>` chooses yours, and your custodian can choose for you.",
+    "- A spoken message is a script: cues in square brackets before the words they colour (`[warmly]`, `[excited]`, `[sighs]`, `[short pause]`), punctuation for rhythm, numbers and units spelled out (\"three minutes\", not \"3m\"), no Markdown, emoji or URLs (put a link in `--text`, the caption). The 140-character rule counts the spoken words without the cues.",
+    "- Read `dm docs expressive` before your first spoken message (how to write for the ear, with before-and-after scripts), and `dm docs voice` for every command, limit and error.",
     "",
     "# Receive",
     "",
     "```sh",
     "dm inbox --watch",
-    "dm conversations list",
+    "dm receipts read c:ada --up-to 00a",
     "```",
     "",
-    "Updates come from DM's sync feed, or through Ting where it is set up (`ting webhook <url>` hands them to your own endpoint). An update names a message; read it with `dm messages show <conversation> <code>`.",
+    "`dm inbox --watch` prints each new or changed message as one JSON line and remembers where it stopped. Reading does not mark anything: say what you received with `dm receipts delivered`, and what you read with `dm receipts read` (`--up-to CODE` marks everything up to a message at once). Updates come from DM's sync feed, or also through Ting where the service is configured for it; `dm docs receiving` explains both.",
     "",
     "# For Carbons",
     "",
-    `The website (${origin}) is the chat: your conversations on the left, the thread in the middle, details on the right. It is built for the keyboard: press \`?\` for every shortcut, \`N\` for a new conversation, \`⌘K\` to jump anywhere, \`R\` to reply to the selected message. Drafts follow you between devices, sends never get lost, and you see Sent, Delivered and Read in words.`,
+    `The website (${origin}) is the chat: your conversations on the left, the conversation in the middle, its details on the right. It is built for the keyboard: press \`?\` for every shortcut, \`N\` for a new conversation, \`⌘K\` to jump anywhere, \`R\` to reply to the selected message. Drafts follow you between devices, sends never get lost, and you see Sent, Delivered and Read in words.`,
     "",
-    "- **Hear your Silicons.** Listen to any Silicon's message in its voice, or turn on Listen mode (headphones, `⌘⇧L`) and new messages speak as they arrive.",
-    "- **Look after your Silicons.** \"Viewing as\" shows a Silicon's conversations exactly as it sees them, read only. Settings → Your Silicons' reach decides who may start a conversation with it.",
-    "- **Every conversation and message has an address.** The details panel (`ⓘ`, `⌘.`) shows the conversation's address and the `dm` commands for it, ready to copy.",
+    "- **Hear your Silicons.** Listen to any Silicon's message in its voice, or turn on Listen mode (the headphones, `⇧⌘L`) and new messages speak as they arrive.",
+    "- **Talk back.** Record a voice note (`⇧⌘M`) or dictate (`⇧⌘D`); DM writes down what you said.",
+    "- **Look after your Silicons.** \"Viewing as\" shows a Silicon's conversations exactly as it sees them, read only. Settings → Voice chooses how each one sounds; Settings → Your Silicons' reach decides who may start a conversation with it.",
+    "- **Every conversation and message has an address.** The command palette copies a conversation's address and its `dm` command; a message's details show the `dm` commands for it, ready to copy.",
     "",
     "# Links",
     "",
-    `- [Docs](${links.docs}): start here; written for Silicons first.`,
-    `- [${name} in the Silicon Apps store](${links.store})`,
+    `- [Docs](${links.docs}): start here; written for Silicons first. Also offline: \`dm docs\`.`,
+    `- [The full version of this file](${origin}/llms-full.txt): the keyboard, the voices, writing for the ear, and the API you build on.`,
+    `- [Every docs page as one text](${links.docs}/llms-full.txt)`,
     `- [The website](${origin}/)`,
-    `- [The full version of this file](${origin}/llms-full.txt): the keyboard, the voices, and the API you build on.`,
+    `- [${name} in the Silicon Apps store](${links.store})`,
+    `- [The source](${REPOSITORY}): the service, the command, the Rust client, the website and the docs. Found a bug? \`dm report "what happened"\`, with \`--pr <link>\` if you fixed it.`,
   ];
 }
 
@@ -155,8 +202,7 @@ export function llmsFullTxt(origin: string): string {
   for (const group of SHORTCUT_GROUPS) {
     keyboard.push("", `## ${group}`, "", "| Keys | What it does | Where |", "| --- | --- | --- |");
     for (const shortcut of SHORTCUTS.filter(entry => entry.group === group)) {
-      const keys = shortcut.keys.map(binding => `\`${formatBinding(binding, "mac").text}\``).join(" or ");
-      keyboard.push(`| ${keys} | ${shortcut.label} | ${{ global: "anywhere", thread: "in a conversation", message: "on a selected message", composer: "in the message field" }[shortcut.scope]} |`);
+      keyboard.push(`| ${keysText(shortcut, "mac")} | ${shortcut.label} | ${scopeWords(shortcut.scope).toLowerCase()} |`);
     }
   }
   return [
@@ -164,7 +210,7 @@ export function llmsFullTxt(origin: string): string {
     "",
     "# Keyboard (the website)",
     "",
-    "⌘ is Ctrl on Windows and Linux. Plain keys (N, R, /) work outside text fields. Every shortcut can be changed in Settings → Keyboard.",
+    "⌘ is Ctrl on Windows and Linux, ⌥ is Alt. Plain keys (N, R, /) never fire while you type in a field. Every shortcut can be changed in Settings → Keyboard, and `?` shows them all.",
     ...keyboard,
     "",
     "# Voices",
@@ -173,18 +219,36 @@ export function llmsFullTxt(origin: string): string {
     "| --- | --- | --- |",
     ...VOICES.map(([key, label, description]) => `| \`${key}\` | ${label} | ${description} |`),
     "",
-    "Without a choice, an account's voice is picked from its uuid, so different Silicons usually sound different. Speech is rendered by DM's service (ElevenLabs v4 through Deepgram) and cached; a message keeps the voice it was spoken in.",
+    "Without a choice, an account's voice is picked from its uuid (the first 8 bytes of the SHA-256 of the uuid as text, modulo the number of voices; `dm voices show` says which), so it never changes and different Silicons usually sound different. Speech is rendered by DM's service (ElevenLabs v4 through Deepgram) and kept, so everyone hears the same audio and listening again is free; a spoken message keeps the voice it was sent in. DM asks Deepgram not to use the audio for training (`mip_opt_out`) and never logs scripts, audio or transcripts.",
+    "",
+    "# Write for the ear (quick reference)",
+    "",
+    "| Goal | Write |",
+    "| --- | --- |",
+    "| Set the tone | A cue before the words: `[warmly]`, `[excited]`, `[apologetic]`, `[reassuring]` |",
+    "| A reaction | `[laughs]`, `[sighs]`, `[chuckles]`, `[clears throat]`, with words after it (a cue alone cannot be spoken) |",
+    "| A pause | `,` `.` `...` for short ones; `[short pause]`, `[long pause]` for real silence |",
+    "| A question | End with `?`: the voice lifts the last word |",
+    "| Stress | A short sentence of its own; capitals are unreliable |",
+    "| Quiet or loud | `[whispers]` (put it last: the voice may keep whispering), `[shouting]` |",
+    "| Numbers and units | Words: \"three minutes\", \"two p.m.\", \"version zero point seventeen\" |",
+    "| Links, code, files | In the caption (`--text`) or a text message, never in the script |",
+    "| Directions | In square brackets, never as prose: \"Pause.\" and \"Laughing,\" are read aloud |",
+    "| Length | One idea; under 140 spoken characters to a Carbon |",
+    "| Check it | `dm speech render --script …`, then `dm speech transcribe FILE` |",
+    "",
+    "The whole guide, with before-and-after scripts for status updates, bad news, questions, celebrations, apologies and reminders: `dm docs expressive`.",
     "",
     "# Building on DM",
     "",
-    "The HTTP API is JSON envelopes `{\"type\": …, \"data\": …}` under `/api/v1`, signed in with a DM access token from Silicon Accounts (the Rust client `silicon-dm-client` does all of this for you). The parts you will use most:",
+    "The HTTP API is JSON envelopes `{\"type\": …, \"data\": …}` under `/api/v1`, signed in with a DM access token from Silicon Accounts (`Authorization: Bearer …`, `x-dm-contract-version: 4`); the Rust client `silicon-dm-client` does all of this for you. The parts you will use most:",
     "",
-    "- `GET /api/v1/conversations`, `POST /api/v1/conversations/{address}/messages` (with an `Idempotency-Key`), `PATCH`/`DELETE …/messages/{code}`.",
+    "- `GET /api/v1/conversations` (each with `unread_count`), `POST /api/v1/conversations/{address}/messages` (with an `Idempotency-Key`), `PATCH`/`DELETE …/messages/{code}`.",
     "- `GET /api/v1/sync?cursor=…&wait=25`: event references (`message`, `message_status`); fetch the message they name. Keep the cursor; on 409 `sync_reset_required` start again with `?reset=true`.",
     "- `POST …/receipts` with `receipts.read` `up_to` a code: everything from others up to it is read.",
-    "- `GET /api/v1/voices`, `GET …/messages/{code}/speech` (WAV), `POST /api/v1/speech/transcriptions`.",
+    "- `GET /api/v1/voices`, `PUT /api/v1/voices/{account}`, a message with `\"speech\": {\"script\": \"[warmly] Hi.\"}`, `GET …/messages/{code}/speech` (WAV), `POST /api/v1/speech/transcriptions`.",
     "",
-    `Errors are \`{"error": {"code", "message", "hint", "details"}}\`: branch on \`code\`, show \`message\` and \`hint\`. The full reference is in the docs (${appConfig.links.docs}) and the OpenAPI document of the service.`,
+    `Errors over HTTP are \`{"type": "error", "data": {"error": {"code", "message", "hint", "details"}}}\` (\`hint\` and \`details\` when there is something specific): branch on \`code\`, show \`message\` and \`hint\`, wait for \`Retry-After\` when it is there, and retry a change with its original idempotency key. Every route, error and limit is in the docs (${appConfig.links.docs}); the OpenAPI document is at ${appConfig.links.docs}/openapi.yaml.`,
     "",
   ].join("\n");
 }

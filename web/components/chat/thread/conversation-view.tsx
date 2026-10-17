@@ -1,23 +1,23 @@
 "use client";
 
 /**
- * One conversation: the header, the messages, the composer, the details panel's content and the message menu and
+ * One conversation: the header, the messages, the composer, the details panel's content, and the message menu and
  * details. It owns what the thread's parts share: the conversation and its messages (from the cache when they are
- * there), the outbox's Waiting and Failed sends, the first unread message as it was when you opened it, delivered and
- * read receipts, presence, and the actions on messages (thread-actions.tsx).
+ * there), the outbox's Waiting and Failed sends, the first unread message as it was when you opened it (older pages
+ * load first when it is further back), delivered receipts, presence (the typing line and the header's status), and
+ * the actions on messages and accounts (thread-actions.tsx), which stay the same object for the whole visit.
  */
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { MessagesSquare } from "lucide-react";
+import { MessagesSquare, WifiOff } from "lucide-react";
 import { Problem } from "@/components/foundation/feedback/problem";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { ButtonLink } from "@/components/foundation/button-link";
 import { Button } from "@/components/silicon-ui/button/button";
-import { conversationHref, conversationKind, conversationTitle, directParticipants, inboxHref, isGroupAddress, messageUrl, otherParticipants, sameAccount, type ConversationKind } from "@/lib/chat/address";
+import { accountName, conversationHref, conversationKind, conversationTitle, directParticipants, inboxHref, isGroupAddress, messageUrl, otherParticipants, sameAccount, type ConversationKind } from "@/lib/chat/address";
 import { deleteMessage } from "@/lib/chat/api";
 import { replaceMessage, upsertMessage, type MessagePages } from "@/lib/chat/cache";
-import { compareCodes } from "@/lib/chat/codes";
 import { useConversation, useMessages } from "@/lib/chat/hooks";
 import { chatKeys } from "@/lib/chat/keys";
 import { discardSend, retrySend, useConversationOutbox } from "@/lib/chat/outbox-store";
@@ -25,20 +25,28 @@ import { useParticipantsPresence } from "@/lib/chat/presence";
 import { markAllRead, noteDelivered } from "@/lib/chat/receipts";
 import { applyMessage } from "@/lib/chat/sync";
 import { useTitle } from "@/lib/chat/title";
-import type { AccountRef, ConversationSummary, Message } from "@/lib/chat/types";
+import type { AccountRef, Message } from "@/lib/chat/types";
 import { ApiError } from "@/lib/errors";
 import { notify } from "@/lib/notify";
 import { useShortcutScope } from "@/lib/shortcuts/react";
+import { toggleListen } from "@/lib/voice";
 import { Composer, type ComposerHandle } from "../composer/composer";
+import { useStartConversation } from "../dialogs/open-conversation";
 import { DetailsPanel } from "../details/details-panel";
 import { useChat } from "../shell/chat-context";
 import { DetailsPortal } from "../shell/details";
 import { MessageDetailsDialog } from "./message-details-dialog";
 import { MessageList, type MessageListHandle } from "./message-list";
 import { MessageMenu, type MenuState } from "./message-menu";
+import { ThreadBeginning } from "./thread-beginning";
 import { ThreadHeader } from "./thread-header";
-import { copyableText, ThreadActionsProvider, type ThreadActions } from "./thread-actions";
+import { custodianOf, findFirstUnread, unreadBeyondLoaded, type Busy, type FirstUnread } from "./thread-model";
+import { copyableText, ThreadActionsProvider, ThreadPeopleProvider, type ThreadActions, type ThreadPeople } from "./thread-actions";
+import { useOnline } from "./use-online";
 import styles from "./thread.module.css";
+
+/** Older pages loaded on opening so the thread can open at the first unread message. */
+const UNREAD_PAGES = 4;
 
 async function copy(text: string, what: string) {
   try {
@@ -60,26 +68,11 @@ function fromAddress(address: string, perspective: AccountRef): { others: Accoun
   return { others: [], kind: "group", title: address };
 }
 
-/** The first unread message from someone else, and how many there are from it on. */
-function findFirstUnread(conversation: ConversationSummary | undefined, messages: Message[], perspective: AccountRef): { code: string; count: number } | null {
-  const fromOthers = messages.filter(message => !sameAccount(message.sender, perspective) && !message.deleted_at);
-  let first: Message | undefined;
-  if (conversation && conversation.last_read_message_id !== undefined) {
-    if (!conversation.unread_count) return null;
-    const read = conversation.last_read_message_id;
-    first = fromOthers.find(message => !read || compareCodes(message["message-id"], read) > 0);
-  } else if (conversation && !conversation.group && conversation.participants.length <= 2) {
-    // An older service has no read position: in a direct conversation, read_at is the other's own read.
-    first = fromOthers.find(message => !message.read_at);
-  }
-  if (!first) return null;
-  const count = fromOthers.filter(message => compareCodes(message["message-id"], first["message-id"]) >= 0).length;
-  return { code: first["message-id"], count };
-}
-
 export function ConversationView({ address }: { address: string }) {
-  const { view, perspective, readOnly } = useChat();
+  const { me, view, viewed, perspective, readOnly } = useChat();
+  const startConversation = useStartConversation();
   const queryClient = useQueryClient();
+  const online = useOnline();
   const { conversation, error: conversationError } = useConversation(address, view);
   const thread = useMessages(address, view);
   const outbox = useConversationOutbox(address);
@@ -91,27 +84,49 @@ export function ConversationView({ address }: { address: string }) {
   const [detailsFor, setDetailsFor] = useState<Message | null>(null);
   useShortcutScope("thread", true);
 
-  const guess = fromAddress(address, perspective);
-  const others = conversation ? otherParticipants(conversation, perspective) : guess.others;
+  const guess = useMemo(() => fromAddress(address, perspective), [address, perspective]);
+  const others = useMemo(() => (conversation ? otherParticipants(conversation, perspective) : guess.others), [conversation, perspective, guess.others]);
   const kind = conversation ? conversationKind(conversation, perspective) : guess.kind;
   const title = conversation ? conversationTitle(conversation, perspective) : guess.title;
   const group = kind === "group";
   useTitle(`${title} · DM`);
 
-  const presenceIds = useMemo(() => (readOnly ? [] : others.slice(0, 8).map(account => account.id)), [others, readOnly]);
+  // Presence of the others only (a group with nobody else yet lists you as its "others").
+  const presenceIds = useMemo(() => (readOnly ? [] : others.filter(account => !sameAccount(account, perspective)).slice(0, 8).map(account => account.id)), [others, readOnly, perspective]);
   const presence = useParticipantsPresence(presenceIds, !!conversation && !readOnly);
+  // Who is busy, as a value that only changes when someone starts or stops (presence polls make a new map each time).
+  const busySignature = others.map(account => `${account.id}:${presence.get(account.id)?.activity ?? ""}`).join("|");
+  const busy = useMemo<Busy[]>(
+    () => others.flatMap(account => {
+      const activity = presence.get(account.id)?.activity;
+      return activity ? [{ account, activity }] : [];
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the signature says when the list changes
+    [busySignature],
+  );
 
   // The first unread is decided once per opening (this view is keyed by its address): reading moves the read
-  // position, not the divider.
-  const [opened, setOpened] = useState<{ firstUnread: { code: string; count: number } | null } | null>(null);
-  if (!opened && thread.isSuccess && (conversation || conversationError)) setOpened({ firstUnread: findFirstUnread(conversation, thread.messages, perspective) });
+  // position, not the divider. When it is older than the first page, a few older pages load first.
+  const [opened, setOpened] = useState<{ firstUnread: FirstUnread | null } | null>(null);
+  const known = thread.isSuccess && (!!conversation || !!conversationError);
+  const needOlder = known && !opened && unreadBeyondLoaded(conversation, thread.messages, perspective) && !!thread.hasNextPage && (thread.data?.pages.length ?? 0) <= UNREAD_PAGES;
+  if (!opened && known && !needOlder && !thread.isFetchingNextPage) setOpened({ firstUnread: findFirstUnread(conversation, thread.messages, perspective) });
+  const { isFetchingNextPage, fetchNextPage } = thread;
+  useEffect(() => {
+    if (needOlder && !isFetchingNextPage) void fetchNextPage();
+  }, [needOlder, isFetchingNextPage, fetchNextPage]);
   const firstUnread = opened?.firstUnread ?? null;
 
   // What this tab fetched from others is delivered.
   useEffect(() => {
     if (readOnly) return;
-    const newest = [...thread.messages].reverse().find(message => !sameAccount(message.sender, perspective) && !message.deleted_at);
-    if (newest && !newest.delivered_at) noteDelivered(address, newest["message-id"]);
+    const messages = thread.messages;
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index]!;
+      if (sameAccount(message.sender, perspective) || message.deleted_at) continue;
+      if (!message.delivered_at) noteDelivered(address, message["message-id"]);
+      break;
+    }
   }, [thread.messages, readOnly, perspective, address]);
 
   // Typing anywhere in the thread (outside a field or a control) types into the composer. It listens on window, after
@@ -123,6 +138,8 @@ export function ConversationView({ address }: { address: string }) {
       const target = event.target as HTMLElement | null;
       if (target && target.closest("input, textarea, select, button, a, [contenteditable], [role='dialog'], [role='menu'], [role='listbox']")) return;
       if (target && !target.closest("main")) return;
+      // Space on a selected message is Listen (or nothing where it cannot play), never a space typed into the composer.
+      if (event.key === " " && target?.closest("[data-message-row]")) return;
       composer.current?.focus();
     };
     window.addEventListener("keydown", onKey);
@@ -131,48 +148,63 @@ export function ConversationView({ address }: { address: string }) {
 
   const recipientDeleted = !group && others.length === 1 && others[0]!.deleted;
   const disabledReason = readOnly
-    ? `You are reading ${view}'s conversation as its custodian. It is read only: nothing is sent or marked read for it.`
+    ? `You are reading ${viewed ? accountName(viewed) : view}'s conversation as its custodian. It is read only: nothing is sent or marked read for it.`
     : conversation?.superseded_by
       ? "This conversation is kept for its history. Write in the current one."
       : recipientDeleted
         ? "This account was deleted. The conversation stays for its history."
         : null;
 
-  const messagesKey = chatKeys.messages(address, view);
-  const actions = useMemo<ThreadActions>(() => ({
-    address,
-    view,
-    readOnly,
-    isMine: message => sameAccount(message.sender, perspective),
-    reply: message => composer.current?.reply(message),
-    edit: message => composer.current?.edit(message),
-    copyText: message => void copy(copyableText(message), "Text"),
-    copyLink: message => void copy(messageUrl(window.location.origin, address, message["message-id"], view), "Link"),
-    requestDelete: message => setDeleting(message["message-id"]),
-    cancelDelete: () => setDeleting(null),
-    confirmDelete: async message => {
-      const tombstone: Message = { ...message, message: null, attachments: [], voice_transcript: null, reply: null, history: [], deleted_at: new Date().toISOString(), voice: null, gif: null, speech: null };
-      queryClient.setQueryData<MessagePages>(messagesKey, data => upsertMessage(data, tombstone));
-      try {
-        applyMessage(queryClient, perspective, await deleteMessage(address, message["message-id"], crypto.randomUUID()));
-        setDeleting(null);
-      } catch (failure) {
-        queryClient.setQueryData<MessagePages>(messagesKey, data => replaceMessage(data, message));
-        notify.error(failure, "The message was not deleted");
-        throw failure;
-      }
-    },
-    deleting,
-    openDetails: message => setDetailsFor(message),
-    openMenu: (message, at) => setMenu({ message, ...at }),
-    jumpTo: code => {
-      window.history.replaceState(window.history.state, "", `${conversationHref(address, { view })}#${code}`);
-      list.current?.jumpTo(code);
-    },
-    retrySend,
-    discardSend,
-    focusComposer: () => composer.current?.focus(),
-  }), [address, view, readOnly, perspective, deleting, queryClient, messagesKey]);
+  const actions = useMemo<ThreadActions>(() => {
+    const messagesKey = chatKeys.messages(address, view);
+    return {
+      address,
+      view,
+      readOnly,
+      isMine: message => sameAccount(message.sender, perspective),
+      isSelf: account => sameAccount(account, me.account),
+      reply: message => composer.current?.reply(message),
+      edit: message => composer.current?.edit(message),
+      copyText: message => void copy(copyableText(message), "Text"),
+      copyLink: message => void copy(messageUrl(window.location.origin, address, message["message-id"], view), "Link"),
+      requestDelete: message => setDeleting(message["message-id"]),
+      cancelDelete: () => setDeleting(null),
+      confirmDelete: async message => {
+        const tombstone: Message = { ...message, message: null, attachments: [], attachment_details: [], voice_transcript: null, reply: null, history: [], deleted_at: new Date().toISOString(), voice: null, gif: null, speech: null };
+        queryClient.setQueryData<MessagePages>(messagesKey, data => upsertMessage(data, tombstone));
+        try {
+          applyMessage(queryClient, perspective, await deleteMessage(address, message["message-id"], crypto.randomUUID()));
+          setDeleting(null);
+          document.querySelector<HTMLElement>(`[data-message-code="${CSS.escape(message["message-id"])}"]`)?.focus({ preventScroll: true });
+        } catch (failure) {
+          queryClient.setQueryData<MessagePages>(messagesKey, data => replaceMessage(data, message));
+          notify.error(failure, "The message was not deleted");
+          throw failure;
+        }
+      },
+      openDetails: message => setDetailsFor(message),
+      openMenu: (message, at) => setMenu({ message, ...at }),
+      jumpTo: code => {
+        window.history.replaceState(window.history.state, "", `${conversationHref(address, { view })}#${code}`);
+        list.current?.jumpTo(code);
+      },
+      listen: message => toggleListen(address, message),
+      // The same path as New conversation: into the cache, opened, its message field ready for the first word.
+      openDirect: account => {
+        startConversation([account.id]).catch(failure => notify.error(failure, `Your conversation with ${account.display_name || account.id} could not be opened`));
+      },
+      copyId: account => void copy(account.id, "Id"),
+      retrySend,
+      discardSend,
+      focusComposer: () => composer.current?.focus(),
+    };
+  }, [address, view, readOnly, perspective, me.account, queryClient, startConversation]);
+
+  const people = useMemo<ThreadPeople>(() => ({
+    conversation,
+    presence,
+    custodianOf: account => custodianOf(account, conversation, me),
+  }), [conversation, presence, me]);
 
   const onSent = useCallback(() => list.current?.scrollToBottom(), []);
   const onSelectLast = useCallback(() => list.current?.focusLast() ?? false, []);
@@ -191,44 +223,62 @@ export function ConversationView({ address }: { address: string }) {
   }
 
   const name = group ? title : others[0] ? (others[0].display_name?.split(/\s+/)[0] ?? others[0].id) : title;
+  const empty = thread.isSuccess && !thread.messages.length && !pending.length;
+  const unloaded = !!failure && !thread.messages.length;
 
   return (
     <ThreadActionsProvider value={actions}>
-      <section className={styles.thread} aria-labelledby="thread-title">
-        <ThreadHeader address={address} view={view} title={title} kind={kind} conversation={conversation} others={others} presence={presence}
-          onCopy={(text, what) => void copy(text, what)}
-          onMarkRead={!readOnly && conversation ? () => void markAllRead([conversation]) : null} />
-        {conversation?.superseded_by ? (
-          <p className={styles.banner} role="note">
-            This history continues in <Link href={conversationHref(conversation.superseded_by, { view })}>the current conversation</Link>.
-          </p>
-        ) : null}
-        {failure ? (
-          <div className={styles.inlineError}>
-            <ErrorAlert error={failure} title="Messages could not be loaded" action={<Button size="sm" variant="secondary" onClick={() => void thread.refetch()}>Try again</Button>} />
-          </div>
-        ) : null}
-        <MessageList
-          ref={list}
-          address={address}
-          title={title}
-          messages={thread.messages}
-          pending={pending}
-          perspective={perspective}
-          group={group}
-          hasOlder={!!thread.hasNextPage}
-          loadingOlder={thread.isFetchingNextPage}
-          loadOlder={thread.fetchNextPage}
-          firstUnread={firstUnread}
-          loading={thread.isPending}
-        />
-        <Composer ref={composer} address={address} name={name} messages={thread.messages} me={perspective} disabledReason={disabledReason} onSent={onSent} onSelectLast={onSelectLast} onLeave={onLeave} />
-      </section>
-      <MessageMenu state={menu} onClose={() => setMenu(null)} />
-      <MessageDetailsDialog message={detailsFor} address={address} view={view} onClose={() => setDetailsFor(null)} />
-      <DetailsPortal title={isGroupAddress(address) ? "Group details" : "Details"}>
-        <DetailsPanel conversation={conversation} address={address} presence={presence} />
-      </DetailsPortal>
+      <ThreadPeopleProvider value={people}>
+        <section className={styles.thread} aria-labelledby="thread-title">
+          <ThreadHeader address={address} view={view} title={title} kind={kind} conversation={conversation} others={others} presence={presence} busy={busy}
+            onCopy={(text, what) => void copy(text, what)}
+            onMarkRead={!readOnly && conversation ? () => void markAllRead([conversation]) : null} />
+          {conversation?.superseded_by ? (
+            <p className={styles.banner} role="note">
+              This history continues in <Link href={conversationHref(conversation.superseded_by, { view })}>the current conversation</Link>.
+            </p>
+          ) : null}
+          {!online ? (
+            <p className={styles.banner} data-tone="offline" role="status">
+              <WifiOff size={14} strokeWidth={1.75} aria-hidden="true" /> You are offline. New messages arrive when you are back; what you send waits and goes out then.
+            </p>
+          ) : null}
+          {failure && !unloaded ? (
+            <div className={styles.inlineError}>
+              <ErrorAlert error={failure} title="Newer messages could not be loaded" action={<Button size="sm" variant="secondary" onClick={() => void thread.refetch()}>Try again</Button>} />
+            </div>
+          ) : null}
+          {unloaded ? (
+            <div className={styles.loadFailed}>
+              <ErrorAlert error={failure} title="The messages could not be loaded" action={<Button size="sm" variant="secondary" onClick={() => void thread.refetch()}>Try again</Button>} />
+            </div>
+          ) : (
+            <MessageList
+              ref={list}
+              address={address}
+              title={title}
+              messages={thread.messages}
+              pending={pending}
+              perspective={perspective}
+              group={group}
+              hasOlder={!!thread.hasNextPage}
+              loadingOlder={thread.isFetchingNextPage}
+              loadOlder={thread.fetchNextPage}
+              firstUnread={firstUnread}
+              loading={thread.isPending || !opened}
+              busy={busy}
+              deleting={deleting}
+              beginning={<ThreadBeginning kind={kind} others={others} title={title} conversation={conversation} empty={empty} />}
+            />
+          )}
+          <Composer ref={composer} address={address} name={name} messages={thread.messages} me={perspective} disabledReason={disabledReason} onSent={onSent} onSelectLast={onSelectLast} onLeave={onLeave} />
+        </section>
+        <MessageMenu state={menu} onClose={() => setMenu(null)} />
+        <MessageDetailsDialog message={detailsFor} address={address} view={view} onClose={() => setDetailsFor(null)} />
+        <DetailsPortal title={isGroupAddress(address) ? "Group details" : "Details"}>
+          <DetailsPanel conversation={conversation} address={address} presence={presence} />
+        </DetailsPortal>
+      </ThreadPeopleProvider>
     </ThreadActionsProvider>
   );
 }
