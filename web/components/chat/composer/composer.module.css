@@ -1,0 +1,107 @@
+/*
+ * The composer, docked under the thread: a hairline above, the field and its send button sharing one squircle (the
+ * send button wakes up in the accent when there is something to send), the side actions quiet until used.
+ */
+.composer {
+  flex: none;
+  border-top: 1px solid var(--border-subtle);
+  padding: var(--space-3) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  background: var(--background);
+}
+.composer > * { width: min(100%, 760px); margin-inline: auto; }
+
+.row { display: flex; align-items: flex-end; gap: var(--space-2); }
+.actions { display: flex; flex: none; align-items: center; gap: 2px; padding-bottom: 4px; }
+
+.box {
+  --sq-r: 18px;
+  --sq-fill: var(--surface);
+  --sq-stroke: var(--border);
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: flex-end;
+  border: 1px solid var(--sq-stroke);
+  background: var(--sq-fill);
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+.box:focus-within { --sq-stroke: var(--border-strong); }
+
+.field {
+  display: block;
+  min-width: 0;
+  flex: 1;
+  max-height: calc(22px * 10 + 20px);
+  resize: none;
+  overflow-y: auto;
+  border: 0;
+  padding: 10px 6px 10px 16px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: var(--text-base);
+  line-height: 22px;
+  outline: none;
+  overflow-wrap: anywhere;
+  scrollbar-width: thin;
+}
+.field::placeholder { color: var(--text-muted); }
+
+.send {
+  --sq-r: 11px;
+  --sq-fill: var(--surface-muted);
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  place-items: center;
+  margin: 0 5px 5px 0;
+  border: 0;
+  padding: 0;
+  background: var(--sq-fill);
+  color: var(--text-muted);
+  cursor: default;
+  transition: background-color var(--duration-standard) var(--ease-standard), color var(--duration-standard) var(--ease-standard), transform var(--duration-instant) var(--ease-standard);
+}
+.send[data-ready] { --sq-fill: var(--accent); color: var(--accent-foreground); cursor: pointer; }
+.send[data-ready]:active { transform: scale(.94); }
+.send:focus-visible { --sq-fill: var(--surface-pressed); color: var(--foreground); outline: none !important; }
+.send[data-ready]:focus-visible { --sq-fill: var(--accent-strong); color: var(--accent-foreground); }
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+  border-left: 2px solid var(--accent);
+  padding: 2px var(--space-1) 2px var(--space-3);
+  color: var(--text-secondary);
+}
+.bar > svg { flex: none; color: var(--accent); }
+.barText { display: grid; min-width: 0; flex: 1; }
+.barTitle { color: var(--foreground); font-size: var(--text-sm); font-weight: 500; }
+.barLine { overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.barClose { --sq-r: 9px; --sq-fill: transparent; display: grid; width: 30px; height: 30px; flex: none; place-items: center; border: 0; background: var(--sq-fill); color: var(--text-muted); cursor: pointer; }
+.barClose:hover, .barClose:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); outline: none !important; }
+
+.tray { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-2); padding: 0; list-style: none; }
+.trayItem { --sq-r: 12px; --sq-fill: var(--surface-muted); display: inline-flex; max-width: 100%; align-items: center; gap: var(--space-2); padding: 6px 6px 6px 12px; background: var(--sq-fill); font-size: var(--text-sm); }
+.trayItem[data-status="failed"] { color: var(--danger); }
+.trayName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trayProgress { color: var(--text-muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.trayRemove { --sq-r: 7px; --sq-fill: transparent; display: grid; width: 24px; height: 24px; place-items: center; border: 0; background: var(--sq-fill); color: var(--text-muted); cursor: pointer; }
+.trayRemove:hover, .trayRemove:focus-visible { --sq-fill: var(--surface-pressed); color: var(--foreground); outline: none !important; }
+
+.disabled { color: var(--text-muted); font-size: var(--text-sm); text-align: center; padding: var(--space-2) 0; }
+.note { margin-top: var(--space-2); color: var(--text-muted); font-size: var(--text-xs); }
+
+@media (max-width: 767px) {
+  .composer { padding: var(--space-2) var(--space-3) calc(var(--space-2) + env(safe-area-inset-bottom, 0px)); }
+  .field { font-size: 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .box, .send { transition: none; }
+  .send[data-ready]:active { transform: none; }
+}

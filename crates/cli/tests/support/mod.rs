@@ -38,6 +38,28 @@ pub struct StubState {
     pub sync_pages: VecDeque<Value>,
     pub sync_calls: Vec<HashMap<String, String>>,
     pub receipts: Vec<String>,
+    /// Speech: whether the service has voices at all (false: a DM service before 0.17).
+    pub speech_supported: bool,
+    /// Whether the service has a speech provider configured (`enabled` in the voice list).
+    pub speech_enabled: bool,
+    /// Voices chosen per account uuid.
+    pub chosen_voices: HashMap<String, String>,
+    /// Every voice route call: method, decoded account, body, Idempotency-Key.
+    pub voice_calls: Vec<(String, String, Value, Option<String>)>,
+    /// Bodies of `POST /api/v1/speech`.
+    pub renders: Vec<Value>,
+    /// Queries of message speech requests.
+    pub listens: Vec<HashMap<String, String>>,
+    /// Transcriptions: content type, query and the bytes sent.
+    pub transcriptions: Vec<(String, HashMap<String, String>, Vec<u8>)>,
+    /// Bodies of message sends.
+    pub sent: Vec<Value>,
+    /// Bodies of bulk receipts, with the conversation.
+    pub bulk_receipts: Vec<(String, Value)>,
+    /// Messages to answer for GET .../messages/{code} instead of the default one.
+    pub messages: HashMap<String, Value>,
+    /// Headers of every request to the stand-in attachment host (`/files/…`).
+    pub attachment_requests: Vec<HeaderMap>,
     counter: u64,
 }
 
@@ -246,6 +268,9 @@ async fn message(
     if code == "404" {
         return (StatusCode::NOT_FOUND, Json(json!({"type":"error","data":{"error":{"code":"not_found","message":"no such message"}}}))).into_response();
     }
+    if let Some(found) = state.messages.get(&code) {
+        return envelope("message", found.clone());
+    }
     envelope(
         "message",
         json!({"message-id":code,"conversation_id":conversation,"recipient_id":null,
@@ -272,6 +297,281 @@ async fn receipt(
         "voice_transcript":null,"reply":null,"bundle":null,"history":[],"created_at":"2026-10-10T10:00:00Z",
         "updated_at":null,"deleted_at":null,"delivered_at":"2026-10-10T10:00:01Z","read_at":null}),
     )
+}
+
+const VOICES: [(&str, &str, &str); 5] = [
+    (
+        "mark",
+        "Mark",
+        "Relaxed and natural, like a friend catching you up. Male, American.",
+    ),
+    (
+        "brittney",
+        "Brittney",
+        "Bright and upbeat. Female, American.",
+    ),
+    (
+        "jamal",
+        "Young Jamal",
+        "Chill and easygoing. Male, American.",
+    ),
+    ("jessa", "Jessa", "Warm and casual. Female, American."),
+    ("hope", "Hope", "Clear and cheerful. Female, American."),
+];
+
+fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
+    (
+        status,
+        Json(json!({"type":"error","data":{"error":{"code":code,"message":message,"hint":"stand-in hint"}}})),
+    )
+        .into_response()
+}
+
+async fn voices(State(state): State<Shared>) -> Response {
+    let state = state.lock().unwrap_or_else(|p| p.into_inner());
+    if !state.speech_supported {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "The resource was not found.",
+        );
+    }
+    envelope(
+        "voices",
+        json!({"model":"eleven_v4","enabled":state.speech_enabled,"items":VOICES.iter().map(|(key,name,description)|
+            json!({"key":key,"name":name,"description":description,"voice_id":format!("id-{key}")})).collect::<Vec<_>>(),
+            "default_rule":"stand-in default rule"}),
+    )
+}
+
+async fn voice(
+    State(state): State<Shared>,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    Path(account): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(caller) = caller(&state, &headers) else {
+        return unauthorized();
+    };
+    let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    state
+        .voice_calls
+        .push((method.to_string(), account.clone(), body.clone(), key));
+    // The caller's own uuid, or another account by id.
+    let uuid = if account == caller["uuid"] {
+        account.clone()
+    } else {
+        format!("uuid-of-{account}")
+    };
+    if method == axum::http::Method::PUT {
+        if body["type"] != "voice.set" {
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "request type does not match this endpoint",
+            );
+        }
+        let wanted = body["data"]["voice"].as_str().unwrap_or_default();
+        if !VOICES.iter().any(|(key, _, _)| *key == wanted) {
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "voice_not_found",
+                "There is no such voice.",
+            );
+        }
+        state.chosen_voices.insert(uuid.clone(), wanted.to_owned());
+    } else if method == axum::http::Method::DELETE {
+        state.chosen_voices.remove(&uuid);
+    }
+    let chosen = state.chosen_voices.get(&uuid).cloned();
+    let key = chosen.clone().unwrap_or_else(|| "jamal".into());
+    let (_, name, description) = VOICES
+        .iter()
+        .find(|(k, _, _)| *k == key)
+        .copied()
+        .unwrap_or(VOICES[2]);
+    envelope(
+        "voice",
+        json!({"account":{"type":"silicon","id":account,"uuid":uuid},
+            "voice":{"key":key,"name":name,"description":description},
+            "chosen":chosen.is_some(),"chosen_by":null,"updated_at":null,"can_change":true}),
+    )
+}
+
+/// Half a second of a loud 24 kHz mono 16-bit tone that starts at once, as DM's speech does.
+pub fn wav(milliseconds: usize) -> Vec<u8> {
+    let samples = 24 * milliseconds;
+    let mut bytes = Vec::with_capacity(44 + samples * 2);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + samples as u32 * 2).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&24_000_u32.to_le_bytes());
+    bytes.extend_from_slice(&48_000_u32.to_le_bytes());
+    bytes.extend_from_slice(&2_u16.to_le_bytes());
+    bytes.extend_from_slice(&16_u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(samples as u32 * 2).to_le_bytes());
+    for index in 0..samples {
+        let sample: i16 = if (index / 55) % 2 == 0 { 8000 } else { -8000 };
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
+fn audio(voice: &str, cache: &str) -> Response {
+    (
+        [
+            ("content-type", "audio/wav".to_owned()),
+            ("x-dm-voice", voice.to_owned()),
+            ("x-dm-duration-ms", "500".to_owned()),
+            ("x-dm-cache", cache.to_owned()),
+            ("etag", "\"stand-in\"".to_owned()),
+        ],
+        wav(500),
+    )
+        .into_response()
+}
+
+async fn render(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+    if caller(&state, &headers).is_none() {
+        return unauthorized();
+    }
+    let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    state.renders.push(body.clone());
+    if body["type"] != "speech.render" {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation_error",
+            "request type does not match this endpoint",
+        );
+    }
+    audio(body["data"]["voice"].as_str().unwrap_or("jamal"), "miss")
+}
+
+async fn listen(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path((_conversation, code)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+    if caller(&state, &headers).is_none() {
+        return unauthorized();
+    }
+    state.listens.push(query);
+    if code == "0zz" {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "nothing_to_speak",
+            "This message has no words to say.",
+        );
+    }
+    audio("mark", "hit")
+}
+
+async fn transcribe(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+    if caller(&state, &headers).is_none() {
+        return unauthorized();
+    }
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let duration =
+        silicon_dm_client::speech::wav_info(&body).map_or(1000, |info| info.duration_milliseconds);
+    state
+        .transcriptions
+        .push((content_type, query, body.to_vec()));
+    envelope(
+        "transcription",
+        json!({"transcript":"hello from the stand-in","language":"en","duration_milliseconds":duration,"confidence":0.9}),
+    )
+}
+
+async fn send(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(conversation): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(caller) = caller(&state, &headers) else {
+        return unauthorized();
+    };
+    state.sent.push(body.clone());
+    let data = &body["data"];
+    let speech = data.get("speech").filter(|s| !s.is_null()).map(|speech| {
+        json!({"voice":speech["voice"].as_str().unwrap_or("jamal"),"voice_name":"Young Jamal",
+            "script":speech["script"],"model":"eleven_v4","status":"pending","duration_milliseconds":null,"peaks":null})
+    });
+    envelope(
+        "message.create.successful",
+        json!({"message-id":"001","conversation_id":conversation,"recipient_id":null,
+            "sender":{"type":caller["kind"],"id":caller["id"],"uuid":caller["uuid"]},
+            "message":data["message"],"attachments":data["attachments"],"voice_transcript":null,
+            "reply":null,"bundle":null,"history":[],"created_at":"2026-10-17T10:00:00Z","updated_at":null,
+            "deleted_at":null,"delivered_at":null,"read_at":null,"speech":speech,"voice":null,"gif":null,
+            "attachment_details":[],"metadata":{}}),
+    )
+}
+
+async fn bulk_receipt(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(conversation): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+    if caller(&state, &headers).is_none() {
+        return unauthorized();
+    }
+    state.bulk_receipts.push((conversation, body.clone()));
+    envelope(
+        "receipts",
+        json!({"updated":3,"unread_count":0,"last_read_message_id":body["data"]["up_to"]}),
+    )
+}
+
+async fn attachment(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+    state.attachment_requests.push(headers);
+    match name.as_str() {
+        "note.ogg" => (
+            [("content-type", "audio/ogg")],
+            b"OggS\0\x02stand-in ogg audio".to_vec(),
+        )
+            .into_response(),
+        "speech.bin" => ([("content-type", "application/octet-stream")], wav(300)).into_response(),
+        "report.pdf" => {
+            ([("content-type", "application/pdf")], b"%PDF-1.7".to_vec()).into_response()
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 pub struct Stub {
@@ -312,6 +612,17 @@ impl Stub {
             sync_pages: VecDeque::new(),
             sync_calls: Vec::new(),
             receipts: Vec::new(),
+            speech_supported: true,
+            speech_enabled: true,
+            chosen_voices: HashMap::new(),
+            voice_calls: Vec::new(),
+            renders: Vec::new(),
+            listens: Vec::new(),
+            transcriptions: Vec::new(),
+            sent: Vec::new(),
+            bulk_receipts: Vec::new(),
+            messages: HashMap::new(),
+            attachment_requests: Vec::new(),
             counter: 0,
         }));
         let app = Router::new()
@@ -329,6 +640,23 @@ impl Stub {
                 "/api/v1/conversations/{conversation}/messages/{code}/receipts",
                 post(receipt),
             )
+            .route("/api/v1/voices", get(voices))
+            .route(
+                "/api/v1/voices/{account}",
+                get(voice).put(voice).delete(voice),
+            )
+            .route("/api/v1/speech", post(render))
+            .route("/api/v1/speech/transcriptions", post(transcribe))
+            .route(
+                "/api/v1/conversations/{conversation}/messages/{code}/speech",
+                get(listen),
+            )
+            .route("/api/v1/conversations/{conversation}/messages", post(send))
+            .route(
+                "/api/v1/conversations/{conversation}/receipts",
+                post(bulk_receipt),
+            )
+            .route("/files/{name}", get(attachment))
             .route("/live", get(|| async { StatusCode::NO_CONTENT }))
             .with_state(state.clone());
         let server = tokio::spawn(async move {
@@ -350,10 +678,23 @@ pub struct Home {
     pub dir: tempfile::TempDir,
     pub base: String,
 }
+/// The relay ports test homes prefer: this build's CLI lane (4650-4699), never the default
+/// 19780, which another DM on this machine may own. A busy port falls back to the next one.
+static NEXT_RELAY_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
 impl Home {
     pub fn new(stub: &Stub) -> Home {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let offset = NEXT_RELAY_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 50;
+        let port = 4650 + (u16::try_from(std::process::id() % 50).unwrap_or(0) + offset) % 50;
+        std::fs::create_dir_all(dir.path().join("state")).expect("state dir");
+        std::fs::write(
+            dir.path().join("state").join("config.json"),
+            json!({"relay_port": port}).to_string(),
+        )
+        .expect("config");
         Home {
-            dir: tempfile::tempdir().expect("tempdir"),
+            dir,
             base: stub.base.clone(),
         }
     }

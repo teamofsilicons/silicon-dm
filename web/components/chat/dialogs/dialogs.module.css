@@ -1,0 +1,19 @@
+/* The chat's dialogs: one column of fields, the primary action last on the right (full width on phones). */
+.form { display: grid; gap: var(--space-5); }
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+
+.invitations { display: grid; margin: 0; padding: 0; list-style: none; }
+.invitation { display: grid; align-items: center; gap: var(--space-3); border-top: 1px solid var(--border-subtle); padding: var(--space-4) 0; grid-template-columns: minmax(0, 1fr) auto; }
+.invitation:first-child { border-top: 0; padding-top: 0; }
+.invitationText { display: grid; min-width: 0; gap: 2px; }
+.invitationName { font-weight: 500; }
+.invitationDescription { color: var(--text-secondary); font-size: var(--text-sm); }
+.invitationMeta { overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.invitationActions { display: flex; gap: var(--space-2); }
+.invitationError { grid-column: 1 / -1; }
+.quiet { color: var(--text-muted); font-size: var(--text-sm); }
+
+@media (max-width: 520px) {
+  .actions > :last-child { flex: 1; }
+  .invitation { grid-template-columns: minmax(0, 1fr); }
+}

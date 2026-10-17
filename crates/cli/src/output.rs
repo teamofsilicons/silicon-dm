@@ -53,6 +53,17 @@ pub fn error_json(error: &anyhow::Error) -> Value {
     if let Some(reason) = error.downcast_ref::<SessionError>() {
         return json!({"error": {"code": reason.code, "message": reason.message, "hint": reason.hint}});
     }
+    if let Some(problem) = error.downcast_ref::<silicon_dm_client::speech::SpeechError>() {
+        let mut detail =
+            json!({"code": problem.code, "message": problem.message, "hint": problem.hint});
+        if let Some(reason) = problem.reason {
+            detail["reason"] = json!(reason);
+        }
+        if let Some(position) = problem.position {
+            detail["position"] = json!(position);
+        }
+        return json!({"error": detail});
+    }
     if let Some(reason) = error.downcast_ref::<SignInError>() {
         let mut detail =
             json!({"code": reason.code(), "message": reason.message(), "hint": reason.hint()});
@@ -80,6 +91,32 @@ fn default_hint(code: &str) -> Option<&'static str> {
             "This dm and the DM service speak different contracts: point DM_API_URL at a DM 0.15 service, or update dm (Silicon Apps keeps it current)."
         }
         "sync_reset_required" => "Run dm sync --reset, then refresh with dm conversations list.",
+        "voice_not_found" => {
+            "dm voices list shows the voices this DM service speaks with; leave out --voice to speak in your own."
+        }
+        "voice_change_forbidden" => {
+            "An account chooses its own voice, and a Silicon's custodian chooses for it (dm voices set KEY --for si:…)."
+        }
+        "speech_not_configured" => {
+            "This DM service has no speech provider configured; its operators set DM_DEEPGRAM_API_KEY. Text messages work as usual."
+        }
+        "speech_unavailable" => {
+            "Speech is briefly unavailable; retry after the time in retry_after. A queued spoken message is retried by the relay."
+        }
+        "speech_rejected" => {
+            "The voice could not speak this script: simplify its cues (dm docs expressive) or try another voice (dm voices list)."
+        }
+        "nothing_to_speak" => {
+            "The message has no words to say (only attachments or a GIF); dm messages transcribe reads a voice note instead."
+        }
+        "message_deleted" => "The message was deleted; its content, speech included, is gone.",
+        "unsupported_audio_type" => {
+            "DM transcribes audio/webm, audio/ogg, audio/wav, audio/mpeg, audio/mp4, audio/x-m4a, audio/aac and audio/flac; convert it (ffmpeg -i in.xxx out.wav)."
+        }
+        "audio_too_large" => "Transcribe a shorter recording (split it with any audio editor).",
+        "read_only_view" => {
+            "A custodian can read its Silicon's conversations but not mark them read; the Silicon marks its own messages read."
+        }
         _ => return None,
     })
 }

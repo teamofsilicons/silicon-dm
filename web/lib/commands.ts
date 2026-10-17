@@ -21,6 +21,8 @@ export interface ShellCommand {
   icon?: ReactNode;
   /** A hint shown at the end of the row, for example "4". */
   shortcut?: string;
+  /** The keyboard shortcut (lib/shortcuts/registry.ts) that does the same: its current keys show at the end of the row. */
+  shortcutId?: string;
   run: () => void;
 }
 

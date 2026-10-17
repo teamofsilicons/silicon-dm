@@ -21,13 +21,16 @@ use crate::{
 };
 
 /// Keys whose values belong to users, never to the contract.
-const USER_CONTENT: [&str; 7] = [
+const USER_CONTENT: [&str; 10] = [
     "metadata",
     "message",
     "text",
     "attachments",
+    "attachment_details",
     "voice",
     "gif",
+    "speech",
+    "script",
     "voice_transcript",
 ];
 /// Lookups DM may make to render one response (unknown accounts are rare).
@@ -40,7 +43,10 @@ pub(super) async fn responses(
 ) -> Response {
     let path = request.uri().path().to_owned();
     let eligible = path.starts_with("/api/v1/") && path != "/api/v1/contracts";
-    let summary = path == "/api/v1/conversations";
+    // Lists and single conversation reads both answer summaries.
+    let summary = path == "/api/v1/conversations"
+        || (request.method() == axum::http::Method::GET
+            && silicon_dm_protocol::http_type("GET", &path) == "conversation");
     let response = next.run(request).await;
     if !eligible
         || !response

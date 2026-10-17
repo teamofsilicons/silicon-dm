@@ -51,6 +51,7 @@ struct MessageSenderRecord {
     sender_kind: String,
     sender_id: String,
     status: String,
+    sequence: i64,
 }
 
 #[derive(FromRow)]
@@ -239,6 +240,23 @@ impl PostgresStore {
                     command.via_app.as_deref(),
                 )
                 .await?;
+                if let Some(job) = &command.speech {
+                    // Rendering is queued with the message, so a crash never loses it; the
+                    // sender's speech limits are charged here (a replay is never charged).
+                    if let Err(limit) = super::speech::queue_speech_render_in(
+                        &mut transaction,
+                        message_id,
+                        &command.sender,
+                        job,
+                    )
+                    .await?
+                    {
+                        return Err(super::speech::limit_error(
+                            limit,
+                            limit_allowance(limit, job),
+                        ));
+                    }
+                }
                 enqueue_message_deliveries_in(
                     &mut transaction,
                     &partition,
@@ -392,7 +410,8 @@ impl PostgresStore {
             SELECT
                 sender_kind::text AS sender_kind,
                 sender_id,
-                status::text AS status
+                status::text AS status,
+                sequence
             FROM messages
             WHERE id = $1 AND conversation_id = $2 AND organization_id = $3
             FOR UPDATE
@@ -509,6 +528,15 @@ impl PostgresStore {
             )
             .await?;
         }
+        if command.status == ReceiptStatus::Read {
+            super::read_states::advance_read_state_in(
+                &mut transaction,
+                command.conversation_id,
+                &command.recipient,
+                Some(message.sequence),
+            )
+            .await?;
+        }
         transaction.commit().await.map_err(map_constraint_error)
     }
 
@@ -611,11 +639,12 @@ pub(crate) async fn insert_message_in(
             reply_to_message_id,
             sender_address,
             recipient_address,
-            via_app
+            via_app,
+            speech
         )
         VALUES (
             $1, $2, $3, $4::text::actor_kind, $5, 1, 'sent', $6, $7,
-            3, $8, $9, $10, $11, $12, $13
+            3, $8, $9, $10, $11, $12, $13, $14
         )
         "#,
     )
@@ -637,6 +666,7 @@ pub(crate) async fn insert_message_in(
             .map(crate::domain::ActorId::as_str),
     )
     .bind(via_app)
+    .bind(content.speech.as_ref().map(sqlx::types::Json))
     .execute(&mut **transaction)
     .await
     .map_err(map_constraint_error)?;
@@ -964,6 +994,18 @@ fn validate_device_id(device_id: &str) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+/// The limit a refused speech charge ran into, for its error message.
+pub(crate) fn limit_allowance(
+    limit: super::speech::LimitExceeded,
+    job: &super::speech::SpeechRenderJob,
+) -> u64 {
+    match limit {
+        super::speech::LimitExceeded::RendersPerMinute => u64::from(job.charge.renders_per_minute),
+        super::speech::LimitExceeded::DailyCharacters => job.charge.daily_characters,
+        super::speech::LimitExceeded::TranscriptionsPerMinute => 0,
+    }
 }
 
 pub(crate) const fn receipt_status_name(status: ReceiptStatus) -> &'static str {

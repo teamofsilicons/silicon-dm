@@ -16,7 +16,14 @@ root = Path(__file__).resolve().parent.parent
 source = root / "docs"
 destination = root / "crates" / "cli" / "docs"
 EXCLUDED = {"history", "migration"}
-REQUIRED = [Path("README.md"), Path("cli/README.md"), Path("client/runtime.md")]
+REQUIRED = [
+    Path("README.md"),
+    Path("cli/README.md"),
+    Path("client/runtime.md"),
+    # `dm docs voice` and `dm docs expressive` embed these two.
+    Path("start/voice.md"),
+    Path("start/expressive-writing.md"),
+]
 
 
 def expected() -> dict[Path, Path]:

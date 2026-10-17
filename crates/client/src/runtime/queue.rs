@@ -104,7 +104,16 @@ pub(crate) fn lane(operation: &crate::relay::Operation) -> String {
         | SendMessage {
             conversation_id, ..
         }
+        | SendSpokenMessage {
+            conversation_id, ..
+        }
         | EditMessage {
+            conversation_id, ..
+        }
+        | EditSpokenMessage {
+            conversation_id, ..
+        }
+        | ReceiptsUpTo {
             conversation_id, ..
         }
         | DeleteMessage {

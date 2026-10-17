@@ -27,6 +27,11 @@ enum Topic {
     Accounts,
     /// Command grammar, profiles, messaging, drafts and groups.
     Cli,
+    /// Voices, spoken messages, listening and transcription: dm voices, --speak, dm speech.
+    Voice,
+    /// How to write a spoken message that sounds right: cues, rhythm, before-and-after scripts.
+    #[value(alias = "write-for-the-ear")]
+    Expressive,
     /// Receiving without pushes: dm sync and dm inbox --watch.
     Receiving,
     /// The outgoing relay at dm.localhost.
@@ -86,6 +91,12 @@ const GUIDES: &[Guide] = &[
         "accounts.md"
     ),
     guide!("cli", "DM CLI guide", "cli/README.md"),
+    guide!("voice", "Voices, speaking and listening", "start/voice.md"),
+    guide!(
+        "expressive",
+        "Write for the ear",
+        "start/expressive-writing.md"
+    ),
     guide!("receiving", "Receiving messages", "cli/receiving.md"),
     guide!("relay", "Outgoing relay", "cli/relay.md"),
     guide!("groups", "Groups and membership", "groups.md"),
@@ -162,11 +173,12 @@ pub fn render(options: &DocsArgs) -> Result<Value> {
     }
     Ok(json!({
         "embedded":true,"package_version":env!("CARGO_PKG_VERSION"),
-        "guides":{"getting_started":"docs/getting-started.md","accounts":"docs/accounts.md","cli":"docs/cli/README.md","receiving":"docs/cli/receiving.md","client":"docs/client/README.md","api":"docs/api/README.md"},
+        "guides":{"getting_started":"docs/getting-started.md","accounts":"docs/accounts.md","cli":"docs/cli/README.md","voice":"docs/start/voice.md","expressive":"docs/start/expressive-writing.md","receiving":"docs/cli/receiving.md","client":"docs/client/README.md","api":"docs/api/README.md"},
         "repository":"https://github.com/teamofsilicons/silicon-dm",
         "topics":GUIDES.iter().map(entry).collect::<Vec<_>>(),
         "sign_in":{"carbon":"dm login","silicon":"silicon-accounts login --app dm -q | dm login --slt-stdin","status":"dm login status --json"},
         "receiving":"dm inbox --watch prints new messages as JSON lines (dm sync for one page of references). Delivered and Read receipts are explicit: dm receipts delivered|read.",
+        "speaking":"dm messages send CONVERSATION --speak SCRIPT says it in your voice (dm voices list); read dm docs expressive before writing a script.",
         "help":"dm docs TOPIC; dm docs --search TEXT; dm docs --all; dm --help; dm COMMAND --help",
         "read_as_markdown":"dm docs cli | jq -r .content",
         "index_content":include_str!("../docs/README.md")
@@ -194,6 +206,29 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn the_speaking_guides_answer_to_their_topics_and_alias() {
+        for (name, path) in [
+            ("voice", "docs/start/voice.md"),
+            ("expressive", "docs/start/expressive-writing.md"),
+            ("write-for-the-ear", "docs/start/expressive-writing.md"),
+        ] {
+            let topic = Topic::from_str(name, false).expect(name);
+            let options = DocsArgs {
+                topic: Some(topic),
+                search: None,
+                all: false,
+            };
+            let guide = render(&options).expect(name);
+            assert_eq!(guide["path"], path);
+            assert!(
+                guide["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("[warmly]"))
+            );
+        }
+    }
+
     #[test]
     fn every_advertised_guide_can_be_selected() {
         for guide in GUIDES {

@@ -34,6 +34,17 @@ pub use crate::domain::ConversationAccess;
 /// Validated required idempotency header.
 pub struct Idempotency(pub IdempotencyKey);
 
+/// Validated optional idempotency header (routes that are idempotent by themselves).
+pub struct OptionalIdempotency(pub Option<IdempotencyKey>);
+
+/// A JSON envelope whose `type` the handler checks itself (a route that accepts several).
+pub struct ApiEnvelope<T> {
+    /// The envelope's `type`.
+    pub kind: String,
+    /// The envelope's `data`.
+    pub data: T,
+}
+
 /// Parsed optimistic-concurrency version.
 pub struct IfMatch(pub Option<i64>);
 
@@ -82,14 +93,15 @@ pub(crate) fn route_requirement(method: &Method, path: &str) -> AuthRequirement 
     let operation = silicon_dm_protocol::http_type(method.as_str(), path);
     let read = *method == Method::GET;
     let proof_scope = match operation {
-        "conversations" | "group" if read => Some("dm.conversations.read"),
+        "conversations" | "conversation" | "group" if read => Some("dm.conversations.read"),
         // The sync feed only references messages the account can already read, so an app
-        // that may read them can follow new ones (Ting is off by default).
-        "messages" | "message" | "bundle" | "sync" if read => Some("dm.messages.read"),
+        // that may read them can follow new ones (Ting is off by default). Listening reads
+        // a message too; its renders are charged to the account either way.
+        "messages" | "message" | "bundle" | "sync" | "speech" if read => Some("dm.messages.read"),
         "create_conversation" | "message.create" | "message.updated" | "message.deleted" => {
             Some("dm.messages.write")
         }
-        "receipt" => Some("dm.receipts.write"),
+        "receipt" | "receipts" => Some("dm.receipts.write"),
         "draft" | "put_draft" | "delete_draft" => Some("dm.drafts.write"),
         _ => None,
     };
@@ -146,6 +158,12 @@ impl FromRequestParts<AppState> for Authenticated {
                         && parts.method != Method::GET
                         && parts.method != Method::DELETE)
                 {
+                    if silicon_dm_protocol::http_type(parts.method.as_str(), parts.uri.path())
+                        == "receipts"
+                        && access == ConversationAccess::Custodian
+                    {
+                        return Err(super::receipts::read_only_view());
+                    }
                     return Err(custodian_read_only(&parts.method));
                 }
                 parameters.insert("conversation_id".into(), id.to_string());
@@ -227,6 +245,26 @@ impl FromRequestParts<AppState> for Idempotency {
             IdempotencyKey::from_str(value)
                 .map(Self)
                 .map_err(|error| AppError::validation(error.to_string()))
+        });
+        std::future::ready(result)
+    }
+}
+
+impl FromRequestParts<AppState> for OptionalIdempotency {
+    type Rejection = AppError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &AppState,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        let result = optional_single_header(&parts.headers, &IDEMPOTENCY_KEY).and_then(|value| {
+            value
+                .map(|value| {
+                    IdempotencyKey::from_str(value)
+                        .map_err(|error| AppError::validation(error.to_string()))
+                })
+                .transpose()
+                .map(Self)
         });
         std::future::ready(result)
     }
@@ -344,6 +382,27 @@ where
         serde_json::from_value(envelope.data)
             .map(Self)
             .map_err(|_| ApiInputRejection::validation("request data is invalid"))
+    }
+}
+
+impl<S, T> FromRequest<S> for ApiEnvelope<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = ApiInputRejection;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(envelope) =
+            Json::<silicon_dm_protocol::Envelope<serde_json::Value>>::from_request(request, state)
+                .await
+                .map_err(|rejection| ApiInputRejection::from_json(&rejection))?;
+        let data = serde_json::from_value(envelope.data)
+            .map_err(|_| ApiInputRejection::validation("request data is invalid"))?;
+        Ok(Self {
+            kind: envelope.kind,
+            data,
+        })
     }
 }
 

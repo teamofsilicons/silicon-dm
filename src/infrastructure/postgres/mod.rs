@@ -15,8 +15,10 @@ pub mod link_identities;
 mod messages;
 mod presence;
 mod public_messages;
+mod read_states;
 mod revisions;
 mod rows;
+mod speech;
 mod sync;
 mod ting;
 
@@ -33,7 +35,12 @@ use crate::{
 pub use accounts::{Applied, StoredAccount, valid_public_id};
 pub use allow_list::AllowListEntry;
 pub use http_presence::PresenceLease;
+pub use read_states::{BulkReceiptOutcome, MAX_BULK_RECEIPTS, UnreadSummary};
 pub use revisions::Reviser;
+pub use speech::{
+    AudioMeta, ChosenVoice, LimitExceeded, MAX_RENDER_ATTEMPTS, RenderClaim, RenderOutcome,
+    RenderState, RenderStatus, SpeechCharge, SpeechRenderJob, limit_error, retry_after_seconds,
+};
 pub(crate) use sync::sync_reset_required;
 pub use sync::{SyncEvent, SyncScan};
 pub use ting::{

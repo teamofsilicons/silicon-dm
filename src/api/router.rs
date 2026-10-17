@@ -18,11 +18,15 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use super::{groups, handlers, me, webhook};
+use super::{groups, handlers, me, receipts, speech, webhook};
 use crate::{AppError, application::state::AppState};
 
 /// Margin added to the longest sync wait before the request is cut off.
 const SYNC_TIMEOUT_MARGIN: Duration = Duration::from_secs(15);
+/// Rendering speech takes 2 to 6 seconds, at most three minutes.
+const SPEECH_TIMEOUT: Duration = Duration::from_secs(200);
+/// A transcription includes uploading the audio (up to `DM_TRANSCRIBE_MAX_BYTES`).
+const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(610);
 
 /// Builds the versioned DM router.
 #[allow(
@@ -51,6 +55,13 @@ fn build_api_router(state: AppState) -> Router {
         )
         .route("/me", get(me::me))
         .route("/accounts", get(me::accounts))
+        .route("/voices", get(speech::voices))
+        .route(
+            "/voices/{account}",
+            get(speech::voice)
+                .put(speech::set_voice)
+                .delete(speech::reset_voice),
+        )
         .route("/delivery", get(me::delivery_status))
         .route("/messages", post(handlers::send_to_recipient))
         .route(
@@ -65,6 +76,14 @@ fn build_api_router(state: AppState) -> Router {
         .route(
             "/conversations",
             get(handlers::list_conversations).post(handlers::create_conversation),
+        )
+        .route(
+            "/conversations/{conversation_id}",
+            get(handlers::get_conversation),
+        )
+        .route(
+            "/conversations/{conversation_id}/receipts",
+            post(receipts::record_receipts),
         )
         .route(
             "/conversations/{conversation_id}/messages",
@@ -118,6 +137,26 @@ fn build_api_router(state: AppState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(u64::from(super::sync::MAX_WAIT_SECONDS)) + SYNC_TIMEOUT_MARGIN,
         ));
+    // Speech renders through Deepgram (seconds, not milliseconds); transcriptions upload.
+    let speech_routes = Router::new()
+        .route(
+            "/api/v1/conversations/{conversation_id}/messages/{message_id}/speech",
+            get(speech::message_speech),
+        )
+        .route(
+            "/api/v1/speech",
+            post(speech::render_speech).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            SPEECH_TIMEOUT,
+        ));
+    let transcription_routes = Router::new()
+        .route("/api/v1/speech/transcriptions", post(speech::transcribe))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            TRANSCRIPTION_TIMEOUT,
+        ));
     let retired_routes = Router::new()
         .route("/api/v1/ws", get(super::contracts::retired))
         .route("/api/v1/ws/shared", get(super::contracts::retired));
@@ -125,6 +164,8 @@ fn build_api_router(state: AppState) -> Router {
     Router::new()
         .merge(timed_routes)
         .merge(sync_routes)
+        .merge(speech_routes)
+        .merge(transcription_routes)
         .merge(retired_routes)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -138,11 +179,14 @@ fn build_api_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Nothing is cached by default; rendered audio sets its own policy (revalidate by `ETag`).
 async fn prevent_response_caching(mut response: Response) -> Response {
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-store"),
-    );
+    if !response.headers().contains_key(header::CACHE_CONTROL) {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
     response
 }
 

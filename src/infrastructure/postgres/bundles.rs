@@ -135,6 +135,20 @@ impl PostgresStore {
                     None,
                 )
                 .await?;
+                if let Some(job) = &command.speech
+                    && let Err(limit) = super::speech::queue_speech_render_in(
+                        &mut transaction,
+                        display_message_id,
+                        &command.creator,
+                        job,
+                    )
+                    .await?
+                {
+                    return Err(super::speech::limit_error(
+                        limit,
+                        super::messages::limit_allowance(limit, job),
+                    ));
+                }
                 let bundle_id = Uuid::now_v7();
                 sqlx::query(
                     r#"

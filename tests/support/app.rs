@@ -14,19 +14,25 @@ use axum::{
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use silicon_dm::{
-    application::{accounts::AccountRuntime, state::AppState, sync_hub::SyncHub},
+    application::{
+        accounts::AccountRuntime, speech::SpeechService, state::AppState, sync_hub::SyncHub,
+    },
     config::{
         AccountsSettings, DataKey, DatabaseSettings, ProofIssuers, ProviderSettings,
-        RealtimeSettings, RuntimeEnvironment, ServerSettings, Settings, TingSettings,
-        WorkerSettings,
+        RealtimeSettings, RuntimeEnvironment, ServerSettings, Settings, SpeechSettings,
+        TingSettings, WorkerSettings,
     },
-    infrastructure::{accounts::AccountsAdapter, giphy::GiphyClient, postgres::PostgresStore},
+    infrastructure::{
+        accounts::AccountsAdapter, deepgram::DeepgramClient, giphy::GiphyClient,
+        postgres::PostgresStore,
+    },
 };
 use tower::ServiceExt as _;
 
 use super::{
     BoxError, TestDatabase,
     accounts::{APP_ID, APP_SECRET, FakeAccounts, WEBHOOK_SECRET},
+    deepgram::{DEEPGRAM_TEST_KEY, FakeDeepgram},
 };
 
 pub fn settings(
@@ -86,6 +92,7 @@ pub fn settings(
             max_retry_delay: Duration::from_secs(5),
         },
         reporting: None,
+        speech: SpeechSettings::defaults()?,
         log_filter: "warn".to_owned(),
     })
 }
@@ -115,6 +122,24 @@ impl TestApp {
         Self::start_configured(database, proof_issuers, |_| {}).await
     }
 
+    /// The service with speech through `deepgram` (a fake), adjusted by `configure`.
+    pub async fn start_with_speech(
+        deepgram: &FakeDeepgram,
+        configure: impl FnOnce(&mut SpeechSettings),
+    ) -> Result<Self, BoxError> {
+        let issuers = "dm.conversations.read=interface,dm.messages.read=interface,dm.messages.write=interface";
+        let deepgram_url: url::Url = deepgram.base_url.parse()?;
+        let agent_url: url::Url = deepgram.agent_url.parse()?;
+        Self::start_configured(TestDatabase::start().await?, issuers, move |settings| {
+            settings.speech.deepgram_api_key =
+                Some(SecretString::from(DEEPGRAM_TEST_KEY.to_owned()));
+            settings.speech.deepgram_url = deepgram_url;
+            settings.speech.agent_url = agent_url;
+            configure(&mut settings.speech);
+        })
+        .await
+    }
+
     /// The service with Ting configured at `ting` (`DM_TING_URL`).
     pub async fn start_with_ting(ting: url::Url) -> Result<Self, BoxError> {
         let issuers = "dm.conversations.read=interface,dm.messages.read=interface,dm.messages.write=interface";
@@ -134,6 +159,9 @@ impl TestApp {
         configure(&mut settings);
         let store = PostgresStore::connect(&settings.database).await?;
         store.migrate().await?;
+        let speech = SpeechService::new(DeepgramClient::new(&settings.speech)?.map(|client| {
+            Arc::new(client) as Arc<dyn silicon_dm::application::ports::SpeechProvider>
+        }));
         let state = AppState {
             instance_id: Arc::from("test-instance"),
             identity: Arc::new(AccountsAdapter::new(&settings.accounts)?),
@@ -142,6 +170,7 @@ impl TestApp {
             store,
             accounts: AccountRuntime::default(),
             sync: SyncHub::default(),
+            speech,
         };
         let router = silicon_dm::api::build_router(state.clone());
         Ok(Self {
@@ -224,6 +253,55 @@ impl TestApp {
             .await
     }
 
+    /// Sends a request as built and returns the status, headers and raw body.
+    pub async fn raw(
+        &self,
+        request: Request<Body>,
+    ) -> Result<(StatusCode, axum::http::HeaderMap, axum::body::Bytes), BoxError> {
+        let response = self.router.clone().oneshot(request).await?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        Ok((status, headers, bytes))
+    }
+
+    /// `GET path` as `token` with extra headers, answering raw bytes (audio).
+    pub async fn get_raw(
+        &self,
+        path: &str,
+        token: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<(StatusCode, axum::http::HeaderMap, axum::body::Bytes), BoxError> {
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .header("authorization", format!("Bearer {token}"));
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        self.raw(request.body(Body::empty())?).await
+    }
+
+    /// `POST path` as `token` with an exact envelope (any `type`), answering raw bytes.
+    pub async fn post_envelope(
+        &self,
+        path: &str,
+        token: &str,
+        envelope: &Value,
+    ) -> Result<(StatusCode, axum::http::HeaderMap, axum::body::Bytes), BoxError> {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .header(
+                "idempotency-key",
+                format!("test-{}", uuid::Uuid::new_v4().simple()),
+            )
+            .body(Body::from(envelope.to_string()))?;
+        self.raw(request).await
+    }
+
     /// Delivers a signed webhook (raw body) and returns the status.
     pub async fn deliver(
         &self,
@@ -241,6 +319,13 @@ impl TestApp {
             .await?;
         Ok(response.status())
     }
+}
+
+/// Parses a JSON envelope's `data` (or the raw body as a string).
+pub fn data_of(bytes: &[u8]) -> Value {
+    let value: Value = serde_json::from_slice(bytes)
+        .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(bytes)}));
+    value.get("data").cloned().unwrap_or(value)
 }
 
 /// Fails with the body when the status is not the expected one.

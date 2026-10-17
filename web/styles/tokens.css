@@ -105,6 +105,9 @@
   --topbar-height: 64px;
   /* The app's mark is drawn in ink, as every redesigned Silicon site draws its own (lib/app.config.ts accent is unused). */
   --app-accent: var(--foreground);
+  /* Profile photos are 30 % squircles (Silicon UI's Avatar, AvatarGroup and UserMenu read these). */
+  --avatar-radius: 30%;
+  --avatar-corner-shape: squircle;
 }
 
 :root[data-theme="dark"], [data-theme="dark"] {

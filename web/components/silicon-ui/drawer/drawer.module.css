@@ -1,8 +1,8 @@
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: 50;
-  background: oklch(10% 0 0 / .38);
+  z-index: var(--layer-overlay);
+  background: var(--scrim);
   backdrop-filter: blur(4px);
 }
 
@@ -12,7 +12,7 @@
   --ease-drawer: cubic-bezier(.32,.72,0,1);
   --drawer-from: translateX(100%);
   position: fixed;
-  z-index: 51;
+  z-index: var(--layer-dialog);
   display: flex;
   flex-direction: column;
   width: var(--drawer-size);
@@ -32,7 +32,7 @@
 .content[data-side="left"] { inset: 0 auto 0 0; border-width: 1px 1px 1px 0; border-radius: 0 var(--radius-container) var(--radius-container) 0; corner-shape: var(--corner-shape); }
 .content[data-side="top"] { inset: 0 0 auto; width: 100%; max-width: none; max-height: min(32rem, 100dvh); border-width: 0 0 1px; border-radius: 0 0 var(--radius-container) var(--radius-container); corner-shape: var(--corner-shape); }
 .content[data-side="bottom"] { inset: auto 0 0; width: 100%; max-width: none; max-height: min(32rem, 100dvh); border-width: 1px 0 0; border-radius: var(--radius-container) var(--radius-container) 0 0; corner-shape: var(--corner-shape); }
-.content[data-side="bottom"]::before { position: absolute; top: 9px; left: 50%; width: 2.25rem; height: 4px; border-radius: var(--radius-full); corner-shape: round; background: var(--border-strong); content: ""; opacity: .75; transform: translateX(-50%); }
+.content[data-side="bottom"]::before { position: absolute; top: var(--space-related); left: 50%; width: 2.25rem; height: 4px; border-radius: var(--radius-full); corner-shape: round; background: var(--border-strong); content: ""; opacity: .75; transform: translateX(-50%); }
 
 /* Motion springs the panel from its edge. Keyframes only run when DrawerContent sits under a bare Radix root. */
 .content[data-side="left"] { --drawer-from: translateX(-100%); }
@@ -45,7 +45,7 @@
 .content:focus { outline: none; }
 /* Inside a container the layers anchor to that element instead of the viewport. */
 .overlay[data-contained], .content[data-contained] { position: absolute; }
-.overlay[data-contained] { z-index: 1; background: oklch(10% 0 0 / .16); backdrop-filter: none; }
+.overlay[data-contained] { z-index: 1; background: var(--scrim-soft); backdrop-filter: none; }
 .content[data-contained] { --drawer-size: min(22rem, calc(100% - var(--space-block))); z-index: 2; max-height: 100%; box-shadow: none; }
 .content[data-contained][data-side="top"], .content[data-contained][data-side="bottom"] { max-height: min(32rem, calc(100% - var(--space-block))); }
 /* The container already draws the outer edges, so only the inner edge keeps a border. */

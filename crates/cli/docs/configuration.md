@@ -51,6 +51,28 @@ See `.env.example` for every setting. Sign-in is Silicon Accounts only:
 | `DM_TING_URL` | no | Ting delivery; unset means clients sync with `GET /api/v1/sync` |
 | `DM_TING_APP_ID` | no | Ting's app id in Silicon Accounts: the receiving app of the proofs DM sends Ting (default `ting`) |
 
+Speech (voices, spoken messages, listening, transcription) goes through Deepgram from the service
+only; the key never reaches a client:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DM_DEEPGRAM_API_KEY` | unset | Deepgram key. Unset: speech and transcription answer 503 `speech_not_configured`, and `GET /api/v1/accounts` says `speech.enabled: false` |
+| `DM_DEEPGRAM_URL` | `https://api.deepgram.com` | Deepgram origin for transcription (`/v1/listen`); no path |
+| `DM_DEEPGRAM_AGENT_URL` | `wss://agent.deepgram.com/v1/agent/converse` | Deepgram Voice Agent endpoint that renders speech |
+| `DM_SPEECH_MODEL` | `eleven_v4` | The ElevenLabs model scripts are spoken with |
+| `DM_STT_MODEL` | `nova-3` | The Deepgram transcription model |
+| `DM_VOICES` | the five default voices | JSON array of `{"key","name","voice_id","description"}` (1 to 50, unique keys) |
+| `DM_SPEECH_CACHE_MAX_BYTES` | `2147483648` (2 GiB) | Rendered audio kept; the least recently used beyond it is evicted |
+| `DM_SPEECH_CACHE_TTL_DAYS` | `90` | Rendered audio unused this long is evicted |
+| `DM_SPEECH_RENDERS_PER_MINUTE` | `30` | Renders one account may cause per minute (cache hits are free) |
+| `DM_SPEECH_DAILY_CHARACTERS` | `200000` | Characters one account may have rendered per UTC day |
+| `DM_TRANSCRIBE_MAX_BYTES` | `104857600` (100 MiB) | Largest audio upload a transcription accepts (at most 2 GiB) |
+| `DM_TRANSCRIBE_PER_MINUTE` | `20` | Transcriptions one account may request per minute |
+
+Plain `http://` and `ws://` Deepgram URLs are accepted only for this machine (tests and local
+stand-ins). The audio cache lives in PostgreSQL (`speech_audio`): it is derived data, never an
+upload, and any row can be evicted and rendered again.
+
 Plain `http` is accepted only for this machine. Database, Giphy, body-size, connection pool,
 timeout and worker settings are unchanged. Attachments are external links; no upload credentials
 are required. DM's sign-in setup at Silicon Accounts needs `device_flow` and `public_client` turned

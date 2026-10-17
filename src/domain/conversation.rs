@@ -30,6 +30,13 @@ pub struct Conversation {
     pub group: Option<super::GroupDetails>,
     /// Latest visible message, if any.
     pub last_message: Option<Message>,
+    /// Messages from others the listed account (the caller, or the Silicon a custodian named
+    /// with `for`) has not read: not deleted, not bundled away, no read receipt on any device.
+    #[serde(default)]
+    pub unread_count: i64,
+    /// Code of the newest message the listed account has read, if any.
+    #[serde(default)]
+    pub last_read_message_id: Option<String>,
     /// Creation time.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,

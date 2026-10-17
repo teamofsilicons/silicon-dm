@@ -16,6 +16,7 @@ use crate::{
             SendMessageCommand,
         },
         messaging::{prepare_message_content, validate_device_id},
+        speech::prepare_message_speech,
         state::AppState,
     },
     domain::{
@@ -45,6 +46,25 @@ pub(super) async fn list_conversations(
     state
         .store
         .list_conversations(&context.actor, &subject, &page, false)
+        .await
+        .map(Json)
+}
+
+/// `GET /api/v1/conversations/{conversation}[?for=si:x]`: one conversation summary, with
+/// the unread facts of the caller (or of the Silicon a custodian names with `for`).
+pub(super) async fn get_conversation(
+    State(state): State<AppState>,
+    Authenticated(context): Authenticated,
+    ApiPath(path): ApiPath<ConversationPath>,
+    ApiQuery(query): ApiQuery<ForQuery>,
+) -> AppResult<Json<Conversation>> {
+    let subject = match &query.for_account {
+        Some(silicon) => looked_after(&state, &context, silicon).await?,
+        None => context.actor.clone(),
+    };
+    state
+        .store
+        .get_conversation_for(&context.actor, &subject, path.conversation_id)
         .await
         .map(Json)
 }
@@ -94,6 +114,24 @@ pub(super) async fn edit_message(
     ApiJson(mut input): ApiJson<MessageCreate>,
 ) -> AppResult<Json<Message>> {
     resolve_routing(&state, &context, &mut input).await?;
+    let previous = match &input.speech {
+        Some(_) => Some(
+            state
+                .store
+                .get_message(&context.actor, path.conversation_id, path.message_id)
+                .await?,
+        ),
+        None => None,
+    };
+    let speech = prepare_message_speech(
+        &state,
+        &context.actor,
+        &mut input,
+        previous
+            .as_ref()
+            .and_then(|message| message.speech.as_ref()),
+    )
+    .await?;
     state
         .store
         .revise_message(
@@ -103,6 +141,7 @@ pub(super) async fn edit_message(
             path.message_id,
             &key,
             Some(input),
+            speech,
         )
         .await
         .map(Json)
@@ -129,6 +168,7 @@ pub(super) async fn delete_message(
             path.conversation_id,
             path.message_id,
             &key,
+            None,
             None,
         )
         .await
@@ -222,6 +262,7 @@ async fn send(
 ) -> AppResult<(StatusCode, Json<Message>)> {
     state.store.require_current(conversation_id).await?;
     resolve_routing(state, context, &mut body).await?;
+    let speech = prepare_message_speech(state, &context.actor, &mut body, None).await?;
     let prepared = prepare_message_content(state, body)?;
     let message = state
         .store
@@ -231,6 +272,7 @@ async fn send(
             content: prepared,
             idempotency_key,
             via_app: context.via_app().map(str::to_owned),
+            speech,
         })
         .await?;
     Ok((StatusCode::ACCEPTED, Json(message)))
@@ -273,6 +315,8 @@ pub(super) async fn create_message_bundle(
     }
     bundle.validate().map_err(AppError::validation)?;
     resolve_routing(&state, &context, &mut bundle.display_message).await?;
+    let speech =
+        prepare_message_speech(&state, &context.actor, &mut bundle.display_message, None).await?;
     let display_message = prepare_message_content(&state, bundle.display_message)?;
     bundle.display_message = display_message;
     let created = state
@@ -282,6 +326,7 @@ pub(super) async fn create_message_bundle(
             creator: context.actor,
             bundle,
             idempotency_key,
+            speech,
         })
         .await?;
     Ok((StatusCode::CREATED, Json(created)))
@@ -555,13 +600,13 @@ pub(super) struct MessageListQuery {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ConversationPath {
-    conversation_id: Uuid,
+    pub(super) conversation_id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]
 pub(super) struct MessagePath {
-    conversation_id: Uuid,
-    message_id: Uuid,
+    pub(super) conversation_id: Uuid,
+    pub(super) message_id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]

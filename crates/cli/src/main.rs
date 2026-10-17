@@ -6,6 +6,7 @@ mod em_dash;
 mod message_length;
 mod output;
 mod receive;
+mod speech;
 mod store;
 
 use anyhow::{Context, Result, bail};
@@ -377,6 +378,95 @@ async fn run(cli: Cli) -> Result<Outcome> {
                 .await
                 .map(Outcome::ok)
         }
+        Command::Voices {
+            command: Voices::List,
+        } => speech::list(&local, &name, &config).await.map(Outcome::ok),
+        Command::Voices {
+            command:
+                Voices::Preview {
+                    voice,
+                    script,
+                    out,
+                    force,
+                },
+        } => {
+            speech::preview(
+                &local,
+                &name,
+                &config,
+                &voice,
+                script,
+                speech::WavOutput {
+                    out,
+                    force,
+                    compact: cli.json,
+                },
+            )
+            .await
+        }
+        Command::Speech { command } => match command {
+            SpeechCommands::Render {
+                script,
+                voice,
+                out,
+                force,
+            } => {
+                speech::render(
+                    &local,
+                    &name,
+                    &config,
+                    script,
+                    voice,
+                    speech::WavOutput {
+                        out,
+                        force,
+                        compact: cli.json,
+                    },
+                )
+                .await
+            }
+            SpeechCommands::Transcribe {
+                file,
+                language,
+                content_type,
+            } => speech::transcribe_file(&local, &name, &file, language, content_type)
+                .await
+                .map(Outcome::ok),
+        },
+        Command::Messages {
+            command:
+                Messages::Listen {
+                    conversation,
+                    message,
+                    out,
+                    force,
+                    for_account,
+                },
+        } => {
+            speech::listen(
+                &local,
+                &name,
+                &conversation,
+                &message,
+                for_account.as_deref(),
+                speech::WavOutput {
+                    out,
+                    force,
+                    compact: cli.json,
+                },
+            )
+            .await
+        }
+        Command::Messages {
+            command:
+                Messages::Transcribe {
+                    conversation,
+                    message,
+                    language,
+                },
+        } => speech::transcribe_message(&local, &name, &conversation, &message, language)
+            .await
+            .map(Outcome::ok),
         Command::Sync(args) => receive::sync(&local, &name, args).await.map(Outcome::ok),
         Command::Inbox(args) => {
             receive::inbox(&local, &name, args, cli.json).await?;
@@ -410,6 +500,24 @@ fn content(content: Content) -> Result<MessageCreate> {
     if let Some(text) = content.text {
         m.text = Some(text)
     }
+    if let Some(script) = content.speak {
+        m.speech = Some(SpeechInput {
+            script,
+            voice: None,
+        });
+    }
+    if let Some(voice) = content.voice {
+        let Some(speech) = m.speech.as_mut() else {
+            bail!(
+                "--voice chooses the voice of a spoken message: add --speak SCRIPT (or speech in --data); see dm messages send --help"
+            );
+        };
+        speech.voice = Some(speech::voice_key(&voice));
+    }
+    if let Some(speech) = m.speech.as_mut() {
+        speech.voice = speech.voice.as_deref().map(speech::voice_key);
+        silicon_dm_client::speech::validate_script(&speech.script)?;
+    }
     if content.metadata.is_some() || !m.metadata.is_empty() {
         bail!(
             "Message metadata was removed in DM 0.8. Use message, attachments, voice_transcript and reply."
@@ -424,9 +532,10 @@ fn content(content: Content) -> Result<MessageCreate> {
         && m.attachments.is_empty()
         && m.voice.is_none()
         && m.gif.is_none()
+        && m.speech.is_none()
     {
         bail!(
-            "message needs --text, --attachment or --data with voice/GIF; see dm messages send --help"
+            "message needs --text, --speak, --attachment or --data with voice/GIF; see dm messages send --help"
         )
     }
     Ok(m)
@@ -567,6 +676,15 @@ async fn relay_command(
                 if em_dash::replace(&actor, &mut message, dangerously_use_em_dash) {
                     eprintln!("{}", em_dash::NOTICE);
                 }
+                if let Some(spoken) = &message.speech {
+                    speech::print_notes(&spoken.script);
+                    speech::check_spoken_send(
+                        &LocalRuntime::from_environment()?,
+                        &profile.base_url,
+                        spoken.voice.as_deref(),
+                    )
+                    .await?;
+                }
                 if message_length::needs_check(&actor, &message) {
                     let session = runtime::store::session_key(name);
                     let (config, fresh) = store::fresh_profile(&session).await?;
@@ -579,22 +697,27 @@ async fn relay_command(
                     )
                     .await?;
                 }
-                Operation::SendMessage {
-                    conversation_id: conversation,
-                    message,
-                    idempotency_key: key,
-                }
+                Operation::send_message(conversation, message, key)
             }
             Messages::Edit {
                 conversation,
                 message,
                 content: input,
-            } => Operation::EditMessage {
-                conversation_id: conversation,
-                message_id: message,
-                message: content(input)?,
-                idempotency_key: key,
-            },
+            } => {
+                // Edits keep the documented exemption from the 140-character and em-dash rules;
+                // a spoken edit's cues and voice are still checked before it is queued.
+                let content = content(input)?;
+                if let Some(spoken) = &content.speech {
+                    speech::print_notes(&spoken.script);
+                    speech::check_spoken_send(
+                        &LocalRuntime::from_environment()?,
+                        &profile.base_url,
+                        spoken.voice.as_deref(),
+                    )
+                    .await?;
+                }
+                Operation::edit_message(conversation, message, content, key)
+            }
             Messages::Delete {
                 conversation,
                 message,
@@ -603,23 +726,62 @@ async fn relay_command(
                 message_id: message,
                 idempotency_key: key,
             },
+            Messages::Listen { .. } | Messages::Transcribe { .. } => {
+                bail!("dm messages listen and transcribe do not use the relay")
+            }
         },
         Command::Receipts { command } => {
-            let (conversation, message, status) = match command {
+            let (conversation, message, up_to, status) = match command {
                 Receipts::Delivered {
                     conversation,
                     message,
-                } => (conversation, message, ReceiptStatus::Delivered),
+                    up_to,
+                } => (conversation, message, up_to, ReceiptStatus::Delivered),
                 Receipts::Read {
                     conversation,
                     message,
-                } => (conversation, message, ReceiptStatus::Read),
+                    up_to,
+                } => (conversation, message, up_to, ReceiptStatus::Read),
             };
-            Operation::Receipt {
-                conversation_id: conversation,
-                message_id: message,
-                status,
-                device_id: profile.device_id.clone(),
+            match (message, up_to) {
+                (_, Some(up_to)) => Operation::ReceiptsUpTo {
+                    conversation_id: conversation,
+                    up_to,
+                    status,
+                },
+                (Some(message), None) => Operation::Receipt {
+                    conversation_id: conversation,
+                    message_id: message,
+                    status,
+                    device_id: profile.device_id.clone(),
+                },
+                (None, None) => bail!("name the message, or every message up to one with --up-to"),
+            }
+        }
+        Command::Voices { command } => {
+            // Your own voice is addressed by your permanent uuid: ids can be renamed.
+            let own = || {
+                profile
+                    .account
+                    .as_ref()
+                    .map(|account| account.uuid.clone())
+                    .context("the profile has no signed-in account")
+            };
+            match command {
+                Voices::Show { account } => Operation::GetVoice {
+                    account: account.map_or_else(own, Ok)?,
+                },
+                Voices::Set { voice, for_account } => Operation::SetVoice {
+                    account: for_account.map_or_else(own, Ok)?,
+                    voice: speech::voice_key(&voice),
+                    idempotency_key: key,
+                },
+                Voices::Reset { for_account } => Operation::ResetVoice {
+                    account: for_account.map_or_else(own, Ok)?,
+                },
+                Voices::List | Voices::Preview { .. } => {
+                    bail!("dm voices list and preview do not use the relay")
+                }
             }
         }
         Command::Drafts { command } => match command {

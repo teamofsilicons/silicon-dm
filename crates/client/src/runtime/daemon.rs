@@ -1169,6 +1169,91 @@ mod tests {
         Ok(())
     }
 
+    /// What a relay from before DM 0.17 does with `send_spoken_message`: it cannot parse the
+    /// operation, so the request stays queued, untouched, for the newer relay that replaces it,
+    /// and other conversations keep moving.
+    #[tokio::test]
+    async fn an_operation_this_relay_cannot_read_stays_queued_for_a_newer_one() -> Result<()> {
+        let sends = Arc::new(AtomicUsize::new(0));
+        let counter = sends.clone();
+        let router = Router::new().route(
+            "/api/v1/conversations/c:alice::c:carol/messages",
+            post(move |Json(body): Json<Value>| {
+                let counter = counter.clone();
+                async move {
+                    assert_eq!(body["data"]["message"], "unrelated");
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"type":"message","data":{
+                        "message-id":"001","conversation_id":"c:alice::c:carol","sender":{"type":"carbon","id":"c:bob"},
+                        "message":"unrelated","created_at":"2026-10-17T00:00:00Z"
+                    }}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let state = fixture_store(&format!("http://{}", listener.local_addr()?))?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let context = RuntimeContext {
+            queue: queue::Queue::open(&state)?,
+            store: state.clone(),
+            payload_budget: Arc::new(Semaphore::new(PAYLOAD_BUDGET_MIB as usize)),
+            workers: Arc::new(Semaphore::new(WORKERS)),
+            http: Arc::new(Pool::new()?),
+            wake: Arc::default(),
+        };
+        let send = |conversation: &str, text: &str| {
+            RelayRequest::new(
+                "default",
+                crate::relay::Operation::SendMessage {
+                    conversation_id: conversation.into(),
+                    message: crate::MessageCreate {
+                        text: Some(text.into()),
+                        ..Default::default()
+                    },
+                    idempotency_key: format!("key-{text}"),
+                },
+            )
+        };
+        let future = send("c:alice::c:bob", "future");
+        let mut unreadable = serde_json::to_value(&future)?;
+        unreadable["request"]["operation"] = json!("send_hologram_message");
+        context.queue.enqueue(&future, &unreadable)?;
+        let unrelated = send("c:alice::c:carol", "unrelated");
+        context
+            .queue
+            .enqueue(&unrelated, &serde_json::to_value(&unrelated)?)?;
+        let worker = AbortOnDrop(tokio::spawn(outbox(context.clone())));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if context
+                    .queue
+                    .result(unrelated.request_id)?
+                    .is_some_and(|r| r.state == "completed")
+                {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await??;
+        // Several scans later the unreadable request is still pending and unchanged.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let kept = context
+            .queue
+            .result(future.request_id)?
+            .context("still queued")?;
+        assert_eq!(kept.state, "pending");
+        assert_eq!(kept.request, unreadable);
+        assert!(kept.error.is_none(), "it was never attempted");
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        worker.0.abort();
+        server.abort();
+        let _ = server.await;
+        drop(context);
+        std::fs::remove_dir_all(state.directory())?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn transient_activity_finishes_on_sign_in_and_configuration_failures() -> Result<()> {
         for case in ["signed_out", "refresh_unavailable", "invalid_url"] {

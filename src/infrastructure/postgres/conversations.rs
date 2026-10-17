@@ -415,7 +415,8 @@ impl PostgresStore {
         .bind(groups_only)
         .fetch_all(self.pool())
         .await?;
-        self.conversation_page(viewer, records, limit).await
+        self.conversation_page(viewer, subject, records, limit)
+            .await
     }
 
     /// One conversation, for a participant or the custodian of a Silicon in it.
@@ -425,6 +426,21 @@ impl PostgresStore {
     pub async fn get_conversation(
         &self,
         viewer: &ActorRef,
+        conversation_id: Uuid,
+    ) -> AppResult<Conversation> {
+        self.get_conversation_for(viewer, viewer, conversation_id)
+            .await
+    }
+
+    /// One conversation as `viewer` may see it, with the unread facts of `subject` (the
+    /// viewer, or a Silicon it looks after).
+    ///
+    /// # Errors
+    /// Not found when the viewer may not read it; database failures.
+    pub async fn get_conversation_for(
+        &self,
+        viewer: &ActorRef,
+        subject: &ActorRef,
         conversation_id: Uuid,
     ) -> AppResult<Conversation> {
         match self.conversation_access(viewer, conversation_id).await? {
@@ -438,7 +454,9 @@ impl PostgresStore {
         .fetch_optional(self.pool())
         .await?
         .ok_or(AppError::NotFound)?;
-        let page = self.conversation_page(viewer, vec![record], 1).await?;
+        let page = self
+            .conversation_page(viewer, subject, vec![record], 1)
+            .await?;
         page.items.into_iter().next().ok_or(AppError::NotFound)
     }
 
@@ -474,6 +492,7 @@ impl PostgresStore {
     async fn conversation_page(
         &self,
         viewer: &ActorRef,
+        subject: &ActorRef,
         mut records: Vec<ConversationRecord>,
         limit: u16,
     ) -> AppResult<ConversationPage> {
@@ -541,6 +560,7 @@ impl PostgresStore {
                 supersedes.entry(canonical).or_default().push(old);
             }
         }
+        let mut unread = self.unread_summaries(subject, &conversation_ids).await?;
         let mut items = Vec::with_capacity(records.len());
         let mut payload_bytes: usize = 0;
         for record in &records {
@@ -560,6 +580,7 @@ impl PostgresStore {
                 break;
             }
             payload_bytes = payload_bytes.saturating_add(message_bytes);
+            let summary = unread.remove(&record.id).unwrap_or_default();
             items.push(Conversation {
                 id: record.id,
                 participants: participants.remove(&record.id).unwrap_or_default(),
@@ -568,6 +589,10 @@ impl PostgresStore {
                 supersedes: supersedes.remove(&record.id).unwrap_or_default(),
                 group: self.group_details(viewer, record.id).await?,
                 last_message,
+                unread_count: summary.unread_count,
+                last_read_message_id: summary
+                    .last_read_sequence
+                    .and_then(silicon_dm_protocol::message_code),
                 created_at: record.created_at,
                 updated_at: record.updated_at,
             });

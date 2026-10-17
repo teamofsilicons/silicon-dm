@@ -42,7 +42,11 @@
     "dm.ting_automatic_enrollments.actor_id",
     "dm.ting_handoffs.target_id",
     "dm.ting_handoffs.originator_id",
-    "dm.ting_proof_grants.actor_id"
+    "dm.ting_proof_grants.actor_id",
+    "dm.account_voices.account_uuid",
+    "dm.account_voices.chosen_by_uuid",
+    "dm.conversation_read_states.actor_id",
+    "dm.speech_usage.account_uuid"
   ],
   "json_columns": [
     "dm.idempotency_records.response_body",

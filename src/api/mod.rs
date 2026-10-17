@@ -13,5 +13,7 @@ mod access;
 mod contracts;
 mod groups;
 mod me;
+mod receipts;
 mod render;
+mod speech;
 mod sync;

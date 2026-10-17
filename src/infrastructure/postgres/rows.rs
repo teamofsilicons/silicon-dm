@@ -11,7 +11,8 @@ use crate::{
     AppError, AppResult,
     domain::{
         ActorId, ActorRef, ActorType, Attachment, BundleRef, BundleRole, Gif,
-        MAX_VOICE_DURATION_MILLISECONDS, Message, MessageCreate, MessageStatus, VoiceAttachment,
+        MAX_VOICE_DURATION_MILLISECONDS, Message, MessageCreate, MessageStatus, Speech,
+        VoiceAttachment,
     },
 };
 
@@ -57,6 +58,7 @@ pub(crate) struct MessageRecord {
     pub delivered_at: Option<OffsetDateTime>,
     pub read_at: Option<OffsetDateTime>,
     pub via_app: Option<String>,
+    pub speech: Option<sqlx::types::Json<Speech>>,
 }
 
 #[derive(Debug, FromRow)]
@@ -124,7 +126,8 @@ impl PostgresStore {
                 created_at,
                 delivered_at,
                 read_at,
-                via_app
+                via_app,
+                speech
             FROM messages
             WHERE id = ANY($1)
             "#,
@@ -262,6 +265,7 @@ impl PostgresStore {
                 message.voice = content.voice;
                 message.voice_transcript = content.voice_transcript;
                 message.gif = content.gif;
+                message.speech = content.speech;
                 message.metadata = content.metadata;
                 message.reply_to_message_id = content.reply_to_message_id;
             }
@@ -314,6 +318,7 @@ fn map_message(
         voice,
         voice_transcript: record.voice_transcript,
         gif,
+        speech: record.speech.map(|speech| speech.0),
         bundle,
         created_at: record.created_at,
         delivered_at: record.delivered_at,

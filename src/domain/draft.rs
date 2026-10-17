@@ -113,6 +113,7 @@ impl DraftInput {
             self.gif.as_ref(),
             &self.metadata,
             self.reply_to_message_id,
+            None,
         )
     }
 }

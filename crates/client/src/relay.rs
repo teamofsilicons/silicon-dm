@@ -7,6 +7,11 @@ use uuid::Uuid;
 /// Public DM operations accepted by the local daemon, without auth secrets.
 /// Mutations include their retry key in the command so crash recovery preserves it.
 /// `for` names one of the custodian's Silicons where the service allows it.
+///
+/// A spoken message travels as `send_spoken_message` (or `edit_spoken_message`), never as
+/// `send_message` with `speech`: a relay from before DM 0.17 cannot parse those operations,
+/// so it leaves them queued for the newer relay that replaces it, instead of sending the
+/// message without its speech. [`Operation::send_message`] picks the right one.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Operation {
@@ -153,13 +158,101 @@ pub enum Operation {
         query: String,
     },
     RecentGifs,
+    /// A message with `speech` (DM 0.17).
+    SendSpokenMessage {
+        conversation_id: String,
+        message: MessageCreate,
+        idempotency_key: String,
+    },
+    /// An edit whose content has `speech` (DM 0.17).
+    EditSpokenMessage {
+        conversation_id: String,
+        message_id: String,
+        message: MessageCreate,
+        idempotency_key: String,
+    },
+    /// Marks every message from others up to `up_to` (inclusive) read or delivered.
+    ReceiptsUpTo {
+        conversation_id: String,
+        up_to: String,
+        status: ReceiptStatus,
+    },
+    ListVoices,
+    /// `account`: a `c:`/`si:` id or uuid.
+    GetVoice {
+        account: String,
+    },
+    SetVoice {
+        account: String,
+        voice: String,
+        idempotency_key: String,
+    },
+    ResetVoice {
+        account: String,
+    },
 }
 impl Operation {
+    /// The operation that sends `message`: `send_spoken_message` when it has speech, else
+    /// `send_message`.
+    pub fn send_message(
+        conversation_id: impl Into<String>,
+        message: MessageCreate,
+        idempotency_key: impl Into<String>,
+    ) -> Self {
+        let (conversation_id, idempotency_key) = (conversation_id.into(), idempotency_key.into());
+        if message.speech.is_some() {
+            Self::SendSpokenMessage {
+                conversation_id,
+                message,
+                idempotency_key,
+            }
+        } else {
+            Self::SendMessage {
+                conversation_id,
+                message,
+                idempotency_key,
+            }
+        }
+    }
+    /// The operation that edits a message to `message`: `edit_spoken_message` when the new
+    /// content has speech, else `edit_message`.
+    pub fn edit_message(
+        conversation_id: impl Into<String>,
+        message_id: impl Into<String>,
+        message: MessageCreate,
+        idempotency_key: impl Into<String>,
+    ) -> Self {
+        let (conversation_id, message_id, idempotency_key) = (
+            conversation_id.into(),
+            message_id.into(),
+            idempotency_key.into(),
+        );
+        if message.speech.is_some() {
+            Self::EditSpokenMessage {
+                conversation_id,
+                message_id,
+                message,
+                idempotency_key,
+            }
+        } else {
+            Self::EditMessage {
+                conversation_id,
+                message_id,
+                message,
+                idempotency_key,
+            }
+        }
+    }
     /// Whether execution changes backend state (presence is transient).
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::CreateGroup { .. }
+            Self::SendSpokenMessage { .. }
+                | Self::EditSpokenMessage { .. }
+                | Self::ReceiptsUpTo { .. }
+                | Self::SetVoice { .. }
+                | Self::ResetVoice { .. }
+                | Self::CreateGroup { .. }
                 | Self::UpdateGroup { .. }
                 | Self::InviteGroupMembers { .. }
                 | Self::RemoveGroupMembers { .. }
@@ -379,6 +472,44 @@ impl Operation {
                 serde_json::to_value(client.gifs(GifList::Search(query)).await?)?
             }
             Self::RecentGifs => serde_json::to_value(client.gifs(GifList::Recent).await?)?,
+            Self::SendSpokenMessage {
+                conversation_id,
+                message,
+                idempotency_key,
+            } => serde_json::to_value(
+                client
+                    .send_message(conversation_id, message, idempotency_key)
+                    .await?,
+            )?,
+            Self::EditSpokenMessage {
+                conversation_id,
+                message_id,
+                message,
+                idempotency_key,
+            } => serde_json::to_value(
+                client
+                    .edit_message(conversation_id, message_id, message, idempotency_key)
+                    .await?,
+            )?,
+            Self::ReceiptsUpTo {
+                conversation_id,
+                up_to,
+                status,
+            } => serde_json::to_value(
+                client
+                    .receipts_up_to(conversation_id, up_to, *status)
+                    .await?,
+            )?,
+            Self::ListVoices => serde_json::to_value(client.voices().await?)?,
+            Self::GetVoice { account } => serde_json::to_value(client.voice(account).await?)?,
+            Self::SetVoice {
+                account,
+                voice,
+                idempotency_key,
+            } => serde_json::to_value(client.set_voice(account, voice, idempotency_key).await?)?,
+            Self::ResetVoice { account } => {
+                serde_json::to_value(client.reset_voice(account).await?)?
+            }
         })
     }
 }

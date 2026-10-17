@@ -1,0 +1,25 @@
+/* The voice area's first, plain parts (phase 2 replaces them). */
+.note { display: grid; min-width: min(260px, 100%); gap: var(--space-2); }
+.noteHead { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); font-size: var(--text-xs); }
+.noteLabel { color: var(--text-secondary); font-weight: 500; }
+.noteTime { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.audio { width: 100%; max-width: 320px; height: 36px; }
+.transcript { display: -webkit-box; overflow: hidden; border: 0; padding: 0; background: none; color: var(--text-secondary); font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer; -webkit-box-orient: vertical; -webkit-line-clamp: 1; }
+.transcript[data-open] { display: block; }
+.speech { display: grid; gap: var(--space-2); }
+/* A caption under a spoken message reads as its own line. */
+.speech + * { margin-top: var(--space-2); }
+.speechWords { overflow-wrap: anywhere; white-space: pre-wrap; }
+.speechMeta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); color: var(--text-muted); font-size: var(--text-xs); }
+.voiceChip { --sq-r: var(--radius-pill); --sq-fill: color-mix(in oklab, var(--accent) 10%, transparent); padding: 1px 8px; background: var(--sq-fill); color: var(--accent-ink); font-weight: 500; }
+.preparing { color: var(--text-muted); }
+.failed { color: var(--danger); }
+.duration { font-variant-numeric: tabular-nums; }
+
+.settings { display: grid; gap: var(--space-4); }
+.settingsText { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.55; text-wrap: pretty; }
+.voiceList { display: grid; margin: 0; padding: 0; list-style: none; }
+.voiceItem { display: grid; gap: 2px; border-top: 1px solid var(--border-subtle); padding: var(--space-3) 0; }
+.voiceItem:first-child { border-top: 0; padding-top: 0; }
+.voiceName { font-size: var(--text-sm); font-weight: 500; }
+.voiceDescription { color: var(--text-muted); font-size: var(--text-sm); }

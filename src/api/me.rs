@@ -33,6 +33,13 @@ pub(super) async fn me(
     } else {
         Vec::new()
     };
+    let mut speech = speech_discovery(&state);
+    let voice = crate::application::speech::account_voice(&state, auth.actor.id.as_str()).await?;
+    speech["voice"] = json!({
+        "key": voice.voice.key,
+        "name": voice.voice.name,
+        "chosen": voice.chosen.is_some(),
+    });
     Ok(Json(json!({
         "account": reference(auth.actor.actor_type, auth.actor.id.as_str()),
         "custodian": stored.custodian_uuid.map(|uuid| reference(ActorType::Carbon, &uuid)),
@@ -40,7 +47,27 @@ pub(super) async fn me(
         "scopes": auth.scopes,
         "via_app": auth.via_app(),
         "delivery": delivery(&state, &auth).await?,
+        "speech": speech,
     })))
+}
+
+/// What a client needs to know about speech: whether it works here, the models, where the
+/// voices are and the limits that apply to each account.
+pub(super) fn speech_discovery(state: &AppState) -> Value {
+    let speech = &state.settings.speech;
+    json!({
+        "enabled": state.speech.enabled(),
+        "model": speech.model,
+        "stt_model": speech.stt_model,
+        "voices_path": "/api/v1/voices",
+        "limits": {
+            "script_characters": crate::domain::speech::MAX_SCRIPT_CHARACTERS,
+            "renders_per_minute": speech.renders_per_minute,
+            "daily_characters": speech.daily_characters,
+            "transcribe_max_bytes": speech.transcribe_max_bytes,
+            "transcriptions_per_minute": speech.transcribe_per_minute,
+        },
+    })
 }
 
 /// `GET /api/v1/accounts` (no sign-in needed): how to sign in to DM.
@@ -59,6 +86,7 @@ pub(super) async fn accounts(State(state): State<AppState>) -> Json<Value> {
         },
         "proof_scopes": crate::config::PROOF_SCOPES,
         "delivery": super::contracts::delivery(&state),
+        "speech": speech_discovery(&state),
     }))
 }
 

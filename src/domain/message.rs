@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::{
     ActorRef, BundleRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MAX_TEXT_CHARACTERS,
-    MAX_VOICE_DURATION_MILLISECONDS,
+    MAX_VOICE_DURATION_MILLISECONDS, Speech, speech::MAX_SCRIPT_CHARACTERS,
 };
 
 /// Durable metadata for a generic attachment.
@@ -136,6 +136,9 @@ pub struct MessageCreate {
     /// Optional GIF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gif: Option<Gif>,
+    /// Optional speech: a script DM renders in a voice. Its words become `voice_transcript`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<Speech>,
 }
 
 /// Durable aggregate message state.
@@ -216,6 +219,9 @@ pub struct Message {
     /// GIF content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gif: Option<Gif>,
+    /// Speech content, with the voice DM pinned when it accepted the message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<Speech>,
     /// Bundle membership, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle: Option<BundleRef>,
@@ -284,15 +290,30 @@ impl MessageCreate {
             && self.attachments.is_empty()
             && self.voice.is_none()
             && self.gif.is_none()
+            && self.speech.is_none()
         {
             return Err("message text must contain at least one character");
         }
         let has_content = self.text.is_some()
             || !self.attachments.is_empty()
             || self.voice.is_some()
-            || self.gif.is_some();
+            || self.gif.is_some()
+            || self.speech.is_some();
         if !has_content {
-            return Err("a message must contain text, an attachment, voice, or a GIF");
+            return Err("a message must contain text, an attachment, voice, speech, or a GIF");
+        }
+        if let Some(speech) = &self.speech {
+            if self.voice.is_some() {
+                return Err(
+                    "a message carries one recording: a voice note (voice) or speech, not both",
+                );
+            }
+            if speech.script.trim().is_empty() {
+                return Err("speech.script must contain at least one character");
+            }
+            if speech.script.chars().count() > MAX_SCRIPT_CHARACTERS {
+                return Err("speech.script exceeds 5,000 characters");
+            }
         }
         if self
             .text
@@ -301,8 +322,12 @@ impl MessageCreate {
         {
             return Err("message text exceeds 100,000,000 characters");
         }
-        if self.voice.is_none() && self.attachments.is_empty() && self.voice_transcript.is_some() {
-            return Err("voice_transcript requires a voice attachment");
+        if self.voice.is_none()
+            && self.attachments.is_empty()
+            && self.speech.is_none()
+            && self.voice_transcript.is_some()
+        {
+            return Err("voice_transcript requires a voice attachment or speech");
         }
         if self
             .voice_transcript
@@ -336,6 +361,8 @@ impl MessageCreate {
             voice_transcript: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             gif: Option<&'a Gif>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            speech: Option<SpeechRequest<'a>>,
         }
         Content {
             metadata: &self.metadata,
@@ -347,6 +374,7 @@ impl MessageCreate {
             voice: self.voice.as_ref(),
             voice_transcript: self.voice_transcript.as_deref(),
             gif: self.gif.as_ref(),
+            speech: self.speech.as_ref().map(SpeechRequest::of),
         }
     }
 
@@ -365,6 +393,7 @@ impl MessageCreate {
             self.gif.as_ref(),
             &self.metadata,
             self.reply_to_message_id,
+            self.speech.as_ref(),
         )
     }
 
@@ -381,8 +410,30 @@ impl MessageCreate {
     }
 }
 
+/// What a request asked to say: the script and the requested voice, never the voice DM
+/// pinned. Retrying a send after the sender's voice changed is still the same request.
+#[derive(Serialize)]
+struct SpeechRequest<'a> {
+    script: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voice: Option<&'a str>,
+}
+
+impl<'a> SpeechRequest<'a> {
+    fn of(speech: &'a Speech) -> Self {
+        Self {
+            script: &speech.script,
+            voice: speech.voice.as_deref(),
+        }
+    }
+}
+
 /// Hashes canonical user-visible content without cloning potentially large
 /// message or draft fields.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one argument per canonical content field, borrowed"
+)]
 pub(crate) fn content_digest(
     text: Option<&str>,
     attachments: &[Attachment],
@@ -391,6 +442,7 @@ pub(crate) fn content_digest(
     gif: Option<&Gif>,
     metadata: &serde_json::Map<String, serde_json::Value>,
     reply_to_message_id: Option<Uuid>,
+    speech: Option<&Speech>,
 ) -> blake3::Hash {
     #[derive(Serialize)]
     struct Canonical<'a> {
@@ -404,6 +456,8 @@ pub(crate) fn content_digest(
         metadata: &'a serde_json::Map<String, serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reply_to_message_id: Option<Uuid>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        speech: Option<SpeechRequest<'a>>,
     }
 
     let canonical = Canonical {
@@ -414,6 +468,7 @@ pub(crate) fn content_digest(
         gif,
         metadata,
         reply_to_message_id,
+        speech: speech.map(SpeechRequest::of),
     };
     let mut hasher = blake3::Hasher::new();
     if serde_json::to_writer(&mut hasher, &canonical).is_err() {
@@ -562,7 +617,7 @@ mod tests {
         let message = MessageCreate::default();
         assert_eq!(
             message.validate(),
-            Err("a message must contain text, an attachment, voice, or a GIF")
+            Err("a message must contain text, an attachment, voice, speech, or a GIF")
         );
     }
 

@@ -343,6 +343,7 @@ mod tests {
             scopes: Vec::new(),
             via_app: None,
             delivery: Delivery::default(),
+            speech: None,
         };
         (
             TingReceiverContext::for_account("dm", &me).expect("uuid"),

@@ -4,8 +4,11 @@
 
 use uuid::Uuid;
 
-use crate::domain::{
-    ActorRef, BundleCreate, Draft, DraftInput, IdempotencyKey, MessageCreate, ReceiptStatus,
+use crate::{
+    domain::{
+        ActorRef, BundleCreate, Draft, DraftInput, IdempotencyKey, MessageCreate, ReceiptStatus,
+    },
+    infrastructure::postgres::SpeechRenderJob,
 };
 
 /// Create or resolve the canonical direct conversation of an exact participant set.
@@ -30,6 +33,8 @@ pub struct SendMessageCommand {
     pub idempotency_key: IdempotencyKey,
     /// The app that sent it for the account through a User verification proof.
     pub via_app: Option<String>,
+    /// The rendering to queue with a spoken message (its voice already pinned in `content`).
+    pub speech: Option<SpeechRenderJob>,
 }
 
 /// Record a device-aware receipt and notify the original sender.
@@ -46,6 +51,20 @@ pub struct RecordReceiptCommand {
     pub status: ReceiptStatus,
 }
 
+/// Mark every message from others up to one message (inclusive) read or delivered.
+pub struct BulkReceiptCommand {
+    /// Parent conversation.
+    pub conversation_id: Uuid,
+    /// Authenticated recipient (a participant).
+    pub recipient: ActorRef,
+    /// Stable device identifier the receipts are recorded for.
+    pub device_id: String,
+    /// `read` (which implies delivered) or `delivered`.
+    pub status: ReceiptStatus,
+    /// The last message to mark, by its sequence.
+    pub up_to_sequence: i64,
+}
+
 /// Create a flat, append-positioned message bundle atomically.
 pub struct CreateBundleCommand {
     /// Parent conversation.
@@ -56,6 +75,8 @@ pub struct CreateBundleCommand {
     pub bundle: BundleCreate,
     /// Retry-safe client key.
     pub idempotency_key: IdempotencyKey,
+    /// The rendering to queue when the display message speaks.
+    pub speech: Option<SpeechRenderJob>,
 }
 
 /// Optimistic draft write.

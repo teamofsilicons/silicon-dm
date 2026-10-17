@@ -18,3 +18,6 @@ coverage/
 
 # Python bytecode from the packaging scripts and their tests.
 __pycache__/
+
+# The local chat stack (Postgres cluster, logs, identities, secrets): scripts/chat-stack.
+/.dev/

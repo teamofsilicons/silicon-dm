@@ -211,3 +211,58 @@ pub trait GifProvider: Send + Sync {
     /// Searches safe provider results.
     async fn search(&self, query: &str) -> AppResult<Vec<Gif>>;
 }
+
+/// What to render: a script in one provider voice with one model.
+#[derive(Clone, Copy, Debug)]
+pub struct SynthesisRequest<'a> {
+    /// Words and square-bracket cues.
+    pub script: &'a str,
+    /// The provider's voice id.
+    pub voice_id: &'a str,
+    /// The speech model (`eleven_v4`).
+    pub model: &'a str,
+}
+
+/// Rendered speech: raw 24 kHz mono 16-bit little-endian PCM.
+#[derive(Clone, Debug)]
+pub struct SynthesizedSpeech {
+    /// The PCM samples.
+    pub pcm: Vec<u8>,
+    /// Time from connecting to the first audio.
+    pub first_audio_after: std::time::Duration,
+}
+
+/// Audio to transcribe, streamed as it arrives.
+pub struct TranscriptionRequest {
+    /// The audio bytes (the request body), never buffered whole.
+    pub audio: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>>,
+    /// The audio's media type (`audio/webm`, `audio/wav`, …).
+    pub content_type: String,
+    /// A language hint (`en`, `pt-BR`); `None` lets the provider detect the language.
+    pub language: Option<String>,
+}
+
+/// What was said.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transcription {
+    /// The words, punctuated; empty when nothing was said.
+    pub transcript: String,
+    /// The language: the hint, or the one detected.
+    pub language: Option<String>,
+    /// Length of the audio.
+    pub duration_milliseconds: Option<u64>,
+    /// The provider's confidence, 0 to 1.
+    pub confidence: Option<f64>,
+}
+
+/// Text to speech and speech to text (Deepgram). Errors use DM's codes:
+/// `speech_rejected` (422, the provider refused the voice or text), `speech_unavailable`
+/// (503 with `Retry-After`), `audio_unreadable` (422) and `audio_too_large` (413).
+#[async_trait]
+pub trait SpeechProvider: Send + Sync {
+    /// Renders a script.
+    async fn synthesize(&self, request: SynthesisRequest<'_>) -> AppResult<SynthesizedSpeech>;
+
+    /// Transcribes audio.
+    async fn transcribe(&self, request: TranscriptionRequest) -> AppResult<Transcription>;
+}

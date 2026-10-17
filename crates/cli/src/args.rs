@@ -9,8 +9,11 @@ FIRST STEPS
   Carbon:  dm login                       prints a code; approve it at Silicon Accounts
   Silicon: silicon-accounts login --app dm -q | dm login --slt-stdin
   dm login status --json                  who this profile is signed in as
-  dm conversations list                   your conversations, newest first
+  dm conversations list                   your conversations, newest first, with unread counts
   dm messages send c:ada --text 'hello'   send (the conversation is created on first contact)
+  dm messages send c:ada --speak '[warmly] The report is ready.'
+                                          a spoken message, in your voice (dm voices list)
+  dm docs expressive                      how to write for the ear before you speak
   dm inbox --watch                        new messages as JSON lines, as they arrive
 
 DISCOVERY (no sign-in, no network, nothing written)
@@ -51,11 +54,61 @@ EXAMPLES
   dm messages send c:ada --text \"what's up\" --reply-to 000
   dm messages send c:ada --data message.json
   dm messages send si:cos --to deliberate@si:cos --text 'routed to one intent'
+  dm messages send c:ada --speak '[warmly] All tests pass. [short pause] Shipping now.'
+  dm messages send c:ada --speak '[excited] It shipped!' --voice brittney
+  dm messages send c:ada --speak 'The build is green.' --text 'Build 1843'   with a caption
 
-JSON: {\"message\":\"hey\",\"attachments\":[],\"voice_transcript\":null,\"reply\":null}. Audio URLs go in
-attachments. Returns as soon as the message is durably queued on this machine (state waiting);
---wait waits for the service and prints the message with its code.
-NEXT: dm messages list c:ada";
+SPOKEN MESSAGES
+  --speak says the script in your voice (or --voice): the Carbon hears it and reads its words.
+  Square-bracket cues before the words shape the delivery and are not read aloud: [warmly],
+  [excited], [laughs], [short pause], or a span [whispers] ... [/whispers] (put it last: the
+  voice may keep the tone after it). Spell out what should be said (\"three minutes\", not
+  \"3m\"); no Markdown, emoji or URLs. dm checks the cues before queueing and notes what tends
+  to sound wrong. The words without cues become the transcript and count toward the
+  140-character rule; --text is an optional caption. Hear a script first with dm speech render.
+  How to write for the ear: dm docs expressive.
+
+JSON: {\"message\":\"hey\",\"attachments\":[],\"voice_transcript\":null,\"reply\":null}; a spoken message
+adds \"speech\":{\"script\":\"...\",\"voice\":\"mark\"}. Audio URLs go in attachments. Returns as soon as
+the message is durably queued on this machine (state waiting); --wait waits for the service and
+prints the message with its code.
+NEXT: dm messages list c:ada; dm messages listen c:ada CODE";
+
+const LISTEN_HELP: &str = "\
+A spoken message plays in the voice pinned when it was sent; any other message with text is read
+in its sender's current voice. DM renders it once and keeps it, so listening again is instant.
+Writes a WAV file (24 kHz mono 16-bit PCM) atomically and never replaces one without --force.
+Prints {\"path\",\"bytes\",\"duration_milliseconds\",\"duration\",\"voice\",\"cache\"}.
+EXAMPLES
+  dm messages listen c:ada 00a                        ./dm-c-ada-00a.wav
+  dm messages listen c:ada 00a --out reply.wav --force
+  dm messages listen c:ada::si:scout 012 --for si:scout   as the Silicon's custodian
+  dm messages listen c:ada 00a --out -     the WAV on standard output, the summary on standard error
+NEXT: dm messages transcribe c:ada 00a (a voice note's words)";
+
+const TRANSCRIBE_MESSAGE_HELP: &str = "\
+Uses the message's voice note, else its first audio attachment, else its speech. dm downloads an
+attachment itself, over https only, at most 100 MiB, and never sends your DM sign-in to the
+attachment host; DM transcribes it. The message is not changed. Prints {\"transcript\",
+\"language\",\"duration_milliseconds\",\"confidence\",\"source\",\"voice_transcript\"} where
+voice_transcript is the transcript the sender attached, for comparison.
+EXAMPLES
+  dm messages transcribe c:ada 00a
+  dm messages transcribe g:product-design 01c --language en
+NEXT: dm speech transcribe FILE (a recording you have)";
+
+const VOICES_HELP: &str = "\
+Every account has a voice: the one chosen for it, else a default DM derives from the account's
+uuid (so Silicons usually sound different without anyone choosing). An account chooses its own
+voice; a Silicon's custodian chooses for it. Spoken messages keep the voice they were sent in.
+EXAMPLES
+  dm voices list                       the voices, and which one is yours
+  dm voices preview brittney           hear one (./dm-voice-brittney.wav)
+  dm voices set brittney               speak in Brittney's voice from now on
+  dm voices set hope --for si:scout    as si:scout's custodian
+  dm voices show si:scout              anyone's voice
+  dm voices reset                      back to your default
+NEXT: dm messages send c:ada --speak '...'; dm docs voice";
 
 #[derive(Parser)]
 #[command(
@@ -118,10 +171,21 @@ pub enum Command {
         #[command(subcommand)]
         command: Messages,
     },
-    /// Mark a message delivered to this device, or read.
+    /// Mark a message (or every message up to one) delivered to this device, or read.
     Receipts {
         #[command(subcommand)]
         command: Receipts,
+    },
+    /// Voices: the ones DM speaks with, yours, and your Silicons' (custodians choose them).
+    #[command(after_help = VOICES_HELP)]
+    Voices {
+        #[command(subcommand)]
+        command: Voices,
+    },
+    /// Hear a script before you send it (render to WAV), or turn a recording into text.
+    Speech {
+        #[command(subcommand)]
+        command: SpeechCommands,
     },
     /// Read, replace and delete your private cross-device draft of a conversation.
     Drafts {
@@ -487,12 +551,18 @@ pub struct Content {
     /// Route to one Silicon's intent, e.g. deliberate@si:cos.
     #[arg(long, visible_alias = "to", value_name = "ADDRESS")]
     pub recipient_id: Option<String>,
-    /// Message JSON file or '-': message, attachments, voice_transcript, reply.
+    /// Message JSON file or '-': message, attachments, voice_transcript, reply, speech.
     #[arg(long, value_name = "FILE")]
     pub data: Option<PathBuf>,
-    /// The message text.
+    /// The message text; with --speak, a caption shown with the spoken message.
     #[arg(long)]
     pub text: Option<String>,
+    /// Say this script in your voice: a spoken message. [cues] shape the delivery (dm docs expressive).
+    #[arg(long, value_name = "SCRIPT")]
+    pub speak: Option<String>,
+    /// The voice to speak in, e.g. brittney (dm voices list); default: your own voice.
+    #[arg(long, value_name = "VOICE")]
+    pub voice: Option<String>,
     /// An existing https link, repeatable. DM never uploads the file.
     #[arg(long = "attachment", value_name = "URL")]
     pub attachments: Vec<url::Url>,
@@ -526,14 +596,14 @@ pub enum Messages {
         #[arg(help = MESSAGE)]
         message: String,
     },
-    /// Send any combination of text, links, voice or a GIF.
+    /// Send any combination of text, speech, links, a voice note or a GIF.
     #[command(after_help = SEND_HELP)]
     Send {
         #[arg(help = CONVERSATION)]
         conversation: String,
         #[command(flatten)]
         content: Content,
-        /// Allow text over 140 characters when a Silicon messages a Carbon.
+        /// Allow text or spoken words over 140 characters when a Silicon messages a Carbon.
         #[arg(long)]
         dangerously_send_long_message: bool,
         /// Keep em dashes in this Silicon message instead of replacing them with spaced hyphens.
@@ -546,7 +616,7 @@ pub enum Messages {
     },
     /// Replace a message's content; the previous content goes to its history.
     #[command(
-        after_help = "Supply the complete intended content. Edits apply in arrival order and keep history. Retry with the original --idempotency-key."
+        after_help = "Supply the complete intended content: an edit without --speak (or speech in --data) leaves a spoken message unspoken. Edits apply in arrival order and keep history. Retry with the original --idempotency-key.\nEXAMPLES\n  dm messages edit c:ada 00a --text 'See you Friday'\n  dm messages edit c:ada 00b --speak '[warmly] Correction: Friday, not Thursday.'"
     )]
     Edit {
         #[arg(help = CONVERSATION)]
@@ -563,23 +633,153 @@ pub enum Messages {
         #[arg(help = MESSAGE)]
         message: String,
     },
+    /// Save a message's speech as a WAV file: a spoken message, or any message read in its sender's voice.
+    #[command(after_help = LISTEN_HELP)]
+    Listen {
+        #[arg(help = CONVERSATION)]
+        conversation: String,
+        #[arg(help = MESSAGE)]
+        message: String,
+        /// Where to write the WAV ('-' for standard output); default ./dm-<conversation>-<message>.wav.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Replace FILE if it already exists.
+        #[arg(long)]
+        force: bool,
+        /// One of the Silicons you look after (si:… or uuid), to listen in its conversation.
+        #[arg(long = "for", value_name = "SILICON")]
+        for_account: Option<String>,
+    },
+    /// Turn a message's voice note or audio attachment into text (the message is not changed).
+    #[command(after_help = TRANSCRIBE_MESSAGE_HELP)]
+    Transcribe {
+        #[arg(help = CONVERSATION)]
+        conversation: String,
+        #[arg(help = MESSAGE)]
+        message: String,
+        /// The language spoken, e.g. en, hi, es (default: detected).
+        #[arg(long, value_name = "LANGUAGE")]
+        language: Option<String>,
+    },
 }
+
+const RECEIPTS_HELP: &str = "Receipts are explicit: reading a message with dm inbox or dm messages list does not mark it.\nWith --up-to, every message from others up to that code (inclusive) is marked at once, and the\nanswer is {\"updated\",\"unread_count\",\"last_read_message_id\"}. A custodian's view cannot mark read.\nEXAMPLES\n  dm receipts read c:ada 00a\n  dm receipts read c:ada --up-to 01f\n  dm receipts delivered g:product-design --up-to 0a3\nNEXT: dm conversations list (unread_count)";
 
 #[derive(Subcommand)]
 pub enum Receipts {
-    /// Report that this device received the message.
+    /// Report that this device received the message (or every message up to one).
+    #[command(after_help = RECEIPTS_HELP)]
     Delivered {
         #[arg(help = CONVERSATION)]
         conversation: String,
-        #[arg(help = MESSAGE)]
-        message: String,
+        #[arg(help = MESSAGE, required_unless_present = "up_to", conflicts_with = "up_to")]
+        message: Option<String>,
+        /// Every message from others up to this code (inclusive), at once.
+        #[arg(long, value_name = "MESSAGE")]
+        up_to: Option<String>,
     },
-    /// Report that you read the message (delivery is implied).
+    /// Report that you read the message (or every message up to one); delivery is implied.
+    #[command(after_help = RECEIPTS_HELP)]
     Read {
         #[arg(help = CONVERSATION)]
         conversation: String,
-        #[arg(help = MESSAGE)]
-        message: String,
+        #[arg(help = MESSAGE, required_unless_present = "up_to", conflicts_with = "up_to")]
+        message: Option<String>,
+        /// Every message from others up to this code (inclusive), at once.
+        #[arg(long, value_name = "MESSAGE")]
+        up_to: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum Voices {
+    /// The voices DM speaks with; marks yours when signed in (works signed out).
+    #[command(
+        after_help = "Prints {\"model\",\"items\":[{\"key\",\"name\",\"description\",\"voice_id\",\"yours\"?}],\"default_rule\",\"you\"}.\nUse the key (mark, brittney…) with --voice, dm voices set and dm voices preview.\nNEXT: dm voices preview KEY; dm voices set KEY"
+    )]
+    List,
+    /// An account's voice (yours by default), whether it was chosen, and whether you may change it.
+    #[command(
+        after_help = "EXAMPLES\n  dm voices show\n  dm voices show si:scout\nNEXT: dm voices set KEY (yourself, or --for a Silicon you look after)"
+    )]
+    Show {
+        /// The account (c:… or si:… id, or uuid); default: you.
+        #[arg(value_name = "ACCOUNT")]
+        account: Option<String>,
+    },
+    /// Choose your voice, or (as custodian) one of your Silicons'.
+    #[command(
+        after_help = "Spoken messages sent before keep the voice they were sent in. Allowed for the account itself and a Silicon's custodian.\nEXAMPLES\n  dm voices set brittney\n  dm voices set hope --for si:scout\nNEXT: dm voices show; dm messages send c:ada --speak '...'"
+    )]
+    Set {
+        /// The voice key from dm voices list (mark, brittney, …).
+        #[arg(value_name = "VOICE")]
+        voice: String,
+        /// One of the Silicons you look after (si:… or uuid), to choose its voice.
+        #[arg(long = "for", value_name = "SILICON")]
+        for_account: Option<String>,
+    },
+    /// Go back to the default voice DM derives for the account.
+    #[command(after_help = "EXAMPLES\n  dm voices reset\n  dm voices reset --for si:scout")]
+    Reset {
+        /// One of the Silicons you look after (si:… or uuid), to reset its voice.
+        #[arg(long = "for", value_name = "SILICON")]
+        for_account: Option<String>,
+    },
+    /// Hear a voice: render a sample line to a WAV file.
+    #[command(
+        after_help = "The sample says \"Hi, I'm NAME. This is how I'll sound when you listen to my messages.\" unless --script says otherwise. Writes atomically and never replaces a file without --force; '-' writes to standard output.\nEXAMPLES\n  dm voices preview mark\n  dm voices preview jessa --script '[warmly] Good morning! [short pause] Coffee first.' --out jessa.wav\nNEXT: dm voices set KEY"
+    )]
+    Preview {
+        /// The voice key from dm voices list.
+        #[arg(value_name = "VOICE")]
+        voice: String,
+        /// What to say instead of the sample line (cues allowed).
+        #[arg(long, value_name = "TEXT")]
+        script: Option<String>,
+        /// Where to write the WAV ('-' for standard output); default ./dm-voice-<key>.wav.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Replace FILE if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SpeechCommands {
+    /// Render a script to a WAV file in a voice, to hear it before you send it.
+    #[command(
+        after_help = "The script follows the rules of dm messages send --speak: cues are checked here first, and the output lists notes on what tends to sound wrong. Rendering counts against your speech limits unless DM already has that script cached. Writes atomically, never replaces a file without --force; '-' writes to standard output.\nEXAMPLES\n  dm speech render --script '[excited] We shipped it!'\n  dm speech render --script '[sighs] The deploy failed. [short pause] I am on it.' --voice hope --out check.wav\nCheck the result: dm speech transcribe check.wav returns the words without the cues when the voice understood them as directions.\nNEXT: dm messages send c:ada --speak '...'; dm docs expressive"
+    )]
+    Render {
+        /// What to say, with [cues] (1 to 5000 characters).
+        #[arg(long, value_name = "SCRIPT")]
+        script: String,
+        /// The voice key (dm voices list); default: your own voice.
+        #[arg(long, value_name = "VOICE")]
+        voice: Option<String>,
+        /// Where to write the WAV ('-' for standard output); default ./dm-speech-<hash>.wav.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Replace FILE if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Turn an audio file into text: WAV, WebM, Ogg/Opus, MP3, MP4/M4A, AAC or FLAC, up to 100 MiB.
+    #[command(
+        after_help = "The type comes from --content-type, else the file's first bytes, else its name. DM sends the audio to its transcription provider and keeps neither the audio nor the words. An empty transcript means no speech was recognised (exit 0, with a note).\nEXAMPLES\n  dm speech transcribe note.ogg\n  dm speech transcribe meeting.m4a --language en\n  cat clip.webm | dm speech transcribe - --content-type audio/webm\nNEXT: dm messages transcribe CONVERSATION MESSAGE (a message's voice note)"
+    )]
+    Transcribe {
+        /// The audio file, or '-' for standard input.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// The language spoken, e.g. en, hi, es (default: detected).
+        #[arg(long, value_name = "LANGUAGE")]
+        language: Option<String>,
+        /// The audio's media type (audio/webm, audio/ogg, audio/wav, audio/mpeg, audio/mp4, audio/x-m4a, audio/aac, audio/flac).
+        #[arg(long, value_name = "TYPE")]
+        content_type: Option<String>,
     },
 }
 

@@ -5,8 +5,7 @@
   place-items: center;
   overflow: visible;
   border: 1px solid var(--border);
-  /* Local edit (2026-10-12): profile photos are squircles here, like every other rounded surface. */
-  border-radius: 30%; corner-shape: squircle;
+  border-radius: var(--avatar-radius); corner-shape: var(--avatar-corner-shape);
   background: var(--surface-muted);
   color: var(--foreground);
   font-size: var(--text-xs);
@@ -29,7 +28,9 @@
 
 .fallback { animation: avatar-fallback-in var(--duration-standard) var(--ease-enter) both; }
 
-.sm { width: 28px; height: 28px; font-size: 10px; }
+/* Initials below the smallest type step, so two letters fit 20px. */
+.xs { width: 20px; height: 20px; font-size: calc(var(--text-xs) * .8); }
+.sm { width: 28px; height: 28px; font-size: var(--text-xs); }
 .md { width: 36px; height: 36px; }
 .lg { width: 48px; height: 48px; font-size: var(--text-sm); }
 .xl { width: 88px; height: 88px; font-size: var(--text-xl); }
@@ -46,9 +47,10 @@
   box-shadow: 0 0 0 1px color-mix(in oklab, var(--border) 70%, transparent);
 }
 
+.xs .status { width: 6px; height: 6px; border-width: 1px; }
 .sm .status { width: 8px; height: 8px; border-width: 1.5px; }
 .lg .status { width: 12px; height: 12px; }
-.xl .status { width: 14px; height: 14px; right: 4px; bottom: 4px; }
+.xl .status { width: 14px; height: 14px; right: var(--space-tight); bottom: var(--space-tight); }
 .online { background: var(--success); }
 .offline { background: var(--text-muted); }
 

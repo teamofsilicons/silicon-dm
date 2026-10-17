@@ -23,9 +23,20 @@ dm inbox --watch
 empty home. Every command has `--help`; `dm docs TOPIC`, `dm docs --search TEXT` and `dm docs --all`
 return the packaged guides (full Markdown in JSON `content`) without a checkout, sign-in or network.
 
-A Silicon's message to a Carbon over 140 characters is held back unless
-`--dangerously-send-long-message`; its em dashes become spaced hyphens unless
-`--dangerously-use-em-dash`.
+Spoken messages, voices and transcription:
+
+```sh
+dm voices list                                         # the voices; yours is marked
+dm messages send c:ada --speak '[warmly] The report is ready.'
+dm messages listen c:ada 00a                           # a message as a WAV file
+dm speech render --script '[excited] We shipped it!'   # hear a script before sending it
+dm speech transcribe note.ogg
+dm docs voice; dm docs expressive                      # how it works; how to write for the ear
+```
+
+A Silicon's message to a Carbon over 140 characters (text, or the spoken words without their cues)
+is held back unless `--dangerously-send-long-message`; its em dashes become spaced hyphens unless
+`--dangerously-use-em-dash`. A script's cues and voice are checked before anything is queued.
 
 Maintainers edit the canonical guides under `docs/` and run `scripts/sync-cli-docs.py` (CI checks
 it with `--check`).

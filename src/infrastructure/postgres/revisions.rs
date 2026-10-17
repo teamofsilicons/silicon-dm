@@ -7,6 +7,7 @@ use super::{
     PostgresStore,
     idempotency::{IdempotencyClaim, IdempotencyResult, claim, complete, request_hash},
     map_constraint_error,
+    speech::SpeechRenderJob,
 };
 use crate::{
     AppError, AppResult,
@@ -54,7 +55,8 @@ impl PostgresStore {
     /// The original sender is the only editor; the sender, or the custodian of the Silicon
     /// that sent it, may tombstone it. History and idempotency are checked while holding the
     /// message lock; delivery fan-out commits in that same transaction. Deleted messages
-    /// cannot be edited or resurrected.
+    /// cannot be edited or resurrected. An edit that speaks queues its rendering (`speech`)
+    /// in the same transaction.
     ///
     /// # Errors
     /// Rejects non-authors, deleted messages, changed retry bodies, and invalid replies.
@@ -67,6 +69,7 @@ impl PostgresStore {
         id: Uuid,
         key: &IdempotencyKey,
         content: Option<MessageCreate>,
+        speech: Option<SpeechRenderJob>,
     ) -> AppResult<Message> {
         if reviser == Reviser::CustodianOfSender && content.is_some() {
             return Err(AppError::forbidden(
@@ -204,6 +207,15 @@ impl PostgresStore {
         } else {
             sqlx::query("INSERT INTO message_history(message_id,deleted_at) VALUES($1,clock_timestamp()) ON CONFLICT(message_id) DO UPDATE SET deleted_at=clock_timestamp()")
                 .bind(id).execute(&mut *tx).await?;
+        }
+        if let (Some(job), Some(_)) = (&speech, &content)
+            && let Err(limit) =
+                super::speech::queue_speech_render_in(&mut tx, id, actor, job).await?
+        {
+            return Err(super::speech::limit_error(
+                limit,
+                super::messages::limit_allowance(limit, job),
+            ));
         }
         // Private outbox discriminator prevents delivery deduplication from hiding later edits/deletions.
         let next: i64 = sqlx::query_scalar("SELECT COALESCE(max(delivery_revision),0)+1 FROM actor_deliveries WHERE message_id=$1 AND delivery_kind='message'")

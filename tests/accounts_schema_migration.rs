@@ -308,6 +308,40 @@ async fn upgrade_from_0038_keeps_every_legacy_row() -> Result<(), BoxError> {
     .fetch_one(&mut connection)
     .await?;
     assert_eq!(handoffs, (before["ting_handoffs"].1.0, 0));
+
+    // 0043 gave every participant a read position from the receipts already recorded.
+    let unplaced: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dm.conversation_participants p WHERE NOT EXISTS (
+            SELECT 1 FROM dm.conversation_read_states s WHERE s.conversation_id = p.conversation_id
+              AND s.actor_kind = p.actor_kind AND s.actor_id = p.actor_id)",
+    )
+    .fetch_one(&mut connection)
+    .await?;
+    assert_eq!(unplaced, 0, "every participant has a read position");
+    let (read, sequence): (Option<i64>, i64) = sqlx::query_as(
+        "SELECT s.last_read_sequence, m.sequence FROM dm.messages m
+         JOIN dm.conversation_read_states s ON s.conversation_id = m.conversation_id
+         WHERE m.id = '01a122d0-ea9d-7f00-a45e-5785d46f2b43'
+           AND s.actor_kind = 'silicon' AND s.actor_id = 'si:cos'",
+    )
+    .fetch_one(&mut connection)
+    .await?;
+    assert_eq!(
+        read,
+        Some(sequence),
+        "the receipt from before the upgrade counts"
+    );
+    let beyond: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dm.conversation_read_states s
+         WHERE s.read_through_sequence > COALESCE((SELECT max(sequence) FROM dm.messages m
+                                                   WHERE m.conversation_id = s.conversation_id), 0)",
+    )
+    .fetch_one(&mut connection)
+    .await?;
+    assert_eq!(
+        beyond, 0,
+        "no read position lies past the conversation's last message"
+    );
     connection.close().await?;
     database.close().await
 }

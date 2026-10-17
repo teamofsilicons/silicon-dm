@@ -1,15 +1,23 @@
-# Silicon Dm website
+# Silicon DM website
 
-Next.js 16, React 19 and the shared Silicon Silicon UI. The product pages call the real Dm API through a same-origin server proxy. Silicon Accounts tokens stay in a sealed, HttpOnly cookie; the browser never receives an access or refresh token in JavaScript. Sign-in uses PKCE and state, token claims are checked against Accounts JWKS, and writes require a same-origin request.
+The chat app Carbons use: conversations at `/c`, a conversation at `/c/<address>`, the settings at `/settings`. Next.js 16,
+React 19 and Silicon UI. `components/chat/README.md` is the map of the chat (routes, frame, data flow, keyboard,
+extension points). The product pages call the real DM API through a same-origin server proxy. Silicon Accounts tokens stay in a sealed, HttpOnly cookie; the browser never receives an access or refresh token in JavaScript. Sign-in uses PKCE and state, token claims are checked against Accounts JWKS, and writes require a same-origin request.
 
 ## Run locally
 
-Use Node 24 or later and pnpm 10.33.0. Copy `.env.example` to `.env.local`, set the app secret and a random session secret, and register `http://127.0.0.1:4120/auth/callback` on the local Accounts app `dm`. Start the real app backend on 4121 and the shared local Accounts stack first.
+Use Node 24 or later and pnpm 10.33.0. The local chat stack (`../scripts/chat-stack/up.sh`: Silicon Accounts, the DM
+service on 4521, stand-ins for Deepgram, Briefcase and Giphy, and a pool of Carbons and Silicons) writes `.env.local`
+for you; otherwise copy `.env.example` to `.env.local`, set the app secret and a random session secret, and register
+`{PUBLIC_URL}/auth/callback` on the local Accounts app `dm`.
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm dev
+PORT=4520 pnpm dev
 ```
+
+Sign in through the hosted pages, or use the stack's identity helper for a session cookie without email codes
+(`node ../scripts/chat-stack/identities.mjs cookie ada`).
 
 ## Environment
 
@@ -22,10 +30,13 @@ pnpm typecheck
 pnpm lint
 pnpm test
 pnpm build
-TEST_STACK_JSON=/private/path/test-stack.json pnpm test:e2e
+pnpm test:e2e            # against the local chat stack; builds and serves the site on 4530
+E2E_PORT=4520 pnpm test:e2e   # against a running `pnpm dev`
 ```
 
-Browser tests use the real Accounts hosted sign-in and app API, including the product mutations, refresh, logout, responsive layouts and axe WCAG 2.2 AA checks. `scripts/e2e-accounts.sh` in the repository rehearses backend and CLI behavior. Extend browser product tests also need the `fake_device` native protocol example built under `target/mig`. Screenshots are written to ignored `screens/`; credentials and browser state stay under ignored test outputs. See `docs/migration/web-verification.md` for recorded results.
+Browser tests use the real Accounts hosted sign-in and the DM service: two Carbons talking (live delivery, receipts,
+reply, edit, draft, delete, a group and its invitation, shortcuts, the palette, a report), refresh, sign-out, responsive
+layouts and axe WCAG 2.2 AA checks. With the local chat stack the Carbons come from its identity pool (no email codes). `../scripts/e2e-accounts.sh` rehearses the service and the `dm` command. Screenshots are written to ignored `screens/`; credentials and browser state stay under ignored test outputs. See `docs/migration/web-verification.md` for recorded results.
 
 ## Deployment
 

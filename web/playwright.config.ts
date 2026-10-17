@@ -1,4 +1,9 @@
-/** Browser gates use the real local Accounts and app API stacks. Set TEST_STACK_JSON. */
+/**
+ * Browser gates against the local chat stack (scripts/chat-stack/up.sh; .dev/stack.json): Silicon Accounts on 9840/9839,
+ * dm-api on 4521, and this website as a production build on 4530 (`next build` + `next start`, in .next-e2e so it never
+ * shares a build with `pnpm dev` on 4520). web/.env.local (written by up.sh) supplies the secrets; TEST_STACK_JSON or
+ * APP_SECRET work too. Override ports with E2E_PORT and API_PORT.
+ */
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { defineConfig } from "@playwright/test";
@@ -31,22 +36,22 @@ function appSecret(): string {
 const sessionSecret = process.env.E2E_SESSION_SECRET || pick("SESSION_SECRET") || randomBytes(48).toString("base64");
 process.env.E2E_SESSION_SECRET = sessionSecret;
 
-const PORT = Number(process.env.E2E_PORT || 4120);
-const API_PORT = Number(process.env.API_PORT || 4121);
+const PORT = Number(process.env.E2E_PORT || 4530);
+const API_PORT = Number(process.env.API_PORT || 4521);
 const env = {
   APP_ID: pick("APP_ID", "dm")!,
   APP_SECRET: appSecret(),
-  ACCOUNTS_URL: pick("ACCOUNTS_URL", "http://localhost:9590")!,
-  ACCOUNTS_API_URL: pick("ACCOUNTS_API_URL", "http://127.0.0.1:9589")!,
+  ACCOUNTS_URL: pick("ACCOUNTS_URL", "http://localhost:9840")!,
+  ACCOUNTS_API_URL: pick("ACCOUNTS_API_URL", "http://127.0.0.1:9839")!,
   APP_API_URL: `http://127.0.0.1:${API_PORT}`,
   SESSION_SECRET: sessionSecret,
   PUBLIC_URL: `http://127.0.0.1:${PORT}`,
-  EXTRA_IMG_ORIGINS: pick("EXTRA_IMG_ORIGINS", "http://127.0.0.1:9594")!,
+  EXTRA_IMG_ORIGINS: pick("EXTRA_IMG_ORIGINS", "http://127.0.0.1:9844")!,
 };
 // The tests read these too (e2e/support.ts).
 process.env.E2E_BASE_URL = env.PUBLIC_URL;
 process.env.E2E_ACCOUNTS_URL = env.ACCOUNTS_URL;
-process.env.E2E_MESSAGING_URL = pick("MOCK_MESSAGING_URL", "http://127.0.0.1:9592");
+process.env.E2E_MESSAGING_URL = pick("MOCK_MESSAGING_URL", "http://127.0.0.1:9842");
 
 export default defineConfig({
   testDir: "./e2e",
@@ -63,6 +68,6 @@ export default defineConfig({
     { name: "screens", testMatch: /screens\.spec\.ts/, dependencies: ["setup"], use: { browserName: "chromium" } },
   ],
   webServer: [
-    { command: `./node_modules/.bin/next dev --port ${PORT}`, url: `http://127.0.0.1:${PORT}/robots.txt`, env: { ...env, PORT: String(PORT), NEXT_DIST_DIR: ".next-e2e" }, reuseExistingServer: true, timeout: 180_000 },
+    { command: `./node_modules/.bin/next build && ./node_modules/.bin/next start --port ${PORT}`, url: `http://127.0.0.1:${PORT}/robots.txt`, env: { ...env, PORT: String(PORT), NEXT_DIST_DIR: ".next-e2e", NEXT_TELEMETRY_DISABLED: "1" }, reuseExistingServer: true, timeout: 420_000 },
   ],
 });

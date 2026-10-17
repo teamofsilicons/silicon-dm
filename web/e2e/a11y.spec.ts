@@ -62,9 +62,18 @@ for (const theme of ["light", "dark"] as const) {
     test(`workspace pages pass WCAG 2.2 AA (${where})`, async ({ browser }) => {
       const context = await contextFor(browser, theme, mobile, await signedIn.storageState());
       const page = await context.newPage();
-      for (const item of appConfig.nav) {
-        await page.goto(item.href);
-        await audit(page, `${item.href} (${where})`);
+      // The chat's sections, a dialog opened by address, and the first conversation in the list (if there is one).
+      for (const path of [...appConfig.nav.map(item => item.href), "/c?new=1", "/c?new=group"]) {
+        await page.goto(path);
+        await audit(page, `${path} (${where})`);
+      }
+      await page.goto("/c");
+      const first = page.locator("a[data-row]").first();
+      if (await first.count()) {
+        await page.goto((await first.getAttribute("href"))!);
+        await audit(page, `a conversation (${where})`);
+        await page.keyboard.press("Shift+?");
+        await audit(page, `the keyboard shortcuts (${where})`);
       }
       await context.close();
     });

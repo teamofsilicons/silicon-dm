@@ -2,6 +2,7 @@
 
 mod account;
 mod actor;
+pub mod audio;
 mod bundle;
 mod conversation;
 mod draft;
@@ -10,6 +11,7 @@ mod idempotency;
 mod message;
 mod pagination;
 mod presence;
+pub mod speech;
 
 pub use account::Account;
 pub use actor::{
@@ -26,6 +28,7 @@ pub use message::{
 };
 pub use pagination::{Cursor, PageRequest};
 pub use presence::{Activity, Availability, Presence};
+pub use speech::{PinnedVoice, Speech, Voice, VoiceCatalog};
 
 /// Maximum number of Unicode scalar values in message or draft text.
 pub const MAX_TEXT_CHARACTERS: usize = 100_000_000;

@@ -1,0 +1,15 @@
+/* The inbox: a quiet note beside the list on wide screens; the list itself on phones. */
+.phone { display: none; min-height: 0; flex: 1; flex-direction: column; }
+.wide { display: grid; min-height: 0; flex: 1; place-items: center; padding: var(--space-10) var(--gutter); }
+
+.note { display: grid; width: min(100%, 440px); justify-items: start; gap: var(--space-4); }
+.title { color: var(--accent-ink); font-family: var(--font-serif); font-size: clamp(1.75rem, 2.4vw, 2.25rem); font-weight: 400; letter-spacing: -.01em; line-height: 1.1; }
+.lede { color: var(--text-secondary); line-height: 1.55; }
+.hints { display: grid; width: 100%; margin: var(--space-2) 0 0; padding: 0; list-style: none; }
+.hint { display: flex; min-height: 44px; align-items: center; justify-content: space-between; gap: var(--space-4); border-top: 1px solid var(--border-subtle); color: var(--text-secondary); font-size: var(--text-sm); }
+.hint:last-child { border-bottom: 1px solid var(--border-subtle); }
+
+@media (max-width: 767px) {
+  .phone { display: flex; }
+  .wide { display: none; }
+}

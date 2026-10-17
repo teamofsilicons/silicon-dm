@@ -1,0 +1,25 @@
+/* The list is the positioning box for both markers, so rows measure their offsetTop against it. Place it on --background or
+   --surface; on a --surface-muted panel the hover fill has nothing to show against. */
+.list { position: relative; display: block; font-family: var(--font-body); letter-spacing: var(--tracking-body); }
+.items { display: grid; gap: var(--space-hair); margin: 0; padding: 0; list-style: none; }
+.section + .section, .items > li + .section { margin-top: var(--space-group); }
+.sectionLabel { padding: var(--space-tight) var(--space-related); color: var(--text-muted); font-size: var(--text-xs); font-weight: 500; line-height: var(--leading-body); }
+
+/* Two markers under the rows: the current page (stronger), and the pointer's hover, which glides between rows. */
+.active, .highlight { position: absolute; top: 0; right: 0; left: 0; border-radius: var(--radius-control); corner-shape: var(--corner-shape); pointer-events: none; }
+.active { background: var(--surface-pressed); }
+.highlight { background: var(--surface-muted); }
+
+.item { position: relative; display: flex; box-sizing: border-box; width: 100%; min-height: 2rem; align-items: center; gap: var(--space-related); margin: 0; padding: 0 var(--space-related); border: 0; border-radius: var(--radius-control); corner-shape: var(--corner-shape); background: transparent; color: var(--text-secondary); font: inherit; font-size: var(--text-sm); line-height: var(--leading-body); text-align: left; text-decoration: none; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: color var(--duration-fast) var(--ease-standard); }
+.item:hover, .item:focus-visible, .item[aria-current="page"] { color: var(--foreground); }
+.item[aria-current="page"] { font-weight: 500; }
+.item[aria-disabled="true"] { color: var(--text-muted); cursor: not-allowed; }
+.icon { display: inline-flex; flex: none; color: var(--text-secondary); }
+.icon svg { width: 16px; height: 16px; }
+.item[aria-current="page"] .icon, .item:hover .icon { color: var(--foreground); }
+.item[aria-disabled="true"] .icon { color: var(--text-muted); }
+.label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trailing { display: inline-flex; flex: none; align-items: center; color: var(--text-muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.reason { flex: none; }
+
+@media (prefers-reduced-motion: reduce) { .item { transition: none; } }

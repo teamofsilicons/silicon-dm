@@ -97,7 +97,7 @@ function Portrait({ user }: { user: UserMenuUser }) {
   const [failed, setFailed] = useState<string>();
   if (!user.avatarSrc || failed === user.avatarSrc) {
     const initials = user.name.trim().split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join("");
-    return <span className={`${styles.portrait} ${styles.initials}`}>{initials}</span>;
+    return <span className={`${styles.portrait} ${styles.initials}`} aria-hidden="true">{initials}</span>;
   }
   // eslint-disable-next-line @next/next/no-img-element -- registry components stay framework agnostic; pass optimized URLs as avatarSrc and avatarSrcSet.
   return <img className={styles.portrait} src={user.avatarSrc} srcSet={user.avatarSrcSet} alt="" decoding="async" draggable={false} onError={() => setFailed(user.avatarSrc)} />;
@@ -409,7 +409,7 @@ export function UserMenu({ user, status: statusProp, defaultStatus = "available"
 
   return <span ref={rootRef} className={styles.root}>
     <button ref={setTriggerRef} id={triggerId} type="button" className={[styles.trigger, className].filter(Boolean).join(" ")} data-state={open ? "open" : "closed"} data-name={showName || undefined}
-      aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} aria-label={`Account menu, ${user.name}${showStatus ? `, ${statusLabel(status)}` : ""}`}
+      aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} aria-label={`Account menu, ${user.name}, ${user.name.trim().split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join("")}${showStatus ? `, ${statusLabel(status)}` : ""}`}
       onClick={onTriggerClick} onKeyDown={onTriggerKeyDown}>
       <Face user={user} status={showStatus ? status : undefined} size="sm" />
       {showName && <><span className={styles.triggerName}>{user.name}</span><ChevronDown className={styles.chevron} size={16} strokeWidth={1.75} aria-hidden="true" /></>}

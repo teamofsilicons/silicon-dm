@@ -11,7 +11,7 @@
 > switch, the note wins.
 
 What the developer site (developers.teamofsilicons.com), the account site (accounts.teamofsilicons.com) and the store
-(apps.teamofsilicons.com) have in common, written down so every app's web frontend looks like part of the same
+(apps.teamofsilicons.com) have in common, written down so every app's website looks like part of the same
 family. The kit implements all of it; this page is the reasoning and the rules for what you add.
 
 ## Principles
@@ -110,7 +110,10 @@ The 4 px scale: `--space-1` 4, `-2` 8, `-3` 12, `-4` 16, `-5` 20, `-6` 24, `-8` 
   `Surface` in a `Surface`: inside one, separate with hairlines (`--border-subtle`).
 - **Settings**: one `SettingsGroup` per subject, rows of label and description with the control at the end, at least
   64 px tall. A switch stays beside its text on phones (`inline`).
-- **The workspace frame**: a 248 px sidebar and a 64 px sticky top bar; below 900 px the sidebar becomes the menu sheet.
+- **The chat frame** (DM, `components/chat/shell`): the conversation list 312 px | the thread (a ~760 px column) | the
+  details panel 340 px; from 768 px the details are a drawer, under 768 px one pane (the list or the thread) with the
+  details in a bottom sheet. The frame never scrolls; the list, the thread and the settings scroll on their own.
+  Bubbles: others' on `--surface-muted`, yours on `--accent-subtle`, ink text, squircles, no shadows.
 - **Phones (390 px)**: one column, full-width primary actions at the end of forms, tables fold into rows that say what
   each value is, nothing scrolls sideways except code.
 

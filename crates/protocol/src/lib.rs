@@ -56,12 +56,15 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
         (_, ["groups", _, "leave"]) => "leave_group",
         ("POST", ["conversations"]) => "create_conversation",
         (_, ["conversations"]) => "conversations",
+        (_, ["conversations", _]) => "conversation",
+        (_, ["conversations", _, "receipts"]) => "receipts",
         ("POST", ["conversations", _, "messages"]) => "message.create",
         (_, ["conversations", _, "messages"]) => "messages",
         ("PATCH", ["conversations", _, "messages", _]) => "message.updated",
         ("DELETE", ["conversations", _, "messages", _]) => "message.deleted",
         (_, ["conversations", _, "messages", _]) => "message",
         (_, ["conversations", _, "messages", _, "receipts"]) => "receipt",
+        (_, ["conversations", _, "messages", _, "speech"]) => "speech",
         (_, ["conversations", _, "bundles"]) => "create_bundle",
         (_, ["conversations", _, "bundles", _]) => "bundle",
         ("PUT", ["conversations", _, "draft"]) => "put_draft",
@@ -69,6 +72,11 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
         (_, ["conversations", _, "draft"]) => "draft",
         (_, ["presence", _]) => "presence",
         (_, ["gifs", _]) => "gifs",
+        (_, ["voices"]) => "voices",
+        ("PUT", ["voices", _]) => "voice.set",
+        (_, ["voices", _]) => "voice",
+        (_, ["speech"]) => "speech.render",
+        (_, ["speech", "transcriptions"]) => "transcription",
         // The local outgoing relay (dm.localhost), not the DM service.
         (_, ["requests"]) => "request",
         (_, ["requests", _, "status"]) => "request_status",
@@ -83,6 +91,7 @@ pub fn http_type(method: &str, path: &str) -> &'static str {
 pub fn http_response_type(method: &str, path: &str) -> &'static str {
     match http_type(method, path) {
         "message.create" => "message.create.successful",
+        "voice.set" => "voice",
         other => other,
     }
 }
@@ -308,6 +317,52 @@ mod creation_tests {
         assert_eq!(
             super::http_response_type("POST", "/api/v1/messages"),
             "message.create.successful"
+        );
+    }
+
+    #[test]
+    fn voices_speech_receipts_and_conversations_have_their_types() {
+        for (method, path, request, response) in [
+            ("GET", "/api/v1/voices", "voices", "voices"),
+            ("GET", "/api/v1/voices/si:scout", "voice", "voice"),
+            ("PUT", "/api/v1/voices/si:scout", "voice.set", "voice"),
+            ("DELETE", "/api/v1/voices/si:scout", "voice", "voice"),
+            ("POST", "/api/v1/speech", "speech.render", "speech.render"),
+            (
+                "POST",
+                "/api/v1/speech/transcriptions",
+                "transcription",
+                "transcription",
+            ),
+            (
+                "GET",
+                "/api/v1/conversations/c:a::si:b/messages/00a/speech",
+                "speech",
+                "speech",
+            ),
+            (
+                "POST",
+                "/api/v1/conversations/c:a::si:b/receipts",
+                "receipts",
+                "receipts",
+            ),
+            (
+                "GET",
+                "/api/v1/conversations/c:a::si:b",
+                "conversation",
+                "conversation",
+            ),
+        ] {
+            assert_eq!(super::http_type(method, path), request, "{method} {path}");
+            assert_eq!(
+                super::http_response_type(method, path),
+                response,
+                "{method} {path}"
+            );
+        }
+        assert_eq!(
+            super::http_type("POST", "/api/v1/conversations/x/messages/00a/receipts"),
+            "receipt"
         );
     }
 }

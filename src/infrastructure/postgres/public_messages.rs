@@ -55,6 +55,21 @@ impl PostgresStore {
             .ok_or(AppError::NotFound)
     }
 
+    /// The sequence of a message named by its code (or legacy UUID) in a conversation.
+    ///
+    /// # Errors
+    /// Validation for something that is not a message code; not found for a message the
+    /// conversation does not have.
+    pub(crate) async fn message_sequence(&self, conversation: Uuid, value: &str) -> AppResult<i64> {
+        let id = self.resolve_message_id(conversation, value).await?;
+        sqlx::query_scalar("SELECT sequence FROM messages WHERE conversation_id=$1 AND id=$2")
+            .bind(conversation)
+            .bind(id)
+            .fetch_optional(self.pool())
+            .await?
+            .ok_or(AppError::NotFound)
+    }
+
     /// Normalize reference fields only, never text, metadata or quoted client content.
     pub(crate) async fn resolve_message_input(
         &self,
@@ -223,12 +238,19 @@ impl PostgresStore {
                 return Err(AppError::NotFound);
             }
             let original = serde_json::to_value(original).map_err(AppError::internal)?;
-            reply = json!({"message-id":silicon_dm_protocol::message_code(original["sequence"].as_i64().unwrap_or(0)), "sender":original["sender"], "content": if original["deleted_at"].is_null() { public_content(&original) } else { Value::Null }});
+            reply = json!({"message-id":silicon_dm_protocol::message_code(original["sequence"].as_i64().unwrap_or(0)), "sender":original["sender"], "content": if original["deleted_at"].is_null() { reply_content(&original) } else { Value::Null }});
         }
+        let message_id = value["id"].as_str().and_then(|id| Uuid::parse_str(id).ok());
         let mut history = Vec::new();
         if value["deleted_at"].is_null() {
             for entry in value["history"].as_array().into_iter().flatten() {
                 let mut snapshot = public_content(&entry["content"]);
+                self.speech_status(
+                    message_id,
+                    &entry["content"]["speech"],
+                    &mut snapshot["speech"],
+                )
+                .await?;
                 snapshot["created_at"] = entry["created_at"].clone();
                 if let Some(reply_id) = entry["content"]["reply_to_message_id"]
                     .as_str()
@@ -236,7 +258,7 @@ impl PostgresStore {
                 {
                     let original = self.load_message(reply_id).await?;
                     let original = serde_json::to_value(original).map_err(AppError::internal)?;
-                    snapshot["reply"] = json!({"message-id":silicon_dm_protocol::message_code(original["sequence"].as_i64().unwrap_or(0)),"sender":original["sender"],"content":if original["deleted_at"].is_null() {public_content(&original)} else {Value::Null}});
+                    snapshot["reply"] = json!({"message-id":silicon_dm_protocol::message_code(original["sequence"].as_i64().unwrap_or(0)),"sender":original["sender"],"content":if original["deleted_at"].is_null() {reply_content(&original)} else {Value::Null}});
                 } else {
                     snapshot["reply"] = Value::Null;
                 }
@@ -246,11 +268,17 @@ impl PostgresStore {
         if let Some(id) = value.get_mut("bundle").and_then(|b| b.get_mut("id")) {
             self.public_bundle_reference(id).await?;
         }
-        let content = public_content(value);
+        let mut content = public_content(value);
+        if value["deleted_at"].is_null() {
+            self.speech_status(message_id, &value["speech"], &mut content["speech"])
+                .await?;
+        }
         let mut output = json!({
             "message-id":silicon_dm_protocol::message_code(sequence), "conversation_id":public,
             "recipient_id":recipient, "sender":value["sender"], "message":content["message"],
             "attachments":content["attachments"], "voice_transcript":content["voice_transcript"],
+            "attachment_details":content["attachment_details"], "voice":content["voice"],
+            "gif":content["gif"], "speech":content["speech"], "metadata":content["metadata"],
             "reply":if value["deleted_at"].is_null() {reply} else {Value::Null}, "bundle":value["bundle"], "history":history, "created_at":value["created_at"],
             "updated_at":value["updated_at"],
             "deleted_at":value["deleted_at"], "delivered_at":value["delivered_at"], "read_at":value["read_at"]
@@ -275,27 +303,123 @@ impl PostgresStore {
     }
 }
 
+impl PostgresStore {
+    /// Fills in where a speech's rendering stands (`status`, `duration_milliseconds`,
+    /// `peaks`) from its render job or the cache.
+    async fn speech_status(
+        &self,
+        message_id: Option<Uuid>,
+        stored: &Value,
+        rendered: &mut Value,
+    ) -> AppResult<()> {
+        if !rendered.is_object() {
+            return Ok(());
+        }
+        let pinned = &stored["pinned"];
+        let (Some(message_id), Some(script), Some(model), Some(voice_id)) = (
+            message_id,
+            stored["script"].as_str(),
+            pinned["model"].as_str(),
+            pinned["voice_id"].as_str(),
+        ) else {
+            rendered["status"] = json!("failed");
+            return Ok(());
+        };
+        let key = crate::domain::speech::cache_key(model, voice_id, script);
+        let state = self.speech_render_state(message_id, &key).await?;
+        rendered["status"] = json!(state.status.as_str());
+        rendered["duration_milliseconds"] = json!(state.duration_milliseconds);
+        rendered["peaks"] = json!(state.peaks);
+        Ok(())
+    }
+}
+
+/// What a reply quotes: the original's words and links.
+fn reply_content(value: &Value) -> Value {
+    let content = public_content(value);
+    json!({"message":content["message"],"attachments":content["attachments"],"voice_transcript":content["voice_transcript"]})
+}
+
+/// The public content of a message or of one of its history snapshots. `attachments` stays a
+/// list of URLs (attachments, then the voice note and the GIF, each once) for older clients;
+/// `attachment_details` describes the same URLs in the same order, `voice`, `gif` and
+/// `speech` the rest. Speech rendering facts are filled in by `speech_status`.
 fn public_content(value: &Value) -> Value {
     if !value["deleted_at"].is_null() {
-        return json!({"message":null,"attachments":[],"voice_transcript":null});
+        return json!({"message":null,"attachments":[],"attachment_details":[],
+            "voice_transcript":null,"voice":null,"gif":null,"speech":null,"metadata":{}});
     }
-    let mut urls = value["attachments"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|v| {
-            v.as_str()
-                .map(str::to_owned)
-                .or_else(|| v["permanent_url"].as_str().map(str::to_owned))
-        })
-        .collect::<Vec<_>>();
-    for (key, field) in [("voice", "permanent_url"), ("gif", "url")] {
-        if let Some(url) = value[key][field].as_str()
-            && !urls.iter().any(|v| v == url)
-        {
-            urls.push(url.to_owned());
+    let mut urls: Vec<String> = Vec::new();
+    let mut details: Vec<Value> = Vec::new();
+    for item in value["attachments"].as_array().into_iter().flatten() {
+        let Some(url) = item.as_str().or_else(|| item["permanent_url"].as_str()) else {
+            continue;
+        };
+        let mut detail = json!({"kind":"attachment","url":url});
+        for field in ["name", "content_type", "size"] {
+            if !item[field].is_null() {
+                detail[field] = item[field].clone();
+            }
         }
+        urls.push(url.to_owned());
+        details.push(detail);
     }
-    json!({"message":value["message"].as_str().unwrap_or(""),"attachments":urls,"voice_transcript":value["voice_transcript"]})
+    let voice = value["voice"]["permanent_url"].as_str().map(|url| {
+        // `permanent_url` repeats `url` for clients older than 0.17, which read voice
+        // objects with that field.
+        let mut voice = json!({"url":url,"permanent_url":url});
+        for field in ["name", "content_type", "size", "duration_milliseconds"] {
+            if !value["voice"][field].is_null() {
+                voice[field] = value["voice"][field].clone();
+            }
+        }
+        if !urls.iter().any(|known| known == url) {
+            let mut detail = json!({"kind":"voice","url":url});
+            for field in ["name", "content_type", "size"] {
+                if !value["voice"][field].is_null() {
+                    detail[field] = value["voice"][field].clone();
+                }
+            }
+            urls.push(url.to_owned());
+            details.push(detail);
+        }
+        voice
+    });
+    let gif = value["gif"]["url"].as_str().map(|url| {
+        let mut gif = json!({"provider_id":value["gif"]["provider_id"],"url":url});
+        for field in ["preview_url", "title"] {
+            if !value["gif"][field].is_null() {
+                gif[field] = value["gif"][field].clone();
+            }
+        }
+        if !urls.iter().any(|known| known == url) {
+            let mut detail = json!({"kind":"gif","url":url});
+            if let Some(title) = value["gif"]["title"].as_str() {
+                detail["name"] = json!(title);
+            }
+            urls.push(url.to_owned());
+            details.push(detail);
+        }
+        gif
+    });
+    let speech = value["speech"]["script"].as_str().map(|script| {
+        let pinned = &value["speech"]["pinned"];
+        json!({
+            "voice": if pinned["key"].is_string() { pinned["key"].clone() } else { value["speech"]["voice"].clone() },
+            "voice_name": pinned["name"],
+            "script": script,
+            "model": pinned["model"],
+            "status": "pending",
+            "duration_milliseconds": null,
+            "peaks": null,
+        })
+    });
+    let metadata = if value["metadata"].is_object() {
+        value["metadata"].clone()
+    } else {
+        json!({})
+    };
+    json!({"message":value["message"].as_str().unwrap_or(""),"attachments":urls,
+        "attachment_details":details,"voice_transcript":value["voice_transcript"],
+        "voice":voice,"gif":gif,"speech":speech,"metadata":metadata})
 }
