@@ -2,7 +2,8 @@
  * Browser gates against the local chat stack (scripts/chat-stack/up.sh; .dev/stack.json): Silicon Accounts on 9840/9839,
  * dm-api on 4521, and this website as a production build on 4530 (`next build` + `next start`, in .next-e2e so it never
  * shares a build with `pnpm dev` on 4520). web/.env.local (written by up.sh) supplies the secrets; TEST_STACK_JSON or
- * APP_SECRET work too. Override ports with E2E_PORT and API_PORT.
+ * APP_SECRET work too. Override ports with E2E_PORT and API_PORT, and the build directory with E2E_DIST_DIR
+ * (`.next-<name>`), so parallel runs on different ports never share a build.
  */
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -68,6 +69,6 @@ export default defineConfig({
     { name: "screens", testMatch: /screens\.spec\.ts/, dependencies: ["setup"], use: { browserName: "chromium" } },
   ],
   webServer: [
-    { command: `./node_modules/.bin/next build && ./node_modules/.bin/next start --port ${PORT}`, url: `http://127.0.0.1:${PORT}/robots.txt`, env: { ...env, PORT: String(PORT), NEXT_DIST_DIR: ".next-e2e", NEXT_TELEMETRY_DISABLED: "1" }, reuseExistingServer: true, timeout: 420_000 },
+    { command: `./node_modules/.bin/next build && ./node_modules/.bin/next start --port ${PORT}`, url: `http://127.0.0.1:${PORT}/robots.txt`, env: { ...env, PORT: String(PORT), NEXT_DIST_DIR: process.env.E2E_DIST_DIR || ".next-e2e", NEXT_TELEMETRY_DISABLED: "1" }, reuseExistingServer: true, timeout: 420_000 },
   ],
 });

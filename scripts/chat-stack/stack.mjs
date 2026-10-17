@@ -661,7 +661,7 @@ async function up() {
   const lines = [
     '',
     'DM chat stack is up',
-    `  website (dev)        ${URLS.webDev}   ${report.web ? `(${report.web})` : '(not started here: pnpm -C web dev, or up.sh --web)'}`,
+    `  website (dev)        ${URLS.webDev}   ${report.web ? `(${report.web})` : '(not started here: PORT=4520 pnpm -C web dev, or up.sh --web)'}`,
     `  website (e2e build)  ${URLS.webE2e}   (Playwright's production build; same web/.env.local)`,
     `  dm-api               ${URLS.dmApi}   (/live, /ready; speech ${report.dm.mode}; build ${build?.built_at ?? '?'} from ${build?.git?.head ?? '?'}${build?.git?.changed_files ? ` + ${build.git.changed_files} changed files` : ''})`,
     `  Silicon Accounts     ${URLS.accountsSite}   (API ${URLS.accountsApi}; mock email ${URLS.mockMessaging}/_messages)`,
