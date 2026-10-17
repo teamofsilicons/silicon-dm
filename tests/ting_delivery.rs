@@ -346,6 +346,15 @@ async fn recipients_are_enrolled_with_their_own_proof_and_reenrolled_from_the_st
         .mount(&app.accounts.server)
         .await;
 
+    let discovery = app
+        .get("/api/v1/delivery", &app.accounts.token(&ada))
+        .await?;
+    assert!(
+        discovery.1["enrolment"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("subscriptions.register")
+    );
     // Ada's first request enrols her in the background.
     expect_status(
         &app.get("/api/v1/me", &app.accounts.token(&ada)).await?,

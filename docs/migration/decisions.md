@@ -112,7 +112,7 @@ decided where they were silent. The root `decisions.md` is the historical (IAM-e
 - **Ting stays off unless `DM_TING_URL` is set** (D4). DM keeps writing `ting_handoffs` either way (the durable
   handoff contract), and while Ting is off the worker marks them discarded with a reason (never deleted). Clients get
   updates from `GET /api/v1/sync?wait=N` (long-poll on Postgres `LISTEN dm_delivery`, N ≤ 30). With Ting configured,
-  enrolment uses a User verification proof (receiving app `ting`, scope `tings.subscribe`) and sends use one cached App
+  enrolment uses a User verification proof (receiving app `ting`, scope `subscriptions.register`) and sends use one cached App
   verification proof (scope `tings.send`); recipients are addressed by uuid + current id, with no organization.
 
 ### Further decisions made while building and testing (stage 1)

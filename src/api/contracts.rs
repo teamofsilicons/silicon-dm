@@ -24,7 +24,9 @@ pub(super) fn delivery(state: &AppState) -> Value {
         "transport": if ting.is_some() { "ting" } else { "sync" },
         "ting_enabled": ting.is_some(),
         "ting_api_base_url": ting,
-        "enrolment": if ting.is_some() { "automatic on sign-in (User verification proof, scope tings.subscribe)" } else { "none: Ting is not configured for this DM" },
+        "enrolment": if ting.is_some() {
+            format!("automatic on sign-in (User verification proof, scope {})", crate::infrastructure::ting_enrollment::SUBSCRIBE_SCOPE)
+        } else { "none: Ting is not configured for this DM".to_owned() },
         "sync_path": "/api/v1/sync",
         "sync_long_poll_seconds": super::sync::MAX_WAIT_SECONDS,
         "presence_path": "/api/v1/presence/devices/{device_id}",

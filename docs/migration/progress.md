@@ -56,7 +56,7 @@ What the service is now (details and every judgement call: [decisions.md](decisi
   `dm.accounts_webhook_receipts`, ordering by `occurred_at` / account version, all six events plus ping; unknown types
   2xx; 401 bad signature, 400 bad body.
 - **Ting:** adapter off unless `DM_TING_URL`; handoffs kept and marked discarded; `GET /api/v1/sync?wait=≤30`
-  long-polls on `LISTEN dm_delivery`. With Ting: User verification enrolment (`tings.subscribe`, refresh token
+  long-polls on `LISTEN dm_delivery`. With Ting: User verification enrolment (`subscriptions.register`, refresh token
   encrypted with `DM_DATA_KEY`), cached App verification proof for sends (`tings.send`).
 
 ### Commits
