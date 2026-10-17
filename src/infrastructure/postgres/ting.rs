@@ -461,10 +461,11 @@ impl TingDeliveryContext {
     }
 }
 
-/// Bodies the IAM-era worker prepared name an organization and a bare public id.
+/// Reject organization-era references independently of Ting's recipient wire shape.
+/// Current Ting requests name the immutable account UUID as a string too.
 fn is_prepared_before_cutover(body: &str) -> bool {
     serde_json::from_str::<Value>(body).map_or(true, |value| {
-        value.get("org_id").is_some() || value["for"].is_string()
+        value.get("org_id").is_some() || value["data"]["schema_version"] != 2
     })
 }
 
@@ -495,7 +496,7 @@ fn prepared_body(record: &HandoffRecord, context: &TingDeliveryContext) -> AppRe
     }
     serde_json::to_string(&json!({
         "type": event_type,
-        "for": { "uuid": record.target_id, "id": record.target_public_id },
+        "for": record.target_id,
         "key": record.delivery_id,
         "data": {
             "schema_version": 2,

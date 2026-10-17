@@ -1,7 +1,7 @@
 //! Durable DM-to-Ting handoff processing, independent of connected DM clients.
 //!
 //! With Ting configured, pending handoffs are sent with DM's App verification proof; with
-//! Ting not configured (the default until Ting accepts Silicon Accounts proofs), they are
+//! Ting not configured (an explicit polling-only deployment), they are
 //! marked discarded with a reason, never deleted, and clients sync over `/api/v1/sync`.
 
 use std::{future::pending, time::Duration};

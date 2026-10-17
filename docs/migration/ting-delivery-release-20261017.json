@@ -1,0 +1,69 @@
+{
+  "app_id": "dm",
+  "version": "0.16.1",
+  "date": "2026-10-17",
+  "problem": "Production DM had no Ting URL while the Silicon consumed Ting webhooks. The dormant adapter also used an obsolete registration scope, authorization scheme and recipient shape. An old shared relay could not attach Accounts profiles.",
+  "backend": {
+    "source": "f239a4d31352aed55f553bfb5a677ddbf5f5fd6c",
+    "build": "https://github.com/teamofsilicons/silicon-dm/actions/runs/38987535781",
+    "image": "sha256:35e76c42a0603fda815ac07efaae0540da7fca0ba21434e4c195b896dad57476",
+    "archive_sha256": "7274b1c6286619ae42219ed021dc517a63675854331765abbf3fa560c58cc9cd",
+    "activation_ssm": "bffde09d-1823-440d-9f9f-d60f8c3bdf2d",
+    "rollback_directory": "/opt/silicon-accounts-apps/dm/ting-upgrade-20261017T004941Z",
+    "readiness": 204,
+    "transport": "ting",
+    "schema_migrations": []
+  },
+  "accounts_proofs": {
+    "issuer": "Silicon Accounts",
+    "receiving_app": "ting",
+    "sending_app": "dm",
+    "app_verification": {"scope": "tings.send", "endpoint": "POST /v1/tings", "live_accepted": true},
+    "user_verification": {"scope": "subscriptions.register", "endpoint": "POST /v1/subscriptions", "live_subscription_active": true},
+    "authorization": "Bearer",
+    "recipient": "immutable account UUID string",
+    "stored_grant_purpose": "tings.subscribe remains the internal persisted encryption label; it is not the requested scope"
+  },
+  "cli": {
+    "source": "e49de817adeab01dd7efc6f6e9f6e7478e76b9ec",
+    "build": "https://github.com/teamofsilicons/silicon-dm/actions/runs/38986834507",
+    "verifier_source": "f239a4d31352aed55f553bfb5a677ddbf5f5fd6c",
+    "native_verification": "https://github.com/teamofsilicons/silicon-dm/actions/runs/38988069585",
+    "source_difference": "Later commits only pin native verification and correct backend discovery/docs; CLI and client implementation are identical.",
+    "targets": ["linux-aarch64", "linux-x86_64", "macos-aarch64", "macos-x86_64", "windows-aarch64", "windows-x86_64"],
+    "catalog_release_id": "e2d7184b-929a-5190-b8fe-b37e9bc03af9",
+    "manifest_sha256": "b44e67bd9bda17ecdbff8574a9ce8fc152de5d4b37cbae39cf372467cd0bf957",
+    "catalog_apply_ssm": "e6f71731-5172-4946-9c31-b7287ad6acc6",
+    "catalog_backup_before": "backups/20261017T004948Z.tar.gz",
+    "catalog_backup_after": "backups/20261017T005115Z.tar.gz",
+    "catalog_before_sqlite": "/var/lib/silicon-apps/catalog-dm-0.16.1/before.sqlite",
+    "publication": "Rehearsed on a consistent SQLite copy; appended six packages and development/production releases with other apps, ownership, prior packages, releases and history unchanged.",
+    "public_resolution": "All six targets resolve 0.16.1 with their verified archive hashes and Apps signature.",
+    "local_install": "Global and project installations verified through Silicon Apps on macos-aarch64; bare dm resolves 0.16.1.",
+    "relay_upgrade": "A normal authenticated command automatically replaced the 0.16.0 relay with 0.16.1, retaining all three attached homes; no failed or pending requests."
+  },
+  "validation": {
+    "rust_tests": 169,
+    "script_tests": 23,
+    "deployment_tests": 5,
+    "checks": ["format", "strict workspace clippy", "cargo deny", "packaged docs sync", "six native build/test runs", "six exact-archive native proof runs"],
+    "backend_ci": ["https://github.com/teamofsilicons/silicon-dm/actions/runs/38987539696", "https://github.com/teamofsilicons/silicon-dm/actions/runs/38987535982"],
+    "original_message": {
+      "recovery": "Requeued only the user's original handoff, which was retained as ting_not_configured, with its original idempotency key; saved its pre-recovery row privately.",
+      "recovery_ssm": "cc5095f2-ef4b-478c-b7de-d03d214d4dc3",
+      "ting_accepted_at": "2026-10-17T00:40:18.587383Z",
+      "webhook_received_at": "2026-10-17T00:40:18.732233Z",
+      "delivered_at": "2026-10-17T00:42:35.535685Z",
+      "read_at": "2026-10-17T00:42:35.535686Z",
+      "silicon_reply_created_at": "2026-10-17T00:42:38.123765Z",
+      "receipt_origin": "Actual consumer processing; no synthetic delivered/read receipts and no operator-composed reply.",
+      "post_upgrade": "Original receipts and reply retained after final backend and CLI upgrade."
+    }
+  },
+  "limits": [
+    "DM presence is a separate HTTP lease. The Silicon is reachable and receives Ting events but has no DM presence lease, so its DM availability remains offline.",
+    "Only the reported original handoff was replayed; other historical discarded handoffs were retained.",
+    "Rust client crate publication is separate from this service and Silicon Apps rollout."
+  ],
+  "pull_request": "https://github.com/teamofsilicons/silicon-dm/pull/17"
+}

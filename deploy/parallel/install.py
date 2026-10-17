@@ -82,6 +82,7 @@ def make_settings(secret):
                'DM_DATABASE_URL': dburl('dm_accounts_runtime'), 'DM_DATABASE_MAX_CONNECTIONS': '4',
                'DM_DATABASE_MIN_CONNECTIONS': '0', 'DM_DATA_KEY': secret['data_key'],
                'DM_LOG_FILTER': 'silicon_dm=info',
+               'DM_TING_URL': 'https://backend.ting.teamofsilicons.com',
                'DM_PROOF_ISSUERS': 'dm.conversations.read=interface,dm.messages.read=interface,dm.messages.write=interface,dm.receipts.write=interface,dm.drafts.write=interface'}
         worker = dict(api)
         migrator = {'DM_ENVIRONMENT': 'production', 'DM_DATABASE_URL': dburl('dm_accounts_migrator')}
