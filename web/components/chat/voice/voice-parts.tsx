@@ -8,7 +8,10 @@
  *   <VoiceNote>          a voice message: the audio and its transcript
  *   <SpeechMessage>      a Silicon's spoken message: its words, its voice, its render state
  *   <ListenModeToggle>   the thread header's headphones
- *   <ComposerVoice>      the composer's microphone
+ *   <ComposerVoice>      the composer's microphone (driven through the composer's bridge, composer/voice-bridge.ts)
+ *   <AccountVoiceRow>    an account's voice in the details panel (Preview, Change when allowed)
+ *
+ * `address` and `code` name the message a bubble belongs to, so it can fetch and play its audio.
  */
 import { useState } from "react";
 import { Headphones, Mic } from "lucide-react";
@@ -19,9 +22,10 @@ import { spokenWords } from "@/lib/chat/preview";
 import type { Speech, VoiceNote as VoiceNoteData } from "@/lib/chat/types";
 import { useListenMode, useVoiceAvailability } from "@/lib/voice";
 import { IconAction } from "../common/icon-action";
+import type { ComposerVoiceBridge } from "../composer/voice-bridge";
 import styles from "./voice.module.css";
 
-export function VoiceNote({ voice, transcript }: { voice: VoiceNoteData; transcript: string | null }) {
+export function VoiceNote({ voice, transcript }: { voice: VoiceNoteData; transcript: string | null; address?: string; code?: string }) {
   const [open, setOpen] = useState(false);
   const url = safeHttpsUrl(voice.url);
   return (
@@ -41,7 +45,7 @@ export function VoiceNote({ voice, transcript }: { voice: VoiceNoteData; transcr
 }
 
 /** A spoken message shows its words (cues removed) as its text, with the voice it speaks in. */
-export function SpeechMessage({ speech }: { speech: Speech }) {
+export function SpeechMessage({ speech }: { speech: Speech; address?: string; code?: string }) {
   const words = spokenWords(speech.script);
   return (
     <div className={styles.speech}>
@@ -71,7 +75,14 @@ export function ListenModeToggle({ address }: { address: string }) {
   );
 }
 
-export function ComposerVoice() {
+export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
+  void bridge;
   const voice = useVoiceAvailability();
   return <IconAction label="Record a voice message" shortcut="composer.record" icon={<Mic strokeWidth={1.75} aria-hidden="true" />} unavailable={voice.record ? null : voice.reason} tooltipSide="top" />;
+}
+
+/** An account's voice, for the details panel: its name, ▶ Preview, and Change when the viewer may change it. */
+export function AccountVoiceRow({ account }: { account: string }) {
+  void account;
+  return null;
 }

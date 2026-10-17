@@ -51,3 +51,17 @@ export function toggleListen(address: string, message: Message): void {
   void address;
   void message;
 }
+
+export interface ListenState {
+  /** "loading" while the service prepares or sends the audio. */
+  state: "idle" | "loading" | "playing" | "paused";
+  /** 0–1 through the audio. */
+  progress: number;
+}
+
+/** Whether this message is the one being listened to, so its row can show it. The voice area implements it. */
+export function useListenState(address: string, code: string): ListenState {
+  void address;
+  void code;
+  return { state: "idle", progress: 0 };
+}
