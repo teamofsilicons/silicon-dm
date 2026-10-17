@@ -350,27 +350,45 @@ impl Directory<'_> {
         {
             return Ok(());
         }
-        let custodian = match &target.custodian {
-            Some(custodian) => self
-                .state
+        let current_id = |uuid: String| async move {
+            self.state
                 .store
-                .stored_account(custodian)
-                .await?
-                .and_then(|stored| stored.current_id)
-                .map_or_else(
-                    || "its custodian".to_owned(),
-                    |id| format!("its custodian {id}"),
-                ),
-            None => "its custodian".to_owned(),
+                .stored_account(&uuid)
+                .await
+                .map(|stored| stored.and_then(|stored| stored.current_id))
         };
+        let custodian = match target.custodian.clone() {
+            Some(uuid) => current_id(uuid).await?,
+            None => None,
+        };
+        let requester = current_id(who.id.as_str().to_owned()).await?;
+        let silicon = target.display_id();
+        let you = requester.as_deref().unwrap_or("<your id>");
+        let (named, ask) = match &custodian {
+            Some(id) => (format!("its custodian {id}"), id.clone()),
+            None => ("its custodian".to_owned(), "its custodian".to_owned()),
+        };
+        let allow_for = format!("dm allow add {you} --for {silicon}");
         Err(AppError::forbidden(
             "contact_not_allowed",
             format!(
-                "{} only accepts new conversations and invitations from its custodian, the custodian's other Silicons and accounts it has allowed. Ask {} (`dm allow add <your id>`) or {custodian} (DM website, Silicons) to allow you first.",
-                target.display_id(),
-                target.display_id(),
+                "{silicon} only accepts new conversations and invitations from {named}, the custodian's other Silicons and the accounts it allows, and {} is not one of them yet.",
+                requester.as_deref().unwrap_or("you"),
             ),
+        )
+        .with_hint(format!(
+            "Ask {silicon} to run dm allow add {you}, or ask {ask} to allow you on the DM website (Settings → Your Silicons' reach, /settings#reach) or with {allow_for}."
         ))
+        .with_details(serde_json::json!({
+            "silicon": silicon,
+            "custodian": custodian,
+            "requester": requester,
+            "allow": {
+                "by_silicon": format!("dm allow add {you}"),
+                "by_custodian": allow_for,
+                "website": "/settings#reach",
+            },
+        })))
     }
 }
 

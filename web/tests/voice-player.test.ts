@@ -1,12 +1,14 @@
 /**
- * What the player says when audio cannot be had (lib/voice/player.ts `playbackError`), and where a voice note is read
- * from (lib/voice/sources.ts `noteSource`): the page reads bytes only from this site, anything else plays as it is.
+ * What the player says when audio cannot be had (lib/voice/player.ts `playbackError`, in lib/voice/words.ts's words,
+ * as transcription and dictation failures are), and where a voice note is read from (lib/voice/sources.ts
+ * `noteSource`): the page reads bytes only from this site, anything else plays as it is.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ApiError } from "../lib/errors";
 import { playbackError } from "../lib/voice/player";
 import { noteSource } from "../lib/voice/sources";
+import { voiceWords } from "../lib/voice/words";
 
 test("a request that never got an answer is told in plain words, not as the request", () => {
   const network = new ApiError({ status: 0, code: "network_error", message: "Could not reach this site for GET /api/v1/conversations/c%3Aa/messages/01a/speech: Failed to fetch.", hint: "Check your connection, then try again.", method: "GET", path: "/api/v1/conversations/c%3Aa/messages/01a/speech" });
@@ -18,11 +20,79 @@ test("a request that never got an answer is told in plain words, not as the requ
   assert.ok(said.hint && /try again/i.test(said.hint));
 });
 
-test("the service's own words pass through untouched", () => {
-  const limited = new ApiError({ status: 429, code: "speech_rate_limited", message: "You have rendered 30 messages in the last minute.", hint: "Wait a moment.", retryAfter: 20 });
-  assert.equal(playbackError(limited), limited);
+test("the service's own words pass through where they already read well for a Carbon", () => {
   const gone = new ApiError({ status: 410, code: "message_deleted", message: "This message was deleted; its content, speech included, is gone." });
   assert.equal(playbackError(gone), gone);
+  const nothing = new ApiError({ status: 404, code: "nothing_to_speak", message: "This message has no speech and no text to read aloud.", hint: "Play its voice note or open its attachments instead." });
+  assert.equal(playbackError(nothing), nothing);
+});
+
+/* The service's words for these name routes, settings and requests; a Carbon reads what happened, why, what to do. */
+const developerWords = /GET |POST |\/api\/|DM_[A-Z_]+|Retry-After|request|Deepgram|operator|details\./;
+
+test("listening failures are told in a Carbon's words, keeping the service's code", () => {
+  const rejected = new ApiError({ status: 422, code: "speech_rejected", message: "Deepgram refused the voice; retrying the same script and voice will not help.", hint: "Change the script (plain words, cues in square brackets) or choose another voice from GET /api/v1/voices." });
+  const heard = playbackError(rejected);
+  assert.equal(heard.code, "speech_rejected");
+  assert.match(heard.message, /^The voice could not say these words/);
+  assert.match(heard.hint ?? "", /Settings → Voice/);
+  assert.match(playbackError(rejected, "sample").message, /^This voice could not say its sample/);
+
+  const unavailable = new ApiError({ status: 503, code: "speech_unavailable", message: "Deepgram did not answer. Nothing was lost; retry in a few seconds.", hint: "Retry the same request after the Retry-After delay.", retryAfter: 3 });
+  assert.equal(playbackError(unavailable).hint, "Nothing is lost. Try again in 3 seconds.");
+
+  const off = new ApiError({ status: 503, code: "speech_not_configured", message: "This DM service has no speech provider configured (DM_DEEPGRAM_API_KEY is not set), so it cannot render speech or transcribe audio.", hint: "Send text instead; speech works once the operator of this DM sets DM_DEEPGRAM_API_KEY. GET /api/v1/accounts says whether speech is enabled." });
+  assert.equal(playbackError(off).message, "Listening is not set up on this DM service yet.");
+
+  const limited = new ApiError({ status: 429, code: "speech_rate_limited", message: "This account already had 30 speech renders this minute, the most DM allows.", hint: "Retry in 20 seconds.", retryAfter: 20, details: { limit: 30, retry_after_seconds: 20 } });
+  assert.equal(playbackError(limited).message, "DM makes at most 30 new recordings a minute for each account, and you reached that.");
+  assert.equal(playbackError(limited).hint, "Try again in 20 seconds. Anything you already heard still plays.");
+  assert.equal(playbackError(limited).retryAfter, 20, "the wait is kept for whoever retries");
+
+  const budget = new ApiError({ status: 429, code: "speech_budget_exceeded", message: "This would take the account past its 200000 characters of speech for today (UTC).", hint: "Send text instead, or retry after midnight UTC (5000 seconds).", details: { limit: 200000, retry_after_seconds: 5000 } });
+  assert.equal(playbackError(budget).message, "DM reads at most 200,000 characters aloud a day for each account, and you reached that.");
+
+  const broken = new ApiError({ status: 502, code: "server_unavailable", message: "GET /v1/conversations/x/messages/0a1/speech failed: the service could not be reached (HTTP 502), and the answer had no error details.", hint: "Wait a moment and try again." });
+  assert.match(playbackError(broken).message, /^The audio could not be loaded/);
+
+  for (const error of [rejected, unavailable, off, limited, budget, broken]) {
+    for (const kind of ["speech", "note", "sample"] as const) {
+      const said = playbackError(error, kind);
+      assert.doesNotMatch(`${said.message} ${said.hint ?? ""}`, developerWords, `${error.code} (${kind}) is in a Carbon's words`);
+    }
+  }
+});
+
+test("a voice message's words and dictation fail in a Carbon's words too", () => {
+  const unavailable = new ApiError({ status: 503, code: "speech_unavailable", message: "Deepgram could not transcribe the audio right now. Nothing was stored; retry in a few seconds.", hint: "Retry the same request after the Retry-After delay." });
+  assert.match(voiceWords(unavailable, "transcribe").message, /^The recording could not be turned into words/);
+  const limited = new ApiError({ status: 429, code: "transcription_rate_limited", message: "This account already asked for 20 transcriptions this minute, the most DM allows.", hint: "Retry in 9 seconds.", retryAfter: 9, details: { limit: 20 } });
+  assert.equal(voiceWords(limited, "dictate").message, "DM turns at most 20 recordings into words a minute for each account, and you reached that.");
+  assert.equal(voiceWords(limited, "dictate").hint, "Try again in 9 seconds.");
+  const off = new ApiError({ status: 503, code: "speech_not_configured", message: "… DM_DEEPGRAM_API_KEY is not set …", hint: "… the operator …" });
+  assert.equal(voiceWords(off, "dictate").hint, "Type instead.");
+  // A voice message's words that failed: it went without them, so nothing asks to try again.
+  assert.equal(voiceWords(off, "transcribe").hint, "The voice message went without its words; it plays as recorded.");
+  assert.equal(voiceWords(unavailable, "transcribe").hint, "The voice message went without its words; it plays as recorded.");
+  const large = new ApiError({ status: 413, code: "audio_too_large", message: "The audio is 120 MiB; DM transcribes at most 100 MiB.", hint: "Set DM_TRANSCRIBE_MAX_BYTES." });
+  assert.equal(voiceWords(large, "dictate").hint, "Dictate a shorter part, then the rest.");
+  assert.equal(voiceWords(large, "transcribe").message, "The recording is too long to be turned into words.");
+  for (const error of [unavailable, limited, off, large]) {
+    for (const task of ["transcribe", "dictate"] as const) {
+      const said = voiceWords(error, task);
+      assert.doesNotMatch(`${said.message} ${said.hint ?? ""}`, developerWords, `${error.code} (${task}) is in a Carbon's words`);
+    }
+  }
+  // Looking at and choosing voices: a request that never got an answer, and a voice no longer offered.
+  const lost = new ApiError({ status: 0, code: "network_error", message: "Could not reach this site for GET /api/v1/voices/si:scout: Failed to fetch.", hint: "Check your connection, then try again." });
+  assert.equal(voiceWords(lost, "voices").message, "DM could not be reached.");
+  const gone = new ApiError({ status: 422, code: "voice_not_found", message: "There is no voice `george`. The voices are: mark, brittney.", hint: "Use one of the keys in details.voices (GET /api/v1/voices describes each)." });
+  assert.equal(voiceWords(gone, "voices").message, "That voice is not one DM offers any more.");
+  const forbidden = new ApiError({ status: 403, code: "voice_change_forbidden", message: "You cannot change the voice of si:atlas.", hint: "Only si:atlas itself or its custodian c:bo can choose its voice; ask them." });
+  assert.equal(voiceWords(forbidden, "voices"), forbidden, "the service's own words, which name who may");
+  // Codes it does not know keep the service's words.
+  const other = new ApiError({ status: 403, code: "read_only_view", message: "A custodian's view is read only.", hint: "Sign in as the Silicon to do that." });
+  assert.equal(voiceWords(other, "transcribe"), other);
 });
 
 test("a voice note is read through this site when it is a Briefcase file; other https links play as they are", () => {

@@ -4,18 +4,25 @@
  * Drafts at run time (the merge rules are lib/chat/drafts.ts). What you type is in localStorage at once (per account
  * and conversation, so it is back the moment you return) and saved to the service about 1.5 s after you stop, with
  * the version you last saw. A 409 means another device saved first: the text here wins and is saved again against
- * that newer version. Returning to the tab looks for a newer draft from another device. Sending clears the draft
- * here and on the service.
+ * that newer version. Opening a conversation, and returning to the tab, look for a newer draft from another device.
+ * Sending clears the draft here and on the service.
+ *
+ * Looking costs one request at most, shared by everything that asks at once (React's double effects in development,
+ * the tab's focus), and none when the conversation list already says what the service has (`draft_version`, see
+ * drafts.ts draftCheck): a draft that is not there answers 404, which the browser logs as an error. That answer is
+ * "no draft", never a failure. Returning to the tab looks again at most every 30 seconds.
  */
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { ApiError } from "@/lib/errors";
 import { deleteDraft, getDraft, putDraft } from "./api";
-import { editDraft, hasContent, mergeDraft, savedDraft, type LocalDraft, type ServerDraft } from "./drafts";
+import { draftCheck, editDraft, hasContent, mergeDraft, savedDraft, type DraftHint, type LocalDraft, type ServerDraft } from "./drafts";
 import { readJson, writeJson } from "./storage";
 import type { Draft } from "./types";
 
 const SAVE_AFTER_MS = 1500;
 const RETRY_AFTER_MS = 10_000;
+/** Returning to the tab looks for another device's draft at most this often. */
+const LOOK_AGAIN_AFTER_MS = 30_000;
 const keyFor = (account: string, address: string) => `dm:draft:v1:${account}:${address}`;
 
 export type DraftSaveState = "idle" | "saving" | "saved" | "offline";
@@ -26,6 +33,12 @@ interface Entry {
   timer: ReturnType<typeof setTimeout> | null;
   saving: Promise<void> | null;
   loaded: boolean;
+  /** A look at the service's draft under way: everything that asks meanwhile shares it. */
+  looking: Promise<void> | null;
+  /** When the service last answered a look (epoch ms; 0: never). */
+  lookedAt: number;
+  /** What the conversation list says about the service's draft (drafts.ts DraftHint). */
+  hint: DraftHint;
   listeners: Set<() => void>;
   snapshot: { draft: LocalDraft | null; save: DraftSaveState };
 }
@@ -39,7 +52,7 @@ function entryFor(account: string, address: string): Entry {
   let entry = entries.get(key);
   if (!entry) {
     const draft = readJson<LocalDraft | null>(key, null);
-    entry = { draft, save: "idle", timer: null, saving: null, loaded: false, listeners: new Set(), snapshot: { draft, save: "idle" } };
+    entry = { draft, save: "idle", timer: null, saving: null, loaded: false, looking: null, lookedAt: 0, hint: "unknown", listeners: new Set(), snapshot: { draft, save: "idle" } };
     entries.set(key, entry);
   }
   return entry;
@@ -114,20 +127,40 @@ function schedule(account: string, address: string, entry: Entry) {
   }, SAVE_AFTER_MS);
 }
 
-/** Looks at the service's draft and merges it with the local one. */
-async function refresh(account: string, address: string, entry: Entry): Promise<void> {
-  let server: ServerDraft | null;
-  try {
-    server = await fetchServer(address);
-  } catch {
-    return;
-  }
-  // Typing may have happened while the answer was on its way: merge with the draft as it is now.
+/** Merges what the service has (null: no draft) with the local draft. */
+function settle(account: string, address: string, entry: Entry, server: ServerDraft | null) {
   const result = mergeDraft(entry.draft, server, Date.now());
   entry.loaded = true;
   if (result.action === "none" && result.draft === entry.draft) return;
   commit(account, address, entry, result.draft);
   if (result.action === "push") schedule(account, address, entry);
+}
+
+/**
+ * Looks at the service's draft and merges it with the local one: not at all when the list's word settles it, and once
+ * for everyone who asks while a look is under way.
+ */
+function refresh(account: string, address: string, entry: Entry): Promise<void> {
+  const check = draftCheck(entry.draft, entry.hint);
+  if (check === "wait" || check === "same") return Promise.resolve();
+  if (check === "absent") {
+    settle(account, address, entry, null);
+    return Promise.resolve();
+  }
+  entry.looking ??= (async () => {
+    let server: ServerDraft | null;
+    try {
+      server = await fetchServer(address);
+    } catch {
+      return;
+    }
+    entry.lookedAt = Date.now();
+    // Typing may have happened while the answer was on its way: merge with the draft as it is now.
+    settle(account, address, entry, server);
+  })().finally(() => {
+    entry.looking = null;
+  });
+  return entry.looking;
 }
 
 export interface DraftHandle {
@@ -158,12 +191,23 @@ function clearDraft(account: string, address: string, remote: boolean) {
   if (remote && hadServerDraft) void deleteDraft(address).catch(() => undefined);
 }
 
+/**
+ * Takes the conversation list's word about the service's draft, and looks when that is not enough. Opening the same
+ * conversation again within 30 seconds of a look, with nothing new said, does not look again.
+ */
+export function lookForDraft(account: string, address: string, hint: DraftHint): Promise<void> {
+  const entry = entryFor(account, address);
+  const changed = entry.hint !== hint;
+  entry.hint = hint;
+  if (!changed && entry.lookedAt && Date.now() - entry.lookedAt < LOOK_AGAIN_AFTER_MS) return Promise.resolve();
+  return refresh(account, address, entry);
+}
+
 /** Starts following one conversation's draft (and the service's), until the returned function is called. */
 function followDraft(account: string, address: string): () => void {
   const entry = entryFor(account, address);
-  void refresh(account, address, entry);
   const onFocus = () => {
-    if (!entry.draft?.dirty) void refresh(account, address, entry);
+    if (!entry.draft?.dirty && Date.now() - entry.lookedAt >= LOOK_AGAIN_AFTER_MS) void refresh(account, address, entry);
   };
   window.addEventListener("focus", onFocus);
   return () => {
@@ -187,15 +231,19 @@ const snapshotOf = (account: string, address: string) => entryFor(account, addre
 
 /**
  * The draft of one conversation for the composer. `enabled` is false in a custodian's read-only view (custodians read
- * a Silicon's draft but never write it), where nothing is stored or saved.
+ * a Silicon's draft but never write it), where nothing is stored or saved. `hint` is what the conversation list says
+ * about the service's draft (drafts.ts draftHint); with "unknown" the service is asked once per opening.
  */
-export function useDraft(account: string, address: string, enabled = true): DraftHandle {
+export function useDraft(account: string, address: string, enabled = true, hint: DraftHint = "unknown"): DraftHandle {
   const snapshot = useSyncExternalStore(
     useCallback((listener: () => void) => subscribeEntry(account, address, listener), [account, address]),
     () => snapshotOf(account, address),
     () => EMPTY_SNAPSHOT,
   );
   useEffect(() => (enabled ? followDraft(account, address) : undefined), [account, address, enabled]);
+  useEffect(() => {
+    if (enabled) void lookForDraft(account, address, hint);
+  }, [account, address, enabled, hint]);
   const setText = useCallback((text: string) => {
     if (enabled) changeDraft(account, address, { text });
   }, [account, address, enabled]);
@@ -207,6 +255,12 @@ export function useDraft(account: string, address: string, enabled = true): Draf
 }
 
 const EMPTY_SNAPSHOT: { draft: LocalDraft | null; save: DraftSaveState } = { draft: null, save: "idle" };
+
+/** A conversation's draft as this tab holds it (what the composer shows). */
+export function draftOf(account: string, address: string): { text: string; replyTo: string | null; version: number } | null {
+  const draft = entryFor(account, address).draft;
+  return draft ? { text: draft.text, replyTo: draft.replyTo, version: draft.version } : null;
+}
 
 /** The local draft text of a conversation, for a row's "Draft:" preview (no network). */
 export function localDraftText(account: string, address: string): string {

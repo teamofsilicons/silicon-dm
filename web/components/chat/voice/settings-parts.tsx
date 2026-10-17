@@ -23,6 +23,7 @@ import { useShortcutKeys } from "@/lib/shortcuts/react";
 import { useAccountVoice, useVoiceChoice } from "@/lib/voice/account-voices";
 import { useVoiceFeatures } from "@/lib/voice/availability";
 import { setRate, SPEEDS } from "@/lib/voice/player";
+import { voiceWords } from "@/lib/voice/words";
 import { AccountAvatar } from "../common/avatars";
 import { useChat } from "../shell/chat-context";
 import { AccountVoiceChooser, ResetVoiceButton } from "./voice-picker";
@@ -66,7 +67,7 @@ function AccountVoiceGroup({ account, title, note }: { account: AccountRef; titl
         <ResetVoiceButton account={account} data={voice.data} choice={choice} />
       </div>
       <p className={styles.groupNote}>{note}</p>
-      {voice.error ? <ErrorAlert error={voice.error} title="The voice could not be loaded" /> : <AccountVoiceChooser account={account} data={voice.data} label={title} choice={choice} />}
+      {voice.error ? <ErrorAlert error={voiceWords(voice.error, "voices")} title="The voice could not be loaded" /> : <AccountVoiceChooser account={account} data={voice.data} label={title} choice={choice} />}
     </section>
   );
 }

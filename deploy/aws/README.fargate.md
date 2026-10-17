@@ -125,7 +125,7 @@ After bootstrap succeeds, execute a reviewed update with
 `RuntimeDesiredCount=1`. Verify both services reach steady state and the API
 IP targets pass `/ready` with 204. Perform public HTTPS, sign-in, sync feed,
 Giphy, and real signed Silicon Accounts webhook checks individually as described in
-[`docs/deployment.md`](../../docs/deployment.md). A service reaching steady
+[`docs/operations/deployment.md`](../../docs/operations/deployment.md). A service reaching steady
 state is infrastructure evidence, not end-to-end application verification.
 
 Before any database mutations, bootstrap verifies that an already initialized

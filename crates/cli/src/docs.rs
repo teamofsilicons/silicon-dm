@@ -1,14 +1,14 @@
 //! Complete offline manuals, embedded from files included in the CLI package.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Args, ValueEnum};
 use serde_json::{Value, json};
 
 #[derive(Args)]
 pub struct DocsArgs {
     /// Guide to print in full. Omit, or use index, to discover available topics.
-    #[arg(value_enum)]
-    topic: Option<Topic>,
+    #[arg(value_parser = TopicName)]
+    topic: Option<String>,
     /// Search all packaged guides; results include matching line numbers and excerpts.
     #[arg(long, value_name = "TEXT", conflicts_with_all = ["topic", "all"])]
     search: Option<String>,
@@ -89,6 +89,115 @@ enum Topic {
     Deployment,
     /// Releasing DM: Silicon Apps archives, the Rust crates and the docs site.
     Releasing,
+}
+
+/// Takes any topic name, so an unknown one is answered in the CLI's own JSON error (with the
+/// valid topics) rather than the argument parser's text, while `--help` still lists the topics.
+#[derive(Clone)]
+struct TopicName;
+
+impl clap::builder::TypedValueParser for TopicName {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        _command: &clap::Command,
+        _argument: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<String, clap::Error> {
+        Ok(value.to_string_lossy().into_owned())
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            Topic::value_variants()
+                .iter()
+                .filter_map(ValueEnum::to_possible_value),
+        ))
+    }
+}
+
+/// `dm docs` was asked for a topic it does not have, or to search for nothing: an argument
+/// error (exit 2), printed as `{"error": {code, message, hint, details}}`.
+#[derive(Debug)]
+pub struct DocsRefusal {
+    pub code: &'static str,
+    pub message: String,
+    pub hint: String,
+    pub details: Value,
+}
+
+impl std::fmt::Display for DocsRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DocsRefusal {}
+
+/// Edit distance between two short names (for "did you mean").
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, left) in a.chars().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, right) in b.iter().enumerate() {
+            let substitution = previous[j] + usize::from(left != *right);
+            current.push(substitution.min(previous[j + 1] + 1).min(current[j] + 1));
+        }
+        previous = current;
+    }
+    previous[b.len()]
+}
+
+fn unknown_topic(name: &str) -> DocsRefusal {
+    let mut topics = Vec::new();
+    let mut aliases = serde_json::Map::new();
+    for value in Topic::value_variants()
+        .iter()
+        .filter_map(ValueEnum::to_possible_value)
+    {
+        let mut names = value.get_name_and_aliases();
+        if let Some(topic) = names.next() {
+            topics.push(topic.to_owned());
+            for alias in names {
+                aliases.insert(alias.to_owned(), json!(topic));
+            }
+        }
+    }
+    let wanted = name.trim().to_lowercase();
+    let suggestion = topics
+        .iter()
+        .chain(aliases.keys())
+        .map(|candidate| (distance(&wanted, candidate), candidate))
+        .filter(|(far, candidate)| {
+            *far <= 2 || candidate.starts_with(&wanted) && !wanted.is_empty()
+        })
+        .min_by_key(|(far, _)| *far)
+        .map(|(_, candidate)| {
+            aliases
+                .get(candidate.as_str())
+                .and_then(Value::as_str)
+                .unwrap_or(candidate)
+                .to_owned()
+        });
+    let shown: String = name.chars().take(80).collect();
+    let hint = match &suggestion {
+        Some(topic) => format!(
+            "Did you mean dm docs {topic}? dm docs lists every guide; dm docs --search '{shown}' finds the pages that mention it."
+        ),
+        None => format!(
+            "dm docs lists every guide with its topic; dm docs --search '{shown}' finds the pages that mention it."
+        ),
+    };
+    DocsRefusal {
+        code: "unknown_topic",
+        message: format!("dm docs has no guide called \"{shown}\"."),
+        hint,
+        details: json!({"topic": shown, "did_you_mean": suggestion, "topics": topics, "aliases": aliases}),
+    }
 }
 
 struct Guide {
@@ -220,7 +329,13 @@ pub fn render(options: &DocsArgs) -> Result<Value> {
     if let Some(search) = &options.search {
         let query = search.trim();
         if query.is_empty() {
-            bail!("documentation search must contain text; use dm docs for the topic index");
+            return Err(DocsRefusal {
+                code: "empty_search",
+                message: "dm docs --search needs some text to look for; it was empty.".into(),
+                hint: "dm docs --search 'allow-list' finds the pages that mention it; dm docs lists every guide.".into(),
+                details: json!({}),
+            }
+            .into());
         }
         let needle = query.to_lowercase();
         let results: Vec<Value> = GUIDES.iter().filter_map(|guide| {
@@ -241,7 +356,11 @@ pub fn render(options: &DocsArgs) -> Result<Value> {
             "documents":GUIDES.iter().map(document).collect::<Vec<_>>()}),
         );
     }
-    if let Some(topic) = options.topic.filter(|topic| !matches!(topic, Topic::Index)) {
+    let topic = match options.topic.as_deref() {
+        Some(name) => Some(Topic::from_str(name, false).map_err(|_| unknown_topic(name))?),
+        None => None,
+    };
+    if let Some(topic) = topic.filter(|topic| !matches!(topic, Topic::Index)) {
         let name = topic
             .to_possible_value()
             .expect("all documentation topics are visible");
@@ -298,9 +417,8 @@ mod tests {
             ("expressive", "docs/start/expressive-writing.md"),
             ("write-for-the-ear", "docs/start/expressive-writing.md"),
         ] {
-            let topic = Topic::from_str(name, false).expect(name);
             let options = DocsArgs {
-                topic: Some(topic),
+                topic: Some(name.to_owned()),
                 search: None,
                 all: false,
             };
@@ -350,9 +468,8 @@ mod tests {
             ("deployment", "docs/operations/deployment.md"),
             ("releasing", "docs/operations/releasing.md"),
         ] {
-            let topic = Topic::from_str(name, false).expect(name);
             let options = DocsArgs {
-                topic: Some(topic),
+                topic: Some(name.to_owned()),
                 search: None,
                 all: false,
             };

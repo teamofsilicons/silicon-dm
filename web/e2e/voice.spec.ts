@@ -4,9 +4,13 @@
  * the stand-in.") and renders speech. Every test makes its own data (a new group, or messages with a unique marker) and
  * asserts only on it, because other runs use the same stack at the same time.
  *
- *   a voice note: recorded with ⌘⇧M, sent with Enter, heard by the other Carbon with its transcript
- *   dictation: ⌘⇧D, Enter, the stand-in's words in the field
- *   Listen on a Silicon's words; a spoken message: "Preparing audio…", then its waveform; Listen mode speaks what arrives
+ *   a voice note: recorded with ⌘⇧M, sent with Enter (waiting in the outbox it already plays), heard by the other
+ *     Carbon with its transcript
+ *   dictation: ⌘⇧D, Enter, the stand-in's words in the field; failures in a Carbon's words, the recording kept
+ *   an open edit: a voice message waits (the microphone dictates into the edit); a voice message on a link elsewhere is
+ *     never fetched by the page (CSP), and shows without errors
+ *   Listen on a Silicon's words; a spoken message: "Preparing audio…", then its waveform; Listen mode speaks what
+ *     arrives (in a group of the run's own with Scout, so nothing another run says is spoken there)
  *   Settings → Voice: choosing Scout's voice is what the service says
  *   axe on the voice surfaces
  */
@@ -81,8 +85,17 @@ async function dmApi<T>(who: string, method: string, path: string, body?: unknow
 }
 
 /** A Silicon sends a message from the CLI (through its relay), like a Silicon does. */
-function scoutSays(args: string[]): void {
-  execFileSync("node", [HELPER, "dm", "scout", "--", "messages", "send", "c:dmc-ada", ...args, "--wait"], { stdio: ["ignore", "pipe", "pipe"] });
+function scoutSays(conversation: string, args: string[]): void {
+  execFileSync("node", [HELPER, "dm", "scout", "--", "messages", "send", conversation, ...args, "--wait"], { stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/**
+ * A group of Ada's with Scout in it (her own Silicon joins at once), for this run only: what Scout says there is heard
+ * by this test alone, whatever other runs say to Ada meanwhile.
+ */
+async function groupWithScout(label: string): Promise<string> {
+  const group = await dmApi<{ id: string }>("ada", "POST", "/api/v1/groups", { type: "create_group", data: { name: `${label} ${stamp()}`, member_ids: ["si:dmc-scout"] } });
+  return group.id;
 }
 
 const stamp = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -146,9 +159,25 @@ test("a voice note: recorded, uploaded, transcribed, heard by the other Carbon; 
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "Stop and send the voice message" })).toBeFocused();
   await page.waitForTimeout(500);
+  // The send is held for a moment (this page's request only), to see the message wait in the outbox as itself. Once let
+  // go, every send passes straight through.
+  let letGo: () => void = () => undefined;
+  const held = new Promise<void>(resolve => {
+    letGo = resolve;
+  });
+  await page.route(url => url.pathname.endsWith(`/conversations/${encodeURIComponent(group.id)}/messages`), async route => {
+    if (route.request().method() === "POST") await held;
+    await route.continue();
+  });
   // Enter stops and sends: the tray takes it (uploading, transcribing), then the message goes with its transcript.
   await page.keyboard.press("Enter");
   await expect(recording).toBeHidden();
+  // Waiting in the outbox, it is already a voice message that plays (from the recording), with its words.
+  const waiting = page.locator("article[data-pending]", { hasText: caption });
+  await expect(waiting.getByRole("button", { name: /^Play the voice message/ })).toBeVisible({ timeout: 30_000 });
+  await expect(waiting).toContainText(STAND_IN_WORDS);
+  await expect(waiting).not.toContainText("Voice message");
+  letGo();
   const sent = page.locator("article[data-message-code]", { hasText: caption });
   await expect(sent).toBeVisible();
   await expect(sent).toContainText(STAND_IN_WORDS, { timeout: 30_000 });
@@ -235,7 +264,8 @@ test("a failed transcription keeps what was said (Try again sends it again); a f
   const dictating = page.getByRole("group", { name: "Dictating" });
   await expect(dictating.getByRole("timer")).toHaveText(/0:0[1-9]/, { timeout: 10_000 });
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("alert").filter({ hasText: "The speech provider did not answer in time." })).toBeVisible();
+  // Said in a Carbon's words (the service's are for Silicons), with how long to wait.
+  await expect(page.getByRole("alert").filter({ hasText: "The recording could not be turned into words: the transcription did not answer in time." })).toContainText("Try again in 5 seconds.");
   await expect(page.getByRole("button", { name: "Try again" })).toBeFocused();
   refuse = false;
   await page.keyboard.press("Enter");
@@ -267,14 +297,14 @@ test("with uploads off the microphone dictates and says why; with speech off lis
   const page = await ada.newPage();
   const errors = watchErrors(page);
   // This page's own answers only: the website without Briefcase.
-  await page.route(url => url.pathname === "/api/uploads/config", route => route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: false, reason: "Uploads are not set up on this website.", max_bytes: 0 }) }));
+  await page.route(url => url.pathname === "/api/uploads/config", route => route.fulfill({ status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: false, reason: "Uploads are not set up on this DM website yet.", max_bytes: 0 }) }));
   await page.goto("/c/c:dmc-ada::si:dmc-scout");
   const field = page.getByRole("textbox", { name: /^Message / });
   await expect(field).toBeVisible();
   await expect(page.getByRole("button", { name: "Dictate (voice messages need uploads, which are off here)" })).toBeVisible();
   await field.click();
   await field.press(`${MOD}+Shift+M`);
-  await expect(page.getByText("Uploads are not set up on this website. Dictation still works")).toBeVisible();
+  await expect(page.getByText("Uploads are not set up on this DM website yet. Dictation still works")).toBeVisible();
   await expect(page.getByRole("group", { name: "Recording a voice message" })).toHaveCount(0);
 
   // The DM service without a speech provider: Listen mode is off and says why; samples cannot play.
@@ -296,24 +326,80 @@ test("with uploads off the microphone dictates and says why; with speech off lis
   await ada.close();
 });
 
+test("a voice message waits for an open edit (it would go as a new message); one on a link elsewhere plays without errors", async ({ browser }) => {
+  const group = await dmApi<{ id: string }>("ada", "POST", "/api/v1/groups", { type: "create_group", data: { name: `Voice edits ${stamp()}`, member_ids: ["c:dmc-bo"] } });
+  await dmApi("bo", "POST", `/api/v1/groups/${encodeURIComponent(group.id)}/accept`);
+  const mine = `Edit me ${stamp()}`;
+  await dmApi("ada", "POST", `/api/v1/conversations/${encodeURIComponent(group.id)}/messages`, { type: "message.create", data: { message: mine } });
+  // A voice message whose link is not a Briefcase file: the page may not read it (connect-src 'self'), so it is not
+  // fetched for a waveform; it shows its words and plays through the audio element when asked.
+  const elsewhere = `From elsewhere ${stamp()}`;
+  await dmApi("bo", "POST", `/api/v1/conversations/${encodeURIComponent(group.id)}/messages`, { type: "message.create", data: { message: elsewhere, voice: { permanent_url: "https://cdn.example.com/notes/hello.ogg", content_type: "audio/ogg", duration_milliseconds: 4000 }, voice_transcript: "Hello from somewhere else." } });
+
+  const ada = await signedIn(browser, "ada");
+  await ada.route(/^https:\/\/cdn\.example\.com\//, route => route.fulfill({ status: 404, body: "" }));
+  const page = await ada.newPage();
+  const errors = watchErrors(page);
+  const fetchedElsewhere: string[] = [];
+  page.on("request", request => {
+    if (request.url().includes("cdn.example.com")) fetchedElsewhere.push(request.url());
+  });
+  await page.goto(`/c/${group.id}`);
+  const note = page.locator("article[data-message-code]", { hasText: elsewhere });
+  await expect(note.getByRole("button", { name: /^Play Bo's voice message/ })).toBeVisible();
+  await expect(note).toContainText("Hello from somewhere else.");
+  expect(fetchedElsewhere, "nothing is fetched from elsewhere before it plays").toEqual([]);
+
+  // ↑ in the empty field edits Ada's last message; meanwhile ⌘⇧M says why it waits, and the microphone dictates.
+  const field = page.getByRole("textbox", { name: /^Message / });
+  await field.click();
+  await field.press("ArrowUp");
+  await expect(page.getByRole("textbox", { name: "Edit your message" })).toHaveValue(mine);
+  await page.keyboard.press(`${MOD}+Shift+M`);
+  await expect(page.getByText("A voice message waits for the edit")).toBeVisible();
+  await expect(page.getByRole("group", { name: "Recording a voice message" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Dictate into your edit" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Record a voice message" })).toBeVisible();
+
+  expect(errors).toEqual([]);
+  await ada.close();
+});
+
 /* Listening to Silicons --------------------------------------------------------------------------------------------- */
 
 test("Listen plays a Silicon's words; a spoken message prepares, then shows its waveform; Listen mode speaks what arrives", async ({ browser }) => {
+  // A group of this run's own with Scout: Listen mode hears only what this test has Scout say.
+  const group = await groupWithScout("Listen check");
   const ada = await signedIn(browser, "ada");
   const page = await ada.newPage();
   const errors = watchErrors(page);
-  await page.goto("/c/c:dmc-ada::si:dmc-scout");
+  await page.goto(`/c/${group}`);
   await expect(page.getByRole("textbox", { name: /^Message / })).toBeVisible();
 
   // Listen on a text message (the message menu, or Space on a selected message): spoken in Scout's voice.
   const words = `Listen check ${stamp()}`;
-  scoutSays(["--text", `${words}, the build is green.`]);
+  scoutSays(group, ["--text", `${words}, the build is green.`]);
   const text = page.locator("article[data-message-code]", { hasText: words });
   await expect(text).toBeVisible();
   const textCode = await text.getAttribute("data-message-code");
   await text.click({ button: "right" });
   await page.getByRole("menuitem", { name: "Listen" }).click();
   await expectPlaying(page, `|${textCode}`);
+
+  // A voice that cannot say the words: the Carbon reads what happened and what to do, never the service's wording for
+  // Silicons ("choose another voice from GET /api/v1/voices"). This page's speech requests only.
+  const refusing = (url: URL) => url.pathname.includes(`/conversations/${encodeURIComponent(group)}/messages/`) && url.pathname.endsWith("/speech");
+  await page.route(refusing, route => route.fulfill({ status: 422, headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "error", data: { error: { code: "speech_rejected", message: "Deepgram refused this voice or script; retrying the same script and voice will not help.", hint: "Change the script (plain words, cues in square brackets) or choose another voice from GET /api/v1/voices." } } }) }));
+  const refused = `Refused words ${stamp()}`;
+  scoutSays(group, ["--text", `${refused}, in a voice that cannot say them.`]);
+  const refusedRow = page.locator("article[data-message-code]", { hasText: refused });
+  await expect(refusedRow).toBeVisible();
+  await refusedRow.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Listen" }).click();
+  await expect(page.getByText("The voice could not say these words, so there is no audio for them.")).toBeVisible();
+  await expect(page.getByText(/GET \/api\/v1\/voices|Deepgram/)).toHaveCount(0);
+  await page.unroute(refusing);
 
   // A spoken message: its words show at once, "Preparing audio…" while the service renders, then the waveform.
   await page.evaluate(() => {
@@ -327,7 +413,7 @@ test("Listen plays a Silicon's words; a spoken message prepares, then shows its 
   });
   const spoken = `Speech check ${stamp()}`;
   const long = Array.from({ length: 60 }, (_, index) => `step ${index + 1} is done`).join(", ");
-  const sending = spawn("node", [HELPER, "dm", "scout", "--", "messages", "send", "c:dmc-ada", "--speak", `[warmly] Hi Ada, ${spoken}. ${long}.`, "--dangerously-send-long-message", "--wait"], { stdio: "ignore" });
+  const sending = spawn("node", [HELPER, "dm", "scout", "--", "messages", "send", group, "--speak", `[warmly] Hi Ada, ${spoken}. ${long}.`, "--dangerously-send-long-message", "--wait"], { stdio: "ignore" });
   const sent = new Promise(resolve => sending.once("exit", resolve));
   const speech = page.locator("article[data-message-code]", { hasText: spoken });
   await expect(speech).toBeVisible({ timeout: 30_000 });
@@ -353,7 +439,7 @@ test("Listen plays a Silicon's words; a spoken message prepares, then shows its 
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-pressed", "true");
   const arriving = `Listen mode check ${stamp()}`;
-  scoutSays(["--text", `${arriving}, ${Array.from({ length: 10 }, (_, index) => `point ${index + 1} still holds`).join(", ")}.`, "--dangerously-send-long-message"]);
+  scoutSays(group, ["--text", `${arriving}, ${Array.from({ length: 10 }, (_, index) => `point ${index + 1} still holds`).join(", ")}.`, "--dangerously-send-long-message"]);
   const next = page.locator("article[data-message-code]", { hasText: arriving });
   await expect(next).toBeVisible();
   const nextCode = await next.getAttribute("data-message-code");
@@ -373,7 +459,7 @@ test("Listen plays a Silicon's words; a spoken message prepares, then shows its 
   await expect.poll(async () => (await player(page))?.track ?? null).toBeNull();
   // A spoken message waits for its rendering, then is spoken in its own voice.
   const said = `Listen mode speech ${stamp()}`;
-  scoutSays(["--speak", `[warmly] ${said}, all done.`]);
+  scoutSays(group, ["--speak", `[warmly] ${said}, all done.`]);
   const spokenNext = page.locator("article[data-message-code]", { hasText: said });
   await expect(spokenNext).toBeVisible();
   await expectPlaying(page, `|${await spokenNext.getAttribute("data-message-code")}`);
@@ -383,11 +469,11 @@ test("Listen plays a Silicon's words; a spoken message prepares, then shows its 
   // other says so, and Listen here brings it back.
   const other = await ada.newPage();
   const otherErrors = watchErrors(other);
-  await other.goto("/c/c:dmc-ada::si:dmc-scout");
+  await other.goto(`/c/${group}`);
   await other.getByRole("button", { name: "Listen mode" }).click();
   await expect(page.getByRole("status").filter({ hasText: "On in another tab" })).toBeVisible();
   const twice = `Two tabs ${stamp()}`;
-  scoutSays(["--text", `${twice}, ${Array.from({ length: 8 }, (_, index) => `point ${index + 1} holds`).join(", ")}.`, "--dangerously-send-long-message"]);
+  scoutSays(group, ["--text", `${twice}, ${Array.from({ length: 8 }, (_, index) => `point ${index + 1} holds`).join(", ")}.`, "--dangerously-send-long-message"]);
   const twiceRow = other.locator("article[data-message-code]", { hasText: twice });
   await expect(twiceRow).toBeVisible();
   await expectPlaying(other, `|${await twiceRow.getAttribute("data-message-code")}`);
@@ -400,20 +486,20 @@ test("Listen plays a Silicon's words; a spoken message prepares, then shows its 
 
   // A message deleted while it is spoken stops at once: its words are gone for everyone.
   const doomed = `Deleted ${stamp()}`;
-  scoutSays(["--text", `${doomed}, ${Array.from({ length: 12 }, (_, index) => `sentence ${index + 1} keeps going`).join(", ")}.`, "--dangerously-send-long-message"]);
+  scoutSays(group, ["--text", `${doomed}, ${Array.from({ length: 12 }, (_, index) => `sentence ${index + 1} keeps going`).join(", ")}.`, "--dangerously-send-long-message"]);
   const doomedRow = page.locator("article[data-message-code]", { hasText: doomed });
   await expect(doomedRow).toBeVisible();
   const doomedCode = (await doomedRow.getAttribute("data-message-code"))!;
   await expectPlaying(page, `|${doomedCode}`);
-  helper("dm", "scout", "--", "messages", "delete", "c:dmc-ada::si:dmc-scout", doomedCode);
+  helper("dm", "scout", "--", "messages", "delete", group, doomedCode);
   await expect.poll(async () => (await player(page))?.track ?? null, { timeout: 15_000, message: "the deleted message stops playing" }).toBeNull();
 
   // ⌘⇧L turns it off again.
   await page.keyboard.press(`${MOD}+Shift+L`);
   await expect(toggle).toHaveAttribute("aria-pressed", "false");
 
-  // What was typed is gone from the shared stack too.
-  await dmApi("ada", "DELETE", "/api/v1/conversations/c:dmc-ada::si:dmc-scout/draft").catch(() => undefined);
+  // What was typed is gone from the stack too.
+  await dmApi("ada", "DELETE", `/api/v1/conversations/${encodeURIComponent(group)}/draft`).catch(() => undefined);
   expect(errors).toEqual([]);
   await ada.close();
 });

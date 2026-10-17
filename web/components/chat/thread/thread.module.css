@@ -82,9 +82,9 @@
 .message[data-first] { margin-top: var(--space-3); }
 .day + .message, .unread + .message { margin-top: var(--space-2); }
 .message[data-mine] { justify-content: flex-end; }
-/* The selected message: a faint wash on the row and an accent edge on the bubble. */
-.message:focus-visible { background: color-mix(in oklab, var(--accent) 6%, transparent); }
-.message:focus-visible .bubble { --sq-stroke: color-mix(in oklab, var(--accent) 60%, transparent); }
+/* The selected message (the keyboard's, or a tapped one): a faint wash on the row and an accent edge on the bubble. */
+.message:focus-visible, .message[data-selected] { background: color-mix(in oklab, var(--accent) 6%, transparent); }
+.message:focus-visible .bubble, .message[data-selected] .bubble { --sq-stroke: color-mix(in oklab, var(--accent) 60%, transparent); }
 @media (prefers-reduced-motion: no-preference) {
   .message[data-fresh] { animation: message-in var(--duration-standard) var(--ease-enter) both; }
   .message { transition: background-color var(--duration-fast) var(--ease-standard); }
@@ -139,16 +139,24 @@
 .emoji[data-count="2"], .emoji[data-count="3"] { font-size: 1.875rem; }
 
 /*
- * The toolbar of the message in use: beside its bubble on the side away from the sender, level with its first line;
- * where the column has no room there (message-row.tsx measures it), over the bubble's top edge at that same end, so it
- * never covers the sender's name over a run.
+ * The toolbar of the message in use (one at a time): beside its bubble on the side away from the sender, level with
+ * its first line, with the time or (where only that fits) without it; under a message you selected when the column has
+ * no room beside it, in the thread's flow (its row makes room, so it covers nothing); over the bubble's own top edge
+ * only when nothing is drawn there. message-row.tsx measures which, before the toolbar is painted.
  */
 .toolbar { --sq-r: 12px; --sq-fill: var(--surface-raised); --sq-stroke: var(--border); position: absolute; top: min(50%, 20px); left: calc(100% + 6px); z-index: 3; display: flex; align-items: center; border: 1px solid var(--sq-stroke); padding: 2px; background: var(--sq-fill); box-shadow: var(--shadow-resting); white-space: nowrap; translate: 0 -50%; }
+.toolbar[hidden] { display: none; }
 .message[data-mine] .toolbar { right: calc(100% + 6px); left: auto; flex-direction: row-reverse; }
 .toolbar[data-place="above"] { top: auto; right: 0; bottom: calc(100% - 6px); left: auto; translate: none; }
 .message[data-mine] .toolbar[data-place="above"] { right: auto; left: 0; }
+.toolbar[data-place="below"] { top: calc(100% + 4px); right: 0; bottom: auto; left: auto; translate: none; }
+.message[data-mine] .toolbar[data-place="below"] { right: auto; left: 0; }
+.bubbleRow:has(> .toolbar[data-place="below"]) { margin-bottom: 40px; }
+/* The face stays level with the bubble's last line, not with the toolbar under it. */
+.message:has(> .stack > .bubbleRow > .toolbar[data-place="below"]) > .gutter { margin-bottom: 61px; }
 .toolbarTime { padding: 0 6px 0 8px; color: var(--text-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .message[data-mine] .toolbarTime { padding: 0 8px 0 6px; }
+.toolbar[data-compact] .toolbarTime { display: none; }
 @media (prefers-reduced-motion: no-preference) {
   .toolbar { animation: toolbar-in var(--duration-fast) var(--ease-enter) both; }
 }

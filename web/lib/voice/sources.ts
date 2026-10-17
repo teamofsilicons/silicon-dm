@@ -441,7 +441,7 @@ export function prepareNote(url: string): Promise<CachedAudio> {
       }
       const error = errorFromResponse(response, body, "GET", source.url);
       throw error.code === "unexpected_response" || error.code === "server_unavailable"
-        ? new ApiError({ status: response.status, code: "voice_note_unavailable", message: `The voice message could not be loaded (HTTP ${response.status}).`, hint: response.status === 404 ? "It may have been removed from its sender's Briefcase." : "Try again in a moment." })
+        ? new ApiError({ status: response.status, code: "voice_note_unavailable", message: response.status === 404 ? "The voice message is not there any more." : "The voice message could not be loaded.", hint: response.status === 404 ? "Its sender may have removed it from their Briefcase." : "Try again in a moment." })
         : error;
     }
     return prepareFromBytes(url, await response.arrayBuffer(), response.headers.get("content-type")?.split(";")[0]?.trim() || "audio/webm");

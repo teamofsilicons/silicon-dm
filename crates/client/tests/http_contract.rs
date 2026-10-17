@@ -103,7 +103,8 @@ async fn handler(State(requests): State<Requests>, request: Request) -> Response
                 "added_by":account("carbon","c:ada","Ada"),"added_at":"2026-10-10T10:00:00Z"}]})
         }
         "/api/v1/conversations" => json!({"items":[
-            {"id":"c:ada::si:cos","participants":[account("carbon","c:ada","Ada"),account("silicon","si:cos","K1E")],
+            {"id":"c:ada::si:cos","participants":[account("carbon","c:ada","Ada"),
+                {"type":"silicon","id":"si:cos","uuid":"K1E","custodian":account("carbon","c:ada","Ada")}],
              "visible_to_custodians":[account("carbon","c:ada","Ada")],"last_message":null,"last_message_status":null,
              "created_at":"2026-10-10T10:00:00Z","updated_at":"2026-10-10T10:00:00Z"},
             {"id":"g:design","participants":[],"group":{"name":"Design","description":"","owners":[account("carbon","c:ada","Ada")]},
@@ -209,6 +210,16 @@ async fn custodian_allow_list_group_and_invitation_routes_use_their_contract() -
         .conversations_for(&Default::default(), Some("si:cos"))
         .await?;
     assert_eq!(conversations.items[0].visible_to_custodians[0].id, "c:ada");
+    // A Silicon names its custodian (DM 0.17); a Carbon has none.
+    let participants = &conversations.items[0].participants;
+    assert_eq!(
+        participants[1]
+            .custodian
+            .as_ref()
+            .map(|custodian| custodian.id.as_str()),
+        Some("c:ada")
+    );
+    assert!(participants[0].custodian.is_none());
     let groups = client.groups(&Default::default()).await?;
     assert_eq!(groups.items.len(), 1);
     let list = client.allow(&["c:bob".into()], Some("si:cos")).await?;

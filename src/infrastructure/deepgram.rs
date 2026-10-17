@@ -116,7 +116,7 @@ fn rejected(message: &str) -> AppError {
         "speech_rejected",
         format!("{message}; retrying the same script and voice will not help."),
     )
-    .with_hint("Change the script (plain words, cues in square brackets) or choose another voice from GET /api/v1/voices.")
+    .with_hint("Simplify the script (plain words, cues such as [warmly] in square brackets) or choose another voice: dm voices list, or Settings → Voice on the DM website.")
 }
 
 fn connection_error(error: &SocketError) -> AppError {
@@ -307,7 +307,9 @@ impl SpeechProvider for DeepgramClient {
                         ));
                     }
                     if pcm.len().saturating_add(data.len()) > AUDIO_MAX_BYTES {
-                        break Err(rejected("the rendered audio exceeds 30 MB"));
+                        break Err(rejected(
+                            "The audio would be larger than DM keeps for one message (30 MB, about ten minutes of speech): split the script into shorter messages",
+                        ));
                     }
                     first_audio_after.get_or_insert_with(|| started.elapsed());
                     pcm.extend_from_slice(&data);
@@ -353,13 +355,15 @@ impl SpeechProvider for DeepgramClient {
                             break Err(unavailable("Deepgram finished without speech audio"));
                         }
                         Some("InjectionRefused") => {
-                            break Err(rejected("Deepgram refused the script"));
+                            break Err(rejected(
+                                "The voice could not say this script (Deepgram refused it)",
+                            ));
                         }
                         Some("Error") => {
                             break Err(match event["code"].as_str() {
-                                Some("INVALID_SETTINGS" | "FAILED_TO_SPEAK") => {
-                                    rejected("Deepgram refused the ElevenLabs voice or the script")
-                                }
+                                Some("INVALID_SETTINGS" | "FAILED_TO_SPEAK") => rejected(
+                                    "The voice could not say this script (Deepgram refused the voice or the script)",
+                                ),
                                 _ => unavailable("Deepgram failed to complete the speech"),
                             });
                         }

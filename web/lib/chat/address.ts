@@ -2,8 +2,8 @@
  * Conversation addresses as people and Silicons use them, and the website's own addresses for them.
  *
  * A direct conversation is its two accounts' current ids joined by `::` (`c:ada::si:scout`), a group is its id
- * (`g:product-design`), and a conversation kept only for its history is its UUID (docs/wire-format.md). The website
- * shows a conversation at `/c/<address>` with the colons left readable (`/c/c:ada::si:scout`), a message at
+ * (`g:product-design`), and a conversation kept only for its history is its UUID (docs/reference/wire-format.md). The
+ * website shows a conversation at `/c/<address>` with the colons left readable (`/c/c:ada::si:scout`), a message at
  * `/c/<address>#<code>`, and a custodian's read-only view of a Silicon's conversation with `?for=si:x`.
  */
 import type { AccountKind, AccountRef, ConversationSummary } from "./types";
@@ -67,6 +67,29 @@ export function accountName(account: Pick<AccountRef, "id" | "display_name" | "d
   return account.display_name?.trim() || account.id;
 }
 
+/**
+ * The Carbon who looks after a Silicon, when the service says who (`custodian` on the Silicon's AccountRef, DM 0.17 and
+ * later); null for a Carbon, from an older service, and when DM knows the custodian only by uuid (it has not seen its
+ * id yet), since a uuid is not a name anyone would recognise.
+ */
+export function custodianFromRef(account: Pick<AccountRef, "type" | "custodian"> | null | undefined): AccountRef | null {
+  const custodian = account?.type === "silicon" ? account.custodian : null;
+  if (!custodian || typeof custodian !== "object" || typeof custodian.id !== "string") return null;
+  return custodian.id.startsWith("c:") ? custodian : null;
+}
+
+/**
+ * Who looks after a Silicon, as a list says it: "Looked after by Ada Marlow", or "Looked after by you" for your own
+ * (`mine`: the Silicons you look after); null for a Carbon, or when DM does not say who.
+ */
+export function custodianWords(account: AccountRef, me: Pick<AccountRef, "id" | "uuid">, mine: Array<Pick<AccountRef, "id" | "uuid">>): string | null {
+  if (account.type !== "silicon") return null;
+  if (mine.some(own => sameAccount(own, account))) return "Looked after by you";
+  const custodian = custodianFromRef(account);
+  if (!custodian) return null;
+  return sameAccount(custodian, me) ? "Looked after by you" : `Looked after by ${accountName(custodian)}`;
+}
+
 /** The first word of an account's name ("Ada" for "Ada Lovelace", "scout" for si:scout). */
 export function firstName(account: Pick<AccountRef, "id" | "display_name" | "deleted">): string {
   const name = accountName(account);
@@ -95,6 +118,18 @@ export function conversationKind(conversation: Pick<ConversationSummary, "partic
 /** The kind in words, as the thread header and the rows say it. */
 export function kindWord(kind: ConversationKind): string {
   return kind === "group" ? "Group" : kind === "silicon" ? "Silicon" : "Carbon";
+}
+
+/**
+ * What a conversation is, as the list and the palette say it: "Group" for a group (it has a name and owners), "3
+ * people" for a conversation of several without a name (as the thread header and the details panel count them), else
+ * the other account's kind ("Silicon", "Carbon").
+ */
+export function conversationKindWords(conversation: Pick<ConversationSummary, "participants" | "group" | "id">, me: Pick<AccountRef, "id" | "uuid">): string {
+  const kind = conversationKind(conversation, me);
+  if (kind !== "group" || conversation.group || isGroupAddress(conversation.id)) return kindWord(kind);
+  const count = conversation.participants.length;
+  return `${count} ${count === 1 ? "person" : "people"}`;
 }
 
 /** The ISI a message was routed to (`deliberate@si:cos` → `deliberate`), or null. */

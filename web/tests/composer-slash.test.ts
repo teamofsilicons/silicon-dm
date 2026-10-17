@@ -216,3 +216,11 @@ test("a long file name is cut in its middle: the end and the extension always sh
   assert.equal(party.end, "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦.png", "never inside an emoji");
   assert.equal(`${party.head}${party.end}`, "celebration 👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦.png");
 });
+
+test("the bridge: while an edit is open a voice message waits (it would go as a new message); dictation still types", () => {
+  const host = { dispatchTray: () => undefined, requestSend: () => undefined, insertText: () => undefined, focusField: () => undefined, registerControls: () => undefined };
+  const editing = createVoiceBridge("c:dmc-ada::c:dmc-bo", null, host, "Finish or cancel the edit first: a voice message goes as a new message. Dictation types into your edit.");
+  assert.match(editing.notesOffReason ?? "", /^Finish or cancel the edit first/);
+  assert.equal(createVoiceBridge("c:dmc-ada::c:dmc-bo", null, host).notesOffReason, null, "no edit: voice messages work");
+  assert.equal(createVoiceBridge("c:dmc-ada::c:dmc-bo", "You are reading Scout's conversation as its custodian.", host, "Finish the edit first").notesOffReason, null, "a read-only view says its own reason");
+});

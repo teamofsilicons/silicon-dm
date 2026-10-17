@@ -26,6 +26,7 @@ import { editMessage } from "@/lib/chat/api";
 import { replaceMessage, upsertMessage, type MessagePages } from "@/lib/chat/cache";
 import { canEditHere, editContent, replyPreviewOf } from "@/lib/chat/compose";
 import { localDraftText, useDraft } from "@/lib/chat/draft-store";
+import type { DraftHint } from "@/lib/chat/drafts";
 import { chatKeys } from "@/lib/chat/keys";
 import { plainPreview } from "@/lib/chat/markdown";
 import { queueSend } from "@/lib/chat/outbox-store";
@@ -37,6 +38,7 @@ import { notify, notifyError } from "@/lib/notify";
 import { provideShortcuts, useShortcut, useShortcutKeys } from "@/lib/shortcuts/react";
 import { useVoiceAvailability } from "@/lib/voice";
 import { IconAction } from "../common/icon-action";
+import { plainFailure } from "../thread/thread-model";
 import { ComposerVoice } from "../voice/voice-parts";
 import { AttachMenu } from "./attach-menu";
 import { DropOverlay } from "./drop-overlay";
@@ -68,6 +70,8 @@ export interface ComposerProps {
   me: AccountRef;
   /** Why nothing can be sent here (a custodian's view, a conversation kept for its history), or null. */
   disabledReason: string | null;
+  /** What the conversation list says about this conversation's draft on the service (lib/chat/drafts.ts draftHint). */
+  draftHint?: DraftHint;
   /** A message went into the outbox (the thread scrolls to it). */
   onSent: () => void;
   /** ⌘↑: select the last message. */
@@ -142,14 +146,14 @@ function insertIntoField(node: HTMLTextAreaElement, words: string, fallback: (va
   requestAnimationFrame(() => node.setSelectionRange(start + insert.length, start + insert.length));
 }
 
-export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({ address, name, messages, me, disabledReason, onSent, onSelectLast, onLeave }, ref) {
+export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({ address, name, messages, me, disabledReason, draftHint = "unknown", onSent, onSelectLast, onLeave }, ref) {
   const queryClient = useQueryClient();
   const router = useRouter();
   const field = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const account = me.uuid ?? me.id;
   const enabled = !disabledReason;
-  const draft = useDraft(account, address, enabled);
+  const draft = useDraft(account, address, enabled, draftHint);
   const tray = useTray(account, address, enabled);
   const uploads = useUploadsConfig();
   const uploadsOff = uploadsOffReason(uploads);
@@ -276,7 +280,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       applyMessage(queryClient, me, saved);
     } catch (failure) {
       queryClient.setQueryData<MessagePages>(key, data => replaceMessage(data, original));
-      notifyError(failure, "Your edit was not saved");
+      notifyError(plainFailure(failure), "Your edit was not saved");
     }
   };
 
@@ -405,8 +409,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       voiceControls.current = controls;
     },
   }), []);
+  // While an edit is open the microphone dictates into it; a voice message would go as a new message, so it waits.
+  const notesOff = editing ? "Finish or cancel the edit first: a voice message goes as a new message. Dictation types into your edit." : null;
   // eslint-disable-next-line react-hooks/refs -- createVoiceBridge only wraps the host's functions; none of them runs (or reads a ref) until the microphone calls it.
-  const bridge = useMemo<ComposerVoiceBridge>(() => createVoiceBridge(address, disabledReason, bridgeHost), [address, disabledReason, bridgeHost]);
+  const bridge = useMemo<ComposerVoiceBridge>(() => createVoiceBridge(address, disabledReason, bridgeHost, notesOff), [address, disabledReason, bridgeHost, notesOff]);
 
   useEffect(() => {
     provideShortcuts(["composer.upload"]);

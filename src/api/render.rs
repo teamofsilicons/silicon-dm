@@ -1,6 +1,7 @@
 //! The public shape of every JSON response: conversation addresses instead of internal
 //! UUIDs, message codes, and accounts rendered from their storage key (uuid) to
-//! `{type, id: <current c:/si: id>, uuid, display_name?, pfp_url?}`.
+//! `{type, id: <current c:/si: id>, uuid, display_name?, pfp_url?}`; a Silicon also names
+//! its `custodian` the same way (one level, never the custodian's own custodian).
 //!
 //! Only contract-owned fields are touched; user metadata, text and attachments never are.
 use std::collections::{HashMap, HashSet};
@@ -130,6 +131,19 @@ pub(crate) async fn render_accounts(state: &AppState, value: &mut Value) -> AppR
             }
         }
     }
+    // Silicon Accounts shares a Silicon's custodian with every app and DM keeps it with the
+    // account, so a Silicon can name its custodian: one more read of DM's own cache for the
+    // custodians not loaded yet, never a lookup at Silicon Accounts.
+    let custodians: HashSet<String> = accounts
+        .values()
+        .filter(|account| account.is_silicon())
+        .filter_map(|account| account.custodian.clone())
+        .filter(|uuid| !accounts.contains_key(uuid))
+        .collect();
+    if !custodians.is_empty() {
+        let custodians: Vec<String> = custodians.into_iter().collect();
+        accounts.extend(state.store.accounts_by_uuid(&custodians).await?);
+    }
     for (legacy_id, uuid) in &links {
         if let Some(account) = accounts.get(uuid).cloned() {
             accounts.insert(legacy_id.clone(), account);
@@ -137,6 +151,39 @@ pub(crate) async fn render_accounts(state: &AppState, value: &mut Value) -> AppR
     }
     visit(value, &mut |slot| slot.render(&accounts));
     Ok(())
+}
+
+/// The fields an account reference gains from what DM knows of the account.
+fn describe(object: &mut Map<String, Value>, account: &Account) {
+    object.insert("id".into(), Value::String(account.display_id().to_owned()));
+    object.insert("uuid".into(), Value::String(account.uuid.clone()));
+    if let Some(name) = &account.display_name {
+        object.insert("display_name".into(), Value::String(name.clone()));
+    }
+    if let Some(photo) = &account.pfp_url {
+        object.insert("pfp_url".into(), Value::String(photo.clone()));
+    }
+    if account.deleted {
+        object.insert("deleted".into(), Value::Bool(true));
+    }
+}
+
+/// A Silicon's custodian as an account reference (`id` stays the uuid when DM has not
+/// cached that Carbon yet, as for any account it cannot render).
+fn custodian_reference(uuid: &str, accounts: &HashMap<String, Account>) -> Value {
+    let mut object = Map::new();
+    if let Some(custodian) = accounts.get(uuid) {
+        object.insert(
+            "type".into(),
+            Value::String(custodian.kind.as_str().to_owned()),
+        );
+        describe(&mut object, custodian);
+    } else {
+        object.insert("type".into(), Value::String("carbon".to_owned()));
+        object.insert("id".into(), Value::String(uuid.to_owned()));
+        object.insert("uuid".into(), Value::String(uuid.to_owned()));
+    }
+    Value::Object(object)
 }
 
 /// One place in a response that names an account.
@@ -168,16 +215,16 @@ impl Slot<'_> {
                 };
                 match accounts.get(&key) {
                     Some(account) => {
-                        object.insert("id".into(), Value::String(account.display_id().to_owned()));
-                        object.insert("uuid".into(), Value::String(account.uuid.clone()));
-                        if let Some(name) = &account.display_name {
-                            object.insert("display_name".into(), Value::String(name.clone()));
-                        }
-                        if let Some(photo) = &account.pfp_url {
-                            object.insert("pfp_url".into(), Value::String(photo.clone()));
-                        }
-                        if account.deleted {
-                            object.insert("deleted".into(), Value::Bool(true));
+                        describe(object, account);
+                        if let Some(custodian) = account
+                            .custodian
+                            .as_deref()
+                            .filter(|_| account.is_silicon())
+                        {
+                            object.insert(
+                                "custodian".into(),
+                                custodian_reference(custodian, accounts),
+                            );
                         }
                     }
                     None if !is_account_uuid(&key) => {
@@ -311,6 +358,28 @@ mod tests {
     use crate::domain::ActorType;
 
     #[test]
+    fn a_custodian_dm_has_not_cached_is_named_by_its_uuid() {
+        let mut value = serde_json::json!({"members": [{"type": "silicon", "id": "K1E"}]});
+        let accounts = HashMap::from([(
+            "K1E".to_owned(),
+            Account {
+                uuid: "K1E".into(),
+                kind: ActorType::Silicon,
+                id: Some("si:cos".into()),
+                display_name: None,
+                pfp_url: None,
+                custodian: Some("Unk".into()),
+                deleted: false,
+            },
+        )]);
+        visit(&mut value, &mut |slot| slot.render(&accounts));
+        assert_eq!(
+            value["members"][0]["custodian"],
+            serde_json::json!({"type": "carbon", "id": "Unk", "uuid": "Unk"})
+        );
+    }
+
+    #[test]
     fn accounts_render_with_current_ids_and_user_content_is_untouched() {
         let mut value = serde_json::json!({
             "participants": [{"type": "carbon", "id": "zQo"}, {"type": "silicon", "id": "K1E"},
@@ -364,6 +433,19 @@ mod tests {
             serde_json::json!({"type": "carbon", "id": "c:saket", "uuid": "zQo", "display_name": "Saket"})
         );
         assert_eq!(value["participants"][1]["id"], "si:cos");
+        assert_eq!(
+            value["participants"][1]["custodian"],
+            serde_json::json!({"type": "carbon", "id": "c:saket", "uuid": "zQo", "display_name": "Saket"}),
+            "a Silicon names its custodian, one level deep"
+        );
+        assert!(
+            value["participants"][0].get("custodian").is_none(),
+            "a Carbon has no custodian"
+        );
+        assert_eq!(
+            value["last_message"]["sender"]["custodian"]["id"],
+            "c:saket"
+        );
         assert_eq!(
             value["participants"][2],
             serde_json::json!({"type": "carbon", "id": "c:old-timer", "legacy": true})

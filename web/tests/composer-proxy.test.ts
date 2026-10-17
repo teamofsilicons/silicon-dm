@@ -38,7 +38,9 @@ const enabled = (source: Record<string, string>) => {
 test("settings: uploads are off without BRIEFCASE_API_URL (and say why), https only except a stand-in on this machine", () => {
   const off = uploadsSettings({});
   assert.equal(off.enabled, false);
-  assert.match(off.enabled ? "" : off.reason, /not connected to Silicon Briefcase \(BRIEFCASE_API_URL is not set\)/);
+  // Carbons read that uploads are not set up; the operator's log says which setting.
+  assert.equal(off.enabled ? "" : off.reason, "Uploads are not set up on this DM website yet.");
+  assert.match(off.enabled ? "" : off.problem, /BRIEFCASE_API_URL is not set/);
   assert.equal(off.maxBytes, 200 * 1024 * 1024);
   const live = enabled({ BRIEFCASE_API_URL: "https://api.briefcase.teamofsilicons.com/api/v1/" });
   assert.equal(live.apiBase, "https://api.briefcase.teamofsilicons.com", "a trailing /api/v1 is the same API");
@@ -50,20 +52,38 @@ test("settings: uploads are off without BRIEFCASE_API_URL (and say why), https o
   for (const bad of ["http://briefcase.example.com", "ftp://x", "not a url", "https://user:pw@x.test", "https://x.test/?a=1", "http://admin:s3cret@briefcase.example.com"]) {
     const settings = uploadsSettings({ BRIEFCASE_API_URL: bad });
     assert.equal(settings.enabled, false, bad);
-    assert.match(settings.enabled ? "" : settings.reason, /^Uploads are off: /);
-    // GET /api/uploads/config hands the reason to any browser: the value itself (credentials and all) never is in it.
-    assert.equal((settings.enabled ? "" : settings.reason).includes(bad), false, bad);
-    assert.equal(/s3cret|admin|pw@/.test(settings.enabled ? "" : settings.reason), false, bad);
+    // GET /api/uploads/config hands the reason to any browser: a Carbon's words, no setting's name.
+    assert.equal(settings.enabled ? "" : settings.reason, "Uploads are not working on this DM website: its setup needs fixing.");
+    assert.match(settings.enabled ? "" : settings.problem, /^Uploads are off: BRIEFCASE_API_URL /);
+    // The value itself (credentials and all) is in neither, not even in the log line.
+    for (const words of [settings.enabled ? "" : settings.reason, settings.enabled ? "" : settings.problem]) {
+      assert.equal(words.includes(bad), false, bad);
+      assert.equal(/s3cret|admin|pw@/.test(words), false, bad);
+    }
   }
-  assert.equal(uploadsSettings({ BRIEFCASE_API_URL: API, UPLOADS_MAX_BYTES: "lots" }).enabled, false);
+  const lots = uploadsSettings({ BRIEFCASE_API_URL: API, UPLOADS_MAX_BYTES: "lots" });
+  assert.equal(lots.enabled, false);
+  assert.match(lots.enabled ? "" : lots.problem, /UPLOADS_MAX_BYTES is not a whole number/);
+  assert.equal((lots.enabled ? "" : lots.problem).includes("lots"), false);
 });
 
-test("GET /api/uploads/config says whether uploads work, and why not", async () => {
+test("GET /api/uploads/config says whether uploads work, and why not: in a Carbon's words, the setting only in the log", async () => {
   assert.deepEqual(await config().json(), { enabled: true, max_bytes: 209715200 });
   applyTestEnv({ BRIEFCASE_API_URL: undefined });
-  const off = (await config().json()) as { enabled: boolean; reason: string };
-  assert.equal(off.enabled, false);
-  assert.match(off.reason, /BRIEFCASE_API_URL is not set/);
+  const logged: string[] = [];
+  const warn = console.warn;
+  console.warn = (...words: unknown[]) => {
+    logged.push(words.join(" "));
+  };
+  try {
+    const off = (await config().json()) as Record<string, unknown>;
+    assert.deepEqual(off, { enabled: false, reason: "Uploads are not set up on this DM website yet.", max_bytes: 209715200 });
+    await config().json();
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(logged.length, 1, "the operator's line is logged once, not on every page");
+  assert.match(logged[0]!, /BRIEFCASE_API_URL is not set/);
 });
 
 test("what the proxy may fetch: the configured Briefcase's public files only, by their own path", () => {

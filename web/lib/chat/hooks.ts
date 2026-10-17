@@ -14,6 +14,7 @@ import type { ConversationSummary, Me, Message, Page } from "./types";
 
 const VIEW_POLL_MS = 10_000;
 const SAFETY_REFRESH_MS = 60_000;
+const INVITATIONS_POLL_MS = 15_000;
 
 export function useMe(initial?: Me) {
   return useQuery({ queryKey: chatKeys.me, queryFn: ({ signal }) => getMe(signal), initialData: initial, staleTime: 5 * 60_000 });
@@ -69,12 +70,17 @@ export function useMessages(address: string, view: string | null) {
   return { ...query, messages };
 }
 
+/**
+ * Group invitations waiting for you (or, in a custodian's view, for the Silicon). The service's sync feed carries
+ * messages only, so invitations are asked for every 15 s while the tab is visible: a new one shows in the sidebar, and
+ * one answered on another device makes the list refresh (components/chat/shell/chat-runtime.tsx).
+ */
 export function useInvitations(view: string | null) {
   return useQuery({
     queryKey: chatKeys.invitations(view),
     queryFn: ({ signal }) => listInvitations({ view, signal }),
-    refetchInterval: 30_000,
-    staleTime: 15_000,
+    refetchInterval: INVITATIONS_POLL_MS,
+    staleTime: 10_000,
     meta: { toast: false },
   });
 }

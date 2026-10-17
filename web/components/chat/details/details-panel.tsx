@@ -14,7 +14,7 @@
  */
 import { MessageCircle } from "lucide-react";
 import { Button } from "@/components/silicon-ui/button/button";
-import { accountName, directParticipants, firstName, otherParticipants, sameAccount } from "@/lib/chat/address";
+import { accountName, custodianWords, directParticipants, firstName, otherParticipants, sameAccount } from "@/lib/chat/address";
 import type { AccountRef, ConversationSummary, Presence } from "@/lib/chat/types";
 import { useChat } from "../shell/chat-context";
 import { useDetails } from "../shell/details";
@@ -75,7 +75,8 @@ export function DetailsPanel({ conversation, address, presence }: { conversation
           <h3 id="details-people" className={styles.heading}>People <span className={styles.count}>{(conversation?.participants.length ?? others.length + 1)}</span></h3>
           <ul role="list" className={styles.people}>
             {(conversation?.participants ?? others).map(account => (
-              <PersonRow key={account.uuid ?? account.id} account={account} presence={presence.get(account.id)} notes={sameAccount(account, perspective) && !view ? ["You"] : []} actions={basics(account)} />
+              <PersonRow key={account.uuid ?? account.id} account={account} presence={presence.get(account.id)} notes={sameAccount(account, perspective) && !view ? ["You"] : []}
+                custodian={custodianWords(account, perspective, view ? [] : me.custodian_of)} actions={basics(account)} />
             ))}
           </ul>
         </section>

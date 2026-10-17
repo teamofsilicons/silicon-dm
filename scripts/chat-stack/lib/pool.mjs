@@ -41,6 +41,25 @@ export const ALLOW = {
   nova: ['ada', 'bo'],
 };
 
+/**
+ * The demo workspace's own accounts (scripts/chat-stack/seed-demo.mjs): a Carbon no test signs in as, with the two
+ * Silicons she looks after, so screenshots show DM as a Carbon sees it instead of test data. They live under `demo` in
+ * the pool file, never in `identities` (status.sh counts the ten accounts there, and `init` rewrites that list), and
+ * every identities.mjs command finds them by name too (withDemo). `init-demo --fresh` makes a new set of them: set 1
+ * keeps the plain handles (c:mira, si:sol), set 2 is c:mira-2 and so on, with the same display names.
+ */
+export const DEMO_CARBONS = [{ name: 'mira', handle: 'mira', display_name: 'Mira Patel' }];
+export const DEMO_SILICONS = [
+  { name: 'sol', handle: 'sol', display_name: 'Sol', custodian: 'mira' },
+  { name: 'wren', handle: 'wren', display_name: 'Wren', custodian: 'mira' },
+];
+/** Who may reach the demo's Silicons besides Mira and each other: Bo, who works with Mira in the demo. */
+export const DEMO_ALLOW = { sol: ['bo'], wren: ['bo'] };
+/** A demo account's handle in set `set`. */
+export const demoHandle = (spec, set) => (set > 1 ? `${spec.handle}-${set}` : spec.handle);
+/** The pool with the demo accounts findable as well (findIdentity looks in `identities`). */
+export const withDemo = (pool) => ({ ...pool, identities: [...(pool.identities ?? []), ...(pool.demo?.identities ?? [])] });
+
 export const carbonId = (spec) => `c:${spec.handle}`;
 export const siliconId = (spec) => `si:${spec.handle}`;
 export const emailOf = (spec) => `${spec.handle}@example.test`;

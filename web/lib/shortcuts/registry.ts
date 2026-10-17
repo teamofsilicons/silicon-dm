@@ -9,8 +9,10 @@
  *   message   while a message has the keyboard (↑/↓ through the thread, or ⌘↑ from the composer)
  *   composer  inside the message field
  *
- * A shortcut whose feature arrives with a later part of the website is listed with `planned`: the cheatsheet shows
- * it switched off, with that reason, until its module calls `provideShortcuts([...ids])`.
+ * A shortcut whose feature depends on what this DM service and this browser offer (speech, a microphone) is listed
+ * with `planned`: it shows as off, with that reason, until the module that knows says it works
+ * (`setShortcutAvailability` or `provideShortcuts`, lib/shortcuts/react.tsx). The chat shell asks the voice module once
+ * per page (components/chat/shell/global-commands.tsx), so the cheatsheet and Settings → Keyboard are right on every page.
  *
  * Pure: tests/shortcuts.test.ts checks the defaults have no conflicts.
  */
@@ -26,7 +28,7 @@ export interface ShortcutDefinition {
   group: "General" | "Conversations" | "Messages" | "Composer" | "Voice";
   /** Default bindings (any of them works), in the format of lib/shortcuts/keys.ts. */
   keys: string[];
-  /** Why it is not there yet, until its module provides it. */
+  /** Why it is off until the module that knows says it works here (shown only in that moment, or never). */
   planned?: string;
   /** Settings → Keyboard does not offer to rebind it (Enter to send follows Settings → Sending instead). */
   fixed?: boolean;
@@ -34,8 +36,8 @@ export interface ShortcutDefinition {
   keywords?: string;
 }
 
-const VOICE = "Arrives with voice notes and listening";
-const UPLOADS = "Arrives with attachments";
+// The voice shortcuts work only where the service speaks and the browser can record; the shell finds out on every page.
+const VOICE = "Checking whether voice works here…";
 
 export const SHORTCUTS: ShortcutDefinition[] = [
   // General
@@ -60,7 +62,8 @@ export const SHORTCUTS: ShortcutDefinition[] = [
   { id: "composer.editLast", scope: "composer", group: "Composer", label: "Edit your last message (empty field)", keys: ["up"] },
   { id: "composer.selectLast", scope: "composer", group: "Composer", label: "Select the last message", keys: ["mod+up"], keywords: "message navigation" },
   { id: "composer.cancel", scope: "composer", group: "Composer", label: "Cancel reply or edit, then leave the field", keys: ["escape"] },
-  { id: "composer.upload", scope: "composer", group: "Composer", label: "Upload a file", keys: ["mod+shift+u"], planned: UPLOADS, keywords: "attach" },
+  // Always on: when this website takes no uploads, pressing it (or the + menu) says why.
+  { id: "composer.upload", scope: "composer", group: "Composer", label: "Upload a file", keys: ["mod+shift+u"], keywords: "attach" },
   // Messages
   { id: "message.previous", scope: "message", group: "Messages", label: "Previous message", keys: ["up", "k"] },
   { id: "message.next", scope: "message", group: "Messages", label: "Next message", keys: ["down", "j"] },

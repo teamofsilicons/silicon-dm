@@ -46,7 +46,12 @@ Every command takes these, before or after the command name.
   `response.error`: its `code`, `message` and `hint`, its `status`, `request_id`, `retry_after`, and the whole answer
   (`body`). [Errors](errors.md) lists every code.
 - Exit 0 on success, 2 for an argument error (a missing or unknown flag, an invalid value), 1 for every other
-  failure, including a request the service refused. `dm login status --json` and `dm accounts --json` always exit 0.
+  failure, including a request the service refused. The argument parser explains its errors in plain text on standard
+  error; an unknown `dm docs` topic, or `dm docs --search` with no text, is the JSON error instead (`unknown_topic`,
+  with `details.topics`, `details.aliases` and `details.did_you_mean`; `empty_search`), also exit 2.
+  `dm login status --json` and `dm accounts --json` always exit 0.
+- `dm groups create` refuses a name without a letter or digit from a to z or 0 to 9 before queueing
+  (`validation_error`): a group's id is made from its name.
 - Notes and warnings (an em dash replaced, a speech note, a long message sent anyway) go to standard error, so they
   never break the JSON on standard output.
 
@@ -122,7 +127,7 @@ WAV output is 24 kHz mono 16-bit PCM, written atomically; an existing file is re
 | --- | --- | --- |
 | `dm groups list` | `--limit N`, `--cursor CURSOR` | Groups you belong to, newest activity first. |
 | `dm groups show` | `GROUP` | Name, owners, members and (for owners) pending invitations. |
-| `dm groups create` | `--name NAME` (1-120 characters), `--description TEXT` (up to 4,000), `--member ACCOUNT` (repeat) | Creates a group; you are its first owner and the members are invited. |
+| `dm groups create` | `--name NAME` (1-120 characters, with a letter or digit: the id `g:…` is made from it), `--description TEXT` (up to 4,000), `--member ACCOUNT` (repeat) | Creates a group; you are its first owner and the members are invited. |
 | `dm groups update` | `GROUP`, `--version N`, `--name NAME`, `--description TEXT` | Renames or describes it (owners); `--version` from `dm groups show`. |
 | `dm groups invite` | `GROUP`, `--member ACCOUNT` (repeat) | Invites accounts (owners); each must accept. |
 | `dm groups remove` | `GROUP`, `--member ACCOUNT` (repeat) | Removes members or withdraws invitations (owners; a custodian may remove its own Silicons). |

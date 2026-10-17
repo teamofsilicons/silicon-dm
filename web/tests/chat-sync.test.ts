@@ -1,11 +1,15 @@
 /**
  * Sync events applied to the cached state (lib/chat/sync-plan.ts, lib/chat/cache.ts): each message fetched once, put
- * where it belongs, the conversation's row updated in place (preview, time, unread, order), never moving backwards.
+ * where it belongs, the conversation's row updated in place (preview, time, unread, order), never moving backwards; a
+ * conversation the list does not have refreshes the list once per burst.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { applyMessageToSummaries, applyReadToSummaries, findMessage, mergeMessage, messagesOldestFirst, statusOf, totalUnread, unreadOf, upsertMessage, type ConversationPages, type MessagePages } from "../lib/chat/cache";
 import { compareCodes } from "../lib/chat/codes";
+import { QueryClient } from "@tanstack/react-query";
+import { chatKeys } from "../lib/chat/keys";
+import { applyMessage, refetchAfterReset, refreshConversationsSoon } from "../lib/chat/sync";
 import { planEvents, SeenEvents, syncDelay } from "../lib/chat/sync-plan";
 import type { AccountRef, ConversationSummary, Message, SyncEvent } from "../lib/chat/types";
 
@@ -129,4 +133,45 @@ test("reading sets the row's count from the service; without counts, an unread l
 
 test("the sync loop backs off from one second up to thirty", () => {
   assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map(failures => syncDelay(failures, () => 0)), [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+});
+
+test("a message in a conversation the list does not have refreshes the list and the invitations once for the burst", async () => {
+  const queryClient = new QueryClient();
+  queryClient.setQueryData(chatKeys.conversations(), list(summary(CONV, message("001", scout))));
+  const asked: string[] = [];
+  queryClient.invalidateQueries = (async (filters?: { queryKey?: readonly unknown[] }) => {
+    asked.push(JSON.stringify(filters?.queryKey));
+  }) as QueryClient["invalidateQueries"];
+  // A group joined on another device, then three messages in it: one refresh, of the list and the invitations.
+  for (const code of ["000", "001", "002"]) applyMessage(queryClient, ada, message(code, scout, { conversation_id: "g:joined-elsewhere" }));
+  // A conversation the list has: nothing to ask for.
+  applyMessage(queryClient, ada, message("002", scout));
+  assert.deepEqual(asked, [], "it waits for the burst to end");
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.deepEqual(asked, [JSON.stringify(chatKeys.conversations()), JSON.stringify(chatKeys.invitations())]);
+  // Another tab's news (lib/chat/news.ts) goes the same way: a moment later, once.
+  refreshConversationsSoon(queryClient);
+  refreshConversationsSoon(queryClient);
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.equal(asked.length, 4);
+  queryClient.clear();
+});
+
+test("after a reset the list and your own threads are fetched again; after an expired history, everything is", () => {
+  const queryClient = new QueryClient();
+  queryClient.setQueryData(chatKeys.conversations(), list(summary(CONV, message("001", scout))));
+  queryClient.setQueryData(chatKeys.messages(CONV), pages([message("001", scout)]));
+  queryClient.setQueryData(chatKeys.messages(CONV, "si:scout"), pages([message("001", scout)]));
+  queryClient.setQueryData(chatKeys.me, { account: ada });
+  const asked: string[] = [];
+  queryClient.invalidateQueries = (async (filters?: Parameters<QueryClient["invalidateQueries"]>[0]) => {
+    for (const query of queryClient.getQueryCache().findAll(filters)) asked.push(JSON.stringify(query.queryKey));
+  }) as QueryClient["invalidateQueries"];
+  // A new tab's first reset: what it fetched before the head may lack messages that came in meanwhile.
+  refetchAfterReset(queryClient, false);
+  assert.deepEqual(asked.sort(), [JSON.stringify(chatKeys.conversations()), JSON.stringify(chatKeys.messages(CONV))].sort(), "your list and threads, not a custodian's view (it is polled)");
+  asked.length = 0;
+  refetchAfterReset(queryClient, true);
+  assert.equal(asked.length, 4, "an expired history refreshes everything");
+  queryClient.clear();
 });

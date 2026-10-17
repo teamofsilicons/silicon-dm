@@ -73,7 +73,21 @@ impl GiphyClient {
         let response = send_redacted(self.client.get(url)).await?;
         match response.status() {
             StatusCode::OK => {}
-            StatusCode::TOO_MANY_REQUESTS => return Err(AppError::RateLimited),
+            StatusCode::TOO_MANY_REQUESTS => {
+                let seconds = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+                    .map_or(60, |seconds| seconds.clamp(1, 3600));
+                return Err(AppError::rate_limited(
+                    "Giphy is limiting the GIF searches DM makes for everyone right now.",
+                )
+                .with_hint(format!(
+                    "Try again in {seconds} seconds (Retry-After). GIFs you sent recently are still in GET /api/v1/gifs/recent."
+                ))
+                .with_retry_after(seconds));
+            }
             status => return Err(status_dependency_error(status)),
         }
         let document: GiphyResponse = read_json(response).await?;

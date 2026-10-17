@@ -261,3 +261,26 @@ fn every_visible_command_explains_itself_without_retired_words() {
     });
     assert!(problems.is_empty(), "{problems:#?}");
 }
+
+#[test]
+fn a_group_name_without_a_letter_or_digit_is_refused_before_queueing() -> Result<()> {
+    let settings = |name: &str| silicon_dm_client::models::GroupSettings {
+        name: name.to_owned(),
+        description: String::new(),
+    };
+    let refused = crate::addressable(settings("🎉🎉"))
+        .err()
+        .context("refused")?;
+    let output = output::error_json(&refused);
+    assert_eq!(output["error"]["code"], "validation_error");
+    assert!(
+        output["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("needs a letter or a digit")
+                && message.contains("Nothing was queued")),
+        "{output}"
+    );
+    assert!(crate::addressable(settings("🎉 2026")).is_ok());
+    assert!(crate::addressable(settings("Ops")).is_ok());
+    Ok(())
+}

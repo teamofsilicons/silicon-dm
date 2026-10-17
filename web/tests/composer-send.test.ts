@@ -118,6 +118,15 @@ test("the words under the field: what a send waits for (online and off), and wha
   const voice: TrayItem = { id: "v", kind: "voice", status: "uploading", progress: 0 };
   assert.equal(waitingWords([file("a", "uploading")]), "Sends when a.pdf is uploaded.");
   assert.equal(waitingWords([voice]), "Sends when the voice message is uploaded.");
+  // Its bytes saved, its words still coming.
+  const heard = trayReducer([voice], { type: "transcribing", id: "v" });
+  assert.deepEqual(heard[0], { ...voice, progress: 1, transcribing: true });
+  assert.equal(waitingWords(heard), "Sends when the voice message is transcribed.");
+  assert.equal(trayBusy(heard), true, "a voice message still waiting for its words holds the send");
+  const done = trayReducer(heard, { type: "ready", id: "v", voice: { permanent_url: "https://x.test/v.webm", duration_milliseconds: 3000 }, transcript: "hello" });
+  assert.equal(done[0]!.status, "ready");
+  assert.equal(done[0]!.kind === "voice" && done[0]!.transcribing, false);
+  assert.equal(trayReducer([file("a", "uploading")], { type: "transcribing", id: "a" })[0]!.status, "uploading", "a file is never transcribed");
   assert.equal(waitingWords([file("a", "uploading"), file("b", "uploading"), file("c", "ready")]), "Sends when 2 files are uploaded.");
   assert.equal(waitingWords([file("a", "uploading")], false), "You are offline: it sends when you are back and a.pdf is uploaded.");
   const retryable = (id: string) => id !== "empty";

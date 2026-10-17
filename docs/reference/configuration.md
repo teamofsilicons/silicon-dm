@@ -151,8 +151,10 @@ Attachments are external links; no upload credentials are required by the servic
 
 Set `DM_POSTMARK_SERVER_TOKEN` on the API service to send report notifications. The default `DM_POSTMARK_EMAIL_URL` is
 `https://api.postmarkapp.com/email`. Verify `dm@teamofsilicons.com` as a Postmark sender. Reports notify
-`saketdev12@gmail.com`, `shubhastro2@gmails.com` and `bugs@teamofsilicons.com`, matching the product specification.
-Each account may submit ten new reports per hour; retries with the same idempotency key do not create another report.
+`saketdev12@gmail.com`, `shubhastro2@gmail.com` and `bugs@teamofsilicons.com`.
+Each account may submit `DM_REPORTS_PER_HOUR` new reports an hour (default 10, at most 100000); the next one is 429
+`rate_limited`, whose `Retry-After` says when one fits again. Retries with the same idempotency key do not create
+another report.
 
 The API returns `202` once the report is stored. Its worker retries Postmark failures with backoff, up to an hour
 between attempts. A process crash after Postmark accepts but before the transaction commits can deliver a duplicate
@@ -182,5 +184,23 @@ The website's server (Next.js) reads these at request time; none of them reaches
 | `UPLOADS_MAX_BYTES` | The largest file the website takes (default 209715200, 200 MiB) |
 
 The DM service never handles files: uploads are the website's job, done as DM acting for the Carbon at Silicon
-Briefcase with User verification proofs. Production needs Briefcase to accept DM's proofs for its upload scopes.
-`web/README.md` in the repository covers running and deploying the website.
+Briefcase with User verification proofs. Production needs Briefcase to accept DM's proofs for its upload scopes
+([the Briefcase side](../operations/deployment.md#uploads-the-briefcase-side)). `web/README.md` in the repository
+covers running and deploying the website.
+
+### When uploads are off
+
+When uploads cannot work, the website tells Carbons only that, in their words: `GET /api/uploads/config` answers
+`{"enabled": false, "reason": …}`, the + menu offers links and GIFs instead, and the microphone offers dictation only.
+Which setting is wrong is the operator's business, so the website's server writes it to its log, once per process, as
+a line that starts `dm: Uploads are off:`. What each one means:
+
+| Carbons read | The server logs | Fix |
+| --- | --- | --- |
+| "Uploads are not set up on this DM website yet." | `BRIEFCASE_API_URL is not set` | Set `BRIEFCASE_API_URL` to Briefcase's API origin, such as `https://api.briefcase.teamofsilicons.com` (after Briefcase accepts DM's proofs) |
+| "Uploads are not working on this DM website: its setup needs fixing." | `BRIEFCASE_API_URL is not a URL`, `… must start with https://`, `… must be an origin (and a path) without credentials, a query or a #fragment` | Give the origin alone; plain `http` works only for a stand-in on this machine |
+| the same | `UPLOADS_MAX_BYTES is not a whole number of bytes` | A whole number of bytes, such as `209715200`, or unset |
+
+Once uploads are on, a refusal by Silicon Accounts or Briefcase reaches the Carbon as the upload's own error
+([Errors](errors.md#from-the-website)): 503 `briefcase_not_allowed` means Briefcase does not list `dm` in its
+`BRIEFCASE_PROOF_ISSUERS`, and 503 `uploads_misconfigured` that the website's `APP_ID` or `APP_SECRET` is wrong.

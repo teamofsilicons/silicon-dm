@@ -62,6 +62,7 @@ Rust, from the repository root:
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 DM_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/postgres cargo test --locked --workspace --all-targets --all-features
+cargo test --locked --workspace --doc --all-features   # the Rust examples in docs/ and crates/client/README.md (--all-targets skips doctests)
 cargo test -p silicon-dm-cli                     # one crate: the CLI (no database needed)
 python3 scripts/sync-cli-docs.py --check         # the CLI's packaged guides match docs/
 python3 -m unittest discover -s scripts -p 'test_*.py'
@@ -116,8 +117,12 @@ Accounts stack on this machine (`tests/e2e/README.md`).
 
 - **Errors say what happened, why, and what to do.** The service answers `{"error": {code, message, hint?,
   details?}}` (in the `{"type": "error", "data": …}` envelope) with `Retry-After` where waiting helps; build them with
-  `AppError::refused(status, code, message).with_hint(…).with_details(…)`. The CLI prints the same shape as JSON on
-  standard error. The website shows the service's words. A new code goes into `docs/reference/errors.md`.
+  `AppError::refused(status, code, message).with_hint(…).with_details(…)`, or `AppError::not_found(…)`,
+  `AppError::invalid(…)` and `AppError::rate_limited(…)` for the codes `not_found`, `validation_error` and
+  `rate_limited`, so even those name what is missing or wrong (the bare variants cannot carry a hint). Codes never
+  change once shipped (clients branch on them); messages may be reworded. The CLI prints the same shape as JSON on
+  standard error, except that a refused relayed command prints its relay result on standard output (`dm --help`
+  says so). The website shows the service's words. A new code goes into `docs/reference/errors.md`.
 - **Envelopes.** Requests and responses are `{"type": …, "data": …}`; a new request type gets an explicit name
   (`voice.set`, `receipts.read`).
 - **Idempotency.** Every change takes an `Idempotency-Key` (8 to 255 visible ASCII characters): the same key and body
@@ -126,15 +131,16 @@ Accounts stack on this machine (`tests/e2e/README.md`).
 - **Contract 4 changes are additive only.** New optional fields, new routes, new request types. Never remove, rename or
   change the meaning of a field or route without a new contract version: older CLIs and open browser tabs must keep
   working. Announce a feature in `GET /api/v1/contracts`.
-- **Every new route** gets: the handler in `src/api/` and its line in `router.rs`, `openapi.yaml` with an example,
-  tests in `tests/`, a method in the Rust client, and its line in `docs/reference/api.md` (and `errors.md`,
-  `limits.md`, `configuration.md` when it adds any).
+- **Every new route** gets: the handler in `src/api/` and its line in `router.rs`, `openapi.yaml` with an example
+  (a test in `router.rs` fails until the document lists every route), tests in `tests/`, a method in the Rust client,
+  and its line in `docs/reference/api.md` (and `errors.md`, `limits.md`, `configuration.md` when it adds any).
 - **Docs.** Edit `docs/` only, then run `python3 scripts/sync-cli-docs.py` (CI fails while `crates/cli/docs` differs).
   Every page has front matter (`title`, `description`, `kind`, `order`, `related`). A page Silicons need offline gets a
   topic in `crates/cli/src/docs.rs` (`guide!(…)`); existing topic names never change. When a page moves, add a redirect
   in `docs-site/vercel.json`. Write for Silicons first, with the reason behind each rule. Write a Rust example as a
-  doctest (a `rust,no_run` code block, with rustdoc's hidden `# ` lines around the part worth reading), so
-  `rustdoc --test` can compile it against the client; the docs site hides those lines.
+  doctest (a `rust,no_run` code block, with rustdoc's hidden `# ` lines around the part worth reading); a page with
+  one is listed in `docs_examples` in `crates/client/src/lib.rs`, so `cargo test --doc` compiles it against the
+  client. The docs site hides those lines.
 - **No telemetry**, anywhere: no analytics, no tracking, no usage pings. Never log message content, scripts, audio,
   transcripts or credentials.
 - **Secrets** never go in logs, URLs, test output, commits or docs. Read them at runtime by variable name.

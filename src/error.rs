@@ -32,8 +32,9 @@ pub enum AppError {
         /// A hint, structured details and a retry delay, when the refusal has them.
         extra: Option<Box<ErrorExtra>>,
     },
-    /// Requested aggregate does not exist in the caller's scope.
-    #[error("resource not found")]
+    /// Requested aggregate does not exist in the caller's scope. Prefer
+    /// [`AppError::not_found`], whose words name what is missing.
+    #[error("It does not exist, or it is not yours to see (DM does not say which).")]
     NotFound,
     /// Request is structurally or semantically invalid.
     #[error("{0}")]
@@ -51,13 +52,16 @@ pub enum AppError {
     #[error("{0}")]
     PreconditionRequired(String),
     /// An upstream system could not complete a required check.
-    #[error("dependency {dependency} is unavailable")]
+    #[error("{}", unavailable_words(dependency))]
     DependencyUnavailable {
         /// Stable dependency name.
         dependency: &'static str,
     },
-    /// Caller exceeded an enforced rate.
-    #[error("rate limit exceeded")]
+    /// Caller exceeded an enforced rate. Prefer [`AppError::rate_limited`] with the limit,
+    /// a hint and `Retry-After`.
+    #[error(
+        "Too many requests: DM is limiting how often this can be done. Wait a little, then retry."
+    )]
     RateLimited,
     /// Database operation failed. Details remain in server traces.
     #[error("database operation failed")]
@@ -65,6 +69,17 @@ pub enum AppError {
     /// Unexpected internal failure. Details remain in server traces.
     #[error("internal server error")]
     Internal(#[source] anyhow::Error),
+}
+
+/// What an unavailable dependency means for the request, and what to do.
+fn unavailable_words(dependency: &str) -> String {
+    match dependency {
+        "accounts" => "Silicon Accounts did not answer DM in time, so DM could not check the sign-in or the account. Nothing was changed: retry in a few seconds with the same Idempotency-Key.".to_owned(),
+        "giphy" => "Giphy did not answer DM in time, so there are no GIFs to show right now. Try again in a moment.".to_owned(),
+        "ting" => "Ting did not take DM's request right now; DM retries by itself.".to_owned(),
+        "postmark_configuration" => "This DM service cannot email bug reports: its operators have not configured email (DM_POSTMARK_SERVER_TOKEN). The report was not stored; open an issue at https://github.com/teamofsilicons/silicon-dm/issues instead.".to_owned(),
+        other => format!("{other} did not answer DM in time. Nothing was changed: retry in a few seconds with the same Idempotency-Key."),
+    }
 }
 
 /// What a refusal can add to its code and message.
@@ -184,6 +199,31 @@ impl AppError {
     #[must_use]
     pub fn forbidden(code: &'static str, message: impl Into<String>) -> Self {
         Self::refused(StatusCode::FORBIDDEN, code, message)
+    }
+
+    /// 404 `not_found` (the code every 404 without one of its own keeps) with words that
+    /// name what is missing, so it can carry a hint.
+    #[must_use]
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::refused(StatusCode::NOT_FOUND, "not_found", message)
+    }
+
+    /// 422 `validation_error` that, unlike [`AppError::validation`], can carry a hint and
+    /// details.
+    #[must_use]
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self::refused(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation_error",
+            message,
+        )
+    }
+
+    /// 429 `rate_limited` for a limit with no code of its own. Name the limit in the
+    /// message and add `with_retry_after` when the wait is known.
+    #[must_use]
+    pub fn rate_limited(message: impl Into<String>) -> Self {
+        Self::refused(StatusCode::TOO_MANY_REQUESTS, "rate_limited", message)
     }
 
     /// 404 for an account id that resolves to nobody.

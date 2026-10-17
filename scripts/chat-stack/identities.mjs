@@ -18,17 +18,22 @@
 //   proof <who> --scope S[,S] [--to briefcase] [--ttl 600]
 //                                  a User verification proof that dm acts for <who> at the receiving app
 //   first-party <silicon>          a first-party Silicon Accounts token for a Silicon (aud silicon-accounts)
+//   init-demo [--fresh | --set N]  the demo workspace's accounts (once, or repaired): Mira Patel (c:mira) and the
+//                                  Silicons she looks after, Sol and Wren, signed in to the CLI; --fresh: a new set
+//                                  (c:mira-2, …); --set N: back to set N. scripts/chat-stack/seed-demo.mjs runs it.
 //
-// <who> is a name (ada, bo, cy, di, scout, quill, atlas, pip, ember, nova), an id (c:dmc-ada, si:dmc-scout, or the
-// short c:ada / si:scout) or a uuid. Every token, cookie and proof is printed only by the command that asks for it.
+// <who> is a name (ada, bo, cy, di, scout, quill, atlas, pip, ember, nova; the demo's mira, sol, wren), an id (c:dmc-ada,
+// si:dmc-scout, or the short c:ada / si:scout) or a uuid. Every token, cookie and proof is printed only by the command
+// that asks for it.
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ACCOUNTS_CHECKOUT, HERE, PATHS, StackError, describe, http, readJson, stackFile, writePrivate } from './lib/common.mjs';
+import { ACCOUNTS_CHECKOUT, HERE, PATHS, StackError, describe, http, readJson, stackFile, withLock, writePrivate } from './lib/common.mjs';
 import {
   ALLOW, CARBONS, SILICONS, appTokens, carbonId, cliEnv, dmBinary, dmCall, emailOf, findIdentity, homeOf,
   issueProof, loadPool, mintSlt, savePool, sessionHeaders, siliconFirstParty, siliconId, stackUrls, websiteCookie,
+  DEMO_ALLOW, DEMO_CARBONS, DEMO_SILICONS, demoHandle, withDemo,
 } from './lib/pool.mjs';
 
 const argv = process.argv.slice(2);
@@ -118,6 +123,8 @@ async function init() {
   const byName = new Map((previous.identities ?? []).map((x) => [x.name, x]));
   const pool = { version: 1, created_at: previous.created_at ?? new Date().toISOString(), updated_at: new Date().toISOString(),
     accounts_public_url: stack.accounts.public_url, accounts_api_url: stack.accounts.api_url, dm_api_url: stack.dm.api_url, identities: [] };
+  // The demo workspace's accounts (init-demo) are kept as they are: this command makes and checks only the ten above.
+  if (previous.demo) pool.demo = previous.demo;
 
   for (const spec of CARBONS) {
     const id = carbonId(spec);
@@ -169,6 +176,119 @@ async function init() {
   }
   savePool(pool);
   print({ pool: PATHS.identities, carbons: pool.identities.filter((x) => x.kind === 'carbon').map((x) => x.id), silicons: pool.identities.filter((x) => x.kind === 'silicon').map((x) => `${x.id} (custodian ${x.custodian})`) });
+}
+
+// ------------------------------------------------------------------------------------------------ init-demo
+
+/** Whether the dm CLI in the identity's own home is signed in as it (`dm login status`). */
+async function cliSignedIn(identity, stack) {
+  if (!existsSync(dmBinary())) return false;
+  const done = await runDm(identity, ['--json', 'login', 'status'], { stack });
+  try {
+    const status = JSON.parse(done.stdout.trim().split('\n').pop());
+    return status.authenticated === true && status.id === identity.id;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The demo workspace's accounts, made once and checked on every run, the way init makes the pool: the Carbon keeps
+ * her account-site session (one email code, the first time), each Silicon its STK; DM admits them, the Silicons let in
+ * DEMO_ALLOW, and each Silicon's CLI is signed in in its own home (it speaks with `dm messages send --speak`). They
+ * are written under `demo` in the pool file, holding the stack's lock so a concurrent up.sh never loses them.
+ */
+async function initDemo() {
+  const stack = stackFile();
+  const fresh = flag('fresh');
+  const requested = argv.includes('--set') ? Number(option('set')) : null;
+  if (requested !== null && (!Number.isInteger(requested) || requested < 1)) throw new StackError(`--set ${option('set')} is not a set number.`, 'Sets are numbered from 1: --set 1 is c:mira, si:sol and si:wren.');
+  return withLock('stack', async () => {
+    const pool = loadPool();
+    const previous = pool.demo ?? null;
+    // Earlier sets stay at the stack (their accounts and conversations), kept whole here, so --set N goes back to one
+    // without an email code; --fresh starts the next number.
+    let retired = [...(previous?.retired ?? [])].filter((entry) => Array.isArray(entry.identities));
+    let set = previous?.set ?? 1;
+    let start = previous?.identities ?? [];
+    let createdAt = previous?.created_at;
+    if (fresh || (requested && requested !== set)) {
+      if (previous) retired.push({ set: previous.set, created_at: previous.created_at, identities: previous.identities });
+      set = fresh ? Math.max(set, ...retired.map((entry) => entry.set)) + 1 : requested;
+      const returning = retired.find((entry) => entry.set === set);
+      start = returning?.identities ?? [];
+      createdAt = returning?.created_at;
+      retired = retired.filter((entry) => entry.set !== set);
+    }
+    const byName = new Map(start.map((x) => [x.name, x]));
+    const now = new Date().toISOString();
+    const demo = { set, created_at: createdAt ?? now, updated_at: now, identities: [], retired };
+    const save = () => savePool({ ...loadPool(), demo: { ...demo, identities: [...demo.identities, ...start.filter((x) => !demo.identities.some((y) => y.name === x.name))] } });
+    const specOf = (base) => ({ ...base, handle: demoHandle(base, set) });
+
+    for (const base of DEMO_CARBONS) {
+      const spec = specOf(base);
+      const id = carbonId(spec);
+      const existing = byName.get(spec.name);
+      let entry;
+      if (existing?.id === id && await carbonSessionWorks(existing, stack)) {
+        entry = existing;
+      } else {
+        say(`signing ${id} in on the account site (one email code)`);
+        entry = signInCarbon(spec, stack);
+      }
+      demo.identities.push({
+        name: spec.name, kind: 'carbon', id, uuid: entry.uuid, display_name: spec.display_name, email: emailOf(spec), home: homeOf(id),
+        silicons: DEMO_SILICONS.filter((s) => s.custodian === spec.name).map((s) => siliconId(specOf(s))), accounts_session: entry.accounts_session, demo: true,
+      });
+      save();
+    }
+    for (const base of DEMO_SILICONS) {
+      const spec = specOf(base);
+      const custodian = demo.identities.find((x) => x.name === spec.custodian);
+      const existing = byName.get(spec.name);
+      const made = await ensureSilicon(spec, custodian, existing?.id === siliconId(spec) ? existing : null, stack);
+      demo.identities.push({
+        name: spec.name, kind: 'silicon', id: siliconId(spec), uuid: made.uuid, display_name: spec.display_name, custodian: custodian.id,
+        home: homeOf(siliconId(spec)), allow: DEMO_ALLOW[spec.name].map((name) => findIdentity(withDemo({ ...pool, demo }), name).id), stk: made.stk, demo: true,
+      });
+      save();
+    }
+
+    // DM learns each account on its first request; each Silicon lets in its DEMO_ALLOW (the custodian never needs it).
+    const tokens = new Map();
+    for (const identity of demo.identities) {
+      const signedIn = await appTokens(identity, 'dm', stack);
+      tokens.set(identity.name, signedIn.access_token);
+      const me = await dmCall(signedIn.access_token, 'GET', '/api/v1/me', undefined, { stack });
+      if (me.status !== 200) throw new StackError(`DM did not admit ${identity.id}: ${describe(me)}`, 'Is dm-api up? scripts/chat-stack/status.sh');
+    }
+    for (const identity of demo.identities.filter((x) => x.kind === 'silicon')) {
+      const answer = await dmCall(tokens.get(identity.name), 'POST', '/api/v1/allow-list', { type: 'allow_list_add', data: { account_ids: identity.allow } }, { stack });
+      if (answer.status !== 200) throw new StackError(`Setting ${identity.id}'s DM allow-list failed: ${describe(answer)}`);
+    }
+    for (const identity of demo.identities) {
+      mkdirSync(identity.home, { recursive: true, mode: 0o700 });
+      chmodSync(identity.home, 0o700);
+    }
+    // The Silicons use the CLI like any Silicon: signed in once in their own homes (an SLT each, no email code).
+    const signedInCli = [];
+    for (const identity of demo.identities.filter((x) => x.kind === 'silicon')) {
+      if (await cliSignedIn(identity, stack)) continue;
+      const slt = await mintSlt(identity, 'dm', stack);
+      const done = await runDm(identity, ['--json', 'login', '--slt-stdin', '--label', 'chat stack demo'], { stdin: slt, stack });
+      if (done.code !== 0) throw new StackError(`dm login failed for ${identity.id} (exit ${done.code}): ${(done.stderr || done.stdout).trim().slice(-600)}`, 'Check the CLI snapshot: scripts/chat-stack/status.sh (dm_api.build).');
+      signedInCli.push(identity.id);
+    }
+    save();
+    print({
+      pool: PATHS.identities, set,
+      carbons: demo.identities.filter((x) => x.kind === 'carbon').map((x) => `${x.id} (${x.display_name})`),
+      silicons: demo.identities.filter((x) => x.kind === 'silicon').map((x) => `${x.id} (${x.display_name}, custodian ${x.custodian}, allows ${x.allow.join(', ')})`),
+      cli_signed_in_now: signedInCli,
+      ...(demo.retired.length ? { retired_sets: demo.retired.map((x) => x.set) } : {}),
+    });
+  }, { onWait: (pid) => say(`waiting for another chat-stack command (pid ${pid}) to finish`) });
 }
 
 // ------------------------------------------------------------------------------------------------ commands
@@ -248,7 +368,9 @@ async function main() {
     return;
   }
   if (command === 'init') return init();
-  const pool = loadPool();
+  if (command === 'init-demo') return initDemo();
+  // The demo workspace's accounts (init-demo) are found by every command, after the pool's own ten.
+  const pool = withDemo(loadPool());
   if (command === 'list') {
     const rows = pool.identities.map(publicView);
     if (flag('json')) return print(rows);

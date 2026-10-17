@@ -1,12 +1,14 @@
 /**
  * Accessibility: axe-core's WCAG 2.2 A and AA rules on every page, light and dark, desktop and phone, plus the keyboard
  * path through the shell. A violation fails with the rule, the element and how to fix it. (The CSP is bypassed only so
- * axe's script can be injected.)
+ * axe's script can be injected.) The conversation it checks is its own, made for the run with known content (two
+ * Carbons, formatting, a wide code block, a reply, an edit and a deletion), so a result never depends on what other runs
+ * left first in the shared list.
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { accountsSession, appConfig, BASE, runAccounts, signIn } from "./support";
+import { accountsSession, appConfig, BASE, runAccounts, sameOrigin, signIn } from "./support";
 
 const AXE = join(process.cwd(), "node_modules", "axe-core", "axe.min.js");
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"];
@@ -14,6 +16,8 @@ const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"];
 test.describe.configure({ mode: "serial" });
 
 let signedIn: BrowserContext;
+/** The run's own conversation (a group of the two Carbons), and the words of its first message. */
+let conversation: { address: string; first: string };
 
 async function audit(page: Page, label: string) {
   await page.waitForLoadState("domcontentloaded");
@@ -35,14 +39,54 @@ async function contextFor(browser: Browser, theme: "light" | "dark", mobile: boo
   return browser.newContext({ baseURL: BASE, bypassCSP: true, colorScheme: theme, reducedMotion: "reduce", viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 900 }, storageState });
 }
 
+/** The DM service through the website's proxy, as the signed-in browser reaches it. */
+async function api<T>(context: BrowserContext, method: string, path: string, data?: unknown): Promise<T> {
+  const response = await context.request.fetch(`/api${path}`, {
+    method,
+    headers: sameOrigin({ "Idempotency-Key": crypto.randomUUID(), ...(data === undefined ? {} : { "Content-Type": "application/json" }) }),
+    data: data === undefined ? undefined : JSON.stringify(data),
+  });
+  const body = (await response.json().catch(() => null)) as { data?: T } | null;
+  expect(response.ok(), `${method} ${path} answered ${response.status()}: ${JSON.stringify(body)}`).toBe(true);
+  return body?.data as T;
+}
+
+/** A group of the run's two Carbons with what a conversation shows: formatting, code, a reply, an edit, a deletion. */
+async function makeConversation(browser: Browser): Promise<{ address: string; first: string }> {
+  const stamp = Date.now().toString(36);
+  const friend = await accountsSession(browser, "friend");
+  await signIn(await friend.newPage(), runAccounts().friend.email, appConfig.home);
+  const group = await api<{ id: string }>(signedIn, "POST", "/api/v1/groups", { type: "create_group", data: { name: `A11y check ${stamp}`, member_ids: [runAccounts().friend.id] } });
+  const address = encodeURIComponent(group.id);
+  await api(friend, "POST", `/api/v1/groups/${address}/accept`);
+  const send = (context: BrowserContext, data: object) => api<{ "message-id": string }>(context, "POST", `/api/v1/conversations/${address}/messages`, { type: "message.create", data });
+  const first = `Morning! The **staging** build is green ${stamp}.`;
+  await send(friend, { message: `${first}\n\n- \`cargo test\` passes\n- the *docs* site builds\n- notes at https://docs.dm.teamofsilicons.com/start/` });
+  const question = await send(signedIn, { message: "Lovely. Could you paste the command?" });
+  await api(signedIn, "PATCH", `/api/v1/conversations/${address}/messages/${question["message-id"]}`, { type: "message.updated", data: { message: "Lovely, thank you. Could you paste the exact command you ran?" } });
+  await send(friend, { message: "```sh\ncargo test --locked --workspace --all-targets --all-features -- --test-threads=1 --nocapture\n```", reply: { "message-id": question["message-id"] } });
+  const mistake = await send(signedIn, { message: "Sent to the wrong conversation" });
+  await api(signedIn, "DELETE", `/api/v1/conversations/${address}/messages/${mistake["message-id"]}`);
+  await send(friend, { message: "One more thing: the release notes are long, so they wrap over several lines in a narrow window, and that is fine." });
+  await friend.close();
+  return { address: group.id, first };
+}
+
 test.beforeAll(async ({ browser }) => {
   signedIn = await accountsSession(browser, "carbon");
   const page = await signedIn.newPage();
   await signIn(page, runAccounts().carbon.email, appConfig.home);
   await page.close();
+  conversation = await makeConversation(browser);
 });
 
 test.afterAll(async () => {
+  // Ada leaves the run's group, so her list does not keep it (Bo, its other member, stays its owner).
+  if (conversation) {
+    const group = encodeURIComponent(conversation.address);
+    await api(signedIn, "POST", `/api/v1/groups/${group}/owners`, { type: "add_group_owners", data: { member_ids: [runAccounts().friend.id] } }).catch(() => undefined);
+    await api(signedIn, "POST", `/api/v1/groups/${group}/leave`).catch(() => undefined);
+  }
   await signedIn?.close();
 });
 
@@ -62,19 +106,29 @@ for (const theme of ["light", "dark"] as const) {
     test(`workspace pages pass WCAG 2.2 AA (${where})`, async ({ browser }) => {
       const context = await contextFor(browser, theme, mobile, await signedIn.storageState());
       const page = await context.newPage();
-      // The chat's sections, a dialog opened by address, and the first conversation in the list (if there is one).
+      // The chat's sections and a dialog opened by address.
       for (const path of [...appConfig.nav.map(item => item.href), "/c?new=1", "/c?new=group"]) {
         await page.goto(path);
         await audit(page, `${path} (${where})`);
       }
-      await page.goto("/c");
-      const first = page.locator("a[data-row]").first();
-      if (await first.count()) {
-        await page.goto((await first.getAttribute("href"))!);
-        await audit(page, `a conversation (${where})`);
-        await page.keyboard.press("Shift+?");
-        await audit(page, `the keyboard shortcuts (${where})`);
+      // The run's own conversation, with everything a conversation shows.
+      await page.goto(`/c/${conversation.address}`);
+      await expect(page.locator("article[data-message-code]", { hasText: conversation.first.replace(/\*\*/g, "") })).toBeVisible();
+      await audit(page, `a conversation (${where})`);
+      if (!mobile) {
+        // With its details panel open (⌘.), as a Carbon often has it.
+        await page.getByRole("main").click({ position: { x: 8, y: 300 } });
+        await page.keyboard.press(process.platform === "darwin" ? "Meta+Period" : "Control+Period");
+        await expect(page.locator("[data-details-panel]")).toBeVisible();
+        await audit(page, `a conversation with its details (${where})`);
+        await page.keyboard.press(process.platform === "darwin" ? "Meta+Period" : "Control+Period");
+        await expect(page.locator("[data-details-panel]")).toBeHidden();
       }
+      // The cheatsheet, opened from outside any field (? would type into the message field).
+      await page.getByRole("main").click({ position: { x: 8, y: 300 } });
+      await page.keyboard.press("Shift+?");
+      await expect(page.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeVisible();
+      await audit(page, `the keyboard shortcuts (${where})`);
       await context.close();
     });
   }

@@ -1,8 +1,8 @@
 /**
  * The chat end to end, as two Carbons use it: a new conversation from the keyboard (N), a message that shows at once
  * and reaches the other browser live, a reply, an edit with ↑, a draft that survives a reload, deleting after asking
- * in place, a group from ⇧N whose invitation the other accepts, the shortcuts and the palette, and a report from the
- * settings. Then the API proxy's same-origin rule.
+ * in place, a group from ⇧N whose invitation the other accepts, the shortcuts and the palette. Then the API proxy's
+ * same-origin rule, and a report from the settings that reaches the DM service.
  */
 import { expect, test } from "@playwright/test";
 import { accountsSession, captureViews, runAccounts, sameOrigin, signIn, watchErrors } from "./support";
@@ -113,12 +113,6 @@ test("two Carbons talk: a conversation, live delivery, a reply, an edit, a draft
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/settings/);
 
-  // A report from the settings.
-  await page.goto("/settings#report");
-  await page.getByLabel("What happened?").fill("Browser verification report");
-  await page.getByRole("button", { name: "Send report" }).click();
-  await expect(page.getByText(/^Thank you\. The report was sent/)).toBeVisible();
-
   // The API proxy refuses a write from another site, and answers this one.
   const rejected = await a.request.post("/api/api/v1/groups", { headers: { Origin: "https://elsewhere.example" }, data: { type: "create_group", data: { name: "Forbidden" } } });
   expect(rejected.status()).toBe(403);
@@ -130,6 +124,24 @@ test("two Carbons talk: a conversation, live delivery, a reply, an edit, a draft
   expect(errors).toEqual([]);
   await a.close();
   await b.close();
+});
+
+test("a report from the settings reaches the DM service and says so", async ({ browser }) => {
+  const a = await accountsSession(browser, "carbon");
+  const page = await a.newPage();
+  const errors = watchErrors(page);
+  await signIn(page, runAccounts().carbon.email);
+  await page.goto("/settings#report");
+  await page.getByLabel("What happened?").fill(`Browser verification report ${Date.now().toString(36)}`);
+  const answer = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/reports"));
+  await page.getByRole("button", { name: "Send report" }).click();
+  // Only the real success counts. The service allows a few reports an hour per account (DM_REPORTS_PER_HOUR); every run
+  // reports as the same Carbon, so the local chat stack raises it in .dev/dm-api.env.
+  const response = await answer;
+  expect(response.status(), `POST /reports answered ${response.status()}: ${await response.text()}${response.status() === 429 ? " (the stack's report limit is used up: raise DM_REPORTS_PER_HOUR in .dev/dm-api.env, then scripts/chat-stack/up.sh)" : ""}`).toBeLessThan(300);
+  await expect(page.getByRole("status").filter({ hasText: /^Thank you\. The report was sent/ })).toBeVisible();
+  expect(errors).toEqual([]);
+  await a.close();
 });
 
 test("old addresses lead to the chat", async ({ browser }) => {

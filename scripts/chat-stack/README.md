@@ -59,6 +59,7 @@ eval "$(node $H env scout)"               # SILICON_HOME, SILICON_DM_RELAY_HOME,
 node $H cookie ada                        # a sealed website session cookie (JSON for Playwright; --header for curl)
 node $H storage-state ada --out test-results/.auth/ada.json   # Playwright storage state, incl. Ada's Accounts session
 node $H proof ada --scope briefcase.uploads.reserve,briefcase.uploads.commit   # a User verification proof, dm → briefcase
+node $H init-demo                         # the demo workspace's own accounts: mira (looks after sol and wren); see below
 ```
 
 No email code is spent after the pool exists: a Carbon keeps its account-site session (`sa_session`, 900 days,
@@ -66,6 +67,55 @@ never rotates) and every token, short-lived token, Silicon or device approval is
 with its STK. Each `token` and `cookie` is a new sign-in with its own refresh token, so parallel tests never trip
 refresh-token reuse detection. The website cookie works on 4520 and 4530 because both read `SESSION_SECRET` from
 `web/.env.local` (Playwright's `E2E_SESSION_SECRET` falls back to it).
+
+## The demo workspace and its screenshots
+
+Tests fill the pool's lists with groups named after their runs, so DM is never looked at as Ada or Bo for a design
+review. The demo workspace is DM on an ordinary morning instead: Mira Patel (`c:mira`) leads the launch of Juniper, a
+calendar for small studios; Sol (`si:sol`) and Wren (`si:wren`) are the Silicons she looks after (their voices Mark
+and Hope, chosen by her); Bo (`c:dmc-bo`, from the pool) designs it with her. No test signs in as Mira.
+
+```sh
+node scripts/chat-stack/seed-demo.mjs             # make what is missing, keep what is there; prints what it made (JSON)
+node scripts/chat-stack/seed-demo.mjs --check     # what exists and what is missing, changing nothing (exit 1 if anything is)
+node scripts/chat-stack/seed-demo.mjs --fresh     # a new set of accounts (c:mira-2, si:sol-2, …): every conversation starts empty
+node scripts/chat-stack/seed-demo.mjs --set 1     # back to an earlier set, its accounts and conversations as they were
+node scripts/chat-stack/identities.mjs cookie mira   # sign a browser in as Mira (every identities.mjs command knows mira, sol, wren)
+node scripts/chat-stack/screens.mjs --base http://127.0.0.1:4530 --out /tmp/dm-screens   # every surface, 1440 and 390 px
+node scripts/chat-stack/screens.mjs --list        # the surfaces; --only a,b and --skip a,b choose some
+```
+
+What the seed makes, through DM's API and CLI (the Silicons speak with `dm messages send --speak`, signed in in their
+own homes):
+
+| Conversation | What is in it |
+| --- | --- |
+| Mira and Sol | The morning summary as a spoken message with cues and a caption; a PDF; a code block; Mira's reply that quotes the PDF and was edited (a typo, so it has history); a voice note from Mira with its transcript; a short spoken message; Read and Delivered |
+| Mira and Wren | A few messages, one spoken, the last one unread |
+| Launch week (`g:launch-week`) | Mira, Bo, Sol and Wren: replies, Bo's two hero mock-ups, Wren's chart, a whiteboard photo, Sol's checklist bundled under one message, a message Wren routes to Sol's `release-notes` intent, Bo's GIF; the last two unread |
+| Mira and Bo | A short Carbon chat (the screenshots add Bo typing) |
+| Sol and Wren | Their own conversation, each message routed to an intent: what Mira sees when she views as Sol |
+| Design crit | Bo's invitation, waiting for Mira |
+
+The pictures and the PDF are small HTML pages rendered by the website's Playwright (`lib/demo-assets.mjs`, kept in
+`.dev/demo/assets`) and uploaded into the sender's own Briefcase (the stand-in) with User verification proofs, the
+same requests `web/lib/server/briefcase.ts` makes for the website, so the website shows them through its file proxy.
+Mira's voice note is her own voice rendered by `POST /api/v1/speech`. The seed records each step's message code and
+creation time in `.dev/demo.json` and checks them against the service on every run: a run after a crash goes on where
+it stopped, a run after `up.sh --fresh-dm` makes everything again. DM cannot backdate messages, so every message has the
+time of the run; the screenshot harness picks a time zone where that time is the morning (`--timezone` to choose).
+The demo accounts live under `demo` in `.dev/identities.json`, outside the pool's ten (which `status.sh` counts and
+`init` rewrites); `identities.mjs init-demo` makes and checks them (`up.sh` keeps them but does not check them).
+
+`screens.mjs` signs Chromium in as Mira (a new sign-in per width) with a fake microphone and writes
+`<surface>-<width>.png` and an `index.md` that names what each one shows. It runs against any website (`--base`): the
+dev site, or a production build (`next build` into your own `NEXT_DIST_DIR`, then `next start` with the environment
+`web/playwright.config.ts` gives it). It leaves the workspace as it found it: it never marks anything read (the
+website's receipts are held in its browser), clears what it typed, discards the send it fails on purpose and cancels
+its recordings and uploads. Listen mode needs a message to arrive, so Wren sends one line per run (every width listens
+at once), and at the end everything older in Wren's conversation is marked read: the inbox keeps one unread message
+there. Sol, Wren and Bo hold presence leases while it runs (they show online), and Bo types while his conversation is
+taken. The pointer rests in a corner for every picture, so no hover toolbar shows unless the surface is about it.
 
 ## Speech
 

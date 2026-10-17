@@ -16,6 +16,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "re
 import { AlertCircle, FileText, ImageIcon, Link2, Mic, Music, RotateCw, Video, X } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import { Progress } from "@/components/silicon-ui/progress/progress";
+import { TextShimmer } from "@/components/silicon-ui/text-shimmer/text-shimmer";
 import { clockDuration, fileSize } from "@/lib/chat/format";
 import { displayUrl } from "@/lib/upload/display";
 import { gifStill } from "./gif-picker";
@@ -125,13 +126,16 @@ function TrayEntry({ item, preview, reduced, online, retryable, onRemove, onRetr
   const image = item.kind === "file" && (item.contentType ?? "").startsWith("image/") ? preview ?? (item.url ? displayUrl(item.url) : undefined) : undefined;
   // Every byte sent: the website is handing the file to Silicon Briefcase (it says so instead of a long "99 %").
   const progressWords = !online ? "Uploads when online" : percent >= 100 ? "Saving…" : `Uploading ${percent}%`;
-  const meta =
-    item.kind === "voice"
+  // A voice note whose bytes are saved waits only for its words: it says so (the shimmer stays still under reduced motion).
+  const transcribing = item.kind === "voice" && uploading && !!item.transcribing;
+  const meta = transcribing
+    ? <TextShimmer>Transcribing…</TextShimmer>
+    : item.kind === "voice"
       ? uploading ? (!online || percent > 0 ? progressWords : "Getting it ready…") : item.voice?.duration_milliseconds ? clockDuration(item.voice.duration_milliseconds) : "Voice message"
       : uploading
         ? !online ? progressWords : item.queued ? "Waiting to upload…" : progressWords
         : [kindWords(item.name, item.contentType), fileSize(item.size)].filter(Boolean).join(" · ");
-  const showProgress = uploading && online && !(item.kind === "file" && item.queued);
+  const showProgress = uploading && online && !transcribing && !(item.kind === "file" && item.queued);
   return (
     <li className={styles.chip} data-sq="surface" data-kind={item.kind} data-status={item.status} data-tray-item={item.id} aria-busy={uploading || undefined}>
       <span className={styles.chipThumb} data-sq={image ? "clip" : "surface"}>

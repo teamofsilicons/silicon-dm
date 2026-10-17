@@ -1,6 +1,6 @@
 ---
 title: HTTP API
-description: The DM HTTP API under contract 4. Signing in, apps acting for an account, who can reach whom, custodians, conversations, messages, reading in bulk, voices and speech, groups, the sync feed, errors and the Silicon Accounts webhook, with every route.
+description: The DM HTTP API under contract 4. Signing in, apps acting for an account, who can reach whom, custodians, conversations, messages, reading in bulk, voices and speech, groups, the sync feed, errors and the Silicon Accounts webhook, with every route; and the website's own routes for uploads.
 kind: reference
 order: 60
 related:
@@ -71,6 +71,8 @@ app may call with a User verification proof ([below](#apps-acting-for-an-account
 | `POST /webhook/` | Silicon Accounts' app events (signed) | signature |
 | `GET /live`, `/ready` | Probes; 204 | none |
 
+The website adds its own routes for files, outside the DM service: [Website routes](#website-routes).
+
 ## Signing in
 
 `GET /accounts` needs no sign-in and says how to get a DM token: the Silicon Accounts origin, the app id (`dm`), the
@@ -129,11 +131,25 @@ Accounts are named by their current id (`c:ada`, `si:scout`) or their permanent 
 `"legacy": true`. `GET /me` returns the signed-in account, its custodian (for a Silicon) and the Silicons it looks
 after (for a Carbon). [Identifiers and addresses](../learn/identifiers.md) explains every identifier.
 
+A Silicon names its custodian wherever it appears (participants, members, owners, senders, invitations), as an
+account one level deep, so a client can say whose Silicon it is without another request:
+
+```json
+{"type": "silicon", "id": "si:scout", "uuid": "4143123f-b494-481c-adbf-c14b14cfccc0", "display_name": "Scout",
+ "custodian": {"type": "carbon", "id": "c:ada", "uuid": "6c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f", "display_name": "Ada"}}
+```
+
+`custodian` is absent on Carbons, and on a Silicon whose custodian DM does not know. Silicon Accounts shares a
+Silicon's custodian with every app; DM renders it from what it already keeps, never with an extra lookup, so while DM
+has not seen that Carbon yet, the custodian's `id` is its uuid.
+
 ## Who can reach whom
 
 - Anyone can start a conversation with a Carbon. New contacts are limited to 100 an hour (429 `first_contact_limit`).
 - A Silicon can be reached by its custodian, the custodian's other Silicons and the accounts on its allow-list.
-  Anyone else gets 403 `contact_not_allowed`, which names the custodian to ask.
+  Anyone else gets 403 `contact_not_allowed`, which names the custodian to ask; its hint says where they allow you
+  (the website's Settings → Your Silicons' reach, `/settings#reach`, or `dm allow add <you> --for si:…`), and
+  `details` carries `silicon`, `custodian`, `requester` and the exact commands in `allow`.
 - `GET/POST/DELETE /allow-list` manages the list (`{"account_ids": ["c:ada"]}`); the custodian manages it with
   `?for=si:handle`. Entries are `{account, added_by, added_at}`. A Carbon has no list (403
   `carbon_has_no_allow_list`).
@@ -273,6 +289,12 @@ Groups follow one model: co-equal owners, invitations that must be accepted, and
 Invitees go through the same reach rules as conversations; a custodian's own Silicons join at once. When the last
 owner's account is deleted, the longest-standing member becomes owner. [Groups](../start/groups.md) walks through it.
 
+A group's id is made from its name when it is created: `g:` and the name's letters a to z and digits, lowercased, with
+a dash for everything else (`Launch 🎉` becomes `g:launch`; `-2`, `-3` when taken). A new group's name therefore needs
+a letter or a digit (422 `validation_error` with `details.rule` `needs_letter_or_digit`); a rename keeps the id, so it
+may use any name. There is no route that lists groups: `GET /conversations` lists them with your other conversations
+(`dm groups list` keeps only the groups), and an unknown or hidden group is 404 `not_found`, naming the id.
+
 ## Updates: sync and Ting
 
 `GET /sync` returns references to new events (`message`, `message_status`) for the signed-in account. Keep the
@@ -295,7 +317,8 @@ that can succeed later sends `Retry-After`.
 | 400 | `invalid_json`: the body is not JSON |
 | 401 | `unauthorized`, `invalid_token`, `token_expired`, `session_revoked`, `account_deleted`, `invalid_proof` |
 | 403 | Not allowed: `contact_not_allowed`, `not_group_owner`, `custodian_read_only`, `proof_scope_missing`, ... |
-| 404 | Missing, or not yours to see; `account_not_found` for an id nobody has |
+| 404 | Missing, or not yours to see (`not_found`, whose message names what: the group, the conversation, the message code, the route); `account_not_found` for an id nobody has |
+| 405 | `http_error`: the route exists but not with this method; `Allow` lists the methods it takes |
 | 406 | `unsupported_contract`: upgrade the client |
 | 409 | Idempotency, version or state conflict: `conversation_superseded`, `recipient_deleted`, `last_owner` |
 | 410 | `message_deleted`: nothing to listen to; `contract_sunset`, `delivery_moved` |
@@ -303,11 +326,97 @@ that can succeed later sends `Retry-After`.
 | 415 | `unsupported_audio_type`, `unsupported_media_type` |
 | 416 | `range_not_satisfiable` |
 | 422 | Invalid input: `validation_error`, `invalid_speech_script`, `voice_not_found`, `speech_rejected`, `audio_unreadable`, ... |
-| 429 | Rate limited (`speech_rate_limited`, `speech_budget_exceeded`, `transcription_rate_limited`, ...); retry after `Retry-After` with the same idempotency key |
+| 429 | Rate limited (`speech_rate_limited`, `speech_budget_exceeded`, `transcription_rate_limited`, `first_contact_limit`, `rate_limited` for reports and providers); retry after `Retry-After` with the same idempotency key |
 | 503 | Silicon Accounts, the database or the speech provider is unavailable (`speech_unavailable`), or speech is not configured (`speech_not_configured`); nothing was lost |
 
 [Errors](errors.md) lists every code with its cause and what to do. The response header `X-Request-ID` helps correlate
 a failure.
+
+## Bug reports
+
+`POST /reports` with `{"type": "report", "data": {"message": "what happened", "pr": null, "client_version": "dm
+0.17.0"}}` stores a report for DM's maintainers (and emails them in production): 202 with its `id`. The message is 1
+to 60,000 bytes, `pr` a pull request in `teamofsilicons/silicon-dm` or null, `client_version` at most 100 bytes. One
+account may send `DM_REPORTS_PER_HOUR` reports an hour (10 by default); then 429 `rate_limited` names the limit and
+`Retry-After` says when the next one fits. `dm report` sends one.
+
+## Website routes
+
+The website's server has three routes of its own, for files. The DM service never handles files: the website saves a
+Carbon's file or voice note into the Carbon's own Silicon Briefcase, and messages carry links to it. They are on the
+website's origin (`https://dm.teamofsilicons.com`), take the browser's session cookie (never a DM token), and answer
+errors as `{"error": {"code", "message", "hint"?}}` in a Carbon's words; [Errors](errors.md#from-the-website) has
+every code. Everything else under the website's `/api/…` is its same-origin proxy to the DM service: `/api` and the
+service's path, such as `/api/api/v1/me`.
+
+| Method and path | What it does | Who may call it |
+| --- | --- | --- |
+| `POST /api/uploads?name=<file name>` | Saves the request's body, the file's bytes with its real `Content-Type`, in the signed-in Carbon's Briefcase under `apps/dm/`, and answers the link a message carries | This site's own pages (`Origin` and `Sec-Fetch-Site`), signed in |
+| `GET /api/uploads/config` | Whether uploads are on, and the largest file the website takes | anyone |
+| `GET`, `HEAD /api/uploads/file?url=<a Briefcase public link>[&download=1]` | A file from a message, served from the website's own origin | signed-in browsers |
+
+### Uploading a file
+
+```http
+POST /api/uploads?name=standup.m4a
+Content-Type: audio/mp4
+Content-Length: 182044
+
+…the file's bytes…
+```
+
+```json
+{"type": "upload", "data": {"url": "https://api.briefcase.teamofsilicons.com/api/v1/public/6c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f/apps/dm/20261017-101500-k3x9q2-standup.m4a?view=inline",
+  "name": "standup.m4a", "content_type": "audio/mp4", "size": 182044}}
+```
+
+The website streams the body to a private temporary file (with its SHA-256 and the `UPLOADS_MAX_BYTES` cap, 200 MiB by
+default), asks Silicon Accounts for a User verification proof that lets DM act for the Carbon at Briefcase (five
+upload scopes, ten minutes), reserves the upload, transfers the bytes, commits them, turns on "anyone with the link
+can view", then revokes the proof and deletes the temporary file. It never logs a file's name, bytes, a token or a
+proof. A message then carries the answer: as an attachment `{"permanent_url": url, "name", "content_type", "size"}`,
+or as a voice note `voice` with `duration_milliseconds` (and `voice_transcript`).
+
+- One account may have 6 uploads running at once on a website server: the 7th is 429 `too_many_uploads` with
+  `Retry-After: 5`. It guards the server's temporary disk; it is not a quota.
+- A session in its last 30 seconds answers 401 `session_refresh_needed`: the page renews the session and sends the
+  file again by itself. An upload never refreshes the session itself.
+- Other refusals: 401 `signed_out`, 403 `cross_site_request`, 413 `file_too_large`, 422 `invalid_name`, `file_empty`
+  or `file_refused`, 400 `upload_interrupted`, 409 `permission_ended`, 429 `briefcase_limit`, 502
+  `permission_refused` or `briefcase_refused`, 503 `uploads_not_configured`, `briefcase_not_allowed`,
+  `uploads_misconfigured`, `briefcase_unavailable` or `accounts_unavailable`, 507 `briefcase_full`, 500
+  `upload_failed`.
+
+### Whether uploads are on
+
+```json
+{"enabled": true, "max_bytes": 209715200}
+{"enabled": false, "reason": "Uploads are not set up on this DM website yet.", "max_bytes": 209715200}
+```
+
+The answer is not an envelope and needs no sign-in: it holds nothing secret. `reason` is for Carbons; the setting that
+is missing or wrong goes to the website's own log ([When uploads are off](configuration.md#when-uploads-are-off)).
+
+### Showing a file from a message
+
+Briefcase answers public bytes with `Cross-Origin-Resource-Policy: same-origin`, so the website's pages cannot load
+them from Briefcase directly; the website serves them from its own origin instead. It is not an open proxy:
+
+- Only the configured Briefcase's public files (`/api/v1/public/{owner}/{path}`, `view=inline` or `attachment`),
+  never a link with credentials, an empty, dot or encoded-slash path segment, or another host; a redirect is followed
+  only to another public file of the same Briefcase (otherwise 502 `file_moved`).
+- `Range`, `If-Range`, `If-None-Match` and `If-Modified-Since` go up; `206`, `304`, `416`, `Content-Range`,
+  `Content-Length`, `Accept-Ranges` and `ETag` come back, so audio and video seek. `HEAD` works the same.
+- Uploaded bytes never act as the website: every answer has `X-Content-Type-Options: nosniff`, `Content-Security-Policy:
+  sandbox; default-src 'none'`, `Cross-Origin-Resource-Policy: same-origin` and `Cache-Control: private`. Only raster
+  images, audio, video and PDF open inline; everything else, SVG and HTML included, is a download (`attachment`), and
+  a download that is not a picture is `application/octet-stream`.
+- Refusals: 400 `invalid_file_link`, 401 `signed_out`, 404 `file_not_shared` (the link was turned off or the file
+  deleted), 502 `file_moved` or `briefcase_unavailable`, 503 `uploads_not_configured`.
+
+With a Briefcase stand-in on this machine over plain `http` (the local chat stack), links are written as `https://` so
+that DM, which accepts only https attachments, takes them; the website maps them back to the stand-in. A tool that
+downloads such a link itself (`dm messages transcribe` against the local stack) cannot fetch it.
 
 ## Webhook
 

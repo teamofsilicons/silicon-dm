@@ -18,7 +18,7 @@ import { Button } from "@/components/silicon-ui/button/button";
 import { HoldToConfirm } from "@/components/silicon-ui/hold-to-confirm/hold-to-confirm";
 import { InlineEdit } from "@/components/silicon-ui/inline-edit/inline-edit";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
-import { accountName, firstName, inboxHref, sameAccount } from "@/lib/chat/address";
+import { accountName, custodianWords, firstName, inboxHref, sameAccount } from "@/lib/chat/address";
 import { useGroup } from "@/lib/chat/hooks";
 import { useParticipantsPresence } from "@/lib/chat/presence";
 import type { AccountRef, ConversationSummary, GroupDetails as Group, Presence } from "@/lib/chat/types";
@@ -265,6 +265,7 @@ export function GroupDetailsPanel({ address, conversation, presence }: { address
             const notes = [...(isListed(member, owners) ? ["Owner"] : []), ...(you && !view ? ["You"] : [])];
             return (
               <PersonRow key={member.uuid ?? member.id} account={member} presence={you ? undefined : presenceOf(member)} notes={notes}
+                custodian={custodianWords(member, perspective, view ? [] : me.custodian_of)}
                 actions={memberActions(member)} removal={removal(member, false)} removing={removing === member.id} onRemovingChange={on => setRemoving(on ? member.id : null)} />
             );
           })}
@@ -278,6 +279,7 @@ export function GroupDetailsPanel({ address, conversation, presence }: { address
           <ul role="list" className={styles.people}>
             {group.pending_invitations.map(account => (
               <PersonRow key={account.uuid ?? account.id} account={account} notes={["Invited"]} actions={invitedActions(account)}
+                custodian={custodianWords(account, perspective, view ? [] : me.custodian_of)}
                 removal={removal(account, true)} removing={removing === account.id} onRemovingChange={on => setRemoving(on ? account.id : null)} />
             ))}
           </ul>

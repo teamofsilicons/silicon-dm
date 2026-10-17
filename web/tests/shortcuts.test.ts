@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { cleanOverrides, effectiveShortcuts, findConflicts } from "../lib/shortcuts/bindings";
 import { ariaKeyShortcut, chordFromEvent, formatBinding, isPlainBinding, keyId, normalizeBinding, type KeyLike } from "../lib/shortcuts/keys";
 import { IDLE, matchChord, SEQUENCE_TIMEOUT_MS } from "../lib/shortcuts/match";
+import { isShortcutAvailable, provideShortcuts, setShortcutAvailability, shortcutOffReason } from "../lib/shortcuts/react";
 import { SHORTCUTS, type ShortcutScope } from "../lib/shortcuts/registry";
 
 const key = (overrides: Partial<KeyLike>): KeyLike => ({ key: "", code: "", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...overrides });
@@ -99,4 +100,24 @@ test("every default shortcut has an id once, a label and keys; stored overrides 
   assert.deepEqual(cleanOverrides(null), {});
   const off = effectiveShortcuts({ "conversation.new": [] }, { platform: "mac", sendWith: "enter" });
   assert.equal(matchChord(off, IDLE, "n", 0, { scopes: scopes(), inField: false }).id, undefined, "an empty override switches it off");
+});
+
+test("a shortcut says whether it works here, and why not: uploads always do; voice waits for the voice module's answer", () => {
+  // Uploads exist: when this website takes none, pressing ⌘⇧U says why, so the shortcut is never shown off.
+  assert.equal(isShortcutAvailable("composer.upload"), true);
+  assert.equal(shortcutOffReason("composer.upload"), null);
+  // Voice depends on the service and the browser: off, with a true reason, until the shell's check answers.
+  assert.equal(isShortcutAvailable("listen.mode"), false);
+  assert.match(shortcutOffReason("listen.mode") ?? "", /^Checking/);
+  setShortcutAvailability({ "listen.mode": "Speech is not set up on this DM service, so listening and dictation are off." });
+  assert.equal(shortcutOffReason("listen.mode"), "Speech is not set up on this DM service, so listening and dictation are off.");
+  setShortcutAvailability({ "listen.mode": null });
+  assert.equal(isShortcutAvailable("listen.mode"), true);
+  // Withheld again (uploads went away): the reason wins over an earlier "it works".
+  provideShortcuts(["composer.record"]);
+  setShortcutAvailability({ "composer.record": "Voice messages need uploads, which are off here." });
+  assert.equal(isShortcutAvailable("composer.record"), false);
+  assert.equal(shortcutOffReason("composer.record"), "Voice messages need uploads, which are off here.");
+  // Nothing in the registry is waiting for a feature that has arrived: only the voice shortcuts are checked at run time.
+  assert.deepEqual(SHORTCUTS.filter(shortcut => shortcut.planned).map(shortcut => shortcut.group), ["Voice", "Voice", "Voice", "Voice"]);
 });

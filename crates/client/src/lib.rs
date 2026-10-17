@@ -25,6 +25,27 @@ pub mod ting;
 pub use models::*;
 pub use silicon_dm_protocol::Envelope;
 
+/// The Rust examples of DM's docs and of this README, compiled as doctests
+/// (`cargo test --doc -p silicon-dm-client --all-features`), so no page shows code that stopped
+/// building. Only rustdoc's doctest collection compiles this module (`cfg(doctest)`), so the
+/// pages outside the crate are never needed to build or publish it.
+#[cfg(doctest)]
+#[allow(dead_code)]
+mod docs_examples {
+    #[doc = include_str!("../README.md")]
+    struct Readme;
+    #[doc = include_str!("../../../docs/start/building.md")]
+    struct Building;
+    #[doc = include_str!("../../../docs/start/groups.md")]
+    struct Groups;
+    #[cfg(feature = "accounts")]
+    #[doc = include_str!("../../../docs/reference/rust-client.md")]
+    struct RustClient;
+    #[cfg(feature = "runtime")]
+    #[doc = include_str!("../../../docs/reference/rust-runtime.md")]
+    struct RustRuntime;
+}
+
 use reqwest::{Client as HttpClient, Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};

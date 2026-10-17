@@ -16,7 +16,9 @@ use crate::{
 };
 
 const REPOSITORY: &str = "https://github.com/teamofsilicons/silicon-dm";
-const RECIPIENTS: &str = "saketdev12@gmail.com,shubhastro2@gmails.com,bugs@teamofsilicons.com";
+const RECIPIENTS: &str = "saketdev12@gmail.com,shubhastro2@gmail.com,bugs@teamofsilicons.com";
+/// Longest report message, in bytes.
+const MAX_REPORT_BYTES: usize = 60_000;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -32,12 +34,22 @@ pub(crate) async fn submit(
     Idempotency(key): Idempotency,
     ApiJson(report): ApiJson<Report>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
-    if report.message.trim().is_empty()
-        || report.message.len() > 60_000
-        || report.client_version.len() > 100
-    {
-        return Err(AppError::validation(
-            "report requires 1–60000 message bytes and a client version of at most 100 bytes",
+    if report.message.trim().is_empty() {
+        return Err(AppError::invalid(
+            "A report needs a message that says what happened; this one is empty.",
+        )
+        .with_hint("Say what you did, what you expected and what happened instead."));
+    }
+    if report.message.len() > MAX_REPORT_BYTES {
+        return Err(AppError::invalid(format!(
+            "A report's message is at most {MAX_REPORT_BYTES} bytes; this one has {}.",
+            report.message.len()
+        ))
+        .with_hint("Shorten it: keep what happened and the error, and leave out long logs."));
+    }
+    if report.client_version.len() > 100 {
+        return Err(AppError::invalid(
+            "A report's client_version is at most 100 bytes, such as \"dm 0.17.0\".",
         ));
     }
     if let Some(pr) = &report.pr {
@@ -56,9 +68,10 @@ pub(crate) async fn submit(
                     })
         });
         if !valid {
-            return Err(AppError::validation(
-                "PR must be a pull-request URL in teamofsilicons/silicon-dm",
-            ));
+            return Err(AppError::invalid(
+                "pr must be the link of a pull request in teamofsilicons/silicon-dm, such as https://github.com/teamofsilicons/silicon-dm/pull/17.",
+            )
+            .with_hint("Leave pr out when there is no pull request yet."));
         }
     }
     let simulated = state.settings.reporting.is_none()
@@ -85,10 +98,21 @@ pub(crate) async fn submit(
         }
         (old.get("id"), old.get("status"))
     } else {
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM bug_reports WHERE actor_id=$1 AND created_at>now()-interval '1 hour'")
-            .bind(actor.actor.id.as_str()).fetch_one(&mut *tx).await?;
-        if count >= 10 {
-            return Err(AppError::RateLimited);
+        // The report that has to leave the hour-long window before another fits: the
+        // limit-th newest. Present means the account is at its limit; its age says when
+        // the next report fits.
+        let limit = state.settings.reports_per_hour;
+        let wait: Option<f64> = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM created_at + interval '1 hour' - now())::float8 FROM bug_reports
+             WHERE actor_id=$1 AND created_at>now()-interval '1 hour'
+             ORDER BY created_at DESC OFFSET $2 LIMIT 1",
+        )
+        .bind(actor.actor.id.as_str())
+        .bind(i64::from(limit) - 1)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(wait) = wait {
+            return Err(report_limit(limit, wait));
         }
         let id = Uuid::now_v7();
         let status = if simulated { "simulated" } else { "queued" };
@@ -101,6 +125,30 @@ pub(crate) async fn submit(
         StatusCode::ACCEPTED,
         Json(json!({"id":id,"submitted":true,"notification":status,"repository":REPOSITORY})),
     ))
+}
+
+/// 429 for an account that sent its hour's reports, saying when the next one fits.
+fn report_limit(limit: u32, wait_seconds: f64) -> AppError {
+    // Whole seconds, at least one: the window is an hour, so this always fits.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 1..=3600 first"
+    )]
+    let seconds = wait_seconds.ceil().clamp(1.0, 3600.0) as u64;
+    let when = if seconds < 90 {
+        format!("{seconds} seconds")
+    } else {
+        format!("{} minutes", seconds.div_ceil(60))
+    };
+    AppError::rate_limited(format!(
+        "This account sent {limit} bug reports in the last hour, the most DM accepts from one account. The reports already sent are kept."
+    ))
+    .with_hint(format!(
+        "Send this one in {when} (Retry-After), or put everything into one report then."
+    ))
+    .with_retry_after(seconds)
+    .with_details(json!({"limit": limit, "window_seconds": 3600, "retry_after_seconds": seconds}))
 }
 
 /// Deliver one queued production report with bounded transport and durable retries.

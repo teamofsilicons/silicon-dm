@@ -3,8 +3,8 @@
 /**
  * People in the details panel. `Profile` is the one other account of a direct conversation: face, name, id (with
  * copy), Carbon or Silicon, presence, and "Message". `PersonRow` is one person in a list (a group's members, its
- * invitations, a conversation of several), with an actions menu for what can be done to them; a removal asks in place
- * (Silicon UI's ConfirmMorph) where the menu was.
+ * invitations, a conversation of several), with who looks after it when it is a Silicon, and an actions menu for what
+ * can be done to them; a removal asks in place (Silicon UI's ConfirmMorph) where the menu was.
  */
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Copy, Ellipsis, MessageCircle } from "lucide-react";
@@ -110,11 +110,13 @@ export interface PersonRemoval {
   run: () => Promise<unknown>;
 }
 
-/** One person in a list, with presence, notes (Owner, Invited, You) and a menu of actions. */
-export function PersonRow({ account, presence, notes = [], actions = [], removal, removing, onRemovingChange }: {
+/** One person in a list, with presence, notes (Owner, Invited, You), a Silicon's custodian and a menu of actions. */
+export function PersonRow({ account, presence, notes = [], custodian = null, actions = [], removal, removing, onRemovingChange }: {
   account: AccountRef;
   presence?: Presence;
   notes?: string[];
+  /** For a Silicon: who looks after it, as lib/chat/address.ts custodianWords says it. */
+  custodian?: string | null;
   actions?: PersonAction[];
   /** A removal that asks in place (it replaces the menu while it asks). */
   removal?: PersonRemoval;
@@ -150,6 +152,7 @@ export function PersonRow({ account, presence, notes = [], actions = [], removal
           <KindMarker kind={account.type} size="xs" />
           {notes.map(note => <span key={note} className={styles.note}>{note}</span>)}
         </span>
+        {custodian ? <span className={styles.custodian}>{custodian}</span> : null}
         <PresenceLine presence={presence} />
       </span>
       {removing && removal ? (

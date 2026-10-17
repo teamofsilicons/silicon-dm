@@ -34,6 +34,7 @@ import { ensureUploadsConfig } from "@/lib/voice/availability";
 import { pause as pausePlayback, playerState } from "@/lib/voice/player";
 import { rememberNote } from "@/lib/voice/sources";
 import { canRecord, MicrophoneError, openMicrophone, type MicrophoneSession, type Recording } from "@/lib/voice/microphone";
+import { voiceWords } from "@/lib/voice/words";
 import { baseType, IDLE_RECORDER, MAX_RECORDING_MS, microphoneProblem, noteFileName, recorderBusy, recorderReducer, timeLeftWarning, WARN_BEFORE_MS, type RecordMode, type RecorderEvent, type RecorderProblem, type RecorderState } from "@/lib/voice/recorder";
 import { IconAction } from "../common/icon-action";
 import type { ComposerVoiceBridge } from "../composer/voice-bridge";
@@ -93,14 +94,18 @@ async function handOver(bridge: ComposerVoiceBridge, recording: Recording, voice
   }
   reportActivity("transcribing_voice");
   const name = noteFileName(recording.type);
+  let heard = !voice.transcripts;
   const words = voice.transcripts
     ? transcribe(recording.blob, { contentType: type })
         .then(result => result.transcript.trim() || null)
         .catch((error: unknown) => {
           const failure = ApiError.from(error);
           // Speech switched off is said elsewhere; anything else, quietly: the message goes without its words.
-          if (failure.code !== "speech_not_configured") notify.warning("Sent without a transcript", describe(failure));
+          if (failure.code !== "speech_not_configured") notify.warning("Sent without a transcript", describe(voiceWords(failure, "transcribe")));
           return null;
+        })
+        .finally(() => {
+          heard = true;
         })
     : Promise.resolve(null);
   try {
@@ -111,6 +116,8 @@ async function handOver(bridge: ComposerVoiceBridge, recording: Recording, voice
     });
     // Its own bubble draws and plays from the recording at once; nothing is downloaded again.
     rememberNote(file.url, recording.blob);
+    // Saved; only its words are still coming: the tray says "Transcribing…" instead of a full progress bar.
+    if (!heard) bridge.dispatchTray({ type: "transcribing", id });
     const transcript = await words;
     bridge.dispatchTray({
       type: "ready",
@@ -182,6 +189,10 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
       return;
     }
     if (recorderBusy(machine.current)) return;
+    if (wanted === "note" && current.notesOffReason) {
+      notify.info("A voice message waits for the edit", current.notesOffReason);
+      return;
+    }
     if (wanted === "note" && features.checking && canRecord()) {
       // Pressed before the page knew whether uploads work: ask, then go on.
       const config = await ensureUploadsConfig(queryClient).catch(() => null);
@@ -256,7 +267,8 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
       const failure = ApiError.from(error);
       // What was said is not lost to a failure that may pass: Try again sends the same recording.
       if (passing(failure)) kept.current = recording;
-      dispatch({ type: "failed", problem: { code: failure.code, message: failure.message, hint: failure.hint } });
+      const words = voiceWords(failure, "dictate");
+      dispatch({ type: "failed", problem: { code: words.code, message: words.message, hint: words.hint } });
     } finally {
       reportActivity(null);
     }
@@ -415,6 +427,11 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
   let button;
   if (!bridge) {
     button = <IconAction label="Record a voice message" icon={<Mic strokeWidth={1.75} aria-hidden="true" />} unavailable="the microphone is not connected to this message field" tooltipSide="top" />;
+  } else if (bridge.notesOffReason) {
+    // An edit is open: the microphone types into it (a voice message would go as a new message).
+    button = voice.dictate
+      ? <IconAction label="Dictate into your edit" shortcut="composer.dictate" icon={<Mic strokeWidth={1.75} aria-hidden="true" />} tooltipSide="top" onClick={() => void start("dictate")} />
+      : <IconAction label="Record a voice message" icon={<Mic strokeWidth={1.75} aria-hidden="true" />} unavailable={bridge.notesOffReason} tooltipSide="top" />;
   } else if (voice.notes || (voice.checking && voice.microphone)) {
     // While the uploads answer is on its way the microphone records (start() waits for it before deciding).
     button = <IconAction label="Record a voice message" shortcut="composer.record" icon={<Mic strokeWidth={1.75} aria-hidden="true" />} tooltipSide="top" onClick={() => void start("note")} />;

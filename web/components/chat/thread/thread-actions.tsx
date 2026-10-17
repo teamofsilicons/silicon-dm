@@ -4,8 +4,8 @@
  * What can be done with a message, shared by every way to reach it: the hover toolbar, the context menu, the keyboard
  * (lib/shortcuts: R, E, C, L, Space, Delete, I…) and the details dialog. ConversationView provides it; rows only call
  * it. The value is stable for the life of a conversation, so a row never re-renders because another row changed:
- * what does change (the delete question, the highlight, the pointer) reaches rows as their own props or through the
- * small stores below.
+ * what does change (the delete question, the highlight, the message in use) reaches rows as their own props or through
+ * the small stores below.
  *
  * ThreadPeople carries what the account cards and the typing line need (the conversation, presence, custodians); it
  * changes with presence polls, so only those parts read it.
@@ -102,7 +102,24 @@ export function valueStore<T>(initial: T): ValueStore<T> {
   };
 }
 
-/** Whether the store holds `key` (the row the pointer is over): true or false, so only two rows re-render per move. */
-export function useIsCurrent(store: ValueStore<string | null>, key: string): boolean {
-  return useSyncExternalStore(store.subscribe, () => store.get() === key, () => false);
+/**
+ * The one message in use, which shows the toolbar (message-list.tsx decides it): the message you selected (with the
+ * keyboard, or by tapping it), else the one the pointer rests on. Never two at once.
+ */
+export interface InUse {
+  key: string;
+  /** Selected (keyboard, a tap), not only under the pointer: its toolbar may open under it, in the thread's flow. */
+  selected: boolean;
+}
+
+/** How a row is in use ("selected", "hover") or null, so only the rows whose answer changes re-render. */
+export function useInUse(store: ValueStore<InUse | null>, key: string): "selected" | "hover" | null {
+  return useSyncExternalStore(
+    store.subscribe,
+    () => {
+      const current = store.get();
+      return current?.key === key ? (current.selected ? "selected" : "hover") : null;
+    },
+    () => null,
+  );
 }

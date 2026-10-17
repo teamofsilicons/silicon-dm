@@ -1,6 +1,6 @@
 /**
- * The DM service's wire shapes as the website reads them (openapi.yaml, docs/wire-format.md). Every response is an
- * envelope `{"type": …, "data": …}`; these are the `data` parts. Fields the service is adding in 0.17 (spec §4:
+ * The DM service's wire shapes as the website reads them (openapi.yaml, docs/reference/wire-format.md). Every response
+ * is an envelope `{"type": …, "data": …}`; these are the `data` parts. Fields the service is adding in 0.17 (spec §4:
  * `speech`, `voice`, `gif`, `attachment_details`, `metadata`, `unread_count`, `last_read_message_id`, `speech` on
  * /me) are optional, so the website works against an older service and a newer one alike.
  */
@@ -17,6 +17,12 @@ export interface AccountRef {
   pfp_url?: string;
   deleted?: boolean;
   legacy?: boolean;
+  /**
+   * A Silicon's custodian (the Carbon who looks after it), one level deep. A newer service sends it wherever it names
+   * a Silicon; absent on Carbons, from an older service, and when DM knows no custodian. When DM has not seen the
+   * custodian's id yet, its `id` is its uuid (read it through `custodianFromRef`, lib/chat/address.ts).
+   */
+  custodian?: AccountRef | null;
 }
 
 export interface Delivery {

@@ -27,5 +27,5 @@ export function useUploadsConfig(): UploadsConfig | undefined {
 /** Why uploads are off here, or null when they work (or are not known yet). */
 export function uploadsOffReason(config: UploadsConfig | undefined): string | null {
   if (!config || config.enabled) return null;
-  return config.reason ?? "Uploads are off on this DM website.";
+  return config.reason ?? "Uploads are not set up on this DM website yet.";
 }

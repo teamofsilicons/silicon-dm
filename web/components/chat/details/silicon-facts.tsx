@@ -5,12 +5,13 @@
  * AccountVoiceRow: the voice's name, a preview, and Change for whoever may change it), and, for its custodian, who may
  * start a conversation with it (its allow-list) with the way to change that.
  *
- * DM names a Silicon's custodian to everyone who can read a conversation with it (`visible_to_custodians`), so a
- * direct conversation knows it; in a group it is said only for your own Silicons.
+ * DM names a Silicon's custodian on the Silicon itself (`custodian` on its AccountRef, DM 0.17); an older service only
+ * through a direct conversation's `visible_to_custodians`, so there it is said for direct conversations and your own
+ * Silicons.
  */
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
-import { accountName, firstName, sameAccount } from "@/lib/chat/address";
+import { accountName, custodianFromRef, firstName, sameAccount } from "@/lib/chat/address";
 import { useAllowList } from "@/lib/chat/hooks";
 import type { AccountRef, ConversationSummary, Me } from "@/lib/chat/types";
 import { AccountVoiceRow } from "../voice/voice-parts";
@@ -19,6 +20,8 @@ import styles from "./details.module.css";
 /** The Silicon's custodian when DM says who it is: "you", the account, or null. */
 export function custodianOf(silicon: AccountRef, conversation: ConversationSummary | undefined, me: Pick<Me, "account" | "custodian_of">): AccountRef | "you" | null {
   if (me.custodian_of.some(own => sameAccount(own, silicon))) return "you";
+  const named = custodianFromRef(silicon);
+  if (named) return sameAccount(named, me.account) ? "you" : named;
   if (!conversation || conversation.group) return null;
   const others = (conversation.visible_to_custodians ?? []).filter(custodian => !sameAccount(custodian, me.account));
   const silicons = conversation.participants.filter(participant => participant.type === "silicon" && !me.custodian_of.some(own => sameAccount(own, participant)));

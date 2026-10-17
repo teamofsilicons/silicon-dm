@@ -2,17 +2,18 @@
 
 /**
  * Settings → Your Silicons' reach: for each Silicon you look after, the accounts on its allow-list (they may start a
- * conversation with it and invite it to groups), each removable after asking in place, and the account picker to allow
- * more. You and your other Silicons never need listing. Changes go to the service at once (GET /api/v1/allow-list
- * shows them) and are the same for the Silicon's CLI (`dm allow list`).
+ * conversation with it and invite it to groups), each removable after asking in place (a quiet Remove that becomes the
+ * question on its own line), and the account picker to allow more. You and your other Silicons never need listing.
+ * Changes go to the service at once (GET /api/v1/allow-list shows them) and are the same for the Silicon's CLI
+ * (`dm allow list`).
  *
  * `/settings?silicon=si:x#reach` (the details panel's "Change who can reach …") puts that Silicon first.
  */
 import { useSearchParams } from "next/navigation";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/silicon-ui/button/button";
-import { ConfirmMorph } from "@/components/silicon-ui/confirm-morph/confirm-morph";
+import { ConfirmMorph, type ConfirmMorphState } from "@/components/silicon-ui/confirm-morph/confirm-morph";
 import { KindMarker } from "@/components/foundation/account/account-chip";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { accountName, firstName, sameAccount, shellQuote } from "@/lib/chat/address";
@@ -31,6 +32,56 @@ import { useShowWhenSet } from "../dialogs/show-when-set";
 import { useKnownAccounts } from "../dialogs/use-known-accounts";
 import { useChat } from "../shell/chat-context";
 import styles from "./settings.module.css";
+
+interface AllowEntry {
+  account: AccountRef;
+  added_at: string;
+}
+
+/**
+ * One account on a Silicon's list. At rest it offers a quiet Remove (no box, so a long list stays calm); pressing it asks
+ * in place, on its own line (Silicon UI's ConfirmMorph), and Cancel or Esc gives the keyboard back to Remove.
+ */
+function AllowedRow({ entry, onRemove }: { entry: AllowEntry; onRemove: (account: AccountRef) => Promise<void> }) {
+  const [asking, setAsking] = useState(false);
+  const removeButton = useRef<HTMLButtonElement>(null);
+  const morph = useRef<HTMLDivElement>(null);
+  const wasAsking = useRef(false);
+  const { account } = entry;
+  useEffect(() => {
+    if (asking && !wasAsking.current) {
+      wasAsking.current = true;
+      const frame = requestAnimationFrame(() => morph.current?.querySelector<HTMLElement>("button[data-autofocus]")?.focus());
+      return () => cancelAnimationFrame(frame);
+    }
+    if (!asking && wasAsking.current) {
+      wasAsking.current = false;
+      requestAnimationFrame(() => removeButton.current?.focus());
+    }
+  }, [asking]);
+  return (
+    <li className={styles.allowedRow} data-asking={asking ? "" : undefined}>
+      <AccountAvatar account={account} size="small" decorative />
+      <span className={styles.allowedText}>
+        <span className={styles.allowedName}>{accountName(account)}</span>
+        <span className={styles.allowedMeta}>
+          {accountName(account) !== account.id ? <span>{account.id}</span> : null}
+          <KindMarker kind={account.type} size="xs" />
+          <span title={fullTime(entry.added_at)}>since {formatDate(entry.added_at)}</span>
+        </span>
+      </span>
+      {asking ? (
+        <ConfirmMorph ref={morph} className={styles.allowedMorph} label={<>Remove<span className="sr-only"> {account.id}</span></>} prompt={`Remove ${firstName(account)}?`}
+          confirmLabel="Remove" pendingLabel="Removing" doneLabel="Removed" defaultState="confirming" onConfirm={() => onRemove(account)}
+          onStateChange={(state: ConfirmMorphState) => { if (state === "idle") setAsking(false); }} />
+      ) : (
+        <Button ref={removeButton} size="sm" variant="ghost" className={styles.allowedRemove} onClick={() => setAsking(true)}>
+          Remove<span className="sr-only"> {account.id}</span>
+        </Button>
+      )}
+    </li>
+  );
+}
 
 function SiliconReach({ silicon }: { silicon: AccountRef }) {
   const { me } = useChat();
@@ -81,6 +132,8 @@ function SiliconReach({ silicon }: { silicon: AccountRef }) {
       const next = await disallowAccounts(silicon.id, [account.id]);
       queryClient.setQueryData(chatKeys.allowList(silicon.id), next);
       notify.success(`${accountName(account)} can no longer start a conversation with ${name}`, "Conversations they already have keep working.");
+      // The row is gone with its buttons: the keyboard goes to the Silicon's heading, not to the page.
+      requestAnimationFrame(() => document.getElementById(`reach-${handle}`)?.focus());
     } catch (failure) {
       notifyError(failure, `${accountName(account)} was not removed`);
       throw failure;
@@ -92,27 +145,13 @@ function SiliconReach({ silicon }: { silicon: AccountRef }) {
       <div className={styles.siliconHead}>
         <AccountAvatar account={silicon} size="header" decorative />
         <span className={styles.siliconText}>
-          <h3 id={`reach-${handle}`} className={styles.siliconName}>{accountName(silicon)}</h3>
+          <h3 id={`reach-${handle}`} className={styles.siliconName} tabIndex={-1}>{accountName(silicon)}</h3>
           <span className={styles.rowDescription}>{silicon.id}</span>
         </span>
       </div>
       {list.error ? <ErrorAlert error={ApiError.from(list.error)} title={`${name}'s list could not be loaded`} action={<Button size="sm" variant="secondary" onClick={() => void list.refetch()}>Try again</Button>} /> : null}
       <ul role="list" className={styles.allowed} aria-label={`Accounts that can reach ${name}`}>
-        {allowed.map(entry => (
-          <li key={entry.account.uuid ?? entry.account.id} className={styles.allowedRow}>
-            <AccountAvatar account={entry.account} size="small" decorative />
-            <span className={styles.allowedText}>
-              <span className={styles.allowedName}>{accountName(entry.account)}</span>
-              <span className={styles.allowedMeta}>
-                {accountName(entry.account) !== entry.account.id ? <span>{entry.account.id}</span> : null}
-                <KindMarker kind={entry.account.type} size="xs" />
-                <span title={fullTime(entry.added_at)}>since {formatDate(entry.added_at)}</span>
-              </span>
-            </span>
-            <ConfirmMorph label={<>Remove<span className="sr-only"> {entry.account.id}</span></>} prompt={`Remove ${firstName(entry.account)}?`}
-              confirmLabel="Remove" pendingLabel="Removing" doneLabel="Removed" onConfirm={() => remove(entry.account)} />
-          </li>
-        ))}
+        {allowed.map(entry => <AllowedRow key={entry.account.uuid ?? entry.account.id} entry={entry} onRemove={remove} />)}
         {list.data && !allowed.length ? <li className={styles.quiet}>Nobody else yet: only you and your other Silicons can start a conversation with {name}.</li> : null}
         {list.isPending ? <li className={styles.quiet}>Looking up who can reach {name}…</li> : null}
       </ul>

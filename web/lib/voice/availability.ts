@@ -142,7 +142,7 @@ export function useVoiceFeatures(): VoiceFeatures {
       ? null
       : uploads.isPending
         ? "Checking whether voice messages can be uploaded here…"
-        : `Voice messages need uploads, which are off here${uploads.data?.reason ? `: ${uploads.data.reason.replace(/\.$/, "")}` : ""}.`;
+        : `Voice messages need uploads. ${uploads.data?.reason?.trim() || "Uploads are not set up on this DM website yet."}`;
   const dictateReason = !microphone ? NO_MICROPHONE : listenReason;
   const notes = microphone && uploadsOn;
   const dictate = microphone && speech;

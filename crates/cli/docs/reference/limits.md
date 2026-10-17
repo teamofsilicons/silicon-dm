@@ -65,9 +65,10 @@ A spoken message is charged when it is sent: over a limit, the send is refused w
 | --- | --- | --- |
 | New conversations an account starts | 100 an hour | 429 `first_contact_limit` |
 | A group's name, description | 1 to 120 characters; at most 4,000 | 422 `validation_error` |
+| A new group's name | at least one letter or digit from a to z or 0 to 9 (its id is made from them); a rename may use any name | 422 `validation_error` (`details.rule` `needs_letter_or_digit`) |
 | Accounts named in one group request | 1 to 100 | 422 `validation_error` |
 | Owners | at least one, always | 409 `last_owner` |
-| Bug reports an account files | 10 an hour | 429 `rate_limited` |
+| Bug reports an account files | 10 an hour (`DM_REPORTS_PER_HOUR`) | 429 `rate_limited`, with `Retry-After` until the oldest of them is an hour old |
 
 ## Receipts, sync and presence
 
@@ -104,4 +105,5 @@ A spoken message is charged when it is sent: over a limit, the send is refused w
 | `dm messages transcribe` download | https only (plain http only from this machine), at most 100 MiB |
 | The website's outbox | 5 automatic attempts while online: at once, then after 1, 2, 4 and 8 seconds (with a little jitter); offline attempts do not count |
 | The website's draft save | about 1.5 seconds after you stop typing |
-| A file uploaded on the website | 200 MiB (`UPLOADS_MAX_BYTES`), saved in your own Silicon Briefcase |
+| A file uploaded on the website | 200 MiB (`UPLOADS_MAX_BYTES`), saved in your own Silicon Briefcase (413 `file_too_large`) |
+| Uploads one account runs at once on a website server | 6 (429 `too_many_uploads`, `Retry-After: 5`); the composer uploads 3 at a time from one conversation |

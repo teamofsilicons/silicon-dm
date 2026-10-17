@@ -5,17 +5,18 @@
  * custodian views, each with its keys). Both run the same actions, so ⌘K finds everything the keyboard can do.
  */
 import { useRouter } from "next/navigation";
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { AudioLines, BookOpen, CircleUserRound, Copy, Eye, Headphones, Inbox, Keyboard, LogOut, Mail, MessageCircle, MessageSquarePlus, Mic, PanelRight, Settings2, Terminal, Users, Volume2 } from "lucide-react";
 import { appConfig } from "@/lib/app.config";
-import { accountName, conversationHref, conversationTitle, inboxHref, kindWord, conversationKind, shellQuote } from "@/lib/chat/address";
+import { accountName, conversationHref, conversationKindWords, conversationTitle, inboxHref, shellQuote } from "@/lib/chat/address";
 import { unreadOf } from "@/lib/chat/cache";
 import { useConversations } from "@/lib/chat/hooks";
 import { markAllRead } from "@/lib/chat/receipts";
 import { useSignOut } from "@/lib/client/session";
 import { toggleCommandPalette, useRegisterCommands, type ShellCommand } from "@/lib/commands";
 import { notify, notifyError } from "@/lib/notify";
-import { isShortcutAvailable, runShortcut, useShortcut, useShortcutAvailability } from "@/lib/shortcuts/react";
+import { isShortcutAvailable, runShortcut, setShortcutAvailability, useShortcut, useShortcutAvailability } from "@/lib/shortcuts/react";
+import { useVoiceAvailability } from "@/lib/voice";
 import { openDialog } from "../dialogs/store";
 import { useOpenAddress } from "../sidebar/conversations-pane";
 import { useChat } from "./chat-context";
@@ -30,6 +31,21 @@ async function copy(text: string, what: string) {
   } catch {
     notify.error({ status: 0, code: "clipboard_refused", message: "This browser did not let the page copy.", hint: "Select the text and copy it yourself." }, `Could not copy the ${what.toLowerCase()}`);
   }
+}
+
+/**
+ * Whether the voice shortcuts work here, asked once for every page of the chat: the service's speech, uploads and the
+ * browser's microphone (lib/voice). Without it the cheatsheet and Settings → Keyboard, opened before any conversation,
+ * would not know; with it, an off shortcut says why ("Speech is not set up on this DM service…").
+ */
+function useVoiceShortcutAvailability(): void {
+  const voice = useVoiceAvailability();
+  const listen = voice.listen ? null : voice.listenReason ?? voice.reason;
+  const record = voice.notes ? null : voice.notesReason ?? voice.reason;
+  const dictate = voice.dictate ? null : voice.dictateReason ?? voice.reason;
+  useEffect(() => {
+    setShortcutAvailability({ "listen.mode": listen, "message.listen": listen, "composer.record": record, "composer.dictate": dictate });
+  }, [listen, record, dictate]);
 }
 
 /** Focuses the conversation search that is on screen (the sidebar's, or the inbox page's on a phone). */
@@ -49,7 +65,8 @@ export function GlobalCommands() {
   const openAddress = useOpenAddress();
   const details = useDetails();
   const { signOut } = useSignOut();
-  // Voice actions appear in the palette once the voice area provides them (deps below re-register then).
+  // Voice actions appear in the palette once they work here (deps below re-register then).
+  useVoiceShortcutAvailability();
   const available = useShortcutAvailability();
 
   const go = useCallback((href: string) => router.push(href), [router]);
@@ -90,9 +107,11 @@ export function GlobalCommands() {
   useRegisterCommands(() => {
     const commands: ShellCommand[] = [];
     if (open) {
+      // As the thread header copies it: a custodian's view is read only, so its command reads (your own sign-in can).
+      const cli = view ? `dm messages list ${shellQuote(open.id)}` : `dm messages send ${shellQuote(open.id)} --text 'hello'`;
       commands.push(
         { id: "conversation.copyAddress", label: "Copy this conversation's address", description: open.id, group: "This conversation", icon: icon(Copy), keywords: ["address", "id", "link"], run: () => void copy(open.id, "Address") },
-        { id: "conversation.copyCli", label: "Copy its CLI command", description: `dm messages send ${shellQuote(open.id)} --text …`, group: "This conversation", icon: icon(Terminal), keywords: ["cli", "terminal", "dm"], run: () => void copy(`dm messages send ${shellQuote(open.id)} --text 'hello'`, "CLI command") },
+        { id: "conversation.copyCli", label: "Copy its CLI command", description: view ? cli : `dm messages send ${shellQuote(open.id)} --text …`, group: "This conversation", icon: icon(Terminal), keywords: ["cli", "terminal", "dm"], run: () => void copy(cli, "CLI command") },
         { id: "conversation.copyLink", label: "Copy its link", description: `${window.location.origin}${conversationHref(open.id, { view })}`, group: "This conversation", icon: icon(Copy), keywords: ["url", "share"], run: () => void copy(`${window.location.origin}${conversationHref(open.id, { view })}`, "Link") },
         { id: "details.toggle", label: details.open ? "Hide the details panel" : "Show the details panel", group: "This conversation", icon: icon(PanelRight), shortcutId: "details.toggle", run: details.toggle },
       );
@@ -124,7 +143,7 @@ export function GlobalCommands() {
       commands.push({
         id: `open.${conversation.id}`,
         label: title,
-        description: `${kindWord(conversationKind(conversation, perspective))} · ${conversation.id}`,
+        description: `${conversationKindWords(conversation, perspective)} · ${conversation.id}`,
         group: "Conversations",
         icon: icon(conversation.group ? Users : MessageCircle),
         keywords: [conversation.id, ...conversation.participants.flatMap(account => [account.id, account.display_name ?? ""]), conversation.group?.name ?? ""],

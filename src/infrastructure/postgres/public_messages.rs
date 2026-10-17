@@ -20,7 +20,10 @@ impl PostgresStore {
         .bind(sequence)
         .fetch_optional(self.pool())
         .await?
-        .ok_or(AppError::NotFound)
+        .ok_or_else(|| {
+            AppError::not_found(format!("This conversation has no bundle {value}."))
+                .with_hint("A bundle's code is in the answer to POST /api/v1/conversations/{conversation}/bundles (dm bundles create), and on every message folded into it.")
+        })
     }
     async fn public_bundle_reference(&self, value: &mut Value) -> AppResult<()> {
         if let Some(id) = value.as_str().and_then(|v| Uuid::parse_str(v).ok()) {
@@ -45,14 +48,21 @@ impl PostgresStore {
             return Ok(id);
         }
         let sequence = silicon_dm_protocol::message_sequence(value).ok_or_else(|| {
-            AppError::validation("expected a conversation-local message code such as 00a")
+            AppError::invalid(format!(
+                "{} is not a message code: a message is named by its code in the conversation, such as 00a (or, for older messages, a UUID).",
+                value.chars().take(64).collect::<String>()
+            ))
+            .with_hint("dm messages list CONVERSATION shows each message with its code.")
         })?;
         sqlx::query_scalar("SELECT id FROM messages WHERE conversation_id=$1 AND sequence=$2")
             .bind(conversation)
             .bind(sequence)
             .fetch_optional(self.pool())
             .await?
-            .ok_or(AppError::NotFound)
+            .ok_or_else(|| {
+                AppError::not_found(format!("This conversation has no message {value}."))
+                    .with_hint("Codes count up from 000 in each conversation: dm messages list CONVERSATION (GET /api/v1/conversations/{conversation}/messages) shows them.")
+            })
     }
 
     /// The sequence of a message named by its code (or legacy UUID) in a conversation.

@@ -436,11 +436,15 @@ impl AccountsAdapter {
         budget.tokens = (budget.tokens + elapsed * limit / 60.0).min(limit);
         budget.refreshed = Instant::now();
         if budget.tokens < 1.0 {
+            // The budget refills continuously (one lookup about every 110 ms), so a short
+            // wait is enough.
             return Err(AppError::refused(
                 http::StatusCode::TOO_MANY_REQUESTS,
                 "accounts_lookup_budget",
-                "DM is resolving too many Silicon Accounts ids right now (its lookup budget is 550 a minute). Retry in a few seconds.",
-            ));
+                "DM is resolving too many Silicon Accounts ids right now (its lookup budget is 550 a minute for the whole service).",
+            )
+            .with_hint("Retry in a second or two (Retry-After), with the same Idempotency-Key.")
+            .with_retry_after(2));
         }
         budget.tokens -= 1.0;
         Ok(())
@@ -452,7 +456,16 @@ impl AccountsAdapter {
         } else if error.is_not_found() {
             AppError::account_not_found(id)
         } else if error.status() == Some(429) {
-            AppError::RateLimited
+            let seconds = error
+                .retry_after()
+                .map_or(5, |delay| delay.as_secs().clamp(1, 300));
+            AppError::rate_limited(
+                "Silicon Accounts is limiting the account lookups DM makes right now, so DM could not resolve this account.",
+            )
+            .with_hint(format!(
+                "Retry in {seconds} seconds (Retry-After), with the same Idempotency-Key."
+            ))
+            .with_retry_after(seconds)
         } else {
             tracing::warn!(
                 dependency = "accounts",

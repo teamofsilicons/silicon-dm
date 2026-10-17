@@ -19,6 +19,7 @@ import { useSyncExternalStore } from "react";
 import { chatSettings, updateChatSettings, type PlaybackSpeed } from "@/lib/chat/settings";
 import { ApiError } from "@/lib/errors";
 import { silentWav } from "./wav";
+import { voiceWords } from "./words";
 
 export type PlayerStatus = "idle" | "loading" | "playing" | "paused" | "error";
 export type TrackKind = "speech" | "note" | "sample";
@@ -356,26 +357,16 @@ function replace(node: HTMLAudioElement, track: Track): void {
 }
 
 /**
- * The words a failure is shown in, under a bubble or in a toast: the service's own (they say what and why, and what to
- * do), except when nothing answered, where the request's technical description would mean nothing to a Carbon.
+ * The words a failure is shown in, under a bubble or in a toast: a Carbon's (lib/voice/words.ts) where the service's
+ * are written for Silicons or developers (a route, a setting, the request that failed), else the service's own.
  */
-export function playbackError(error: ApiError): ApiError {
-  if (!error.isNetwork) return error;
-  const offline = typeof navigator !== "undefined" && navigator.onLine === false;
-  return new ApiError({
-    status: 0,
-    code: "network_error",
-    message: offline ? "The audio could not be loaded: this browser is offline." : "The audio could not be loaded: DM could not be reached.",
-    hint: offline ? "Try again once you are back online." : "Check the connection, then try again.",
-    method: error.method,
-    path: error.path,
-    cause: error,
-  });
+export function playbackError(error: ApiError, kind: TrackKind = "speech"): ApiError {
+  return voiceWords(error, kind === "sample" ? "sample" : "listen");
 }
 
 function fail(failure: ApiError): void {
-  const error = playbackError(failure);
   const failed = active;
+  const error = playbackError(failure, failed?.track.kind);
   stopFrames();
   if (failed) {
     failed.controller.abort();

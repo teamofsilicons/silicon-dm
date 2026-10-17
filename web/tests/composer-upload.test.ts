@@ -225,7 +225,7 @@ test("refused before Briefcase is asked: other sites, no sign-in, a session abou
   applyTestEnv({ BRIEFCASE_API_URL: undefined });
   const off = await POST(upload());
   assert.equal(off.status, 503);
-  assert.match((await errorOf(off)).message, /not connected to Silicon Briefcase/);
+  assert.equal((await errorOf(off)).message, "Uploads are not set up on this DM website yet.");
   assert.equal(fake.calls.length, 0, "nothing reached Accounts or Briefcase");
 });
 

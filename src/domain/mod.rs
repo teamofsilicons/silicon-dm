@@ -20,8 +20,11 @@ pub use actor::{
 pub use bundle::{Bundle, BundleCreate, BundleDetail, BundleRef, BundleRole};
 pub use conversation::{Conversation, ConversationAccess, ConversationPage};
 pub use draft::{Draft, DraftInput};
-pub use group::{GroupCreate, GroupDetails, GroupSettings};
-pub use idempotency::IdempotencyKey;
+pub use group::{
+    GroupCreate, GroupDetails, GroupSettings, MAX_GROUP_DESCRIPTION_CHARACTERS,
+    MAX_GROUP_NAME_CHARACTERS, unaddressable_name,
+};
+pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use message::{
     Attachment, Gif, GifPage, Message, MessageCreate, MessagePage, MessageStatus, ReceiptStatus,
     VoiceAttachment,

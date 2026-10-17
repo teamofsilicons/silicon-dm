@@ -78,8 +78,12 @@ pub(super) async fn update(
     ApiJson(settings): ApiJson<GroupSettings>,
 ) -> AppResult<Json<GroupDetails>> {
     require_manager(&state, &auth, path.group_id).await?;
-    let version = version
-        .ok_or_else(|| AppError::validation("If-Match is required when updating a group"))?;
+    let version = version.ok_or_else(|| {
+        AppError::invalid(
+            "Changing a group needs an If-Match header with the version you read, so a change someone made since is not overwritten.",
+        )
+        .with_hint("Read the group (GET /api/v1/groups/{group}, dm groups show), then send If-Match: its version.")
+    })?;
     let group = state
         .store
         .update_group(&auth.actor, path.group_id, settings, version, &key)

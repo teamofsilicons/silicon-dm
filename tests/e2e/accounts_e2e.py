@@ -988,10 +988,10 @@ def scenario_6(ids):
     first = next((c for c in calls if c["for"].get("uuid") == c1.uuid), {})
     proof_seen = first.get("proof") or {}
     RUN.check("DM enrols each account at Ting on its next request, with a User verification proof Silicon Accounts "
-              "confirms (issuer dm, receiver Ting's app, that account, tings.subscribe)",
+              "confirms (issuer dm, receiver Ting's app, that account, subscriptions.register)",
               subscriptions and proof_seen.get("valid") and proof_seen.get("kind") == "user_verification"
               and proof_seen.get("issuing_app") == "dm" and proof_seen.get("receiving_app") == ting_app
-              and proof_seen.get("user_uuid") == c1.uuid and proof_seen.get("scopes") == ["tings.subscribe"]
+              and proof_seen.get("user_uuid") == c1.uuid and proof_seen.get("scopes") == ["subscriptions.register"]
               and str(first.get("answer", "")).startswith("sub_"), calls)
     s, v = api("GET", "/api/v1/me", c1.token)
     RUN.check("/me reports the account enrolled", s == 200 and (v.get("delivery") or {}).get("enrolled") is True,

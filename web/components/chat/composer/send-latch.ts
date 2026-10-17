@@ -75,7 +75,8 @@ const inSentence = (item: TrayItem) => itemName(item).replace(/^The /, "the ");
 /** The line under the field while a send waits: what it waits for (a Cancel button beside it, and Esc, take it back). */
 export function waitingWords(items: TrayItem[], online = true): string {
   const uploading = items.filter(item => item.status === "uploading");
-  const what = uploading.length === 1 ? `${inSentence(uploading[0]!)} is uploaded` : `${uploading.length} files are uploaded`;
+  const only = uploading.length === 1 ? uploading[0]! : null;
+  const what = only ? `${inSentence(only)} ${only.kind === "voice" && only.transcribing ? "is transcribed" : "is uploaded"}` : `${uploading.length} files are uploaded`;
   return online ? `Sends when ${what}.` : `You are offline: it sends when you are back and ${what}.`;
 }
 

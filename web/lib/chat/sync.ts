@@ -1,10 +1,11 @@
 /**
  * The sync loop: one per browser tab, long-polling GET /api/v1/sync?wait=25 for event references and applying each
  * one to the cached state (the message is fetched once and put in place; the conversation's row moves up with its new
- * preview, time and unread count). The cursor is kept in sessionStorage, so a reload continues where the tab was;
- * a new tab starts at the head (its lists load fresh). 409 `sync_reset_required` starts again from the head and
- * refreshes everything. Failures back off (1 s … 30 s) and retry at once when the browser comes back online; a 401
- * stops the loop (the session keeper signs the Carbon in again).
+ * preview, time and unread count; a conversation the list does not have yet brings a refresh of the list, one for the
+ * whole burst). The cursor is kept in sessionStorage, so a reload continues where the tab was; a new tab starts at the
+ * head, and once the head is known asks again for the list and threads it already fetched (refetchAfterReset). 409
+ * `sync_reset_required` starts again from the head and then refreshes everything. Failures back off (1 s … 30 s) and
+ * retry at once when the browser comes back online; a 401 stops the loop (the session keeper signs the Carbon in again).
  *
  * Only your own account syncs: a custodian's view of a Silicon's conversations refreshes by polling instead
  * (lib/chat/hooks.ts).
@@ -35,6 +36,42 @@ const WAIT_SECONDS = 25;
 const FETCH_CONCURRENCY = 4;
 const cursorKey = (account: string) => `dm:sync-cursor:v1:${account}`;
 
+/** How long a burst of news waits before the list is asked for again (one request for all of it). */
+const LIST_REFRESH_DELAY_MS = 250;
+const listRefreshes = new WeakMap<QueryClient, ReturnType<typeof setTimeout>>();
+
+/**
+ * Asks for your conversation list (and your invitations) again, soon and once: everything that asks within a moment
+ * shares one request. Used when a sync event names a conversation the list does not have (a group you joined on another
+ * device, the first message of a new conversation, a conversation further down than the list has loaded), and when
+ * another tab of this browser started, joined or left one (lib/chat/news.ts).
+ */
+export function refreshConversationsSoon(queryClient: QueryClient): void {
+  if (listRefreshes.has(queryClient)) return;
+  listRefreshes.set(queryClient, setTimeout(() => {
+    listRefreshes.delete(queryClient);
+    void queryClient.invalidateQueries({ queryKey: chatKeys.conversations(), exact: true });
+    void queryClient.invalidateQueries({ queryKey: chatKeys.invitations(), exact: true });
+  }, LIST_REFRESH_DELAY_MS));
+}
+
+/**
+ * After a reset the feed starts at the head: whatever was fetched before the head was taken can miss messages that came
+ * in between (they are neither in that answer nor after the cursor). So once a reset answers, your conversation list
+ * and your own threads are asked for again (the ones on screen at once, the others when they next show); after an
+ * expired history (409) everything is. Seen when a page loads while the service restarts: the thread loads, a message
+ * is sent, and only then does the reset succeed.
+ */
+export function refetchAfterReset(queryClient: QueryClient, expired: boolean): void {
+  if (expired) {
+    void queryClient.invalidateQueries({ queryKey: chatKeys.all });
+    return;
+  }
+  void queryClient.invalidateQueries({ queryKey: chatKeys.conversations(), exact: true });
+  // Your own threads only (a custodian's view of a Silicon is polled, not synced).
+  void queryClient.invalidateQueries({ predicate: query => query.queryKey[0] === "dm" && query.queryKey[1] === "messages" && query.queryKey[3] === "" });
+}
+
 /** Puts one fetched message where it belongs in the caches. Returns whether it is fresh for its conversation. */
 export function applyMessage(queryClient: QueryClient, me: AccountRef, message: Message): IncomingInfo {
   queryClient.setQueryData<MessagePages>(chatKeys.messages(message.conversation_id), data => upsertMessage(data, message));
@@ -46,7 +83,8 @@ export function applyMessage(queryClient: QueryClient, me: AccountRef, message: 
     fresh = result.fresh;
     return result.data;
   });
-  if (!found) void queryClient.invalidateQueries({ queryKey: chatKeys.conversations() });
+  // A conversation the list does not have: it is new to this tab, so the list is asked for again (once per burst).
+  if (!found) refreshConversationsSoon(queryClient);
   return { fresh: fresh || !found };
 }
 
@@ -80,6 +118,8 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
   let cursor = readText(cursorKey(account), "session");
   let more = false;
   let failures = 0;
+  // The history ran out (409): after the next reset everything is fetched again.
+  let expired = false;
 
   const applyRef = async (ref: MessageRef) => {
     try {
@@ -100,6 +140,8 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
         const head = await syncPage({ reset: true, signal });
         cursor = head.cursor;
         writeText(cursorKey(account), cursor, "session");
+        refetchAfterReset(queryClient, expired);
+        expired = false;
       }
       const page = await syncPage({ cursor, wait: more ? 0 : WAIT_SECONDS, signal });
       await inPool(planEvents(page.events, seen), FETCH_CONCURRENCY, applyRef);
@@ -112,10 +154,11 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
       const failure = ApiError.from(error);
       if (failure.status === 401) break;
       if (failure.status === 409 && failure.code === "sync_reset_required") {
+        // Start again from the head; everything is fetched again once the reset has answered (refetchAfterReset).
         cursor = null;
         more = false;
+        expired = true;
         writeText(cursorKey(account), null, "session");
-        await queryClient.invalidateQueries({ queryKey: chatKeys.all });
         continue;
       }
       failures += 1;

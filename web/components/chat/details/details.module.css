@@ -28,6 +28,8 @@
 .profileActions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); grid-column: 1 / -1; }
 
 .presence { color: var(--text-muted); font-size: var(--text-xs); line-height: 1.4; }
+/* A Silicon's custodian under its name: quiet, and it wraps rather than cutting a name off. */
+.custodian { min-width: 0; color: var(--text-secondary); font-size: var(--text-xs); line-height: 1.4; overflow-wrap: anywhere; }
 .presence[data-online] { color: var(--success); }
 
 /* People in a list. */

@@ -92,6 +92,7 @@ pub fn settings(
             max_retry_delay: Duration::from_secs(5),
         },
         reporting: None,
+        reports_per_hour: 10,
         speech: SpeechSettings::defaults()?,
         log_filter: "warn".to_owned(),
     })

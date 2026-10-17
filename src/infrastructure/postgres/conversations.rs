@@ -174,19 +174,24 @@ impl PostgresStore {
         .await?)
     }
 
-    /// How many direct conversations this account started in the last hour.
+    /// Whether this account started `limit` direct conversations in the last hour, and if so
+    /// how many seconds remain until the `limit`-th newest leaves that hour (then one more
+    /// fits).
     ///
     /// # Errors
     /// Database failures.
-    pub async fn conversations_started_last_hour(&self, actor: &ActorRef) -> AppResult<i64> {
+    pub async fn first_contact_wait(&self, actor: &ActorRef, limit: i64) -> AppResult<Option<f64>> {
         Ok(sqlx::query_scalar(
-            "SELECT count(*) FROM conversations
+            "SELECT EXTRACT(EPOCH FROM created_at + interval '1 hour' - clock_timestamp())::float8
+             FROM conversations
              WHERE created_by_kind = $1::text::actor_kind AND created_by_id = $2
-               AND NOT is_group AND created_at > clock_timestamp() - interval '1 hour'",
+               AND NOT is_group AND created_at > clock_timestamp() - interval '1 hour'
+             ORDER BY created_at DESC OFFSET $3 LIMIT 1",
         )
         .bind(actor.actor_type.as_str())
         .bind(actor.id.as_str())
-        .fetch_one(self.pool())
+        .bind(limit - 1)
+        .fetch_optional(self.pool())
         .await?)
     }
 

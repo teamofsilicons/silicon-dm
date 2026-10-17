@@ -121,8 +121,9 @@ function send(file: Blob, options: UploadOptions, contentType: string): Promise<
         new ApiError({
           status: xhr.status,
           code: body?.error?.code ?? "upload_failed",
-          message: body?.error?.message ?? `The upload failed (HTTP ${xhr.status}).`,
-          hint: body?.error?.hint ?? "Try again.",
+          // An answer without the website's own words (a proxy in between, a crash): what happened, in plain words.
+          message: body?.error?.message ?? (xhr.status >= 500 ? "The upload failed: this website could not finish it." : "The upload was refused, and the website did not say why."),
+          hint: body?.error?.hint ?? (xhr.status >= 500 ? "Try again in a moment." : "Try again; if it keeps failing, report it in Settings → Report a problem."),
           details: body?.error?.details,
           retryAfter: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null,
           method: "POST",

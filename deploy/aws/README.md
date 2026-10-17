@@ -130,7 +130,7 @@ Create and review a CloudFormation change set, then execute it. When the stack
 is healthy, create the Namecheap CNAME for `backend.dm` using the stack's
 `LoadBalancerDnsName` output. Preserve unrelated DNS records. Keep ACM's DNS
 validation CNAME for renewal. Finish the individually performed deployment
-checks in [`docs/deployment.md`](../../docs/deployment.md), including CLI sign-in,
+checks in [`docs/operations/deployment.md`](../../docs/operations/deployment.md), including CLI sign-in,
 large-message delivery and the sync feed, Giphy results, and a real signed Silicon
 Accounts webhook at `https://backend.dm.teamofsilicons.com/webhook/`.
 

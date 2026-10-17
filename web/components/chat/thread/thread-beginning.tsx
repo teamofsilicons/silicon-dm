@@ -2,27 +2,34 @@
 
 /**
  * The top of a thread, once its first message is loaded, and the whole of a conversation with no messages yet: who it
- * is with (the face, the name, Carbon or Silicon and the id, a Silicon's custodian), or the group and how many are in
- * it, and one sentence: "This is the beginning of your conversation with Scout."
+ * is with (the face, the name, Carbon or Silicon and the id, a Silicon's custodian), the group and how many are in it,
+ * or the people of a conversation of several, and one sentence: "This is the beginning of your conversation with
+ * Scout."
  */
-import { accountName, kindWord, type ConversationKind } from "@/lib/chat/address";
+import { accountName, isGroupAddress, kindWord, sameAccount, type ConversationKind } from "@/lib/chat/address";
 import type { AccountRef, ConversationSummary } from "@/lib/chat/types";
 import { AccountAvatar, GroupAvatar } from "../common/avatars";
 import { useChat } from "../shell/chat-context";
 import { useThreadActions, useThreadPeople } from "./thread-actions";
+import { namesInWords, peopleWords, viewedName } from "./thread-model";
 import styles from "./thread.module.css";
 
 export function ThreadBeginning({ kind, others, title, conversation, empty }: { kind: ConversationKind; others: AccountRef[]; title: string; conversation: ConversationSummary | undefined; empty: boolean }) {
-  const { view, viewed } = useChat();
+  const { view, viewed, perspective } = useChat();
   const actions = useThreadActions();
   const people = useThreadPeople();
   const single = kind !== "group" && others.length === 1 ? others[0]! : null;
   const custodian = single ? people.custodianOf(single) : null;
-  const viewedName = viewed ? accountName(viewed) : view;
+  const whose = view ? `${viewedName(view, viewed, conversation)}'s` : "your";
   const members = conversation?.participants.length ?? others.length + 1;
+  // A conversation of several without a name: the people in it, not a group.
+  const several = kind === "group" && !conversation?.group && !isGroupAddress(actions.address) && !!conversation;
+  const company = several ? namesInWords(conversation!.participants.filter(account => !sameAccount(account, perspective)).map(accountName)) : "";
   const sentence = single
-    ? view ? `This is the beginning of ${viewedName}'s conversation with ${accountName(single)}.` : `This is the beginning of your conversation with ${accountName(single)}.`
-    : `This is the beginning of ${title}.`;
+    ? `This is the beginning of ${whose} conversation with ${accountName(single)}.`
+    : several && company
+      ? `This is the beginning of ${whose} conversation with ${company}.`
+      : `This is the beginning of ${title}.`;
   const next = !empty ? null : actions.readOnly ? "Nothing has been said here yet." : "Say hello. What you send is kept even when you are offline, and goes out as soon as it can.";
   return (
     // In an empty conversation this sits inside the log, which reads new messages out; this is not one.
@@ -42,6 +49,8 @@ export function ThreadBeginning({ kind, others, title, conversation, empty }: { 
               </>
             ) : null}
           </>
+        ) : several ? (
+          <span>{peopleWords(members)}</span>
         ) : (
           <>
             <span>Group</span>

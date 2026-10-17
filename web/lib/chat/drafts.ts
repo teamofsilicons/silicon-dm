@@ -82,3 +82,33 @@ export function savedDraft(current: LocalDraft, saved: Pick<LocalDraft, "text" |
 
 /** Whether a draft is worth keeping or saving at all. */
 export const hasContent = (draft: Pick<LocalDraft, "text" | "replyTo"> | null | undefined) => !isBlank(draft);
+
+/**
+ * What the conversation list says about the signed-in account's draft in a conversation (`draft_version` on a
+ * conversation summary): its version, null when there is none, "unknown" when the service does not say (it answers
+ * the draft itself, and 404 when there is none), "pending" while the summary is still on its way.
+ */
+export type DraftHint = number | null | "unknown" | "pending";
+
+/** The hint a conversation summary gives (draftHint), or "pending" before the summary is there. */
+export function draftHint(conversation: object | null | undefined): DraftHint {
+  if (!conversation) return "pending";
+  if (!("draft_version" in conversation)) return "unknown";
+  const value = (conversation as { draft_version?: unknown }).draft_version;
+  if (value === null) return null;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : "unknown";
+}
+
+/**
+ * Whether to ask the service for the draft: "fetch" (it may have one this browser has not seen), "absent" (it has
+ * none: settle with that, no request), "same" (it has the version this browser holds), or "wait" (not known yet).
+ * Asking for a draft that is not there answers 404, which every browser logs as an error, so the list's word is taken
+ * whenever the service gives it.
+ */
+export function draftCheck(local: LocalDraft | null, hint: DraftHint): "fetch" | "absent" | "same" | "wait" {
+  if (hint === "pending") return "wait";
+  if (hint === "unknown") return "fetch";
+  // A list read before this browser saved its draft says "none": what was saved here is checked, never dropped on its word.
+  if (hint === null) return local && local.version > 0 ? "fetch" : "absent";
+  return local && !local.dirty && local.version === hint ? "same" : "fetch";
+}

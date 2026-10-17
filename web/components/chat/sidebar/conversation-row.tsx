@@ -7,7 +7,7 @@
  */
 import Link from "next/link";
 import { memo, type ReactNode } from "react";
-import { conversationHref, conversationKind, conversationTitle, kindWord, otherParticipants, sameAccount } from "@/lib/chat/address";
+import { conversationHref, conversationKind, conversationKindWords, conversationTitle, otherParticipants, sameAccount } from "@/lib/chat/address";
 import { unreadOf } from "@/lib/chat/cache";
 import { rowTime } from "@/lib/chat/format";
 import { plainPreview } from "@/lib/chat/markdown";
@@ -82,7 +82,7 @@ export const ConversationRow = memo(function ConversationRow({ conversation, per
         <span className={styles.rowMain}>
           <span className={styles.rowTop}>
             <span className={styles.rowName}>{title}</span>
-            <span className="sr-only">, {kindWord(kind)}</span>
+            <span className="sr-only">, {conversationKindWords(conversation, perspective)}</span>
             {time ? <span className={styles.rowTime} data-unread={unread ? "" : undefined}>{time}</span> : null}
           </span>
           <span className={styles.rowBottom}>

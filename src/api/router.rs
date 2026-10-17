@@ -5,7 +5,7 @@ use std::time::Duration;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    http::{HeaderName, StatusCode, header},
+    http::{HeaderName, Method, StatusCode, Uri, header},
     response::Response,
     routing::{get, post, put},
 };
@@ -167,16 +167,38 @@ fn build_api_router(state: AppState) -> Router {
         .merge(speech_routes)
         .merge(transcription_routes)
         .merge(retired_routes)
+        .method_not_allowed_fallback(wrong_method)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             super::render::responses,
         ))
-        .fallback(|| async { AppError::NotFound })
+        .fallback(unknown_route)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             super::contracts::negotiate,
         ))
         .with_state(state)
+}
+
+/// A path DM has no route for: name it, and where the routes are listed.
+async fn unknown_route(method: Method, uri: Uri) -> AppError {
+    let path: String = uri.path().chars().take(200).collect();
+    AppError::not_found(format!("DM has no route {method} {path}."))
+        .with_hint("Every route is listed in openapi.yaml (dm docs openapi) and docs/reference/api.md (dm docs api); routes start with /api/v1/, and GET /api/v1/contracts says which contract versions this DM serves.")
+}
+
+/// A route DM has, called with a method it does not take (axum adds the `Allow` header).
+/// The code stays `http_error`, what a 405 has always answered.
+async fn wrong_method(method: Method, uri: Uri) -> AppError {
+    let path: String = uri.path().chars().take(200).collect();
+    AppError::refused(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "http_error",
+        format!(
+            "The route {path} does not take {method}; the Allow header lists the methods it takes."
+        ),
+    )
+    .with_hint("openapi.yaml (dm docs openapi) describes every method of every route.")
 }
 
 /// Nothing is cached by default; rendered audio sets its own policy (revalidate by `ETag`).
@@ -218,4 +240,78 @@ pub fn build_router(state: AppState) -> Router {
         .layer(middleware)
         .layer(axum::middleware::from_fn(silicon_dm_protocol::responses))
         .layer(axum::middleware::map_response(prevent_response_caching))
+}
+
+#[cfg(test)]
+mod tests {
+    /// The routes registered in this file, as full paths with every `{parameter}` written `{}`.
+    fn routes() -> Vec<String> {
+        let source = include_str!("router.rs");
+        let source = source.split("#[cfg(test)]").next().unwrap_or(source);
+        source
+            .split(".route(")
+            .skip(1)
+            .filter_map(|rest| rest.trim_start().strip_prefix('"'))
+            .filter_map(|rest| rest.split_once('"').map(|(path, _)| path))
+            .map(|path| {
+                // The public routes are nested under /api/v1; the probes and the webhook are not.
+                if path.starts_with("/api/v1/") || matches!(path, "/webhook/" | "/live" | "/ready")
+                {
+                    normalized(path)
+                } else {
+                    normalized(&format!("/api/v1{path}"))
+                }
+            })
+            .collect()
+    }
+
+    fn normalized(path: &str) -> String {
+        let mut out = String::new();
+        let mut in_parameter = false;
+        for character in path.chars() {
+            match character {
+                '{' => {
+                    in_parameter = true;
+                    out.push_str("{}");
+                }
+                '}' => in_parameter = false,
+                _ if in_parameter => {}
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    /// openapi.yaml lists every route DM serves (retired ones included), so a client reading
+    /// the contract never meets a route it does not describe.
+    #[test]
+    fn openapi_lists_every_route() {
+        let openapi = include_str!("../../openapi.yaml");
+        let section = openapi
+            .split("\npaths:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\ncomponents:\n").next());
+        assert!(section.is_some(), "openapi.yaml has paths and components");
+        let paths: Vec<String> = section
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.starts_with("  /") && line.ends_with(':'))
+            .map(|line| normalized(line.trim().trim_end_matches(':')))
+            .collect();
+        let routes = routes();
+        assert!(routes.len() > 30, "found the routes: {routes:?}");
+        let missing: Vec<&String> = routes
+            .iter()
+            .filter(|route| !paths.contains(route))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "openapi.yaml does not describe {missing:?}; add each with a schema and an example"
+        );
+        let unknown: Vec<&String> = paths.iter().filter(|path| !routes.contains(path)).collect();
+        assert!(
+            unknown.is_empty(),
+            "openapi.yaml describes routes the router does not have: {unknown:?}"
+        );
+    }
 }

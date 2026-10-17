@@ -19,9 +19,16 @@ receipts work in a group as in a direct conversation.
 ## Ids
 
 A new group gets `g:{name-slug}`: **Product Design** becomes `g:product-design`; if that is taken,
-`g:product-design-2`, then `-3`. The slug is lowercased, and runs of other characters become one
-hyphen. The id never changes when the group is renamed. Groups created before DM 0.15 keep their
-three-part ids (such as `g:tos:product-design`); both forms are accepted everywhere.
+`g:product-design-2`, then `-3`. The slug keeps the name's letters a to z and digits, lowercased, and
+runs of anything else (spaces, punctuation, accented letters, emoji) become one hyphen: **Été 🎉 2026**
+becomes `g:t-2026`. So a new group's name needs at least one letter or digit from a to z or 0 to 9;
+a name of only emoji or accented letters has no id, and DM refuses it (`validation_error`, with
+`details.rule` `needs_letter_or_digit`) before anything is created. The id never changes when the
+group is renamed, so a rename may use any name. Groups created before DM 0.15 keep their three-part
+ids (such as `g:tos:product-design`); both forms are accepted everywhere.
+
+A group you cannot see answers 404 `not_found` whether it does not exist or you are not in it, so nobody
+can probe for groups; the message names the id, and `dm groups list` shows yours.
 
 ## Owners and invitations
 

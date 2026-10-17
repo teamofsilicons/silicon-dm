@@ -11,7 +11,8 @@ export type TrayItem =
   | { id: string; kind: "file"; name: string; size?: number; contentType?: string; status: "uploading" | "ready" | "failed"; progress: number; url?: string; error?: string; queued?: boolean }
   | { id: string; kind: "link"; url: string; name?: string; status: "ready" }
   | { id: string; kind: "gif"; gif: Gif; status: "ready" }
-  | { id: string; kind: "voice"; voice?: DraftVoice; transcript?: string; status: "uploading" | "ready" | "failed"; progress: number; error?: string };
+  /** A voice note: uploading, then (its bytes saved, its words still coming) `transcribing`, then ready. */
+  | { id: string; kind: "voice"; voice?: DraftVoice; transcript?: string; status: "uploading" | "ready" | "failed"; progress: number; error?: string; transcribing?: boolean };
 
 export type TrayAction =
   | { type: "add"; item: TrayItem }
@@ -19,6 +20,8 @@ export type TrayAction =
   /** Uploaded: a file takes the name the website saved it under (folders and invisible characters taken out). */
   | { type: "ready"; id: string; url?: string; name?: string; voice?: DraftVoice; transcript?: string; size?: number; contentType?: string }
   | { type: "fail"; id: string; error: string }
+  /** A voice note's bytes are saved and only its words are still coming (the tray says "Transcribing…"). */
+  | { type: "transcribing"; id: string }
   | { type: "remove"; id: string }
   | { type: "clear" }
   /** A failed file goes again (waiting for its turn). */
@@ -42,11 +45,13 @@ export function trayReducer(items: TrayItem[], action: TrayAction): TrayItem[] {
       return items.map(item => {
         if (item.id !== action.id) return item;
         if (item.kind === "file") return { ...item, status: "ready", progress: 1, queued: false, error: undefined, url: action.url ?? item.url, name: action.name || item.name, size: action.size ?? item.size, contentType: action.contentType ?? item.contentType };
-        if (item.kind === "voice") return { ...item, status: "ready", progress: 1, error: undefined, voice: action.voice ?? item.voice, transcript: action.transcript ?? item.transcript };
+        if (item.kind === "voice") return { ...item, status: "ready", progress: 1, error: undefined, transcribing: false, voice: action.voice ?? item.voice, transcript: action.transcript ?? item.transcript };
         return item;
       });
     case "fail":
-      return items.map(item => (item.id === action.id && (item.kind === "file" || item.kind === "voice") ? { ...item, status: "failed", error: action.error, ...(item.kind === "file" ? { queued: false } : {}) } : item));
+      return items.map(item => (item.id === action.id && (item.kind === "file" || item.kind === "voice") ? { ...item, status: "failed", error: action.error, ...(item.kind === "file" ? { queued: false } : { transcribing: false }) } : item));
+    case "transcribing":
+      return items.map(item => (item.id === action.id && item.kind === "voice" && item.status === "uploading" ? { ...item, progress: 1, transcribing: true } : item));
     case "remove":
       return items.filter(item => item.id !== action.id);
     case "clear":

@@ -1,7 +1,7 @@
 /**
  * Message codes are conversation-local, lowercase base36 and never reused: `000` … `zzz`, then `1000` and up
- * (docs/wire-format.md). A longer code is always newer, and codes of one length sort as text ('0'-'9' before 'a'-'z'),
- * so ordering needs no parsing. Bundle codes follow the same rule from `001`.
+ * (docs/reference/wire-format.md). A longer code is always newer, and codes of one length sort as text ('0'-'9' before
+ * 'a'-'z'), so ordering needs no parsing. Bundle codes follow the same rule from `001`.
  */
 
 const CODE = /^(?:[0-9a-z]{3}|[1-9a-z][0-9a-z]{3,12})$/;

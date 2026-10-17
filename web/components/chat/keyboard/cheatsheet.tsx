@@ -2,14 +2,15 @@
 
 /**
  * The keyboard cheatsheet (? or ⌘/): every shortcut of the registry with its current keys, grouped as the registry
- * groups them, searchable by name or key. Shortcuts whose feature has not arrived are shown off, with the reason.
+ * groups them, searchable by name or key. A shortcut whose feature does not work here (no speech on this DM service, no
+ * microphone) is shown off, with the reason.
  */
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/silicon-ui/dialog/dialog";
 import { formatBinding } from "@/lib/shortcuts/keys";
-import { isShortcutAvailable, useShortcutAvailability, useShortcuts } from "@/lib/shortcuts/react";
+import { shortcutOffReason, useShortcutAvailability, useShortcuts } from "@/lib/shortcuts/react";
 import { scopeWords, SHORTCUT_GROUPS } from "@/lib/shortcuts/registry";
 import { closeDialog } from "../dialogs/store";
 import { Keys } from "./keys";
@@ -47,12 +48,12 @@ export function Cheatsheet({ open }: { open: boolean }) {
               <h3 id={`cheatsheet-${group}`} className={styles.groupTitle}>{group}</h3>
               <ul role="list" className={styles.rows}>
                 {items.map(shortcut => {
-                  const available = isShortcutAvailable(shortcut.id);
+                  const off = shortcutOffReason(shortcut.id);
                   return (
-                    <li key={shortcut.id} className={styles.row} data-off={available ? undefined : ""}>
+                    <li key={shortcut.id} className={styles.row} data-off={off === null ? undefined : ""}>
                       <span className={styles.rowLabel}>
                         <span>{shortcut.label}</span>
-                        {available ? null : <span className={styles.rowReason}>{shortcut.planned}</span>}
+                        {off === null ? null : <span className={styles.rowReason}>{off}</span>}
                         <span className="sr-only">, {scopeWords(shortcut.scope).toLowerCase()}</span>
                       </span>
                       <span className={styles.rowKeys}>

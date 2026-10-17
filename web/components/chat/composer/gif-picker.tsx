@@ -24,7 +24,7 @@ import { recentGifs, searchGifs, trendingGifs } from "@/lib/chat/api";
 import { chatKeys } from "@/lib/chat/keys";
 import { reportActivity } from "@/lib/chat/presence";
 import type { Gif } from "@/lib/chat/types";
-import { ApiError } from "@/lib/errors";
+import { plainFailure } from "../thread/thread-model";
 import styles from "./composer.module.css";
 
 /** What the picker opens above (the composer's field). */
@@ -195,7 +195,7 @@ function GifPanel({ initialQuery, onPick }: { initialQuery: string; onPick: (gif
       <div ref={grid} className={styles.gifScroll} onKeyDown={onGridKey}>
         {failure ? (
           <div className={styles.gifState} role="alert">
-            <p>GIFs could not be loaded: {ApiError.from(failure).message}</p>
+            <p>GIFs could not be loaded: {plainFailure(failure).message}</p>
             <Button size="sm" variant="secondary" onClick={() => void (search ? found.refetch() : trending.refetch())}>Try again</Button>
           </div>
         ) : offline && !all.length ? (

@@ -168,11 +168,13 @@
     },
     "components/silicon-ui/hold-to-confirm/hold-to-confirm.module.css": {
       "registry": "https://ui.teamofsilicons.com/r/hold-to-confirm.json",
-      "sha256": "2c4f11b5a2a5405ba4e7a911d5ef97e805d6621ec04e098142b9554095c4eae8"
+      "sha256": "51a232fc377ea574f79fce7c51ed295b0111dc03336d8e936fdec6f344d9b3de",
+      "local_edit": "The fill's second copy of the label paints its words with CSS (`data-text` + `::before { content: attr(data-text) }`) instead of a text node, so the button's visible text is its label once, not twice (axe label-content-name-mismatch, WCAG 2.5.3, read the clipped copy too). Looks the same."
     },
     "components/silicon-ui/hold-to-confirm/hold-to-confirm.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/hold-to-confirm.json",
-      "sha256": "1d5905798dedde34e7bad029e1287a7a1620337fae3dfc3bd0d03101d06580ed"
+      "sha256": "9ace656fce12abb039fc3e96ced2826c427d160b6b29581f28b5d8c7b40d0538",
+      "local_edit": "The fill's second copy of the label paints its words with CSS (`data-text` + `::before { content: attr(data-text) }`) instead of a text node, so the button's visible text is its label once, not twice (axe label-content-name-mismatch, WCAG 2.5.3, read the clipped copy too). Looks the same."
     },
     "components/silicon-ui/hover-card/hover-card.module.css": {
       "registry": "https://ui.teamofsilicons.com/r/hover-card.json",
@@ -204,7 +206,8 @@
     },
     "components/silicon-ui/json-viewer/json-viewer.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/json-viewer.json",
-      "sha256": "993dde4169d8bfc53e44b678d3e4b0510470a2ee881548ced01cfe9988ef8866"
+      "sha256": "d93296822adaa8e13a1997527073dc4007f152de7d921fa2f87cdfa8a34ade68",
+      "local_edit": "A tree item's accessible name starts with its visible words in order (the key, the closed preview's keys, the count) and adds the type after them (was \"key, type, count\"); a space (not drawn: the row is flex) keeps the key, and \"Show N more\", words of their own in the row's text. axe label-content-name-mismatch (WCAG 2.5.3) passes in the message details dialog."
     },
     "components/silicon-ui/lib/escape.ts": {
       "registry": "https://ui.teamofsilicons.com/r/dialog.json",

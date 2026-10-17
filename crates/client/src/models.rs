@@ -2,7 +2,8 @@
 //!
 //! Accounts are Silicon Accounts accounts: a Carbon (`c:handle`) or a Silicon (`si:handle`).
 //! Responses name them as [`Actor`] `{type, id, uuid, display_name?, pfp_url?}` where `id` is
-//! the account's current public id and `uuid` its permanent key. Store the uuid, show the id.
+//! the account's current public id and `uuid` its permanent key (a Silicon adds its
+//! `custodian`, named the same way). Store the uuid, show the id.
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -74,6 +75,10 @@ pub struct Actor {
     /// An identity from before Silicon Accounts that was never linked to an account.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub legacy: bool,
+    /// A Silicon's custodian, when the service knows it (DM 0.17 and later): an account one
+    /// level deep, which never carries a custodian of its own. `None` for Carbons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custodian: Option<Box<Actor>>,
 }
 impl Actor {
     pub fn new(actor_type: ActorType, id: impl Into<String>) -> Self {
@@ -85,6 +90,7 @@ impl Actor {
             pfp_url: None,
             deleted: false,
             legacy: false,
+            custodian: None,
         }
     }
     pub fn with_uuid(mut self, uuid: impl Into<String>) -> Self {

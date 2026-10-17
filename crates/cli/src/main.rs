@@ -106,7 +106,12 @@ fn offline(cli: &Cli) -> Option<i32> {
             }
             Err(error) => {
                 output::print_error(&error, compact);
-                1
+                // An unknown topic or an empty search is an argument error, like the parser's.
+                if error.downcast_ref::<docs::DocsRefusal>().is_some() {
+                    2
+                } else {
+                    1
+                }
             }
         }),
         Command::Login(LoginArgs {
@@ -258,6 +263,23 @@ fn group_settings(settings: GroupSettingsArgs) -> Result<models::GroupSettings> 
         name: settings.name,
         description: settings.description,
     })
+}
+
+/// A new group's address is made from its name (`g:` and its letters a to z and digits), so
+/// a name without any is refused here, before anything is queued, in the service's words.
+/// A rename keeps the address, so updates are not checked.
+pub(crate) fn addressable(settings: models::GroupSettings) -> Result<models::GroupSettings> {
+    let name = settings.name.trim();
+    if name.is_empty() || name.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Ok(settings);
+    }
+    Err(anyhow::Error::new(runtime::store::SessionError {
+        code: "validation_error",
+        message: format!(
+            "A group's address is made from its name, so the name needs a letter or a digit (a to z, 0 to 9): \"{name}\" has none. Nothing was queued."
+        ),
+        hint: "Add one, for example --name 'Launch 🎉' (its address is g:launch). A rename keeps the address, so dm groups update can give it any name afterwards.".into(),
+    }))
 }
 
 async fn run(cli: Cli) -> Result<Outcome> {
@@ -570,7 +592,7 @@ async fn relay_command(
             Groups::Show { group } => Operation::GetGroup { group_id: group },
             Groups::Create { settings, members } => Operation::CreateGroup {
                 group: models::GroupCreate {
-                    settings: group_settings(settings)?,
+                    settings: addressable(group_settings(settings)?)?,
                     member_ids: members,
                 },
                 idempotency_key: key,

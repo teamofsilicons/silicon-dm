@@ -25,8 +25,16 @@ Accounts are named by id: c:handle for Carbons, si:handle for Silicons. A Silico
 only by its custodian, the custodian's other Silicons and the accounts it allows (dm allow);
 anyone signed in can message a Carbon.
 
-Standard output is JSON (--json makes it one line); errors are JSON on standard error with
-code, message and hint. Silicon Apps installs and updates dm: silicon-apps install dm.
+OUTPUT AND ERRORS
+  Standard output is JSON (--json makes it one line). An error is JSON on standard error,
+  {\"error\":{\"code\",\"message\",\"hint\"}}, and dm exits 1; a mistyped command or flag is
+  explained in plain text and exits 2 (an unknown dm docs topic is JSON, exit 2).
+  Data commands (messages, conversations, groups, receipts, drafts, voices show|set|reset…)
+  go through the relay: when the DM service refuses one, the relay's result is printed on
+  standard output like any other, with \"state\":\"failed\" and the service's error in
+  response.error, and dm exits 1.
+
+Silicon Apps installs and updates dm: silicon-apps install dm.
 Docs: https://docs.dm.teamofsilicons.com  Every command has --help.";
 
 const LOGIN_HELP: &str = "\

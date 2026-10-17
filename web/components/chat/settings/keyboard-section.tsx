@@ -11,7 +11,7 @@ import { Button } from "@/components/silicon-ui/button/button";
 import { SearchField } from "@/components/silicon-ui/search-field/search-field";
 import { ShortcutRecorder } from "@/components/silicon-ui/shortcut-recorder/shortcut-recorder";
 import { formatBinding, normalizeBinding } from "@/lib/shortcuts/keys";
-import { isShortcutAvailable, useShortcutAvailability, useShortcuts } from "@/lib/shortcuts/react";
+import { shortcutOffReason, useShortcutAvailability, useShortcuts } from "@/lib/shortcuts/react";
 import { scopeWords, SHORTCUT_GROUPS, shortcutDefinition } from "@/lib/shortcuts/registry";
 import { resetAllShortcuts, setShortcutKeys, useShortcutOverrides } from "@/lib/shortcuts/store";
 import { Keys } from "../keyboard/keys";
@@ -65,7 +65,7 @@ export function KeyboardSection() {
           <h3 id={`keys-${group}`} className={styles.keyGroupTitle}>{group}</h3>
           <ul role="list" className={styles.keyRows}>
             {items.map(shortcut => {
-              const available = isShortcutAvailable(shortcut.id);
+              const off = shortcutOffReason(shortcut.id);
               const others = shortcuts.filter(other => other.id !== shortcut.id).flatMap(other => other.bindings.map(binding => ({ shortcut: binding, label: other.label })));
               const first = shortcut.bindings[0] ?? null;
               const sequence = !!first && first.includes(" ");
@@ -73,10 +73,10 @@ export function KeyboardSection() {
               const also = shortcut.bindings.slice(1);
               const defaults = shortcutDefinition(shortcut.id)?.keys ?? [];
               return (
-                <li key={shortcut.id} className={styles.keyRow} data-off={available ? undefined : ""} data-shortcut={shortcut.id}>
+                <li key={shortcut.id} className={styles.keyRow} data-off={off === null ? undefined : ""} data-shortcut={shortcut.id}>
                   <div className={styles.keyText}>
                     <span className={styles.rowLabel}>{shortcut.label}</span>
-                    <span className={styles.rowDescription}>{available ? scopeWords(shortcut.scope) : shortcut.planned}</span>
+                    <span className={styles.rowDescription}>{off ?? scopeWords(shortcut.scope)}</span>
                   </div>
                   <div className={styles.keyControl}>
                     {shortcut.fixed ? (

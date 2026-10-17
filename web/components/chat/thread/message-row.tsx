@@ -4,16 +4,18 @@
  * One message in the thread (spec §6.4, §6.11): an `article` named by its sender, time, state and words, carrying its
  * code, conversation, sender and state as data attributes; the bubble; the line under it (the time and your state under
  * the last of a run; Edited with its history, via an app and the ISI it was routed to under any message that has them);
- * and its actions: a toolbar while the pointer is over it, it was tapped or it has the keyboard (beside the bubble, or
- * over its top edge where the column has no room), the context menu, and the keys of lib/shortcuts. Deleting asks in
- * place. Sends still in the outbox render here too, as Waiting or Failed (with Retry and Discard). Your own rows are
- * not read out by the log as they are added.
+ * and its actions: a toolbar on the one message in use (the one you selected with the keyboard or a tap, else the one
+ * the pointer rests on; message-list.tsx decides), the context menu, and the keys of lib/shortcuts. The toolbar never
+ * covers another message (thread-model.ts toolbarPlacement): beside the bubble, or under a selected one in the flow
+ * of the thread. Deleting asks in place. Sends still in the outbox render here too, as Waiting or Failed (with Retry
+ * and Discard), drawn as they will be once sent (a voice note plays from the recording). Your own rows are not read out
+ * by the log as they are added.
  *
  * Rows are memoized on what they show (thread-model.ts sameMessageVersion), so a new message renders one row, not the
  * thread. The toolbar exists only on the row in use, and in a group the sender's name and face open the account card
  * (account-card.tsx).
  */
-import { forwardRef, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type MouseEvent } from "react";
+import { forwardRef, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type MouseEvent } from "react";
 import { CornerUpLeft, Ellipsis, Headphones, Pause, Pencil, RotateCw, X } from "lucide-react";
 import { ConfirmMorph } from "@/components/silicon-ui/confirm-morph/confirm-morph";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/silicon-ui/popover/popover";
@@ -29,12 +31,14 @@ import { canListen, useListenState, useVoiceAvailability, warmListen } from "@/l
 import { AccountAvatar } from "../common/avatars";
 import { IconAction } from "../common/icon-action";
 import { StatusTick, STATE_WORDS, stateOf, type MessageState } from "../common/status-tick";
+import { VoiceNote } from "../voice/voice-parts";
 import { AccountTrigger } from "./account-card";
+import { Attachments, GifView } from "./attachments";
 import { MessageContent, ReplyQuote } from "./message-content";
 import { RichText } from "./rich-text";
 import { applyRowTabbing } from "./row-focus";
-import { emojiOnly, estimateBubbleHeight, messageLabel, sameMessageVersion, toolbarPlacement } from "./thread-model";
-import { useIsCurrent, useThreadActions, type ValueStore } from "./thread-actions";
+import { emojiOnly, estimateBubbleHeight, messageLabel, pendingMedia, plainFailure, sameMessageVersion, toolbarPlacement, type Box, type ToolbarPlace } from "./thread-model";
+import { useInUse, useThreadActions, type InUse, type ValueStore } from "./thread-actions";
 import { useOnline } from "./use-online";
 import styles from "./thread.module.css";
 
@@ -117,24 +121,87 @@ function ListenLine({ address, code }: { address: string; code: string }) {
   );
 }
 
-function Toolbar({ message, mine, name, showTime }: { message: Message; mine: boolean; name: string; showTime: boolean }) {
+const boxOf = (element: Element): Box => {
+  const rect = element.getBoundingClientRect();
+  return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+};
+
+/**
+ * What an overlay over a bubble's top edge must not cover: the sender's name over it, and what the message before
+ * draws (its name, bubble, lines and face), or the divider before it.
+ */
+function obstaclesAbove(row: HTMLElement): Box[] {
+  const stack = `:scope > .${CSS.escape(styles.stack)}`;
+  const elements: Element[] = [...row.querySelectorAll(`${stack} > .${CSS.escape(styles.sender)}`)];
+  const previous = row.previousElementSibling;
+  if (previous?.matches("[data-message-row]")) elements.push(...previous.querySelectorAll(`${stack} > *, :scope > .${CSS.escape(styles.gutter)} > *`));
+  else if (previous) elements.push(previous);
+  return elements.map(boxOf).filter(box => box.right > box.left && box.bottom > box.top);
+}
+
+function Toolbar({ message, mine, name, showTime, selected }: { message: Message; mine: boolean; name: string; showTime: boolean; selected: boolean }) {
   const actions = useThreadActions();
   const voice = useVoiceAvailability();
   const listenable = voice.listen && canListen(message);
   const listen = useListenState(actions.address, message["message-id"]);
   const playing = listen.state === "playing" || listen.state === "loading";
   const self = useRef<HTMLDivElement>(null);
-  // Beside the bubble when the column has room on its outer side, else over its top edge at that end (never over the
-  // sender's name). Measured before the toolbar is first painted, each time it shows.
-  useLayoutEffect(() => {
+  const placed = useRef<ToolbarPlace | null>(null);
+  // Where it goes is measured before it is first painted, each time it shows, and again when the thread's width changes
+  // (thread-model.ts toolbarPlacement): beside the bubble when there is room (with the time, or without it), else under
+  // a selected message (the thread makes room: .bubbleRow:has(…[data-place="below"])), else over the top edge when
+  // nothing is there, else nowhere.
+  const place = useCallback(() => {
     const node = self.current;
     const bubble = node?.previousElementSibling;
     const log = node?.closest("[role='log']");
-    if (!node || !bubble || !log) return;
-    const at = bubble.getBoundingClientRect();
+    const row = node?.closest<HTMLElement>("[data-message-row]");
+    if (!node || !bubble || !log || !row) return;
+    // Its widths with and without the time. Where it is stays as it is meanwhile: taking a toolbar out of the thread's
+    // flow, even for a measurement, would shorten the thread and could move what is read.
+    node.hidden = false;
+    delete node.dataset.compact;
+    const width = node.offsetWidth;
+    node.dataset.compact = "";
+    const compactWidth = node.offsetWidth;
+    delete node.dataset.compact;
     const within = log.getBoundingClientRect();
-    node.dataset.place = toolbarPlacement({ mine, bubble: { left: at.left, right: at.right }, column: { left: within.left, right: within.right }, width: node.offsetWidth });
-  });
+    const result = toolbarPlacement({
+      mine,
+      selected,
+      bubble: boxOf(bubble),
+      column: { left: within.left, right: within.right },
+      width,
+      compactWidth,
+      height: node.offsetHeight,
+      obstacles: selected ? [] : obstaclesAbove(row),
+    });
+    node.dataset.place = result.place;
+    if (result.compact) node.dataset.compact = "";
+    node.hidden = result.place === "none";
+    // Opened under the message you selected: the thread shows it whole, once (not again each time the row re-renders).
+    if (result.place === "below" && placed.current !== "below") node.scrollIntoView({ block: "nearest" });
+    placed.current = result.place;
+  }, [mine, selected]);
+  useLayoutEffect(place);
+  useEffect(() => {
+    const log = self.current?.closest("[role='log']");
+    if (!log || typeof ResizeObserver === "undefined") return;
+    let width = log.getBoundingClientRect().width;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      const now = log.getBoundingClientRect().width;
+      if (Math.abs(now - width) < 1) return;
+      width = now;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(place);
+    });
+    observer.observe(log);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [place]);
   const openMenuFromButton = (event: MouseEvent<HTMLButtonElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     actions.openMenu(message, { x: rect.left, y: rect.bottom + 4 });
@@ -213,15 +280,15 @@ export interface MessageRowProps extends RowLayout {
   confirming: boolean;
   /** It arrived while the thread was open (it rises in). */
   fresh: boolean;
-  /** The row the pointer is over (one store for the thread). */
-  hover: ValueStore<string | null>;
+  /** The message in use (one store for the thread): only that row shows its toolbar. */
+  inUse: ValueStore<InUse | null>;
 }
 
 function sameRow(a: MessageRowProps, b: MessageRowProps): boolean {
-  return a.first === b.first && a.last === b.last && a.group === b.group && a.day === b.day && a.stateShown === b.stateShown && a.highlighted === b.highlighted && a.confirming === b.confirming && a.fresh === b.fresh && a.hover === b.hover && sameMessageVersion(a.message, b.message);
+  return a.first === b.first && a.last === b.last && a.group === b.group && a.day === b.day && a.stateShown === b.stateShown && a.highlighted === b.highlighted && a.confirming === b.confirming && a.fresh === b.fresh && a.inUse === b.inUse && sameMessageVersion(a.message, b.message);
 }
 
-export const MessageRow = memo(function MessageRow({ message, first, last, group, day, stateShown, highlighted, confirming, fresh, hover }: MessageRowProps) {
+export const MessageRow = memo(function MessageRow({ message, first, last, group, day, stateShown, highlighted, confirming, fresh, inUse }: MessageRowProps) {
   const actions = useThreadActions();
   const row = useRef<HTMLElement>(null);
   const confirmRef = useRef<HTMLDivElement>(null);
@@ -230,9 +297,9 @@ export const MessageRow = memo(function MessageRow({ message, first, last, group
   const deleted = !!message.deleted_at;
   const state: MessageState | null = mine && !deleted ? stateOf(message) : null;
   const name = mine ? "You" : accountName(message.sender);
-  const hovered = useIsCurrent(hover, code);
+  const use = useInUse(inUse, code);
   const { focused, onFocus, onBlur } = useFocusWithin();
-  const active = (hovered || focused) && !deleted && !confirming;
+  const active = !!use && !deleted && !confirming;
   const { edited, marked } = metaOf(message);
 
   const shape = useMemo(() => {
@@ -281,6 +348,7 @@ export const MessageRow = memo(function MessageRow({ message, first, last, group
       data-deleted={deleted ? "" : undefined}
       data-fresh={fresh ? "" : undefined}
       data-active={active ? "" : undefined}
+      data-selected={use === "selected" ? "" : undefined}
       data-message-row=""
       data-row-key={code}
       data-message-code={code}
@@ -312,7 +380,7 @@ export const MessageRow = memo(function MessageRow({ message, first, last, group
           <div className={styles.bubble} data-sq="surface" data-kind={shape.kind} style={{ containIntrinsicBlockSize: `auto ${shape.height}px` }}>
             <MessageContent message={message} emoji={shape.emoji} />
           </div>
-          {active ? <Toolbar message={message} mine={mine} name={name} showTime={!(last || stateShown)} /> : null}
+          {active ? <Toolbar message={message} mine={mine} name={name} showTime={!(last || stateShown)} selected={use === "selected"} /> : null}
         </div>
         {/* A spoken message and a voice note show their playback in their own player; words played with Listen here. */}
         {canListen(message) && !message.speech && !message.voice ? <ListenLine address={actions.address} code={code} /> : null}
@@ -323,7 +391,18 @@ export const MessageRow = memo(function MessageRow({ message, first, last, group
   );
 }, sameRow);
 
-/** A send still in the outbox: Waiting (the service does not have it yet) or Failed (with the service's words). */
+/** Why a send failed: the service's words, or plain words where nothing answered (thread-model.ts plainFailure). */
+function failedWords(error: OutboxItem["error"]): string {
+  if (!error) return "The service did not accept it.";
+  const plain = plainFailure(error);
+  return [plain.message, plain.hint].filter(Boolean).join(" ");
+}
+
+/**
+ * A send still in the outbox: Waiting (the service does not have it yet) or Failed (with the service's words). It shows
+ * what it carries as the sent message will (photos, files, a GIF, a voice note that plays from this tab's recording),
+ * so nothing changes shape when the service's copy takes its place.
+ */
 export const PendingRow = memo(function PendingRow({ item, first, last, fresh }: { item: OutboxItem; fresh: boolean } & RowLayout) {
   const actions = useThreadActions();
   const online = useOnline();
@@ -332,10 +411,13 @@ export const PendingRow = memo(function PendingRow({ item, first, last, fresh }:
   const state: MessageState = item.status === "failed" ? "failed" : "waiting";
   const at = new Date(item.createdAt).toISOString();
   const text = item.body.message ?? "";
-  const attachments = item.body.attachments?.length ?? 0;
-  const emoji = !item.replyPreview && !attachments && !item.body.gif && !item.body.voice ? emojiOnly(text) : 0;
+  const media = useMemo(() => pendingMedia(item.body), [item.body]);
+  const attachments = media.attachments.length;
+  const emoji = !item.replyPreview && !attachments && !media.gif && !media.voice ? emojiOnly(text) : 0;
+  const visual = attachments > 0 && media.attachments.every(entry => entry.kind === "image" || entry.kind === "video");
+  const mediaOnly = !text && !item.replyPreview && !media.voice && ((visual && !media.gif) || (!attachments && !!media.gif));
   useLayoutEffect(() => applyRowTabbing(row.current, focused || state === "failed"));
-  const words = [text ? plainPreview(text, 140) : null, attachments ? (attachments === 1 ? "1 attachment" : `${attachments} attachments`) : null, item.body.gif ? "GIF" : null, item.body.voice ? "Voice message" : null].filter(Boolean).join(", ");
+  const words = [text ? plainPreview(text, 140) : null, attachments ? (attachments === 1 ? "1 attachment" : `${attachments} attachments`) : null, media.gif ? "GIF" : null, media.voice ? "Voice message" : null].filter(Boolean).join(", ");
   return (
     <article
       ref={row}
@@ -359,10 +441,12 @@ export const PendingRow = memo(function PendingRow({ item, first, last, fresh }:
     >
       <div className={styles.stack}>
         <div className={styles.bubbleRow}>
-          <div className={styles.bubble} data-sq="surface" data-kind={emoji ? "emoji" : "text"}>
+          <div className={styles.bubble} data-sq="surface" data-kind={emoji ? "emoji" : mediaOnly ? "media" : "text"}>
             {item.replyPreview ? <ReplyQuote reply={item.replyPreview} interactive={false} /> : null}
             {text ? (emoji ? <p className={styles.emoji} data-count={emoji}>{text.trim()}</p> : <RichText text={text} />) : null}
-            {!text && words ? <p className={styles.tombstone}>{words}</p> : null}
+            {media.voice ? <VoiceNote voice={media.voice} transcript={item.body.voice_transcript ?? null} /> : null}
+            <Attachments items={media.attachments} />
+            {media.gif ? <GifView gif={media.gif} /> : null}
           </div>
         </div>
         {/* Waiting sends in a row say it once, under the last (each bubble is faded, and its name says Waiting). */}
@@ -376,7 +460,7 @@ export const PendingRow = memo(function PendingRow({ item, first, last, fresh }:
         {state === "failed" ? (
           <div className={styles.failed} role="alert">
             <p className={styles.failedText}>
-              <strong>Not sent.</strong> {[item.error?.message, item.error?.hint].filter(Boolean).join(" ") || "The service did not accept it."}
+              <strong>Not sent.</strong> {failedWords(item.error)}
             </p>
             <span className={styles.failedActions}>
               <button type="button" className={styles.failedButton} data-sq="surface" onClick={() => actions.retrySend(item.key)}><RotateCw size={14} strokeWidth={1.9} aria-hidden="true" /> Retry</button>

@@ -15,6 +15,7 @@ import { acceptInvitation, declineInvitation } from "@/lib/chat/api";
 import { fullTime } from "@/lib/chat/format";
 import { useInvitations } from "@/lib/chat/hooks";
 import { chatKeys } from "@/lib/chat/keys";
+import { announceConversationsChanged } from "@/lib/chat/news";
 import type { Invitation } from "@/lib/chat/types";
 import { ApiError } from "@/lib/errors";
 import { formatRelative } from "@/lib/format";
@@ -26,7 +27,7 @@ import { closeDialog, forgetOpener, returnFocus } from "./store";
 import styles from "./dialogs.module.css";
 
 function InvitationRow({ invitation }: { invitation: Invitation }) {
-  const { view, viewed, readOnly } = useChat();
+  const { me, view, viewed, readOnly } = useChat();
   const viewedName = viewed ? accountName(viewed) : view;
   const queryClient = useQueryClient();
   const open = useOpenConversation();
@@ -62,6 +63,7 @@ function InvitationRow({ invitation }: { invitation: Invitation }) {
       const neighbour = (node?.nextElementSibling ?? node?.previousElementSibling) as HTMLElement | null;
       const layer = node?.closest<HTMLElement>('[role="dialog"]') ?? null;
       queryClient.setQueryData<{ items: Invitation[] }>(key, data => data && { items: data.items.filter(item => item.conversation_id !== invitation.conversation_id) });
+      if (!view) announceConversationsChanged(me.account.uuid ?? me.account.id);
       requestAnimationFrame(() => (neighbour?.isConnected ? neighbour.querySelector<HTMLElement>("button") : layer?.querySelector<HTMLElement>("button"))?.focus());
       notify.info(view ? `${viewedName} declined ${invitation.name}` : `You declined ${invitation.name}`);
     } catch (failure) {

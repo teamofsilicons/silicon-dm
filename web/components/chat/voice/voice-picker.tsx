@@ -25,6 +25,7 @@ import { useVoiceChoices, useVoiceFeatures } from "@/lib/voice/availability";
 import { onPlayerEvent, playerState, toggle, useTrack } from "@/lib/voice/player";
 import { sampleTrack } from "@/lib/voice/sources";
 import { sampleName } from "@/lib/voice/voices";
+import { voiceWords } from "@/lib/voice/words";
 import { useChat } from "../shell/chat-context";
 import styles from "./voice.module.css";
 
@@ -189,7 +190,7 @@ export function AccountVoiceChooser({ account, data, label, choice }: { account:
         sampleFor={sampleName(data?.account.display_name ? data.account : account)}
         samplesOff={features.listen ? null : features.listenReason}
       />
-      {choice.error ? <ErrorAlert error={choice.error} title="The voice was not changed" /> : null}
+      {choice.error ? <ErrorAlert error={voiceWords(choice.error, "voices")} title="The voice was not changed" /> : null}
     </div>
   );
 }
@@ -266,7 +267,10 @@ export function AccountVoiceRow({ account }: { account: string }) {
   }
   // An older service without voices: nothing to show (the panel hides the label too).
   if (voice.error && (voice.error.status === 404 || voice.error.status === 405)) return null;
-  if (voice.error || !data) return <p className={styles.accountVoiceDescription}>The voice could not be loaded. {voice.error?.message}</p>;
+  if (voice.error || !data) {
+    const why = voice.error ? voiceWords(voice.error, "voices") : null;
+    return <p className={styles.accountVoiceDescription}>The voice could not be loaded{why ? `: ${why.message.replace(/\.$/, "")}. ${why.hint ?? ""}` : "."}</p>;
+  }
   const name = sampleName(data.account);
   const who = data.account.display_name?.split(/\s+/)[0] || name;
   return (

@@ -1,7 +1,7 @@
 /** What rows and bubbles say (lib/chat/format.ts, preview.ts, media.ts, compose.ts, address.ts). */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { conversationHref, conversationKind, conversationTitle, decodeAddress, directParticipants, encodeAddress, isiOf, shellQuote } from "../lib/chat/address";
+import { conversationHref, conversationKind, conversationKindWords, conversationTitle, custodianFromRef, custodianWords, decodeAddress, directParticipants, encodeAddress, isiOf, shellQuote } from "../lib/chat/address";
 import { canEditHere, editContent, replyPreviewOf } from "../lib/chat/compose";
 import { clockDuration, fileSize, lastSeen, rowTime } from "../lib/chat/format";
 import { attachmentName, mediaKind, messageMedia, safeHttpsUrl } from "../lib/chat/media";
@@ -98,4 +98,35 @@ test("addresses: readable links, direct pairs, titles and kinds, ISI, shell quot
   assert.equal(isiOf("c:ada"), null);
   assert.equal(shellQuote("c:ada::si:scout"), "c:ada::si:scout");
   assert.equal(shellQuote("it's"), "'it'\\''s'");
+});
+
+test("a Silicon's custodian comes from its reference when DM names it, and only by a name people know", () => {
+  const ada: AccountRef = { type: "carbon", id: "c:ada", uuid: "u-ada", display_name: "Ada Marlow" };
+  const bo: AccountRef = { type: "carbon", id: "c:bo", uuid: "u-bo", display_name: "Bo Okafor" };
+  const atlas: AccountRef = { type: "silicon", id: "si:atlas", uuid: "u-atlas", display_name: "Atlas", custodian: bo };
+  const scout: AccountRef = { type: "silicon", id: "si:scout", uuid: "u-scout", display_name: "Scout", custodian: ada };
+  const unseen: AccountRef = { type: "silicon", id: "si:pip", uuid: "u-pip", custodian: { type: "carbon", id: "0d6c4a8e-uuid", uuid: "0d6c4a8e-uuid" } };
+  const older: AccountRef = { type: "silicon", id: "si:nova", uuid: "u-nova" };
+  assert.equal(custodianFromRef(atlas)?.id, "c:bo");
+  assert.equal(custodianFromRef(unseen), null, "a custodian DM knows only by uuid is not named");
+  assert.equal(custodianFromRef(older), null, "an older service says nothing");
+  assert.equal(custodianFromRef({ ...bo, custodian: ada }), null, "a Carbon has no custodian");
+  assert.equal(custodianWords(atlas, ada, []), "Looked after by Bo Okafor");
+  assert.equal(custodianWords(scout, ada, []), "Looked after by you");
+  assert.equal(custodianWords(older, ada, [older]), "Looked after by you", "your own Silicons are known without the field");
+  assert.equal(custodianWords(older, ada, []), null);
+  assert.equal(custodianWords(bo, ada, []), null);
+});
+
+test("a conversation says what it is: a group, a number of people, or the other account's kind", () => {
+  const me: AccountRef = { type: "carbon", id: "c:ada", uuid: "u-ada" };
+  const bo: AccountRef = { type: "carbon", id: "c:bo", uuid: "u-bo" };
+  const cy: AccountRef = { type: "carbon", id: "c:cy", uuid: "u-cy" };
+  const scout: AccountRef = { type: "silicon", id: "si:scout", uuid: "u-scout" };
+  const conversation = (id: string, participants: AccountRef[], group?: ConversationSummary["group"]) => ({ id, participants, group });
+  assert.equal(conversationKindWords(conversation("c:ada::si:scout", [me, scout]), me), "Silicon");
+  assert.equal(conversationKindWords(conversation("c:ada::c:bo", [me, bo]), me), "Carbon");
+  assert.equal(conversationKindWords(conversation("0193f0aa-uuid", [me, bo, cy]), me), "3 people", "several without a name are people, not a group");
+  assert.equal(conversationKindWords(conversation("g:launch", [me, bo, cy], { name: "Launch", description: "", owners: [me], version: 1 } as ConversationSummary["group"]), me), "Group");
+  assert.equal(conversationKindWords(conversation("g:launch", [me, bo, cy]), me), "Group", "a group's address says it before its details arrive");
 });

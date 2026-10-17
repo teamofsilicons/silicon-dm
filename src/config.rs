@@ -15,6 +15,9 @@ use url::Url;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_HTTP_BODY_BYTES: usize = 3 * 1024 * 1024 * 1024;
+/// The most `DM_REPORTS_PER_HOUR` may allow (a test stack sets it high; every report is
+/// stored and, in production, emailed).
+const MAX_REPORTS_PER_HOUR: u32 = 100_000;
 
 /// Complete process settings.
 #[derive(Clone, Debug)]
@@ -39,6 +42,8 @@ pub struct Settings {
     pub worker: WorkerSettings,
     /// Optional Postmark notification transport for durable bug reports.
     pub reporting: Option<ReportingSettings>,
+    /// Bug reports one account may send in an hour (`DM_REPORTS_PER_HOUR`, default 10).
+    pub reports_per_hour: u32,
     /// Voices, speech rendering and transcription through Deepgram.
     pub speech: SpeechSettings,
     /// Tracing filter directive.
@@ -634,6 +639,7 @@ impl Settings {
                     })
                 })
                 .transpose()?,
+            reports_per_hour: parse_or("DM_REPORTS_PER_HOUR", "10")?,
             speech: SpeechSettings::from_env()?,
             log_filter: parse_or("DM_LOG_FILTER", "info,silicon_dm=debug")?,
         };
@@ -737,6 +743,12 @@ impl Settings {
             return Err(invalid(
                 "DM_DELIVERY_MAX_RETRY_SECONDS",
                 "is outside the supported retry timestamp range",
+            ));
+        }
+        if !(1..=MAX_REPORTS_PER_HOUR).contains(&self.reports_per_hour) {
+            return Err(invalid(
+                "DM_REPORTS_PER_HOUR",
+                format!("must be 1 to {MAX_REPORTS_PER_HOUR} reports"),
             ));
         }
         self.speech.validate(self.environment)
@@ -1052,6 +1064,21 @@ mod tests {
                     assert_eq!(settings.speech.daily_characters, 200_000);
                     assert_eq!(settings.speech.transcribe_max_bytes, 104_857_600);
                     assert_eq!(settings.speech.transcribe_per_minute, 20);
+                    assert_eq!(settings.reports_per_hour, 10);
+                }
+                "reports_per_hour" => {
+                    let settings = loaded.unwrap_or_else(|error| panic!("{error}"));
+                    assert_eq!(settings.reports_per_hour, 5000);
+                }
+                "no_reports" => {
+                    let error = loaded
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default();
+                    assert_eq!(
+                        error,
+                        "invalid environment variable DM_REPORTS_PER_HOUR: must be 1 to 100000 reports"
+                    );
                 }
                 "speech_options" => {
                     let settings = loaded.unwrap_or_else(|error| panic!("{error}"));
@@ -1234,6 +1261,12 @@ mod tests {
             &with("DM_ACCOUNTS_WEBHOOK_SECRET", "not-a-webhook-secret"),
         );
         run_child(TEST_NAME, "bad_data_key", &with("DM_DATA_KEY", "AAEC"));
+        run_child(
+            TEST_NAME,
+            "reports_per_hour",
+            &with("DM_REPORTS_PER_HOUR", "5000"),
+        );
+        run_child(TEST_NAME, "no_reports", &with("DM_REPORTS_PER_HOUR", "0"));
         run_child(TEST_NAME, "ting_app_is_dm", &with("DM_TING_APP_ID", "dm"));
         run_child(
             TEST_NAME,

@@ -174,6 +174,7 @@ impl PostgresStore {
         key: &IdempotencyKey,
     ) -> AppResult<Conversation> {
         settings.validate()?;
+        settings.validate_address()?;
         invitees.retain(|invitee| invitee.actor != *creator);
         invitees.sort_by(|a, b| {
             (a.actor.actor_type.as_str(), a.actor.id.as_str())

@@ -4,7 +4,8 @@
  * The signed-in chat, mounted once by the workspace layout and kept while you move between conversations and the
  * settings: who you are (ChatProvider), the keyboard (ShortcutsProvider), the details panel's place (DetailsProvider),
  * what runs in the background (ChatRuntime: sync, presence, outbox, receipts, title, notifications), the global
- * shortcuts and the palette's entries, the frame (sidebar | page | details), and the chat's dialogs.
+ * shortcuts and the palette's entries, the frame (sidebar | page | details), the chat's dialogs, and where toasts sit
+ * (ToastPlace: never over the composer).
  */
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
@@ -21,6 +22,7 @@ import { ChatProvider } from "./chat-context";
 import { ChatRuntime } from "./chat-runtime";
 import { DetailsHost, DetailsProvider } from "./details";
 import { GlobalCommands } from "./global-commands";
+import { ToastPlace } from "./toast-place";
 import styles from "./shell.module.css";
 
 export interface ChatAppProps {
@@ -88,6 +90,7 @@ export function ChatApp({ account, accountsUrl, initialMe, initialConversations,
           <CommandMenu />
           <ChatDialogs />
           <DialogFromAddress />
+          <ToastPlace />
         </DetailsProvider>
       </ShortcutsProvider>
     </ChatProvider>

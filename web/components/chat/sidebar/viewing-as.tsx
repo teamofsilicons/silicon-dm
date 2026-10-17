@@ -20,8 +20,8 @@ export function ViewingAs() {
       <DropdownMenuTrigger asChild>
         <button type="button" className={styles.viewAs} data-sq="surface">
           <span className={styles.viewAsLabel}>Viewing as </span>
-          <span className={styles.viewAsValue}>{current}</span>
-          <span className="sr-only">. Change whose conversations you see</span>
+          {/* The hint sits inside the value, so the name reads "Viewing as You, change whose…" with no stray stop. */}
+          <span className={styles.viewAsValue}>{current}<span className="sr-only">, change whose conversations you see</span></span>
           <ChevronsUpDown size={14} strokeWidth={1.75} aria-hidden="true" />
         </button>
       </DropdownMenuTrigger>

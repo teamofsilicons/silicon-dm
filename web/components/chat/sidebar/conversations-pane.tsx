@@ -207,7 +207,8 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
         )}
       </nav>
 
-      <div className={styles.foot}>
+      {/* data-toast-floor: toasts rise above this bar, never over it (shell/toast-place.tsx). */}
+      <div className={styles.foot} data-toast-floor="">
         <AccountMenu />
         {me.custodian_of.length ? <ViewingAs /> : null}
       </div>

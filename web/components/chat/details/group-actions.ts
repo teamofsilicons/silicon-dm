@@ -7,15 +7,18 @@
  *
  * A rename or a new description sends the group's version (If-Match). When someone else changed the group in the
  * meantime the service answers 409; the change is then made again on the current version, keeping the other field
- * as it is now (theirs), so nobody's edit is lost.
+ * as it is now (theirs), so nobody's edit is lost. Every change is also told to this browser's other tabs
+ * (lib/chat/news.ts), so their list and panel show it at once.
  */
 import { useCallback, useMemo } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { addOwners, getGroup, inviteMembers, leaveGroup, removeMembers, removeOwners, updateGroup } from "@/lib/chat/api";
 import type { ConversationPages } from "@/lib/chat/cache";
 import { chatKeys } from "@/lib/chat/keys";
+import { announceConversationsChanged } from "@/lib/chat/news";
 import type { ConversationSummary, GroupDetails } from "@/lib/chat/types";
 import { ApiError } from "@/lib/errors";
+import { useChat } from "../shell/chat-context";
 
 type GroupData = ConversationSummary & { group: GroupDetails };
 
@@ -59,10 +62,13 @@ export interface GroupActions {
 
 export function useGroupActions(id: string, view: string | null, current: GroupDetails | undefined): GroupActions {
   const queryClient = useQueryClient();
+  const { me } = useChat();
+  const account = me.account.uuid ?? me.account.id;
   const apply = useCallback((details: GroupDetails) => {
     applyGroup(queryClient, id, view, details);
+    announceConversationsChanged(account);
     return details;
-  }, [queryClient, id, view]);
+  }, [queryClient, id, view, account]);
 
   const update = useCallback(async (change: { name?: string; description?: string }) => {
     const base = current ?? (await getGroup(id, { view })).group;
@@ -85,6 +91,7 @@ export function useGroupActions(id: string, view: string | null, current: GroupD
       await leaveGroup(id);
       dropGroup(queryClient, id, view);
       void queryClient.invalidateQueries({ queryKey: chatKeys.conversations(view) });
+      announceConversationsChanged(account);
     },
-  }), [apply, id, queryClient, update, view]);
+  }), [apply, id, queryClient, update, view, account]);
 }

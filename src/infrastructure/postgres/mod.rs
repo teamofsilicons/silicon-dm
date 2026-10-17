@@ -218,16 +218,59 @@ fn duration_as_postgres_milliseconds(duration: Duration) -> String {
     format!("{}ms", duration.as_millis())
 }
 
+/// What a refusal by the database means to the client. The domain checks every rule a
+/// request can break before anything is written, so these are a backstop; the rules a
+/// request can still reach get their own words, and the rest say what to do instead of
+/// naming an internal invariant.
 pub(crate) fn map_constraint_error(error: sqlx::Error) -> AppError {
     let Some(database) = error.as_database_error() else {
         return AppError::Database(error);
     };
     match database.code().as_deref() {
-        Some("23503") => AppError::NotFound,
-        Some("23505") => AppError::conflict("resource already exists"),
+        Some("23503") => AppError::not_found(
+            "Something this request refers to does not exist any more (a conversation, message or account it names).",
+        )
+        .with_hint("Read the current state, then send the request again with what exists."),
+        Some("23505") => AppError::refused(
+            axum::http::StatusCode::CONFLICT,
+            "conflict",
+            "This already exists: another request made the same change first.",
+        )
+        .with_hint(
+            "Read the current state. A retry with the same Idempotency-Key returns the original result.",
+        ),
         Some("23514" | "22001" | "22P02") => {
-            AppError::validation("request violates a durable data invariant")
+            broken_rule(database.constraint(), database.message())
         }
         _ => AppError::Database(error),
+    }
+}
+
+/// A check the database refused (23514), a value too long for its column (22001) or in a
+/// form it cannot store (22P02).
+fn broken_rule(constraint: Option<&str>, message: &str) -> AppError {
+    const REPORT: &str = "Check the request against openapi.yaml. If it looks right, report it with dm report (POST /api/v1/reports), quoting the X-Request-ID response header.";
+    // Rules raised by triggers have no constraint name; they are known by their message.
+    if message == "group name must contain an ASCII letter or digit" {
+        return crate::domain::unaddressable_name("");
+    }
+    match constraint {
+        Some("groups_name_check") => AppError::invalid(format!(
+            "A group needs a name of 1 to {} characters (spaces at either end do not count).",
+            crate::domain::MAX_GROUP_NAME_CHARACTERS
+        )),
+        Some("groups_description_check") => AppError::invalid(format!(
+            "A group's description is at most {} characters.",
+            crate::domain::MAX_GROUP_DESCRIPTION_CHARACTERS
+        )),
+        Some(rule) => AppError::invalid(format!(
+            "DM could not store this change: it breaks the stored-data rule {rule}, which DM's own checks should have caught first."
+        ))
+        .with_hint(REPORT)
+        .with_details(serde_json::json!({ "rule": rule })),
+        None => AppError::invalid(
+            "DM could not store this change: a value in it breaks a rule DM keeps for stored data (it is too long, or not in a form DM stores).",
+        )
+        .with_hint(REPORT),
     }
 }

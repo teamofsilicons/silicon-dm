@@ -1,8 +1,9 @@
 /** The thread's pure decisions (components/chat/thread/thread-model.ts). */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { activityStatus, arrivedSends, busyWords, copyableText, custodianOf, cutAtWord, emojiOnly, estimateBubbleHeight, fileNameParts, findFirstUnread, friendlyType, locateCode, messageCommands, messageLabel, toolbarPlacement, unreachableWords, unreadBeyondLoaded, unseenCount } from "../components/chat/thread/thread-model";
+import { activityStatus, arrivedSends, busyWords, copyableText, custodianOf, cutAtWord, emojiOnly, estimateBubbleHeight, fileNameParts, findFirstUnread, friendlyType, locateCode, messageCommands, messageLabel, namesInWords, pendingMedia, peopleWords, plainFailure, toolbarPlacement, unreachableWords, unreadBeyondLoaded, unseenCount, viewedName } from "../components/chat/thread/thread-model";
 import type { AccountRef, ConversationSummary, Message } from "../lib/chat/types";
+import { ApiError } from "../lib/errors";
 
 const ada: AccountRef = { type: "carbon", id: "c:ada", uuid: "u-ada", display_name: "Ada Marlow" };
 const bo: AccountRef = { type: "carbon", id: "c:bo", uuid: "u-bo", display_name: "Bo Okafor" };
@@ -91,6 +92,13 @@ test("a Silicon's custodian: yours, the one listed outside the conversation, or 
   // Viewing as your Silicon (you are listed as its custodian outside): the other Silicon's custodian is still found.
   assert.deepEqual(custodianOf(atlas, { participants: [scout, atlas], visible_to_custodians: [ada, bo] }, me), bo);
   assert.equal(custodianOf(bo, { participants: [ada, bo] }, me), null);
+  // DM 0.17 names a Silicon's custodian on the Silicon itself: told apart in a group too, and "you" for your own.
+  const atlasOfBo = { ...atlas, custodian: bo };
+  assert.deepEqual(custodianOf(atlasOfBo, { participants: [ada, atlasOfBo, { ...scout, id: "si:other", uuid: "u-other" }], visible_to_custodians: [bo, cy] }, me), bo);
+  assert.deepEqual(custodianOf(atlas, { participants: [ada, atlasOfBo, cy], visible_to_custodians: [bo, cy] }, me), bo, "the conversation's own copy of it says so too");
+  assert.deepEqual(custodianOf({ ...atlas, custodian: { type: "carbon", id: "c:ada", uuid: "u-ada" } }, undefined, { account: ada, custodian_of: [] }), ada);
+  // A custodian DM knows only by uuid is not named (a uuid means nothing to a reader): the conversation decides.
+  assert.deepEqual(custodianOf({ ...atlas, custodian: { type: "carbon", id: "0193f3b2-7c41-7a3e-8f00-000000000000" } }, { participants: [ada, atlas], visible_to_custodians: [bo] }, me), bo);
 });
 
 test("bubble heights are estimated from what a message carries", () => {
@@ -155,14 +163,67 @@ test("a message from another day says the day in its name", () => {
   assert.equal(messageLabel({ sender: bo, mine: false, time: "00:31", day: "Friday, Oct 9", message: { ...m, deleted_at: "2026-10-09T00:00:00Z" } }), "Deleted message from Bo Okafor on Friday, Oct 9 at 00:31");
 });
 
-test("the toolbar goes beside the bubble when there is room on the side away from the sender, else above it", () => {
+test("the toolbar goes beside the bubble when there is room, else under a selected message, never over another", () => {
   const column = { left: 0, right: 760 };
-  assert.equal(toolbarPlacement({ mine: false, bubble: { left: 40, right: 300 }, column, width: 120 }), "side");
-  assert.equal(toolbarPlacement({ mine: false, bubble: { left: 40, right: 700 }, column, width: 120 }), "above");
-  assert.equal(toolbarPlacement({ mine: true, bubble: { left: 500, right: 760 }, column, width: 120 }), "side");
-  assert.equal(toolbarPlacement({ mine: true, bubble: { left: 100, right: 760 }, column, width: 120 }), "above");
+  const base = { width: 140, compactWidth: 96, height: 36, obstacles: [] };
+  const bubble = (left: number, right: number, top = 100) => ({ left, right, top, bottom: top + 40 });
+  // Room on the side away from the sender: beside it, with the time.
+  assert.deepEqual(toolbarPlacement({ ...base, mine: false, selected: false, bubble: bubble(40, 300), column }), { place: "side", compact: false });
+  assert.deepEqual(toolbarPlacement({ ...base, mine: true, selected: true, bubble: bubble(500, 760), column }), { place: "side", compact: false });
   // Exactly the toolbar and its gap fits.
-  assert.equal(toolbarPlacement({ mine: false, bubble: { left: 0, right: 634 }, column, width: 120 }), "side");
+  assert.deepEqual(toolbarPlacement({ ...base, mine: false, selected: false, bubble: bubble(0, 614), column }), { place: "side", compact: false });
+  // Only the toolbar without the time fits: beside it, without the time.
+  assert.deepEqual(toolbarPlacement({ ...base, mine: false, selected: false, bubble: bubble(40, 650), column }), { place: "side", compact: true });
+  // No room beside a message you selected: under it, in the flow of the thread.
+  assert.deepEqual(toolbarPlacement({ ...base, mine: false, selected: true, bubble: bubble(40, 700), column }), { place: "below", compact: false });
+  assert.deepEqual(toolbarPlacement({ ...base, mine: true, selected: true, bubble: bubble(100, 760), column }), { place: "below", compact: false });
+  // The pointer only rests on it: over its top edge when nothing is drawn there…
+  assert.deepEqual(toolbarPlacement({ ...base, mine: false, selected: false, bubble: bubble(40, 700), column }), { place: "above", compact: false });
+  // …without the time when only that leaves the message before uncovered (its bubble ends left of the toolbar's end)…
+  const before = { left: 40, right: 580, top: 50, bottom: 96 };
+  assert.deepEqual(toolbarPlacement({ ...base, mine: false, selected: false, bubble: bubble(40, 700), column, obstacles: [before] }), { place: "above", compact: true });
+  // …and nowhere when even that would cover something (the message before, a divider, the sender's name).
+  const wide = { left: 40, right: 700, top: 50, bottom: 96 };
+  assert.deepEqual(toolbarPlacement({ ...base, mine: false, selected: false, bubble: bubble(40, 700), column, obstacles: [wide] }), { place: "none", compact: false });
+  assert.deepEqual(toolbarPlacement({ ...base, mine: true, selected: false, bubble: bubble(100, 760), column, obstacles: [{ left: 90, right: 200, top: 80, bottom: 98 }] }), { place: "none", compact: false });
+  // Something beside it that it does not reach is no obstacle.
+  assert.deepEqual(toolbarPlacement({ ...base, mine: true, selected: false, bubble: bubble(100, 760), column, obstacles: [{ left: 400, right: 760, top: 80, bottom: 98 }] }), { place: "above", compact: false });
+});
+
+test("a conversation of several is its people; a custodian reads as its Silicon by name", () => {
+  assert.equal(peopleWords(3), "3 people");
+  assert.equal(peopleWords(1), "1 person");
+  assert.equal(namesInWords([]), "");
+  assert.equal(namesInWords(["Bo"]), "Bo");
+  assert.equal(namesInWords(["Bo", "Cy"]), "Bo and Cy");
+  assert.equal(namesInWords(["Bo", "Cy", "Scout"]), "Bo, Cy and Scout");
+  const conversation = summary({ participants: [bo, scout] });
+  assert.equal(viewedName("si:scout", scout, conversation), "Scout");
+  // Not in the custodian's own list (yet): the conversation's own copy of the Silicon names it.
+  assert.equal(viewedName("si:scout", null, conversation), "Scout");
+  assert.equal(viewedName("u-scout", { id: "si:scout" }, conversation), "Scout");
+  // Nothing knows its name: its id.
+  assert.equal(viewedName("si:nobody", null, conversation), "si:nobody");
+  assert.equal(viewedName("si:quill", { id: "si:quill" }, undefined), "si:quill");
+});
+
+test("a send in the outbox shows what it carries as a sent message would", () => {
+  const media = pendingMedia({
+    attachments: [
+      { permanent_url: "https://bc.example/p/photo.png", name: "photo.png", content_type: "image/png", size: 1200 },
+      "https://example.com/notes.pdf",
+    ],
+    voice: { permanent_url: "https://bc.example/p/note.webm", content_type: "audio/webm", size: 9000, duration_milliseconds: 4200 },
+    gif: { provider_id: "g1", url: "https://media.giphy.com/media/x/giphy.gif" },
+  });
+  assert.deepEqual(media.attachments, [
+    { url: "https://bc.example/p/photo.png", name: "photo.png", content_type: "image/png", size: 1200, kind: "image" },
+    { url: "https://example.com/notes.pdf", kind: "file" },
+  ]);
+  assert.deepEqual(media.voice, { url: "https://bc.example/p/note.webm", content_type: "audio/webm", size: 9000, duration_milliseconds: 4200 });
+  assert.equal(media.gif?.provider_id, "g1");
+  // Words only: nothing else.
+  assert.deepEqual(pendingMedia({}), { attachments: [], voice: null, gif: null });
 });
 
 test("Copy text copies what the bubble shows: a spoken message's words without cues, then its caption", () => {
@@ -202,4 +263,18 @@ test("a long message is cut at a space, and a long file name keeps its end", () 
   assert.equal(parts.start + parts.end, long);
   assert.equal(parts.end, "x-last.zip");
   assert.equal(fileNameParts(`${"n".repeat(40)}`).end, "nnnnnn");
+});
+
+test("failures the thread and the composer show: the service's words, or plain words where nothing answered", () => {
+  const lost = new ApiError({ status: 0, code: "network_error", message: "Could not reach this site for GET /api/v1/conversations/g%3Ax/messages: Failed to fetch.", hint: "Check your connection, then try again.", method: "GET", path: "/api/v1/conversations/g%3Ax/messages" });
+  const plain = plainFailure(lost, false);
+  assert.equal(plain.message, "DM could not be reached.");
+  assert.equal(plain.code, "network_error", "the code stays for whatever branches on it");
+  assert.equal(plainFailure(lost, true).message, "This browser is offline.");
+  const bare = new ApiError({ status: 502, code: "server_unavailable", message: "POST /api/v1/conversations/x/messages failed: the service could not be reached (HTTP 502), and the answer had no error details." });
+  assert.equal(plainFailure(bare).message, "DM did not answer as it should.");
+  const refused = new ApiError({ status: 403, code: "contact_not_allowed", message: "Scout does not take conversations from c:dmc-di.", hint: "Ask Scout's custodian to allow you." });
+  assert.equal(plainFailure(refused), refused, "the service's own words stay");
+  // An outbox error is a plain object; it reads the same.
+  assert.equal(plainFailure({ status: 0, code: "network_error", message: "Could not reach this site for POST /api/v1/…" }, false).message, "DM could not be reached.");
 });

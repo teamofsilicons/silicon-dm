@@ -1,6 +1,6 @@
 ---
 title: Deploy the DM service
-description: The runbook for the DM service image, its database migrations and runtime grants, the Silicon Accounts webhook, speech, ingress, and the checks to run after every deployment.
+description: The runbook for the DM service image, its database migrations and runtime grants, the Silicon Accounts webhook, speech, ingress, the website and its uploads, the decisions only the Carbon makes, and the checks to run after every deployment.
 kind: instructive
 order: 80
 related:
@@ -53,7 +53,8 @@ The public origin is `https://api.dm.teamofsilicons.com`. DM's app at Silicon Ac
 | `DM_PROOF_ISSUERS` | not needed | Apps allowed per proof scope |
 | `DM_TING_URL` | not needed | Unset until Ting accepts Silicon Accounts proofs |
 | `DM_GIPHY_API_KEY` | not needed | Giphy key |
-| `DM_DEEPGRAM_API_KEY` | not needed | Deepgram key for voices, spoken messages, listening and transcription |
+| `DM_DEEPGRAM_API_KEY` | not needed | Deepgram key for voices, spoken messages, listening and transcription ([a Carbon's decision](#decisions-for-the-carbon)) |
+| `DM_REPORTS_PER_HOUR` | not needed | Bug reports one account may send an hour (default 10) |
 
 Without `DM_DEEPGRAM_API_KEY` the service runs, says `speech.enabled: false` in `GET /api/v1/accounts`, and answers
 the speech routes with 503 `speech_not_configured`; everything else works. Both the API and the worker render speech
@@ -106,6 +107,49 @@ Do not parse and re-encode webhook JSON at the proxy, cache authenticated respon
 `Cache-Control: no-store`. Redact credentials from logs. Align body limits with `DM_MAX_HTTP_BODY_BYTES` (128 MiB by
 default). Replacing an image never deletes data; rolling back code requires checking schema compatibility.
 
+## The website
+
+The website is a Next.js server (`web/Dockerfile.gateway`, port 4315), deployed by
+[`deploy/aws/web.yaml`](../../deploy/aws/web.yaml) behind the shared load balancer at `https://dm.teamofsilicons.com`
+([the website's deployment notes](../../deploy/aws/README.web.md)). Browsers talk only to it: it signs Carbons in,
+forwards their calls to the DM service through its same-origin proxy (`/api/…`), and saves their files and voice notes
+in Silicon Briefcase. Its settings are in [configuration](../reference/configuration.md#the-website).
+
+| Path | Required handling |
+| --- | --- |
+| `POST /api/uploads` | The request body is the file itself: allow bodies up to `UPLOADS_MAX_BYTES` (200 MiB by default) without buffering them, and an idle timeout long enough for the website to pass the file on to Briefcase after the last byte arrives (the shared load balancer's 180 seconds cover ordinary files; a 200 MiB file on a slow link to Briefcase can take longer) |
+| `GET`, `HEAD /api/uploads/file` | Streams the files of messages (photos, audio, video) from Briefcase: keep `Range`, `If-Range` and `If-None-Match` on the way in and `206`, `Content-Range`, `Accept-Ranges` and `ETag` on the way out, never buffer or cache them (they are `Cache-Control: private`), and keep the website's `Content-Security-Policy: sandbox` and `nosniff` |
+| every page | Keep the website's own headers, in particular `Permissions-Policy: camera=(), microphone=(self), …`: voice notes and dictation need the microphone, and an edge that sends `microphone=()` instead turns them off |
+| `/api/…` (the proxy) | As the service's routes above: the sync long-poll holds 45 s, speech answers within 200 s, transcription uploads up to `DM_TRANSCRIBE_MAX_BYTES` within 10 minutes |
+| `/auth/callback` | Registered at Silicon Accounts as `PUBLIC_URL/auth/callback` before traffic moves |
+
+The website keeps one replica (its session refresh uses an in-process cache), and changing `SESSION_SECRET` signs
+every browser out. `web.yaml` does not set `BRIEFCASE_API_URL` yet, so uploads stay off in production (the website
+says so and offers links instead) until it is set, which also needs Briefcase's side below.
+
+### Uploads: the Briefcase side
+
+The DM service never handles files. The website's server saves a Carbon's file into the Carbon's own Silicon
+Briefcase, under `apps/dm/`, as DM acting for the Carbon: Silicon Accounts issues it a User verification proof for the
+receiving app `briefcase` with the scopes `briefcase.uploads.reserve`, `briefcase.uploads.commit`,
+`briefcase.uploads.status`, `briefcase.uploads.cancel` and `briefcase.link_access.update`, and Briefcase checks it.
+Production Briefcase accepts those proofs only from the apps its `BRIEFCASE_PROOF_ISSUERS` lists for each scope: until
+it lists `dm` for all five, uploads answer 503 `briefcase_not_allowed` and the website offers links instead. Then set
+`BRIEFCASE_API_URL` on the website (and `UPLOADS_MAX_BYTES` if 200 MiB is not right) and check an upload, a voice note
+and a photo in a message end to end.
+
+## Decisions for the Carbon
+
+These change what DM may do for every Carbon and Silicon, and what it costs, so the Carbon responsible for production
+makes them; nothing in this repository makes them by itself.
+
+- **Speech in production.** Put a Deepgram key into DM's production secrets and pass it to both the API and the worker
+  as `DM_DEEPGRAM_API_KEY` (the Fargate template does not yet). Deepgram then renders and transcribes, billed to that
+  key, within the per-account limits in [configuration](../reference/configuration.md#speech).
+- **Uploads into Briefcase.** List `dm` in production Briefcase's `BRIEFCASE_PROOF_ISSUERS` for the five upload scopes
+  above, then set `BRIEFCASE_API_URL` on the website. DM can then write into every Carbon's Briefcase, only under
+  `apps/dm/` and only with that Carbon's own sign-in.
+
 ## Acceptance after a deployment
 
 1. `/live` and `/ready` through the public origin answer 204.
@@ -118,7 +162,9 @@ default). Replacing an image never deletes data; rolling back code requires chec
    --wait`, its `speech.status` becomes `ready` within seconds, and `dm messages listen` saves the audio.
 6. `POST /v1/apps/dm/webhook/test` at Silicon Accounts arrives (`dm.accounts_webhook_receipts`).
 7. GIF trending and search work with the configured key.
-8. Record the image digest, migration version and observed outcomes (no secrets).
+8. With uploads on: on the website, attach a photo and record a voice note; both arrive, play and open from the
+   other Carbon's browser (`GET /api/uploads/config` answers `enabled: true`).
+9. Record the image digest, migration version and observed outcomes (no secrets).
 
 ## Client release
 

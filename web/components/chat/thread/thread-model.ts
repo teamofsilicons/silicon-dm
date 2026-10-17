@@ -3,15 +3,17 @@
  * "New messages" divider goes and whether older pages must load first, where a linked message can be, which messages
  * are only emoji, what the typing line says, what a message is called for a screen reader, who looks after a Silicon,
  * how tall a bubble probably is before it is drawn, how many messages wait below the screen, where the toolbar goes,
- * what "Copy text" copies, where a long message is cut, and a friendly name for a file's type.
+ * what "Copy text" copies, where a long message is cut, a friendly name for a file's type, how a conversation of
+ * several and a custodian's Silicon are named, and what a send still in the outbox shows.
  */
-import { accountName, firstName, sameAccount, shellQuote } from "@/lib/chat/address";
+import { accountName, custodianFromRef, firstName, sameAccount, shellQuote } from "@/lib/chat/address";
+import { ApiError } from "@/lib/errors";
 import { compareCodes } from "@/lib/chat/codes";
-import { messageMedia } from "@/lib/chat/media";
+import { messageMedia, type MediaKind } from "@/lib/chat/media";
 import { messageGist, spokenWords } from "@/lib/chat/preview";
 import type { OutboxItem } from "@/lib/chat/outbox";
 import { layoutCommand } from "../details/cli";
-import type { AccountRef, Activity, ConversationSummary, Message } from "@/lib/chat/types";
+import type { AccountRef, Activity, AttachmentDetail, ConversationSummary, Gif, Message, MessageCreate, VoiceNote } from "@/lib/chat/types";
 
 type Who = Pick<AccountRef, "id" | "uuid">;
 
@@ -254,13 +256,16 @@ export function messageLabel({ sender, mine, time, day, state, edited, message }
 }
 
 /**
- * Who looks after a Silicon, as far as the thread can tell: you (it is one of yours), or the one custodian DM lists for
- * the conversation (`visible_to_custodians` names custodians who are not in it), or the one other Carbon taking part
- * (a custodian in the conversation is not listed). Null when it cannot be told apart from another Silicon's.
+ * Who looks after a Silicon: you (it is one of yours); the custodian DM names on the Silicon itself (`custodian` on
+ * its AccountRef, from DM 0.17, in a group too); else, as far as the conversation tells, the one custodian DM lists for
+ * it (`visible_to_custodians` names custodians who are not in it), or the one other Carbon taking part (a custodian in
+ * the conversation is not listed). Null when it cannot be told apart from another Silicon's.
  */
 export function custodianOf(account: AccountRef, conversation: Pick<ConversationSummary, "participants" | "visible_to_custodians"> | undefined, me: { account: AccountRef; custodian_of: AccountRef[] }): AccountRef | null {
   if (account.type !== "silicon") return null;
   if (me.custodian_of.some(own => sameAccount(own, account))) return me.account;
+  const said = custodianFromRef(account) ?? custodianFromRef(conversation?.participants.find(participant => sameAccount(participant, account)));
+  if (said) return sameAccount(said, me.account) ? me.account : said;
   if (!conversation) return null;
   const silicons = conversation.participants.filter(participant => participant.type === "silicon" && !me.custodian_of.some(own => sameAccount(own, participant)));
   if (silicons.length !== 1 || !sameAccount(silicons[0], account)) return null;
@@ -304,15 +309,101 @@ export function estimateBubbleHeight(message: Message): number {
 
 /* The toolbar ------------------------------------------------------------------------------------------------------- */
 
+export interface Box {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+/** Where the toolbar of the message in use goes (message-row.tsx draws it there). */
+export type ToolbarPlace = "side" | "above" | "below" | "none";
+
+const overlaps = (a: Box, b: Box) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
 /**
- * Where the toolbar of the message in use goes: beside its bubble, on the side away from the sender (to the right of
- * someone else's, to the left of yours), when the column has room there; otherwise over the bubble's top edge at that
- * same outer end, so it never covers the sender's name over a run (the name sits at the other end).
+ * Where the toolbar of the message in use goes. It never covers another message, and the pointer resting on a message
+ * never moves the thread:
+ *
+ * - beside the bubble, on the side away from the sender (the right of someone else's, the left of yours), when the
+ *   column has room there: with the time (for a message in the middle of a run), or without it when only that fits;
+ * - otherwise, for a message you selected (with the keyboard, or by tapping it), under the bubble, in the flow of the
+ *   thread: what follows moves down to make room, as a tapped message opens on a phone;
+ * - otherwise (the pointer only rests on it) over the bubble's top edge at that outer end, when nothing is drawn there
+ *   (`obstacles`: the message before, a divider, the sender's name); else nowhere: its menu and its keys still work.
+ *
+ * `overlap` is how far an "above" toolbar comes down over the bubble's own top edge.
  */
-export function toolbarPlacement(input: { mine: boolean; bubble: { left: number; right: number }; column: { left: number; right: number }; width: number; gap?: number }): "side" | "above" {
+export function toolbarPlacement(input: {
+  mine: boolean;
+  selected: boolean;
+  bubble: Box;
+  column: { left: number; right: number };
+  /** The toolbar's width with the time, and without it. */
+  width: number;
+  compactWidth: number;
+  height: number;
+  obstacles: Box[];
+  gap?: number;
+  overlap?: number;
+}): { place: ToolbarPlace; compact: boolean } {
   const gap = input.gap ?? 6;
-  const room = input.mine ? input.bubble.left - input.column.left : input.column.right - input.bubble.right;
-  return room >= input.width + gap ? "side" : "above";
+  const overlap = input.overlap ?? 6;
+  const { bubble, mine } = input;
+  const room = mine ? bubble.left - input.column.left : input.column.right - bubble.right;
+  if (room >= input.width + gap) return { place: "side", compact: false };
+  if (room >= input.compactWidth + gap) return { place: "side", compact: true };
+  if (input.selected) return { place: "below", compact: false };
+  for (const [width, compact] of [[input.width, false], [input.compactWidth, true]] as const) {
+    const box: Box = mine
+      ? { left: bubble.left, right: bubble.left + width, top: bubble.top + overlap - input.height, bottom: bubble.top + overlap }
+      : { left: bubble.right - width, right: bubble.right, top: bubble.top + overlap - input.height, bottom: bubble.top + overlap };
+    if (!input.obstacles.some(obstacle => overlaps(box, obstacle))) return { place: "above", compact };
+  }
+  return { place: "none", compact: false };
+}
+
+/* Who is in a conversation ------------------------------------------------------------------------------------------ */
+
+/** "3 people": a conversation of several without a name (the details panel lists them under People). */
+export function peopleWords(count: number): string {
+  return `${count} ${count === 1 ? "person" : "people"}`;
+}
+
+/** "Bo", "Bo and Cy", "Bo, Cy and Scout": names as a sentence says them. */
+export function namesInWords(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+/**
+ * The name of the Silicon a custodian reads as (`?for=`): its name as the custodian's own list has it, else as the
+ * conversation lists it, else its id.
+ */
+export function viewedName(view: string | null, viewed: Pick<AccountRef, "id" | "display_name" | "deleted"> | null, conversation: Pick<ConversationSummary, "participants"> | undefined): string {
+  if (viewed?.display_name?.trim()) return accountName(viewed);
+  const listed = view ? conversation?.participants.find(participant => participant.id === view || participant.uuid === view) : undefined;
+  if (listed?.display_name?.trim()) return accountName(listed);
+  return viewed ? accountName(viewed) : view ?? "";
+}
+
+/* Sends still in the outbox ----------------------------------------------------------------------------------------- */
+
+/**
+ * What a send still in the outbox carries, in the shapes the thread draws a sent message with: its attachments (with
+ * the details the tray gave them), its voice note (playing from this tab's own recording) and its GIF. A waiting
+ * message then looks the way it will once sent, and nothing moves when the service's copy takes its place.
+ */
+export function pendingMedia(body: Pick<MessageCreate, "attachments" | "voice" | "gif">): { attachments: Array<AttachmentDetail & { kind: MediaKind }>; voice: VoiceNote | null; gif: Gif | null } {
+  const details: AttachmentDetail[] = (body.attachments ?? []).map(item =>
+    typeof item === "string" ? { url: item } : { url: item.permanent_url, ...(item.name ? { name: item.name } : {}), ...(item.content_type ? { content_type: item.content_type } : {}), ...(item.size !== undefined ? { size: item.size } : {}) },
+  );
+  const voice: VoiceNote | null = body.voice?.permanent_url
+    ? { url: body.voice.permanent_url, ...(body.voice.content_type ? { content_type: body.voice.content_type } : {}), ...(body.voice.size !== undefined ? { size: body.voice.size } : {}), duration_milliseconds: body.voice.duration_milliseconds ?? null }
+    : null;
+  const gif = body.gif ?? null;
+  const { attachments } = messageMedia({ attachments: details.map(detail => detail.url), attachment_details: details, voice, gif });
+  return { attachments, voice, gif };
 }
 
 /* Copying ----------------------------------------------------------------------------------------------------------- */
@@ -344,6 +435,28 @@ export function messageCommands(address: string, message: Pick<Message, "message
   if (!view && !message.deleted_at) commands.push(["dm messages send", "--text 'your reply'", `--reply-to ${code}`, conversation]);
   if (speakable) commands.push(["dm messages listen", conversation, code, ...(view ? [`--for ${shellQuote(view)}`] : [])]);
   return commands.map(words => layoutCommand(words, width)).join("\n");
+}
+
+/* Failures in words ------------------------------------------------------------------------------------------------- */
+
+/**
+ * A failure as the thread and the composer show it: the service's own words (they say what happened, why and what to
+ * do), except where nothing answered, or the answer said nothing, whose generic words name the request ("Could not
+ * reach this site for GET /api/v1/conversations/…: Failed to fetch") and mean nothing to a Carbon. The code and
+ * status stay, so what branches on them still works.
+ */
+export function plainFailure(failure: unknown, offline = typeof navigator !== "undefined" && navigator.onLine === false): ApiError {
+  const error = ApiError.from(failure);
+  const words =
+    error.code === "network_error"
+      ? offline
+        ? { message: "This browser is offline.", hint: "It works again once you are back online." }
+        : { message: "DM could not be reached.", hint: "Check the connection, then try again." }
+      : error.code === "server_unavailable" || error.code === "unexpected_response"
+        ? { message: "DM did not answer as it should.", hint: "Try again in a moment." }
+        : null;
+  if (!words) return error;
+  return new ApiError({ status: error.status, code: error.code, message: words.message, hint: words.hint, details: error.details, requestId: error.requestId, retryAfter: error.retryAfter, method: error.method, path: error.path, cause: error });
 }
 
 /* Long words -------------------------------------------------------------------------------------------------------- */

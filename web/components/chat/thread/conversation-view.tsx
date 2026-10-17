@@ -15,8 +15,9 @@ import { Problem } from "@/components/foundation/feedback/problem";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { ButtonLink } from "@/components/foundation/button-link";
 import { Button } from "@/components/silicon-ui/button/button";
-import { accountName, conversationHref, conversationKind, conversationTitle, directParticipants, inboxHref, isGroupAddress, messageUrl, otherParticipants, sameAccount, type ConversationKind } from "@/lib/chat/address";
+import { conversationHref, conversationKind, conversationTitle, directParticipants, inboxHref, isGroupAddress, messageUrl, otherParticipants, sameAccount, type ConversationKind } from "@/lib/chat/address";
 import { deleteMessage } from "@/lib/chat/api";
+import { draftHint, type DraftHint } from "@/lib/chat/drafts";
 import { replaceMessage, upsertMessage, type MessagePages } from "@/lib/chat/cache";
 import { useConversation, useMessages } from "@/lib/chat/hooks";
 import { chatKeys } from "@/lib/chat/keys";
@@ -26,7 +27,6 @@ import { markAllRead, noteDelivered } from "@/lib/chat/receipts";
 import { applyMessage } from "@/lib/chat/sync";
 import { useTitle } from "@/lib/chat/title";
 import type { AccountRef, Message } from "@/lib/chat/types";
-import { ApiError } from "@/lib/errors";
 import { notify } from "@/lib/notify";
 import { useShortcutScope } from "@/lib/shortcuts/react";
 import { toggleListen } from "@/lib/voice";
@@ -40,7 +40,7 @@ import { MessageList, type MessageListHandle } from "./message-list";
 import { MessageMenu, type MenuState } from "./message-menu";
 import { ThreadBeginning } from "./thread-beginning";
 import { ThreadHeader } from "./thread-header";
-import { custodianOf, findFirstUnread, unreadBeyondLoaded, type Busy, type FirstUnread } from "./thread-model";
+import { custodianOf, findFirstUnread, plainFailure, unreadBeyondLoaded, viewedName, type Busy, type FirstUnread } from "./thread-model";
 import { copyableText, ThreadActionsProvider, ThreadPeopleProvider, type ThreadActions, type ThreadPeople } from "./thread-actions";
 import { useOnline } from "./use-online";
 import styles from "./thread.module.css";
@@ -148,7 +148,7 @@ export function ConversationView({ address }: { address: string }) {
 
   const recipientDeleted = !group && others.length === 1 && others[0]!.deleted;
   const disabledReason = readOnly
-    ? `You are reading ${viewed ? accountName(viewed) : view}'s conversation as its custodian. It is read only: nothing is sent or marked read for it.`
+    ? `You are reading ${viewedName(view, viewed, conversation)}'s conversation as its custodian. It is read only: nothing is sent or marked read for it.`
     : conversation?.superseded_by
       ? "This conversation is kept for its history. Write in the current one."
       : recipientDeleted
@@ -178,7 +178,7 @@ export function ConversationView({ address }: { address: string }) {
           document.querySelector<HTMLElement>(`[data-message-code="${CSS.escape(message["message-id"])}"]`)?.focus({ preventScroll: true });
         } catch (failure) {
           queryClient.setQueryData<MessagePages>(messagesKey, data => replaceMessage(data, message));
-          notify.error(failure, "The message was not deleted");
+          notify.error(plainFailure(failure), "The message was not deleted");
           throw failure;
         }
       },
@@ -191,7 +191,7 @@ export function ConversationView({ address }: { address: string }) {
       listen: message => toggleListen(address, message),
       // The same path as New conversation: into the cache, opened, its message field ready for the first word.
       openDirect: account => {
-        startConversation([account.id]).catch(failure => notify.error(failure, `Your conversation with ${account.display_name || account.id} could not be opened`));
+        startConversation([account.id]).catch(failure => notify.error(plainFailure(failure), `Your conversation with ${account.display_name || account.id} could not be opened`));
       },
       copyId: account => void copy(account.id, "Id"),
       retrySend,
@@ -212,7 +212,7 @@ export function ConversationView({ address }: { address: string }) {
     document.querySelector<HTMLElement>("[role='log']")?.focus();
   }, []);
 
-  const failure = thread.error ? ApiError.from(thread.error) : null;
+  const failure = thread.error ? plainFailure(thread.error) : null;
   if (failure && !thread.messages.length && (failure.status === 404 || failure.status === 403)) {
     return (
       <Problem layout="inset" icon={<MessagesSquare strokeWidth={1.5} />} title={failure.status === 403 ? "This conversation is not yours to read" : "This conversation is not here"}
@@ -223,6 +223,8 @@ export function ConversationView({ address }: { address: string }) {
   }
 
   const name = group ? title : others[0] ? (others[0].display_name?.split(/\s+/)[0] ?? others[0].id) : title;
+  // Whether the service has a draft here, as the conversation list says (once the thread loaded without one: ask).
+  const hint: DraftHint = conversation ? draftHint(conversation) : conversationError || thread.isSuccess || thread.isError ? "unknown" : "pending";
   const empty = thread.isSuccess && !thread.messages.length && !pending.length;
   const unloaded = !!failure && !thread.messages.length;
 
@@ -271,7 +273,7 @@ export function ConversationView({ address }: { address: string }) {
               beginning={<ThreadBeginning kind={kind} others={others} title={title} conversation={conversation} empty={empty} />}
             />
           )}
-          <Composer ref={composer} address={address} name={name} messages={thread.messages} me={perspective} disabledReason={disabledReason} onSent={onSent} onSelectLast={onSelectLast} onLeave={onLeave} />
+          <Composer ref={composer} address={address} name={name} messages={thread.messages} me={perspective} disabledReason={disabledReason} draftHint={hint} onSent={onSent} onSelectLast={onSelectLast} onLeave={onLeave} />
         </section>
         <MessageMenu state={menu} onClose={() => setMenu(null)} />
         <MessageDetailsDialog message={detailsFor} address={address} view={view} onClose={() => setDetailsFor(null)} />

@@ -36,6 +36,8 @@ let order = 0;
 const registrations = new Map<string, Registration[]>();
 const availabilityListeners = new Set<() => void>();
 const provided = new Set<string>();
+/** Shortcuts whose feature does not work here, with the words that say why (the service has no speech, …). */
+const withheld = new Map<string, string>();
 let availabilityVersion = 0;
 
 function emitAvailability() {
@@ -43,20 +45,43 @@ function emitAvailability() {
   for (const listener of availabilityListeners) listener();
 }
 
-/** Marks shortcuts whose feature has arrived (a `planned` one stops showing as off). Phase-2 modules call this. */
-export function provideShortcuts(ids: string[]): void {
+/**
+ * Says, for each shortcut, whether its feature works here: null when it does, or the words that say why not ("Speech is
+ * not set up on this DM service…"). The cheatsheet and Settings → Keyboard show those words, and the palette leaves the
+ * action out. A shortcut with `planned` in the registry is off until its module says it works.
+ */
+export function setShortcutAvailability(entries: Record<string, string | null>): void {
   let changed = false;
-  for (const id of ids) if (!provided.has(id)) {
-    provided.add(id);
-    changed = true;
+  for (const [id, reason] of Object.entries(entries)) {
+    if (reason === null) {
+      if (!provided.has(id)) {
+        provided.add(id);
+        changed = true;
+      }
+      if (withheld.delete(id)) changed = true;
+    } else if (withheld.get(id) !== reason) {
+      withheld.set(id, reason);
+      changed = true;
+    }
   }
   if (changed) emitAvailability();
 }
 
-/** Whether a shortcut's feature is here (not `planned`, or provided). */
+/** Marks shortcuts whose feature works here (a `planned` one stops showing as off). */
+export function provideShortcuts(ids: string[]): void {
+  setShortcutAvailability(Object.fromEntries(ids.map(id => [id, null])));
+}
+
+/** Whether a shortcut's feature works here: not withheld, and not `planned` unless its module provided it. */
 export function isShortcutAvailable(id: string): boolean {
   const definition = shortcutDefinition(id);
-  return !!definition && (!definition.planned || provided.has(id));
+  return !!definition && !withheld.has(id) && (!definition.planned || provided.has(id));
+}
+
+/** Why a shortcut is off here, in the words the cheatsheet shows; null when it works. */
+export function shortcutOffReason(id: string): string | null {
+  if (isShortcutAvailable(id)) return null;
+  return withheld.get(id) ?? shortcutDefinition(id)?.planned ?? null;
 }
 
 /** Re-renders when shortcuts become available. */

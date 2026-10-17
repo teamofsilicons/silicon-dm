@@ -58,22 +58,28 @@ export type UploadsSettings =
        * service accepts only https links, so its links are written with https and the proxy maps them back. */
       publicBase: string;
     }
-  | { enabled: false; maxBytes: number; reason: string };
+  /**
+   * `reason` is what Carbons read (GET /api/uploads/config, the + menu, the microphone): no setting's name, nothing an
+   * operator would need. `problem` is the operator's: which setting, what is wrong with it (never its value); the
+   * website's server logs it once (app/api/uploads/config/route.ts), and docs/reference/configuration.md has the rest.
+   */
+  | { enabled: false; maxBytes: number; reason: string; problem: string };
 
-const NOT_CONNECTED = "Uploads are off: this DM website is not connected to Silicon Briefcase (BRIEFCASE_API_URL is not set). Links and GIFs still work.";
+/** What Carbons read while this website has no Briefcase to upload to. */
+export const UPLOADS_NOT_SET_UP = "Uploads are not set up on this DM website yet.";
+/** What Carbons read when the uploads setting is there but wrong. */
+export const UPLOADS_MISCONFIGURED = "Uploads are not working on this DM website: its setup needs fixing.";
 
 /** Reads BRIEFCASE_API_URL and UPLOADS_MAX_BYTES (at request time, like every setting of this site). */
 export function uploadsSettings(source: Record<string, string | undefined> = process.env): UploadsSettings {
   const maxRaw = source.UPLOADS_MAX_BYTES?.trim();
   const maxBytes = maxRaw ? Number(maxRaw) : DEFAULT_UPLOADS_MAX_BYTES;
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
-    return { enabled: false, maxBytes: 0, reason: `Uploads are off: UPLOADS_MAX_BYTES is "${maxRaw}", which is not a whole number of bytes (209715200 is 200 MB).` };
-  }
+  // Neither the reason nor the problem repeats a setting's value: the problem goes to logs, and a mistaken value could
+  // carry credentials.
+  const off = (problem: string) => ({ enabled: false as const, maxBytes: Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : 0, reason: UPLOADS_MISCONFIGURED, problem: `Uploads are off: ${problem}` });
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) return off("UPLOADS_MAX_BYTES is not a whole number of bytes (209715200 is 200 MB).");
   const raw = source.BRIEFCASE_API_URL?.trim();
-  if (!raw) return { enabled: false, maxBytes, reason: NOT_CONNECTED };
-  // The reason reaches every browser (GET /api/uploads/config needs no sign-in), so it never repeats the value itself:
-  // a mistaken one could carry credentials.
-  const off = (problem: string) => ({ enabled: false as const, maxBytes, reason: `Uploads are off: ${problem}` });
+  if (!raw) return { enabled: false, maxBytes, reason: UPLOADS_NOT_SET_UP, problem: "Uploads are off: BRIEFCASE_API_URL is not set, so this website has no Silicon Briefcase to save files and voice messages into. Links and GIFs still work." };
   let url: URL;
   try {
     url = new URL(raw);

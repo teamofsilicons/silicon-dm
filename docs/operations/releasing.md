@@ -26,13 +26,14 @@ by the workflow: each step that reaches people is a deliberate command.
    workflow refuse a service and CLI that differ.
 2. Within contract 4 a change is additive (new optional fields and routes); a change that removes or
    redefines something needs a new contract version ([contracts](../reference/contracts.md)).
-3. Run what CI runs:
+3. Run what CI runs, and the doctests (`--all-targets` leaves them out, and the docs' Rust examples are among them):
 
    ```sh
    cargo fmt --all -- --check
    cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
    DM_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/postgres \
      cargo test --locked --workspace --all-targets --all-features
+   cargo test --locked --workspace --doc --all-features
    python3 scripts/sync-cli-docs.py --check
    python3 -m unittest discover -s scripts -p 'test_*.py'
    python3 -m unittest discover -s deploy/aws -p 'test_*.py'

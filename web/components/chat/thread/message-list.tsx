@@ -14,13 +14,13 @@
  * - a message named by a link or a reply quote is loaded if needed, scrolled to, selected and highlighted; one that no
  *   older page can bring (newer than the thread, bundled away, not in this conversation) is said at once.
  *
- * Speed: rows are memoized on what they show, the actions they share never change, the row under the pointer is a
- * store two rows watch, the log is block flow with layout-contained rows, bubbles off screen are not drawn
+ * Speed: rows are memoized on what they show, the actions they share never change, the message in use is a store
+ * two rows watch, the log is block flow with layout-contained rows, bubbles off screen are not drawn
  * (`content-visibility`), and a long cached thread renders its newest rows first and the rest as you scroll up.
  * Messages from others that are on screen in a focused tab are read (lib/chat/receipts.ts). The keyboard moves between
  * messages (↑/↓, K/J, Home, End) and acts on the selected one (R, E, C, L, Space, Delete, I, Esc).
  */
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ArrowDown } from "lucide-react";
 import { motionTokens } from "@/components/silicon-ui/lib/motion-tokens";
@@ -36,7 +36,7 @@ import { canListen, useVoiceAvailability } from "@/lib/voice";
 import { AccountAvatar } from "../common/avatars";
 import { MessageRow, PendingRow } from "./message-row";
 import { arrivedSends, busyWords, locateCode, unreachableWords, unseenCount, type Busy, type FirstUnread } from "./thread-model";
-import { useThreadActions, valueStore } from "./thread-actions";
+import { useThreadActions, valueStore, type InUse } from "./thread-actions";
 import styles from "./thread.module.css";
 
 type Item = { kind: "message"; message: Message } | { kind: "pending"; item: OutboxItem };
@@ -89,6 +89,32 @@ const NO_GHOSTS: OutboxItem[] = [];
 let hoverQuery: MediaQueryList | null = null;
 /** Whether this device's main pointer hovers (a mouse or a trackpad, not a finger). */
 const devicesHover = () => (hoverQuery ??= window.matchMedia("(hover: hover)")).matches;
+let onePaneQuery: MediaQueryList | null = null;
+/** The one-pane layout (a phone): messages are tapped, not hovered (the shell's breakpoint, shell.module.css). */
+const onePane = () => (onePaneQuery ??= window.matchMedia("(max-width: 767px)")).matches;
+/** A message's own controls: tapping one uses it, and selects nothing. */
+const CONTROLS = "a[href], button, input, textarea, select, audio, video, canvas, pre, [role='slider'], [role='button'], [contenteditable]";
+/** Layers opened from a message (its menu, its details, the lightbox): the message stays selected while they are open. */
+const LAYERS = "[role='menu'], [role='dialog'], [role='alertdialog'], [data-radix-popper-content-wrapper]";
+
+/**
+ * How the Carbon acted last: with the keyboard, or with a pointer of some kind. Focus that follows decides whether a
+ * message is selected (a browser does not always show focus for keys with a modifier, such as ⌘↑, so :focus-visible
+ * cannot tell).
+ */
+const lastInput = { keyboard: false, pointerType: "" };
+let trackingInput = false;
+function trackInput(): void {
+  if (trackingInput || typeof document === "undefined") return;
+  trackingInput = true;
+  document.addEventListener("keydown", () => {
+    lastInput.keyboard = true;
+  }, true);
+  document.addEventListener("pointerdown", event => {
+    lastInput.keyboard = false;
+    lastInput.pointerType = event.pointerType;
+  }, true);
+}
 
 /** The first row a long thread renders when it opens: enough for the newest messages, the first unread and a link's target. */
 function initialWindow(rows: Row[], target: string | null): string | null {
@@ -200,7 +226,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
   const scroller = useRef<HTMLDivElement>(null);
   const log = useRef<HTMLDivElement>(null);
   const store = useMemo(() => viewStore(), []);
-  const hover = useMemo(() => valueStore<string | null>(null), []);
+  const inUse = useMemo(() => valueStore<InUse | null>(null), []);
   const stick = useRef(true);
   /** Where the last scroll event left the thread: only a move up by the reader lets go of the bottom. */
   const lastTop = useRef(0);
@@ -642,13 +668,78 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
     }
   };
 
+  /*
+   * The message in use, the one with the toolbar: the message you selected, else the one the pointer rests on. Never two
+   * (focus wins over hover). Selected means reached with the keyboard, or tapped (a finger, or any pointer in the
+   * one-pane layout, where nothing is hovered); a mouse click on a wide screen only rests the pointer there. Tapping one
+   * of a message's own controls (play, a photo, a link) uses that control and selects nothing. A selection lasts while
+   * the keyboard is on that message or in a layer opened from it (its menu, its details); pressing anywhere else, or
+   * the keyboard going anywhere else, lets it go.
+   */
+  const hovered = useRef<string | null>(null);
+  const selected = useRef<string | null>(null);
+  const publishInUse = useCallback(() => {
+    const key = selected.current ?? hovered.current;
+    const next = key ? { key, selected: selected.current !== null } : null;
+    const now = inUse.get();
+    if (now?.key !== next?.key || now?.selected !== next?.selected) inUse.set(next);
+  }, [inUse]);
+  const select = useCallback((key: string | null) => {
+    if (selected.current === key) return;
+    selected.current = key;
+    publishInUse();
+  }, [publishInUse]);
+  const tapped = () => !lastInput.keyboard && (lastInput.pointerType !== "mouse" || onePane());
+
   const onPointerOver = (event: PointerEvent<HTMLDivElement>) => {
-    // Only a pointer that hovers selects a row by hovering. A phone makes up mouse events after a tap or a scroll, and
-    // a toolbar opened by them would cover what the next tap was meant for; there, tapping a message shows its toolbar.
-    if (event.pointerType === "touch" || !devicesHover()) return;
+    // Only a pointer that hovers puts a message in use by resting on it. A phone makes up mouse events after a tap or a
+    // scroll, and a toolbar opened by them would cover what the next tap was meant for; there, a tap selects instead.
+    if (event.pointerType !== "mouse" || !devicesHover() || onePane()) return;
     const row = (event.target as Element).closest?.<HTMLElement>("[data-message-row]");
-    hover.set(row?.dataset.rowKey ?? null);
+    hovered.current = row?.dataset.rowKey ?? null;
+    publishInUse();
   };
+  const onPointerLeave = () => {
+    hovered.current = null;
+    publishInUse();
+  };
+  const onFocusIn = (event: FocusEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    const row = target.closest<HTMLElement>("[data-message-row]");
+    select(row && (lastInput.keyboard || (tapped() && target === row)) ? row.dataset.rowKey ?? null : null);
+  };
+  // A tap on a message's words selects it, even where the browser does not focus what is tapped.
+  const onClick = (event: MouseEvent<HTMLDivElement>) => {
+    if (!tapped()) return;
+    const target = event.target as HTMLElement;
+    const row = target.closest<HTMLElement>("[data-message-row]");
+    if (!row || target.closest(CONTROLS) || window.getSelection()?.toString().trim()) return;
+    if (document.activeElement === row) select(row.dataset.rowKey ?? null);
+    else row.focus({ preventScroll: true });
+  };
+  useEffect(() => {
+    trackInput();
+    const outside = (target: EventTarget | null) => {
+      const element = target instanceof Element ? target : null;
+      const key = selected.current;
+      if (!key || element?.closest(LAYERS)) return false;
+      return !element?.closest(`[data-row-key="${CSS.escape(key)}"]`);
+    };
+    // The keyboard went elsewhere (the composer, the sidebar), or a press landed outside the selected message.
+    const onFocus = (event: globalThis.FocusEvent) => {
+      if (log.current?.contains(event.target as Node)) return;
+      if (outside(event.target)) select(null);
+    };
+    const onDown = (event: globalThis.PointerEvent) => {
+      if (outside(event.target)) select(null);
+    };
+    document.addEventListener("focusin", onFocus, true);
+    document.addEventListener("pointerdown", onDown, true);
+    return () => {
+      document.removeEventListener("focusin", onFocus, true);
+      document.removeEventListener("pointerdown", onDown, true);
+    };
+  }, [select]);
 
   const empty = !loading && !messages.length && !shownPending.length;
   const atBeginning = !loading && !hasOlder && startIndex === 0;
@@ -695,7 +786,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
             tabIndex={0}
             onKeyDown={onLogKeyDown}
             onPointerOver={onPointerOver}
-            onPointerLeave={() => hover.set(null)}
+            onPointerLeave={onPointerLeave}
+            onFocus={onFocusIn}
+            onClick={onClick}
           >
             {loading ? (
               <div className={styles.loadingRows} aria-hidden="true">
@@ -714,7 +807,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
               if (value.kind === "pending") return <PendingRow key={row.key} item={value.item} first={row.first} last={row.last} group={group} fresh={openedNewest !== null} />;
               const code = value.message["message-id"];
               const fresh = openedNewest !== null && compareCodes(code, openedNewest) > 0 && !actions.isMine(value.message);
-              return <MessageRow key={row.key} message={value.message} first={row.first} last={row.last} group={group} day={rowFacts.days.get(code) ?? null} stateShown={rowFacts.beforePending.has(code)} highlighted={highlight === code} confirming={deleting === code} fresh={fresh} hover={hover} />;
+              return <MessageRow key={row.key} message={value.message} first={row.first} last={row.last} group={group} day={rowFacts.days.get(code) ?? null} stateShown={rowFacts.beforePending.has(code)} highlighted={highlight === code} confirming={deleting === code} fresh={fresh} inUse={inUse} />;
             })}
             {loading ? null : <BusyRow busy={busy} group={group} />}
           </div>

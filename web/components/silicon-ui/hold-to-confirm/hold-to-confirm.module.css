@@ -15,6 +15,7 @@
 /* Clips the outgoing label while the frame narrows, with room for the rise and the soft blur. */
 .labelFrame { position: relative; display: inline-flex; min-width: 0; clip-path: inset(-.6em -3px); }
 .label { display: block; white-space: nowrap; }
+.label[data-text]::before { content: attr(data-text); }
 .measure { position: absolute; top: 0; left: 0; visibility: hidden; white-space: nowrap; pointer-events: none; }
 .srOnly { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .button { transition: none; } }

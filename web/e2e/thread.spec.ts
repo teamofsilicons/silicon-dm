@@ -12,6 +12,8 @@
  *   the menu gives the keyboard back (Shift+F10, Esc), keys that do not apply do nothing, code blocks are a Tab stop of
  *     their message only, and a link no older page can bring is answered at once
  *   a custodian's view: only the commands a custodian may run (show, listen --for), never a send
+ *   one toolbar at a time, never over another message (beside it; under the message tapped on a phone)
+ *   a conversation of several: "3 people"; opening a conversation asks for its draft at most once
  */
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -75,20 +77,30 @@ async function newGroup(label: string): Promise<string> {
   return group.id;
 }
 
-/**
- * What a page reports as broken (e2e/support.ts watchErrors), less one known warning that is not the thread's: the
- * composer's microphone renders "cannot record" on the server and enabled in the browser (a hydration mismatch the
- * voice area owns). Every other error still fails the test.
- */
+/** What a page reports as broken (e2e/support.ts watchErrors): every error fails the test, hydration mismatches too. */
 function threadErrors(page: Page): () => string[] {
   const errors = watchErrors(page);
-  const known: string[] = [];
-  page.on("console", message => {
-    const text = message.text();
-    if (message.type() === "error" && text.startsWith("A tree hydrated") && text.includes("Record a voice message")) known.push(`console: ${text.split("\n")[0]}`);
-  });
-  return () => errors.filter(error => !known.includes(error));
+  return () => errors;
 }
+
+/** The toolbars on screen, and anything of another message each one covers (it must cover nothing). */
+const toolbars = (page: Page) =>
+  page.evaluate(() =>
+    [...document.querySelectorAll<HTMLElement>("[role='toolbar']")]
+      .filter(node => !node.hidden && node.getBoundingClientRect().width > 0)
+      .map(node => {
+        const row = node.closest("article");
+        const box = node.getBoundingClientRect();
+        const covered = [...document.querySelectorAll("article[data-message-row]")]
+          .filter(other => other !== row)
+          .flatMap(other => [...other.querySelectorAll("[data-sq], time, p, button")])
+          .filter(element => {
+            const rect = element.getBoundingClientRect();
+            return rect.width > 0 && rect.left < box.right && box.left < rect.right && rect.top < box.bottom && box.top < rect.bottom;
+          }).length;
+        return { row: row?.getAttribute("aria-label") ?? "", place: node.dataset.place ?? "", covered };
+      }),
+  );
 
 const row = (page: Page, text: string) => page.locator("article[data-message-row]", { hasText: text });
 const scroller = (page: Page) => page.getByRole("log").locator("xpath=ancestor::div[contains(@class, 'scroller')]");
@@ -447,6 +459,85 @@ test("the menu gives the keyboard back; keys that do not apply do nothing; code 
   await page.goto(`/c/${group}#zzz`);
   await expect(page.getByText("Message zzz is not in this thread yet")).toBeVisible();
   expect(pages).toBeLessThanOrEqual(1);
+
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
+/* One toolbar, never over another message ---------------------------------------------------------------------------- */
+
+test("one message's toolbar at a time, never over another: beside it, or under the message you select on a phone", async ({ browser }) => {
+  const group = await newGroup("Thread toolbars");
+  const long = (who: string) => `${who} ${stamp()}: long enough to fill most of the column on a phone, so nothing fits beside it and it wraps onto lines.`;
+  const first = long("First from Bo");
+  const second = long("Then Bo again");
+  const answer = long("Ada answers");
+  const last = long("Last from Bo");
+  await send("bo", group, { message: first });
+  await send("bo", group, { message: second });
+  await send("ada", group, { message: answer });
+  await send("bo", group, { message: "ok" });
+  await send("bo", group, { message: last });
+
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  await page.goto(`/c/${group}`);
+  const field = page.getByRole("textbox", { name: /^Message / });
+  await expect(row(page, last)).toBeVisible();
+
+  // Wide: the pointer rests on a message (its toolbar beside it); the keyboard selects another: only that one shows,
+  // and the pointer resting elsewhere does not add a second.
+  await row(page, second).locator("[data-sq='surface']").first().hover();
+  await expect.poll(async () => (await toolbars(page)).map(bar => bar.row)).toEqual([expect.stringContaining("Then Bo again")]);
+  await field.click();
+  await field.press(`${MOD}+ArrowUp`);
+  await expect.poll(() => focusedLabel(page)).toContain("Last from Bo");
+  await expect.poll(async () => (await toolbars(page)).map(bar => bar.row)).toEqual([expect.stringContaining("Last from Bo")]);
+  await row(page, first).locator("[data-sq='surface']").first().hover();
+  await page.waitForTimeout(200);
+  expect((await toolbars(page)).map(bar => bar.row)).toEqual([expect.stringContaining("Last from Bo")]);
+  for (const bar of await toolbars(page)) expect(bar.covered, `${bar.row} covers nothing`).toBe(0);
+
+  // A phone: tapping a message selects it; its toolbar opens under it (or beside a short one), covering nothing.
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const words of [first, answer, "ok", last]) {
+    const target = words === "ok" ? page.locator("article[data-message-row][aria-label$=': ok']") : row(page, words);
+    await target.locator("[data-sq='surface']").first().click({ position: { x: 16, y: 10 } });
+    await expect.poll(async () => (await toolbars(page)).length).toBe(1);
+    const [bar] = await toolbars(page);
+    expect(bar!.row).toContain(words === "ok" ? ": ok" : words.slice(0, 12));
+    expect(["side", "below"]).toContain(bar!.place);
+    expect(bar!.covered, `the toolbar of "${bar!.row}" covers nothing`).toBe(0);
+    if (words !== "ok") expect(bar!.place).toBe("below");
+  }
+  // Pressing outside the selected message lets it go.
+  await page.getByRole("heading", { level: 1 }).click();
+  await expect.poll(async () => (await toolbars(page)).length).toBe(0);
+
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
+/* A conversation of several, and drafts on opening ----------------------------------------------------------------- */
+
+test("a conversation of several says how many people it has; opening it asks for a draft at most once", async ({ browser }) => {
+  const several = await dmApi<{ id: string }>("ada", "POST", "/api/v1/conversations", { type: "create_conversation", data: { participant_ids: ["c:dmc-bo", "c:dmc-cy"] } });
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  const drafts: number[] = [];
+  page.on("response", response => {
+    if (response.request().method() === "GET" && /\/draft(\?|$)/.test(response.url())) drafts.push(response.status());
+  });
+  await page.goto(`/c/${several.id}`);
+  const header = page.locator("header").filter({ has: page.getByRole("heading", { level: 1 }) });
+  await expect(header).toContainText("3 people");
+  await expect(header).not.toContainText("Group");
+  await expect(page.getByText(/^This is the beginning of your conversation with (Bo Okafor and Cy Varga|Cy Varga and Bo Okafor)\./)).toBeVisible();
+  await page.waitForTimeout(1500);
+  expect(drafts.length, `GET …/draft on opening: ${drafts.join(", ")}`).toBeLessThanOrEqual(1);
+  expect(drafts.every(status => status === 200 || status === 404), "no draft is an answer (404), never a failure").toBe(true);
 
   expect(errors()).toEqual([]);
   await ada.close();

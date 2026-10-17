@@ -4,8 +4,9 @@
  * area records, and drives everything after the recording through these calls, so neither edits the other's files.
  *
  * A voice note: add a `voice` tray item (status "uploading") → upload it with `uploadFile` (lib/upload/client.ts) and
- * transcribe it (`transcribe` in lib/chat/api.ts) in parallel → `ready` with the voice object and the transcript (or
- * `fail`) → `sendWhenReady()` when the Carbon stopped with Enter or ✓. Dictation: `insertText` at the caret.
+ * transcribe it (`transcribe` in lib/chat/api.ts) in parallel → `transcribing` when the bytes are saved and only the
+ * words are still coming → `ready` with the voice object and the transcript (or `fail`) → `sendWhenReady()` when the
+ * Carbon stopped with Enter or ✓. Dictation: `insertText` at the caret.
  */
 import type { TrayAction } from "./tray";
 
@@ -14,6 +15,11 @@ export interface ComposerVoiceBridge {
   address: string;
   /** Why nothing can be sent here (a custodian's read-only view, a conversation you left), or null. */
   disabledReason: string | null;
+  /**
+   * Why a voice message cannot be recorded right now, though dictation can (an edit is open: a voice message would go
+   * as a new message), or null.
+   */
+  notesOffReason: string | null;
   /** Add, update or remove the voice note's tray item. */
   dispatchTray: (action: TrayAction) => void;
   /** Send the composer's message (words and tray) as soon as nothing in the tray is still uploading. */
@@ -48,10 +54,11 @@ export interface VoiceBridgeHost {
 }
 
 /** The bridge the composer renders `<ComposerVoice bridge={…} />` with. A read-only view takes nothing from it. */
-export function createVoiceBridge(address: string, disabledReason: string | null, host: VoiceBridgeHost): ComposerVoiceBridge {
+export function createVoiceBridge(address: string, disabledReason: string | null, host: VoiceBridgeHost, notesOffReason: string | null = null): ComposerVoiceBridge {
   return {
     address,
     disabledReason,
+    notesOffReason: disabledReason ? null : notesOffReason,
     dispatchTray: action => {
       if (!disabledReason) host.dispatchTray(action);
     },

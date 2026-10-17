@@ -361,6 +361,15 @@ pub(super) async fn get_draft(
         .get_draft(&owner, path.conversation_id)
         .await
         .map(Json)
+        .map_err(|error| {
+            if matches!(error, AppError::NotFound) {
+                AppError::not_found("There is no draft in this conversation.").with_hint(
+                    "PUT /api/v1/conversations/{conversation}/draft saves one (dm drafts put); sending the drafted message clears it.",
+                )
+            } else {
+                error
+            }
+        })
 }
 
 /// Creates or conditionally replaces a synchronized draft.
@@ -432,14 +441,18 @@ pub(super) async fn get_presence(
     Authenticated(context): Authenticated,
     ApiPath(path): ApiPath<PresencePath>,
 ) -> AppResult<Json<Presence>> {
-    let target = state.directory().resolve(path.actor_id.as_str()).await?;
-    let target = target.actor();
+    let account = state.directory().resolve(path.actor_id.as_str()).await?;
+    let target = account.actor();
     if !state
         .store
         .may_see_presence(&context.actor, &target)
         .await?
     {
-        return Err(AppError::NotFound);
+        return Err(AppError::not_found(format!(
+            "{} shares its presence only with the accounts it has a conversation with (and a Silicon with its custodian).",
+            account.display_id()
+        ))
+        .with_hint("Presence follows conversations: once you share one, GET /api/v1/presence/{account} answers."));
     }
     state.store.get_presence(&target).await.map(Json)
 }

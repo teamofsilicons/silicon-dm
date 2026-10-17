@@ -1,7 +1,7 @@
 /**
  * The pure part of the sync loop (lib/chat/sync.ts): which messages a page of events asks the website to fetch, which
- * events it has already applied, and how long to wait after a failure. Events are references, not content (docs/
- * wire-format.md: Updates): one message edited three times and read twice is fetched once.
+ * events it has already applied, and how long to wait after a failure. Events are references, not content
+ * (docs/reference/wire-format.md, Updates): one message edited three times and read twice is fetched once.
  */
 import type { SyncEvent } from "./types";
 
