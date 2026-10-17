@@ -531,3 +531,6 @@ What changes on a machine that runs `dm` (the fleet's part is in section 1):
 - Public-origin verification of the Next.js website and deployment in the coordinated window;
   local implementation, build and browser evidence are recorded in `web-verification.md`.
 - Ting accepting Silicon Accounts proofs, only to turn Ting delivery back on (not for the cutover).
+  Resolved on 17 October 2026: DM 0.16.1 uses Ting's current App/User proof contract,
+  and production receive-and-reply delivery was verified. See
+  [the activation receipt](ting-delivery-release-20261017.json).
