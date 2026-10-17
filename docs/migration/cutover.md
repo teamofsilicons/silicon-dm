@@ -76,11 +76,17 @@ it must:
 
 ### Ting
 
-Ting stays on its earlier sign-in, so DM's Ting delivery stays off (`TingUrl` empty): DM keeps
-writing its handoff records and marks them discarded (`ting_not_configured`); clients read DM's
-sync feed. Nothing about Ting blocks the cutover. To turn delivery back on later, Ting must accept,
-from issuer `dm`, a User verification proof with scope `tings.subscribe` (enrolment, receiving app
-`ting`) and an App verification proof with scope `tings.send`; then set `TingUrl` with a stack update.
+Ting 0.3 accepts Silicon Accounts proofs. DM 0.16.1 uses a User verification proof with scope
+`subscriptions.register` for enrolment and an App verification proof with scope `tings.send`
+for delivery. Both proofs are issued by `dm` for receiving app `ting`. HTTP app calls to Ting
+use `Authorization: Bearer sap_…`; recipients are immutable UUID strings. Register the
+`dm.sync.changed` notification type as a DM author, then set `TingUrl` (or `DM_TING_URL`)
+to `https://backend.ting.teamofsilicons.com` on both API and worker.
+
+With Ting unset, handoffs are retained with reason `ting_not_configured` and clients must
+poll the sync feed. Enabling Ting does not replay those discarded records. Recover only
+reviewed messages by resetting their unaccepted handoffs; preserve their IDs and original
+bytes, exclude organization-era references and never bulk replay historical notifications.
 DM names Ting's app id with `DM_TING_APP_ID` (default `ting`); the templates do not pass it, so only
 if Ting is registered at Silicon Accounts under another id does the task definition need it.
 

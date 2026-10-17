@@ -12,7 +12,7 @@ DM's own WebSocket endpoints are retired (`/api/v1/ws` answers 410 `delivery_mov
 Each item is a reference, not the message:
 
 ```json
-{"type": "dm.sync.changed", "for": {"uuid": "K1E", "id": "si:scout"}, "key": "<delivery uuid>",
+{"type": "dm.sync.changed", "for": "K1E", "key": "<delivery uuid>",
  "data": {"schema_version": 2, "event": "message.created", "conversation_id": "c:ada::si:scout",
           "message_id": "00a", "delivery_id": "<delivery uuid>", "delivery_sequence": 41},
  "metadata": {"isi": "deliberate"}}

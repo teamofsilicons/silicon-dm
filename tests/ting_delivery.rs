@@ -184,7 +184,7 @@ async fn with_ting_each_handoff_is_sent_once_and_never_becomes_a_receipt() -> Re
         .map(|(_, body)| body.clone())
         .unwrap_or_default();
     assert_eq!(to_bob["type"], "dm.sync.changed");
-    assert_eq!(to_bob["for"], json!({"uuid": "Bb2", "id": "c:bob"}));
+    assert_eq!(to_bob["for"], json!("Bb2"));
     assert_eq!(to_bob["key"], to_bob["data"]["delivery_id"]);
     assert_eq!(to_bob["data"]["schema_version"], 2);
     assert_eq!(to_bob["data"]["conversation_id"], "c:ada::c:bob");
@@ -239,6 +239,35 @@ async fn with_ting_each_handoff_is_sent_once_and_never_becomes_a_receipt() -> Re
         count(&app, "SELECT count(*) FROM ting_handoffs WHERE accepted_at IS NULL AND discarded_at IS NULL AND attempt_count = 1 AND next_attempt_at > clock_timestamp()").await?,
         i64::try_from(failing.sent().len())?
     );
+    let original: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT delivery_id, request_body FROM ting_handoffs WHERE accepted_at IS NULL ORDER BY delivery_id",
+    )
+    .fetch_all(app.state.store.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE ting_handoffs SET next_attempt_at = clock_timestamp() WHERE accepted_at IS NULL",
+    )
+    .execute(app.state.store.pool())
+    .await?;
+    let retried = Recording::accepting();
+    let retried_count = TingDeliveryWorker::new(app.state.clone(), Some(retried.clone()))
+        .process_once()
+        .await?;
+    assert_eq!(
+        retried_count,
+        original.len(),
+        "UUID strings must not be discarded as legacy references"
+    );
+    let persisted: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT delivery_id, request_body FROM ting_handoffs WHERE delivery_id = ANY($1) ORDER BY delivery_id",
+    )
+    .bind(original.iter().map(|(id, _)| *id).collect::<Vec<_>>())
+    .fetch_all(app.state.store.pool())
+    .await?;
+    assert_eq!(
+        persisted, original,
+        "retry preserves the exact body and idempotency key"
+    );
     app.close().await
 }
 
@@ -283,7 +312,11 @@ async fn wait_for(app: &TestApp, sql: &str, expected: i64) -> Result<(), BoxErro
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Err(format!("timed out waiting for `{sql}` = {expected}").into())
+    let enrolments: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT actor_id, last_error FROM ting_automatic_enrollments")
+            .fetch_all(app.state.store.pool())
+            .await?;
+    Err(format!("timed out waiting for `{sql}` = {expected}; enrolments: {enrolments:?}").into())
 }
 
 #[tokio::test]
@@ -293,7 +326,7 @@ async fn recipients_are_enrolled_with_their_own_proof_and_reenrolled_from_the_st
     for (proof, subscription) in [("sap_user", "sub_1"), ("sap_user_2", "sub_2")] {
         Mock::given(method("POST"))
             .and(path("/v1/subscriptions"))
-            .and(header("authorization", format!("Proof {proof}").as_str()))
+            .and(header("authorization", format!("Bearer {proof}").as_str()))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": subscription})))
             .mount(&ting)
             .await;
@@ -319,12 +352,25 @@ async fn recipients_are_enrolled_with_their_own_proof_and_reenrolled_from_the_st
         StatusCode::OK,
     )?;
     wait_for(&app, "SELECT count(*) FROM ting_automatic_enrollments WHERE actor_id = 'a8K' AND subscription_id = 'sub_1'", 1).await?;
+    let issuance = app
+        .accounts
+        .server
+        .received_requests()
+        .await
+        .unwrap_or_default();
+    assert!(
+        issuance.iter().any(|request| {
+            request.url.path() == "/v1/proofs/user-verification"
+                && serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| {
+                    body["receiving_app"] == "ting"
+                        && body["scopes"] == json!(["subscriptions.register"])
+                })
+        }),
+        "enrolment uses Ting's exact User verification scope"
+    );
     let subscriptions = ting.received_requests().await.unwrap_or_default();
     let body: Value = serde_json::from_slice(&subscriptions[0].body)?;
-    assert_eq!(
-        body,
-        json!({"app_id": "dm", "for": {"uuid": "a8K", "id": "c:ada"}})
-    );
+    assert_eq!(body, json!({"app_id": "dm", "for": "a8K"}));
     let (nonce, sealed): (Vec<u8>, Vec<u8>) =
         sqlx::query_as("SELECT nonce, ciphertext FROM ting_proof_grants WHERE actor_id = 'a8K'")
             .fetch_one(app.state.store.pool())
@@ -368,7 +414,7 @@ async fn recipients_are_enrolled_with_their_own_proof_and_reenrolled_from_the_st
         requests.iter().any(|request| request
             .headers
             .get("authorization")
-            .is_some_and(|value| value == "Proof sap_user_2")),
+            .is_some_and(|value| value == "Bearer sap_user_2")),
         "re-subscribed with the refreshed proof"
     );
     app.close().await

@@ -307,10 +307,22 @@ pub async fn start(
     loop {
         match host::state(&home)? {
             host::HostState::Running(record) => {
+                let older = older_than_this(&json!({"version": record.version}));
                 let owner = crate::relay::RelayClient::new(
                     &format!("http://127.0.0.1:{}/", record.port),
                     record.token,
                 )?;
+                // The old relay may be unable to parse this home's new credential
+                // format. Upgrade before asking it to attach that home. The host
+                // record is private and shutdown still uses its authenticated token.
+                if older {
+                    if !replacing {
+                        let _ = owner.stop().await;
+                        replacing = true;
+                    }
+                    continue_after_pause(deadline, &log).await?;
+                    continue;
+                }
                 // Attaching may wait up to 5s for an older per-home relay to stop.
                 let attached =
                     tokio::time::timeout(Duration::from_secs(8), owner.attach(&directory)).await;
@@ -1506,7 +1518,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_newer_client_replaces_an_older_shared_relay() -> Result<()> {
+    async fn a_newer_client_replaces_an_older_shared_relay_before_attaching() -> Result<()> {
         let state = fixture_store("http://localhost")?;
         let shared = state.relay_home()?;
         // Stand in for an older shared relay: it holds the host lock and
@@ -1517,19 +1529,28 @@ mod tests {
         let stopped = Arc::new(AtomicUsize::new(0));
         let (release, stopped_handler) = (held.clone(), stopped.clone());
         let router = Router::new()
-            .route("/homes", post(|| async {
-                Json(json!({"type":"relay_status","data":{"running":true,"pid":123,"version":"0.0.1",
-                    "profiles":{},"queues":{},"incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false},
-                    "host":{"shared":true,"port":1}}}))
-            }))
-            .route("/shutdown", post(move || {
-                let (release, stopped) = (release.clone(), stopped_handler.clone());
-                async move {
-                    stopped.fetch_add(1, Ordering::SeqCst);
-                    release.lock().unwrap().take();
-                    StatusCode::NO_CONTENT
-                }
-            }));
+            .route(
+                "/homes",
+                post(|| async {
+                    // The actual pre-Accounts relay rejects new profiles this way.
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({"error":{"code":"attach_failed",
+                    "message":"missing field `token_type`"}})),
+                    )
+                }),
+            )
+            .route(
+                "/shutdown",
+                post(move || {
+                    let (release, stopped) = (release.clone(), stopped_handler.clone());
+                    async move {
+                        stopped.fetch_add(1, Ordering::SeqCst);
+                        release.lock().unwrap().take();
+                        StatusCode::NO_CONTENT
+                    }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         host::publish(
             &shared,
