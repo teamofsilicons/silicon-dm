@@ -172,7 +172,8 @@ export function watchErrors(page: Page): string[] {
  * signs in to the kit with "Continue as", a sign-in of its own (its own tokens) without spending a code.
  */
 export type Who = "carbon" | "friend";
-const AUTH_DIR = "test-results/.auth";
+// One directory per port, so parallel runs on different ports (E2E_PORT) never overwrite each other's sign-ins.
+export const AUTH_DIR = `test-results/.auth-${process.env.E2E_PORT || 4530}`;
 export const statePath = (who: Who) => `${AUTH_DIR}/${who}.json`;
 export const accountsFile = `${AUTH_DIR}/accounts.json`;
 

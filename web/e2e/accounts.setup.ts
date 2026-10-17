@@ -1,5 +1,5 @@
 /**
- * Once per run: two Carbons signed in to Silicon Accounts, their browser state kept in test-results/.auth/. Specs start
+ * Once per run: two Carbons signed in to Silicon Accounts, their browser state kept in test-results/.auth-<port>/. Specs start
  * from that Accounts sign-in and continue as them ("Continue as …"), a sign-in of their own at DM.
  *
  * Against the local chat stack (scripts/chat-stack/up.sh) the Carbons are the stack's own (ada and bo): their browser
@@ -10,14 +10,14 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test as setup } from "@playwright/test";
-import { accountsFile, BASE, sameOrigin, sessionOf, signIn, statePath, uniqueEmail, type Who } from "./support";
+import { accountsFile, AUTH_DIR, BASE, sameOrigin, sessionOf, signIn, statePath, uniqueEmail, type Who } from "./support";
 
 const HELPER = join(process.cwd(), "..", "scripts", "chat-stack", "identities.mjs");
 const STACK = join(process.cwd(), "..", ".dev", "stack.json");
 const POOL: Record<Who, string> = { carbon: "ada", friend: "bo" };
 
 setup("sign two Carbons in once for the whole run", async ({ browser }) => {
-  mkdirSync("test-results/.auth", { recursive: true });
+  mkdirSync(AUTH_DIR, { recursive: true });
   const accounts: Record<string, { email: string; id: string }> = {};
   if (existsSync(HELPER) && existsSync(STACK)) {
     for (const who of ["carbon", "friend"] as Who[]) {

@@ -56,6 +56,8 @@ process.env.E2E_MESSAGING_URL = pick("MOCK_MESSAGING_URL", "http://127.0.0.1:984
 
 export default defineConfig({
   testDir: "./e2e",
+  // Playwright empties its output directory when a run starts: one per port, so parallel runs keep their own.
+  outputDir: `test-results/run-${PORT}`,
   timeout: 120_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
