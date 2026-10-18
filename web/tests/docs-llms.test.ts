@@ -4,11 +4,15 @@
  * guides. A Silicon that copies a command from these files must be able to run it.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { llmsFullTxt } from "../lib/agent/files";
 
-const reference = readFileSync(new URL("../../docs/reference/cli.md", import.meta.url), "utf8");
+const REFERENCE = new URL("../../docs/reference/cli.md", import.meta.url);
+// The website's image is built from web/ alone (web/Dockerfile.gateway), where the repository's docs are not present;
+// the repository's own CI runs these tests with them.
+const skip = existsSync(REFERENCE) ? false : "docs/ is not beside web/ here (the website's image build)";
+const reference = skip ? "" : readFileSync(REFERENCE, "utf8");
 
 /** "dm messages send", "dm login status", … : the first column of the reference's command tables. */
 const COMMANDS = new Set([...reference.matchAll(/^\| `(dm [a-z][a-z -]*?)` \|/gm)].map(match => match[1]!.trim()));
@@ -26,12 +30,12 @@ function invocations(text: string): string[] {
   return found;
 }
 
-test("the CLI reference lists the commands and topics this test reads", () => {
+test("the CLI reference lists the commands and topics this test reads", { skip }, () => {
   for (const command of ["dm messages send", "dm voices list", "dm receipts read", "dm inbox", "dm docs"]) assert.ok(COMMANDS.has(command), command);
   for (const topic of ["voice", "expressive", "building", "receiving"]) assert.ok(TOPICS.has(topic), topic);
 });
 
-test("every dm command llms.txt and llms-full.txt name exists", () => {
+test("every dm command llms.txt and llms-full.txt name exists", { skip }, () => {
   const text = llmsFullTxt("https://dm.example");
   const named = invocations(text);
   assert.ok(named.length > 10, "the files name the commands a Silicon needs");

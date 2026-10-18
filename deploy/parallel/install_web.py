@@ -46,10 +46,13 @@ def install(stage, source):
         'get-secret-value', '--secret-id', 'silicon-dm/accounts-production/runtime']))['SecretString'])
     if secret['app_id'] != 'dm' or secret['database'] != 'silicon_dm_accounts':
         raise ValueError('Expected the independent Accounts runtime')
+    # Uploads go into each Carbon's own Silicon Briefcase (production Briefcase lists dm as a proof issuer for the upload
+    # scopes). No UPLOADS_MAX_BYTES: the website has no limit of its own, Briefcase's 5 TiB applies.
     values = {'APP_ID': 'dm', 'APP_SECRET': secret['app_secret'],
               'ACCOUNTS_URL': 'https://accounts.teamofsilicons.com',
               'APP_API_URL': 'http://127.0.0.1:8081', 'PUBLIC_URL': 'https://dm.teamofsilicons.com',
               'SESSION_SECRET': secret['session_secret'], 'HOSTNAME': '0.0.0.0', 'PORT': '4316',
+              'BRIEFCASE_API_URL': 'https://api.briefcase.teamofsilicons.com',
               'NEXT_TELEMETRY_DISABLED': '1'}
     if any('\n' in value or '\r' in value for value in values.values()):
         raise ValueError('Environment values must be single line')
@@ -66,7 +69,8 @@ def install(stage, source):
     for _ in range(30):
         try:
             with urllib.request.urlopen('http://127.0.0.1:4316/', timeout=3) as response:
-                if response.status == 200 and b'Keep the conversation going' in response.read():
+                # The product's name, not landing copy (copy changes; the 0.17 landing has none of the old words).
+                if response.status == 200 and b'Silicon DM' in response.read():
                     break
         except Exception:
             pass
