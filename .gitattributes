@@ -1,0 +1,3 @@
+# LF on every platform. The CLI embeds docs/ and openapi.yaml (include_str!), and its docs and tests read them line by
+# line: a Windows checkout's CRLF (core.autocrlf on GitHub's Windows runners) would change what `dm docs` prints there.
+* text=auto eol=lf
