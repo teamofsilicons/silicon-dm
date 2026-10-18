@@ -50,10 +50,10 @@ test("an answer without error details is put in words from its status, never the
 });
 
 test("the service's own words are kept as they are", () => {
-  const body = { type: "error", data: { error: { code: "contact_not_allowed", message: "si:scout does not allow c:di yet.", hint: "Ask Ada Marlow." } } };
-  const refused = errorFromResponse(new Response(JSON.stringify(body), { status: 403 }), body, "POST", "/api/v1/conversations");
-  assert.equal(refused.code, "contact_not_allowed");
-  assert.equal(refused.message, "si:scout does not allow c:di yet.");
-  assert.equal(refused.hint, "Ask Ada Marlow.");
-  assert.ok(ApiError.is(refused, "contact_not_allowed"));
+  const body = { type: "error", data: { error: { code: "first_contact_limit", message: "You started 100 new conversations in the last hour, the most DM allows.", hint: "The next new conversation fits in 12 minutes (Retry-After)." } } };
+  const refused = errorFromResponse(new Response(JSON.stringify(body), { status: 429 }), body, "POST", "/api/v1/conversations");
+  assert.equal(refused.code, "first_contact_limit");
+  assert.equal(refused.message, "You started 100 new conversations in the last hour, the most DM allows.");
+  assert.equal(refused.hint, "The next new conversation fits in 12 minutes (Retry-After).");
+  assert.ok(ApiError.is(refused, "first_contact_limit"));
 });

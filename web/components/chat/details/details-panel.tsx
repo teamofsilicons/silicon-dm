@@ -5,7 +5,7 @@
  *
  *   a Carbon    face, name, id (copy), presence (no "Message" button: the panel is always beside the conversation
  *               with them, whose composer is right there)
- *   a Silicon   the same, then its custodian, its voice and, for its custodian, its reach (allow-list)
+ *   a Silicon   the same, then its custodian and its voice
  *   a group     name and description (owners edit them in place), members, add members, invitations, leave
  *   several     the people in it
  *   every one   its address (copy), Copy link, and the CLI commands for it
@@ -32,7 +32,7 @@ function othersOf(conversation: ConversationSummary | undefined, address: string
 }
 
 export function DetailsPanel({ conversation, address, presence }: { conversation: ConversationSummary | undefined; address: string; presence: Map<string, Presence> }) {
-  const { me, view, viewed, perspective, readOnly } = useChat();
+  const { me, view, viewed, perspective } = useChat();
   const viewedName = viewed ? accountName(viewed) : view;
   const basics = usePersonBasics();
   const isGroup = address.startsWith("g:") || !!conversation?.group;
@@ -49,7 +49,7 @@ export function DetailsPanel({ conversation, address, presence }: { conversation
       ) : single ? (
         <>
           <Profile account={single} presence={presence.get(single.id)} />
-          {single.type === "silicon" ? <SiliconFacts silicon={single} conversation={conversation} me={me} readOnly={readOnly} /> : null}
+          {single.type === "silicon" ? <SiliconFacts silicon={single} conversation={conversation} me={me} /> : null}
         </>
       ) : (
         <section className={styles.section} aria-labelledby="details-people">

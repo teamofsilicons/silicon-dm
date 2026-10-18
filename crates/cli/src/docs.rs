@@ -53,7 +53,7 @@ enum Topic {
     VoicesAndSpeech,
     /// Uuids and ids, conversation addresses, message codes and ISI routes.
     Identifiers,
-    /// Who may reach a Silicon, and what its custodian may and may never do.
+    /// What a Silicon's custodian may and may never do; anyone may message a Silicon.
     #[value(alias = "reach")]
     Custodians,
     /// Drafts on every device, and the outbox that never loses a send.
@@ -333,7 +333,7 @@ pub fn render(options: &DocsArgs) -> Result<Value> {
             return Err(DocsRefusal {
                 code: "empty_search",
                 message: "dm docs --search needs some text to look for; it was empty.".into(),
-                hint: "dm docs --search 'allow-list' finds the pages that mention it; dm docs lists every guide.".into(),
+                hint: "dm docs --search 'custodian' finds the pages that mention it; dm docs lists every guide.".into(),
                 details: json!({}),
             }
             .into());

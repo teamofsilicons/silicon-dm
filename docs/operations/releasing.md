@@ -22,7 +22,7 @@ by the workflow: each step that reaches people is a deliberate command.
    `crates/client/Cargo.toml` and `crates/protocol/Cargo.toml`, in the path dependencies that pin them
    (`Cargo.toml` `[dependencies]` and `[dev-dependencies]`, `crates/client/Cargo.toml`,
    `crates/cli/Cargo.toml`), and in `web/package.json` and `docs-site/package.json`. Every part carries
-   the same version (0.17.0 today), so a version names one consistent set: the packager and the release
+   the same version (0.17.1 today), so a version names one consistent set: the packager and the release
    workflow refuse a service and CLI that differ.
 2. Within contract 4 a change is additive (new optional fields and routes); a change that removes or
    redefines something needs a new contract version ([contracts](../reference/contracts.md)).
@@ -67,7 +67,7 @@ target, so every target uploads and is validated on its own:
 ```yaml
 schema_version: 1
 app_id: dm
-version: 0.17.0
+version: 0.17.1
 command: dm
 targets:
   linux-x86_64:
@@ -86,11 +86,11 @@ Sign in to Silicon Apps as an author of `dm`, then upload, release and promote:
 
 ```sh
 silicon-apps capabilities        # which validation workers answer right now
-silicon-apps upload dm --target linux-x86_64 release/dm-0.17.0-linux-x86_64.tar.gz
-silicon-apps upload dm --target linux-aarch64 release/dm-0.17.0-linux-aarch64.tar.gz
+silicon-apps upload dm --target linux-x86_64 release/dm-0.17.1-linux-x86_64.tar.gz
+silicon-apps upload dm --target linux-aarch64 release/dm-0.17.1-linux-aarch64.tar.gz
 silicon-apps packages dm         # the accepted package ids and their validation results
-silicon-apps release dm --version 0.17.0 --package <id> --package <id> --notes "What changed"
-silicon-apps promote dm <development release id> --version 0.17.0
+silicon-apps release dm --version 0.17.1 --package <id> --package <id> --notes "What changed"
+silicon-apps promote dm <development release id> --version 0.17.1
 ```
 
 - Silicon Apps runs the three discovery commands again on each target's own worker before it

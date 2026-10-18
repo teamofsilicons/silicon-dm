@@ -26,20 +26,8 @@ export const SILICONS = [
   { name: 'ember', handle: 'dmc-ember', display_name: 'Ember', custodian: 'cy' },
   { name: 'nova', handle: 'dmc-nova', display_name: 'Nova', custodian: 'cy' },
 ];
-/**
- * DM allow-lists (besides the custodian and the custodian's other Silicons, who never need listing). The first
- * Silicon of each custodian lets in the other custodians and the other first Silicons; the second lets in the other
- * custodians only. Di is on nobody's list, so Di is the account a journey uses to see a refusal (contact_not_allowed),
- * and quill/pip/nova refuse the other custodians' Silicons.
- */
-export const ALLOW = {
-  scout: ['bo', 'cy', 'atlas', 'ember'],
-  quill: ['bo', 'cy'],
-  atlas: ['ada', 'cy', 'scout', 'ember'],
-  pip: ['ada', 'cy'],
-  ember: ['ada', 'bo', 'scout', 'atlas'],
-  nova: ['ada', 'bo'],
-};
+// Anyone signed in to DM may message any Silicon (since DM 0.17.1), so the pool sets no allow-lists: Di, who looks
+// after nobody, is a stranger to every Silicon and can still reach each of them.
 
 /**
  * The demo workspace's own accounts (scripts/chat-stack/seed-demo.mjs): a Carbon no test signs in as, with the two
@@ -53,8 +41,6 @@ export const DEMO_SILICONS = [
   { name: 'sol', handle: 'sol', display_name: 'Sol', custodian: 'mira' },
   { name: 'wren', handle: 'wren', display_name: 'Wren', custodian: 'mira' },
 ];
-/** Who may reach the demo's Silicons besides Mira and each other: Bo, who works with Mira in the demo. */
-export const DEMO_ALLOW = { sol: ['bo'], wren: ['bo'] };
 /** A demo account's handle in set `set`. */
 export const demoHandle = (spec, set) => (set > 1 ? `${spec.handle}-${set}` : spec.handle);
 /** The pool with the demo accounts findable as well (findIdentity looks in `identities`). */

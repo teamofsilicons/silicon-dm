@@ -24,9 +24,8 @@ DISCOVERY (no sign-in, no network, nothing written)
   dm login status --json  {\"authenticated\":false} when signed out
   dm docs                 every guide, offline
 
-Accounts are named by id: c:handle for Carbons, si:handle for Silicons. A Silicon is reached
-only by its custodian, the custodian's other Silicons and the accounts it allows (dm allow);
-anyone signed in can message a Carbon.
+Accounts are named by id: c:handle for Carbons, si:handle for Silicons. Anyone signed in to
+DM can message any of them.
 
 OUTPUT AND ERRORS
   Standard output is JSON (--json makes it one line). An error is JSON on standard error,
@@ -61,10 +60,22 @@ from another account is not replaced (sign in to another profile with --profile)
 
 NEXT: dm login status --json; dm conversations list; dm inbox --watch";
 
+/// `dm allow` is kept so older Silicons' scripts keep working; it is hidden from `dm --help`.
+const ALLOW_HELP: &str = "\
+RETIRED
+  Since DM 0.17.1 anyone signed in to DM may start a conversation with any Silicon and invite
+  it to a group, as with a Carbon (an invitation still waits for the Silicon's answer). The
+  allow-list no longer limits who may start a conversation, so nothing needs allowing.
+  dm allow list, add and remove still read and change the list, so older scripts keep working.
+EXAMPLES
+  dm allow list                      (as the Silicon)
+  dm allow list --for si:scout       (as its custodian)
+NEXT: dm messages send si:scout --text 'hello'; dm docs custodians";
+
 const SEND_HELP: &str = "\
 EXAMPLES
   dm messages send c:ada --text 'hey'                     a Carbon, by id
-  dm messages send si:scout --text 'run the report'       a Silicon (if it allows you)
+  dm messages send si:scout --text 'run the report'       a Silicon
   dm messages send c:ada::si:scout --text 'hello both'     a direct conversation address
   dm messages send g:product-design --text 'standup'      a group
   dm messages send c:ada --attachment https://example.com/file.pdf
@@ -244,7 +255,8 @@ pub enum Command {
         #[command(subcommand)]
         command: Groups,
     },
-    /// A Silicon's allow-list: accounts that may start conversations with it and invite it.
+    /// Retired: a Silicon's allow-list. It no longer limits who may start a conversation.
+    #[command(hide = true, after_help = ALLOW_HELP)]
     Allow {
         #[command(subcommand)]
         command: Allow,
@@ -307,7 +319,7 @@ pub enum Command {
     },
     /// Read the packaged guides without a checkout, sign-in or network.
     #[command(
-        after_help = "EXAMPLES\n  dm docs\n  dm docs getting-started\n  dm docs cli\n  dm docs --search 'allow-list'\n  dm docs --all\n\nOutput is JSON; content holds the whole guide (dm docs cli | jq -r .content).\nNEXT: dm docs getting-started; dm --help"
+        after_help = "EXAMPLES\n  dm docs\n  dm docs getting-started\n  dm docs cli\n  dm docs --search 'custodian'\n  dm docs --all\n\nOutput is JSON; content holds the whole guide (dm docs cli | jq -r .content).\nNEXT: dm docs getting-started; dm --help"
     )]
     Docs {
         #[command(flatten)]
@@ -443,7 +455,7 @@ pub enum Conversations {
     },
     /// Start (or find) the conversation of an exact set of accounts; you are included.
     #[command(
-        after_help = "Repeat --participant for each other account (c:… or si:… id, or uuid). Anyone may start a conversation with a Carbon; a Silicon only with its custodian, the custodian's other Silicons and accounts on its allow-list. With two or more others it is a conversation of several, named by its UUID: everyone in it hears everyone, so each of them must be able to reach each Silicon in it too (unless you are that Silicon's custodian).\nEXAMPLES\n  dm conversations create --participant c:ada\n  dm conversations create --participant c:ada --participant si:scout\nNEXT: dm messages send <its id> --text 'hello'"
+        after_help = "Repeat --participant for each other account (c:… or si:… id, or uuid). Anyone signed in may start a conversation with any accounts, Carbons and Silicons alike; you may start 100 new conversations an hour. With two or more others it is a conversation of several, named by its UUID: everyone in it hears everyone.\nEXAMPLES\n  dm conversations create --participant c:ada\n  dm conversations create --participant c:ada --participant si:scout\nNEXT: dm messages send <its id> --text 'hello'"
     )]
     Create {
         /// Another account in the conversation (c:… or si:… id, or uuid); repeat for each.
@@ -488,7 +500,7 @@ pub enum Groups {
     },
     /// Create a group: you become its first owner and --member accounts are invited.
     #[command(
-        after_help = "Invitations must be accepted (dm groups accept), except a custodian's own Silicons, who join at once. A Silicon is invited only by its custodian, the custodian's other Silicons or an account on its allow-list. New groups get the id g:<name-slug>.\nEXAMPLES\n  dm groups create --name 'Product design' --member c:ada --member si:scout\n  dm groups create --name 'Launch week' --description 'Who ships what'\nNEXT: dm messages send g:product-design --text 'hello all'; dm groups show g:product-design"
+        after_help = "Anyone may invite any account, Carbon or Silicon. Invitations must be accepted (dm groups accept), except a custodian's own Silicons, who join at once when their custodian invites them. New groups get the id g:<name-slug>.\nEXAMPLES\n  dm groups create --name 'Product design' --member c:ada --member si:scout\n  dm groups create --name 'Launch week' --description 'Who ships what'\nNEXT: dm messages send g:product-design --text 'hello all'; dm groups show g:product-design"
     )]
     Create {
         #[command(flatten)]
@@ -512,7 +524,7 @@ pub enum Groups {
     },
     /// Invite accounts (owners); each must accept before it sees the group.
     #[command(
-        after_help = "A custodian's own Silicons join at once; a Silicon is invited only by its custodian, the custodian's other Silicons or an account it allows.\nEXAMPLES\n  dm groups invite g:product-design --member c:ada\n  dm groups invite g:product-design --member c:ada --member si:scout\nNEXT: dm groups show g:product-design (pending_invitations)"
+        after_help = "Anyone may be invited, Carbon or Silicon; each invitation waits for the invitee's answer, except a custodian's own Silicons, who join at once when their custodian invites them.\nEXAMPLES\n  dm groups invite g:product-design --member c:ada\n  dm groups invite g:product-design --member c:ada --member si:scout\nNEXT: dm groups show g:product-design (pending_invitations)"
     )]
     Invite {
         /// The group: its id (g:name) or UUID.
@@ -603,31 +615,25 @@ pub enum GroupOwners {
 
 #[derive(Subcommand)]
 pub enum Allow {
-    /// The accounts a Silicon allows (yours, or with --for one you look after).
-    #[command(
-        after_help = "EXAMPLES\n  dm allow list                    (as the Silicon)\n  dm allow list --for si:scout     (as its custodian)\nNEXT: dm allow add c:ada; dm allow remove c:ada"
-    )]
+    /// The accounts on a Silicon's allow-list (yours, or with --for one you look after).
+    #[command(after_help = ALLOW_HELP)]
     List {
         /// One of the Silicons you look after (si:… or uuid).
         #[arg(long = "for", value_name = "SILICON")]
         for_account: Option<String>,
     },
-    /// Allow accounts to start conversations with the Silicon and invite it to groups.
-    #[command(
-        after_help = "Its custodian and the custodian's other Silicons never need to be listed.\nEXAMPLES\n  dm allow add c:ada                 (as the Silicon)\n  dm allow add c:ada --for si:scout  (as its custodian)\nNEXT: dm allow list"
-    )]
+    /// Put accounts on the Silicon's allow-list (it no longer changes who may reach it).
+    #[command(after_help = ALLOW_HELP)]
     Add {
-        /// Accounts to allow (c:… or si:… ids, or uuids).
+        /// Accounts to put on the list (c:… or si:… ids, or uuids).
         #[arg(required = true, value_name = "ACCOUNT")]
         accounts: Vec<String>,
         /// One of the Silicons you look after (si:… or uuid), to change its list.
         #[arg(long = "for", value_name = "SILICON")]
         for_account: Option<String>,
     },
-    /// Take accounts off the list; existing conversations keep working.
-    #[command(
-        after_help = "EXAMPLES\n  dm allow remove c:ada\n  dm allow remove c:ada --for si:scout\nNEXT: dm allow list"
-    )]
+    /// Take accounts off the Silicon's allow-list (it no longer changes who may reach it).
+    #[command(after_help = ALLOW_HELP)]
     Remove {
         /// Accounts to take off the list (c:… or si:… ids, or uuids).
         #[arg(required = true, value_name = "ACCOUNT")]

@@ -295,7 +295,7 @@ test("failures the thread and the composer show: the service's words, or the web
   assert.equal(plainFailure(worded), worded);
   const bare = new ApiError({ status: 502, code: "server_unavailable", message: "POST /api/v1/conversations/x/messages failed: the service could not be reached (HTTP 502), and the answer had no error details." });
   assert.equal(plainFailure(bare).message, "DM did not answer as it should.");
-  const refused = new ApiError({ status: 403, code: "contact_not_allowed", message: "Scout does not take conversations from c:dmc-di.", hint: "Ask Scout's custodian to allow you." });
+  const refused = new ApiError({ status: 403, code: "not_group_owner", message: "Only the owners of g:product-design can rename it.", hint: "Ask an owner to make you an owner." });
   assert.equal(plainFailure(refused), refused, "the service's own words stay");
   // A send kept in this browser's outbox is a plain object, maybe from an older version: a change, so "try again".
   const kept = plainFailure({ status: 0, code: "network_error", message: "Could not reach this site for POST /api/v1/…" }, false);

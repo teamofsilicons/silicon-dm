@@ -393,10 +393,10 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(AppError::conflict("stale").status(), StatusCode::CONFLICT);
-        let refused = AppError::forbidden("contact_not_allowed", "si:x has not allowed c:y");
+        let refused = AppError::forbidden("not_custodian", "c:y does not look after si:x");
         assert_eq!(refused.status(), StatusCode::FORBIDDEN);
-        assert_eq!(refused.code(), "contact_not_allowed");
-        assert_eq!(refused.to_string(), "si:x has not allowed c:y");
+        assert_eq!(refused.code(), "not_custodian");
+        assert_eq!(refused.to_string(), "c:y does not look after si:x");
         assert_eq!(
             AppError::account_not_found("c:nobody").code(),
             "account_not_found"

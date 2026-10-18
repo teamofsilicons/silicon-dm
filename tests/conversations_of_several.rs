@@ -2,7 +2,7 @@
 //! It is addressed by its UUID everywhere (the API, the sync feed, the Ting handoff), and
 //! everything a two-party conversation does works in it: sending, routing, receipts one by one
 //! and in bulk, unread counts, drafts and `draft_version`, speech, bundles, and going on after
-//! one of its accounts is deleted.
+//! one of its accounts is deleted. Anyone may start one with any Silicon in it.
 #![allow(
     clippy::too_many_lines,
     reason = "each test is one scenario, read top to bottom"
@@ -472,23 +472,15 @@ async fn a_conversation_of_several_goes_on_while_two_of_its_accounts_remain() ->
 }
 
 #[tokio::test]
-async fn every_account_in_a_conversation_of_several_must_reach_its_silicons() -> Result<(), BoxError>
-{
+async fn anyone_may_start_a_conversation_of_several_with_any_silicon() -> Result<(), BoxError> {
     let app = TestApp::start().await?;
     let p = people(&app).await;
     let ada = app.accounts.token(&p.ada);
     let bob = app.accounts.token(&p.bob);
     let cy = app.accounts.token(&p.cy);
     let scout = app.accounts.token(&p.scout);
-    // Scout hears from Bob; Cy is not on its allow-list.
-    let allowed = app
-        .post(
-            "/api/v1/allow-list",
-            &scout,
-            json!({"account_ids": ["c:bob"]}),
-        )
-        .await?;
-    expect_status(&allowed, StatusCode::OK)?;
+    // Scout allows nobody, and neither Bob nor Cy is its custodian or one of the custodian's
+    // Silicons: that limits nothing. Cy starts a conversation with Scout alone...
     let alone = app
         .post(
             "/api/v1/conversations",
@@ -496,69 +488,28 @@ async fn every_account_in_a_conversation_of_several_must_reach_its_silicons() ->
             json!({"participant_ids": ["si:scout"]}),
         )
         .await?;
-    assert_eq!(
-        alone.1["error"]["code"], "contact_not_allowed",
-        "{}",
-        alone.1
-    );
-
-    // Bob may reach Scout, but he cannot bring Cy into a conversation with it: everyone in a
-    // conversation of several hears everyone, and nobody asked Scout.
-    let refused = app
-        .post(
-            "/api/v1/conversations",
-            &bob,
-            json!({"participant_ids": ["si:scout", "c:cy"]}),
-        )
-        .await?;
-    assert_eq!(refused.0, StatusCode::FORBIDDEN, "{}", refused.1);
-    let error = &refused.1["error"];
-    assert_eq!(error["code"], "contact_not_allowed");
-    assert_eq!(error["details"]["silicon"], "si:scout");
-    assert_eq!(error["details"]["requester"], "c:cy");
-    assert_eq!(error["details"]["started_by"], "c:bob");
-    assert_eq!(error["details"]["custodian"], "c:ada");
-    assert_eq!(
-        error["details"]["allow"]["by_custodian"],
-        "dm allow add c:cy --for si:scout"
-    );
-    for words in [&error["message"], &error["hint"]] {
-        assert!(
-            words.as_str().is_some_and(|words| words.contains("c:cy")),
-            "{error}"
-        );
-    }
-    let none: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM conversations c WHERE NOT c.is_group
-           AND (SELECT count(*) FROM conversation_participants p WHERE p.conversation_id = c.id) = 3",
-    )
-    .fetch_one(app.state.store.pool())
-    .await?;
-    assert_eq!(none, 0, "nothing was created");
-
-    // The custodian's choice: Ada may put her Silicon in a conversation with anyone.
-    let by_custodian = start(&app, &ada, &["si:scout", "c:cy"]).await?;
-    send(&app, &cy, &by_custodian, json!({"message": "hi Scout"})).await?;
-    // Bob with Ada (Scout's custodian) is fine too: Ada reaches Scout.
-    start(&app, &bob, &["si:scout", "c:ada"]).await?;
-    // Once Scout allows Cy, Bob may start it.
-    let allowed = app
-        .post(
-            "/api/v1/allow-list",
+    expect_status(&alone, StatusCode::CREATED)?;
+    assert_eq!(alone.1["id"], "c:cy::si:scout");
+    // ... and Bob brings Cy into one with Scout: everyone in it hears everyone, and nobody
+    // had to ask Scout or its custodian first.
+    let with_bob = start(&app, &bob, &["si:scout", "c:cy"]).await?;
+    send(&app, &cy, &with_bob, json!({"message": "hi Scout"})).await?;
+    let heard = app
+        .get(
+            &format!("/api/v1/conversations/{with_bob}/messages"),
             &scout,
-            json!({"account_ids": ["c:cy"]}),
         )
         .await?;
-    expect_status(&allowed, StatusCode::OK)?;
-    let with_bob = app
-        .post(
-            "/api/v1/conversations",
-            &bob,
-            json!({"participant_ids": ["si:scout", "c:cy"]}),
-        )
-        .await?;
-    expect_status(&with_bob, StatusCode::CREATED)?;
-    // A Silicon may start one with Carbons it reaches: it chose them.
+    expect_status(&heard, StatusCode::OK)?;
+    assert_eq!(heard.1["items"][0]["message"], "hi Scout", "{}", heard.1);
+    // Its custodian still reads it, and everyone in it can see that she may.
+    let watched = summary(&app, &ada, "?for=si:scout", &with_bob).await?;
+    assert_eq!(
+        watched["visible_to_custodians"][0]["id"], "c:ada",
+        "{watched}"
+    );
+    // The custodian may put her Silicon with anyone, and a Silicon may start one with Carbons.
+    start(&app, &ada, &["si:scout", "c:cy"]).await?;
     let by_silicon = app
         .post(
             "/api/v1/conversations",

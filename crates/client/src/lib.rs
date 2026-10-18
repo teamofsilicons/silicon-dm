@@ -556,7 +556,8 @@ impl Client {
         .await
     }
     /// A Silicon's allow-list: its own (`for_silicon = None`), or, for its custodian, the
-    /// list of the Silicon named by `si:` id or uuid.
+    /// list of the Silicon named by `si:` id or uuid. Kept for older clients: since DM 0.17.1
+    /// the list no longer limits who may start a conversation with the Silicon.
     pub async fn allow_list(&self, for_silicon: Option<&str>) -> Result<AllowList> {
         self.json(
             self.request(Method::GET, "allow-list")?
@@ -564,8 +565,9 @@ impl Client {
         )
         .await
     }
-    /// Allow accounts (by `c:`/`si:` id or uuid) to start conversations with the Silicon and
-    /// invite it to groups.
+    /// Put accounts (by `c:`/`si:` id or uuid) on the Silicon's allow-list. Kept for older
+    /// clients: since DM 0.17.1 anyone may start a conversation with any Silicon and invite it
+    /// to groups, so this changes nothing about who may reach it.
     pub async fn allow(
         &self,
         account_ids: &[String],
@@ -578,7 +580,8 @@ impl Client {
         )
         .await
     }
-    /// Take accounts off the Silicon's allow-list; existing conversations keep working.
+    /// Take accounts off the Silicon's allow-list. Kept for older clients: since DM 0.17.1 this
+    /// changes nothing about who may reach the Silicon.
     pub async fn disallow(
         &self,
         account_ids: &[String],
@@ -1297,20 +1300,20 @@ mod tests {
     fn errors_expose_code_message_and_hint() {
         let error = Error::Api {
             status: 403,
-            code: "contact_not_allowed".into(),
-            message: "si:scout only receives new conversations from people it allows.".into(),
-            hint: Some("Ask its custodian to run dm allow add c:ada --for si:scout.".into()),
+            code: "custodian_read_only".into(),
+            message: "You can read this conversation as a custodian but only its participants send to it.".into(),
+            hint: Some("To write, message si:scout directly in a conversation you are in.".into()),
             body: Box::new(json!({})),
             request_id: None,
             retry_after: None,
         };
-        assert_eq!(error.code(), "contact_not_allowed");
-        assert!(error.is_code("contact_not_allowed"));
+        assert_eq!(error.code(), "custodian_read_only");
+        assert!(error.is_code("custodian_read_only"));
         assert_eq!(error.status(), Some(403));
         assert!(
             error
                 .hint()
-                .is_some_and(|hint| hint.contains("dm allow add"))
+                .is_some_and(|hint| hint.contains("message si:scout directly"))
         );
         assert!(!error.retryable());
         assert_eq!(

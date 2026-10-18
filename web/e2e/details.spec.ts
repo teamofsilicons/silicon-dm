@@ -1,10 +1,12 @@
 /**
  * The details area against the local chat stack (scripts/chat-stack/up.sh): a group managed from the details panel
  * (rename, add and remove members, make an owner, leave), an invitation accepted from the Invitations dialog, a
- * refusal in the service's words, a Silicon's reach changed in Settings (and put back), a rebound shortcut that
- * survives a reload (and is reset), focus and Esc around the dialogs and the drawer, a custodian's read-only view, a
- * report's link checked before it is sent, and a details panel that never scrolls sideways on a phone. Every run makes
- * its own groups and asserts only on them: other agents use the same stack.
+ * Carbon who looks after no Silicon starting a conversation with one and inviting one to a group (and a refusal in the
+ * service's words first), Settings and a Silicon's details with no reach section (an old `/settings#reach` link lands
+ * at the top), a rebound shortcut that survives a reload (and is reset), focus and Esc around the dialogs and the
+ * drawer, a custodian's read-only view, a report's link checked before it is sent, and a details panel that never
+ * scrolls sideways on a phone. Every run makes its own groups and asserts only on them: other agents use the same
+ * stack.
  *
  * Signed in with the stack's sealed cookies (scripts/chat-stack/identities.mjs cookie <who>), never with email codes.
  */
@@ -200,50 +202,121 @@ test("bo invites ada to a group, and ada accepts from the Invitations dialog (G 
   await context.close();
 });
 
-test("a new conversation di may not start is refused in the service's words, and the dialog stays", async ({ browser }) => {
+test("di, who looks after no Silicon, starts a conversation with Scout; an id that names nobody is refused in the service's words first", async ({ browser }) => {
   const { context, page } = await signedIn(browser, "di");
-  await page.goto("/c");
-  await page.locator("main").click({ position: { x: 8, y: 300 } });
-  await page.keyboard.press("n");
-  const dialog = page.getByRole("dialog", { name: "New conversation" });
-  await expect(dialog).toBeVisible();
-  const to = dialog.getByRole("combobox", { name: "To" });
-  await expect(to).toBeFocused();
-  await to.fill("si:dmc-scout");
-  await to.press("Enter");
-  await dialog.getByRole("button", { name: "Start conversation", exact: true }).click();
-  const alert = dialog.getByRole("alert").filter({ hasText: "The conversation could not be opened" });
-  await expect(alert).toContainText("si:dmc-scout only accepts new conversations");
-  await expect(dialog).toBeVisible();
-  await expect(page).toHaveURL(/\/c$/);
-  await context.close();
+  const errors = watchErrors(page);
+  try {
+    await page.goto("/c");
+    await page.locator("main").click({ position: { x: 8, y: 300 } });
+    await page.keyboard.press("n");
+    const dialog = page.getByRole("dialog", { name: "New conversation" });
+    await expect(dialog).toBeVisible();
+    // Any Carbon or Silicon: nothing in the dialog says a Silicon must allow you first.
+    await expect(dialog).toContainText("With a Carbon or a Silicon.");
+    await expect(dialog).not.toContainText(/allow/i);
+    const to = dialog.getByRole("combobox", { name: "To" });
+    await expect(to).toBeFocused();
+
+    // An id that names nobody: the service's words, its chip marked, and the dialog stays.
+    const nobody = `si:dmc-nobody-${stamp()}`;
+    await to.fill(nobody);
+    await to.press("Enter");
+    await dialog.getByRole("button", { name: "Start conversation", exact: true }).click();
+    const alert = dialog.getByRole("alert").filter({ hasText: "The conversation could not be opened" });
+    await expect(alert).toContainText(`No Silicon Accounts account has the id ${nobody} now`);
+    await expect(dialog).toBeVisible();
+    await expect(page).toHaveURL(/\/c$/);
+
+    // Scout, whom nobody asked to hear from di: the conversation opens (the one di has, from an earlier run) with its
+    // field ready, and a message goes.
+    await dialog.getByRole("button", { name: `Remove ${nobody}` }).click();
+    await to.fill("si:dmc-scout");
+    await to.press("Enter");
+    await dialog.getByRole("button", { name: "Start conversation", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/c\/(c:dmc-di::si:dmc-scout|si:dmc-scout::c:dmc-di)$/);
+    const field = page.getByRole("textbox", { name: "Message Scout" });
+    await expect(field).toBeFocused();
+    const words = `Hello Scout from Di ${stamp()}`;
+    await field.fill(words);
+    await field.press("Enter");
+    await expect(page.locator("article[data-message-row]", { hasText: words })).toHaveAttribute("data-message-code", /.+/);
+
+    // Its details name who looks after Scout, and nothing about who may reach it.
+    const panel = await openDetails(page);
+    const about = panel.getByRole("region", { name: "About Scout" });
+    await expect(about).toContainText("Ada Marlow (c:dmc-ada) looks after Scout and can read this conversation.");
+    await expect(about).not.toContainText(/reach|allow/i);
+    expect(errors).toEqual([]);
+  } finally {
+    await context.close();
+  }
 });
 
-test("a Silicon's reach changed in Settings is what the service says, and is put back", async ({ browser }) => {
-  const { context, page } = await signedIn(browser, "ada");
-  const allowList = async () => ((await (await context.request.get("/api/api/v1/allow-list?for=si:dmc-scout")).json()).data.items as Array<{ account: { id: string } }>).map(entry => entry.account.id);
+test("di invites Scout to a new group: the group opens, and Scout's invitation waits for its answer", async ({ browser }) => {
+  const { context, page } = await signedIn(browser, "di");
+  const errors = watchErrors(page);
+  let address = "";
   try {
-    expect(await allowList()).not.toContain("c:dmc-di");
-    await page.goto("/settings#reach");
-    const scout = page.locator('section[data-silicon="si:dmc-scout"]');
-    await expect(scout).toBeVisible();
-    await settingsSettled(page);
-    const field = scout.getByRole("combobox", { name: "Allow another account to reach Scout" });
-    await field.fill("c:dmc-di");
-    await field.press("Enter");
-    await scout.getByRole("button", { name: "Allow", exact: true }).click();
-    await expect(scout.getByRole("list", { name: "Accounts that can reach Scout" })).toContainText("c:dmc-di");
-    await expect.poll(allowList).toContain("c:dmc-di");
-
-    await scout.getByRole("button", { name: "Remove c:dmc-di" }).click();
-    await scout.getByRole("button", { name: "Remove", exact: true }).click();
-    await expect.poll(allowList).not.toContain("c:dmc-di");
+    const name = `Stranger invite ${stamp()}`;
+    address = await createGroup(page, name, ["si:dmc-scout", "c:dmc-bo"]);
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText(name);
+    const panel = await openDetails(page);
+    const invited = panel.locator("section", { has: page.getByRole("heading", { name: /^Invited/ }) });
+    await expect(invited.locator('li[data-account="si:dmc-scout"]')).toBeVisible();
+    await expect(invited.locator('li[data-account="c:dmc-bo"]')).toBeVisible();
+    expect((await call(context, "GET", `/api/v1/groups/${encodeURIComponent(address)}`)).json?.data?.group).toMatchObject({ pending_invitations: expect.arrayContaining([expect.objectContaining({ id: "si:dmc-scout" })]) });
+    expect(errors).toEqual([]);
   } finally {
-    // Other agents rely on the pool's allow-lists: di is never left on scout's.
-    if ((await allowList()).includes("c:dmc-di")) {
-      await context.request.delete("/api/api/v1/allow-list?for=si:dmc-scout", { headers: sameOrigin({ "Content-Type": "application/json", "x-dm-contract-version": "4" }), data: { type: "allow_list_remove", data: { account_ids: ["c:dmc-di"] } } });
+    // Scout's invitation goes; Bo takes the group over (a group keeps an owner), as the other specs leave theirs.
+    if (address) {
+      const group = encodeURIComponent(address);
+      await call(context, "DELETE", `/api/v1/groups/${group}/members`, { type: "remove_group_members", data: { member_ids: ["si:dmc-scout"] } });
+      const bo = await signedIn(browser, "bo");
+      await call(bo.context, "POST", `/api/v1/groups/${group}/accept`);
+      await bo.context.close();
+      await call(context, "POST", `/api/v1/groups/${group}/owners`, { type: "add_group_owners", data: { member_ids: ["c:dmc-bo"] } });
+      await call(context, "POST", `/api/v1/groups/${group}/leave`);
     }
-    expect(await allowList()).not.toContain("c:dmc-di");
+    await context.close();
+  }
+});
+
+test("Settings and a Silicon's details have no reach: one fewer section, an old #reach link lands at the top", async ({ browser }) => {
+  const { context, page } = await signedIn(browser, "ada");
+  const errors = watchErrors(page);
+  const lists: string[] = [];
+  page.on("request", request => { if (/\/api\/v1\/allow-list/.test(request.url())) lists.push(`${request.method()} ${request.url()}`); });
+  try {
+    // The address the details panel of 0.17.0 linked to: Settings at its top, Scout first in Voice.
+    await page.goto("/settings?silicon=si:dmc-scout#reach");
+    await expect(page.getByRole("heading", { level: 1, name: "Settings" })).toBeVisible();
+    await settingsSettled(page);
+    expect(await page.evaluate(() => document.getElementById("settings-scroll")!.scrollTop)).toBe(0);
+    const nav = page.getByRole("navigation", { name: "Settings sections" });
+    await expect(nav.getByRole("link")).toHaveText(["Voice", "Listening", "Sending", "Keyboard", "Notifications", "Account", "Report a problem"]);
+    await expect(nav.getByRole("link", { name: "Voice" })).toHaveAttribute("aria-current", "page");
+    await expect(page.locator("#settings-scroll").getByRole("heading", { level: 2 })).toHaveText(["Voice", "Listening", "Sending", "Keyboard", "Notifications", "Account", "Report a problem"]);
+    await expect(page.locator("#reach")).toHaveCount(0);
+    await expect(page.locator("#settings-scroll")).not.toContainText(/Silicons' reach|allow-list|may start a conversation/i);
+    await expect(page.locator("#account")).toContainText(/You look after (Scout and Quill|Quill and Scout)\. You choose their voices, and you can read their conversations/);
+    // A section still lands where it is asked for, and the spy agrees once the column has arrived.
+    await nav.getByRole("link", { name: "Keyboard" }).click();
+    await expect(page).toHaveURL(/#keyboard$/);
+    await expect(nav.getByRole("link", { name: "Keyboard" })).toHaveAttribute("aria-current", "page");
+    await page.waitForTimeout(1500);
+    await expect(nav.getByRole("link", { name: "Keyboard" })).toHaveAttribute("aria-current", "page");
+
+    // The details of Ada's own Silicon: who looks after it and its voice, then the address; no reach between them.
+    await page.goto("/c/si:dmc-scout");
+    const panel = await openDetails(page);
+    const about = panel.getByRole("region", { name: "About Scout" });
+    await expect(about).toContainText("You look after Scout.");
+    await expect(about).not.toContainText(/reach|allow/i);
+    await expect(panel.getByRole("link", { name: /reach/i })).toHaveCount(0);
+    expect(lists, "the website no longer asks for allow-lists").toEqual([]);
+    expect(errors).toEqual([]);
+  } finally {
     await context.close();
   }
 });
@@ -353,7 +426,7 @@ test("in the drawer, Esc clears what was typed, then closes Add members, then th
 });
 
 test("a custodian's view shows a Silicon's conversation read only, CLI commands included", async ({ browser }) => {
-  // Bo and Scout talk (Scout allows Bo); Ada looks after Scout and reads it as Scout's custodian.
+  // Bo and Scout talk; Ada looks after Scout and reads it as Scout's custodian.
   const bo = await signedIn(browser, "bo");
   const conversation = await call(bo.context, "POST", "/api/v1/conversations", { type: "create_conversation", data: { participant_ids: ["si:dmc-scout"] } });
   expect(conversation.status, JSON.stringify(conversation.json)).toBeLessThan(300);

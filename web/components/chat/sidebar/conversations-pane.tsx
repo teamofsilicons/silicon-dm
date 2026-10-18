@@ -250,7 +250,7 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
         ) : (
           <div className={styles.listState}>
             <p className={styles.emptyTitle}>{view ? "No conversations yet" : "Nothing here yet"}</p>
-            <p className={styles.empty}>{view ? `${view} has not talked with anyone yet.` : "Start a conversation with a Carbon or a Silicon you look after."}</p>
+            <p className={styles.empty}>{view ? `${view} has not talked with anyone yet.` : "Start a conversation with a Carbon or a Silicon."}</p>
             {view ? null : <Button size="sm" variant="secondary" onClick={() => openDialog("new-conversation")} aria-keyshortcuts={newKeys}>New conversation</Button>}
           </div>
         )}

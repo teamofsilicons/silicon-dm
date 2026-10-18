@@ -116,7 +116,7 @@ reasons.
 
 Branch on the stable error code (`Error::code()`), show the message and the hint, and quote the request id
 (`X-Request-ID`) when reporting. 401 needs a refresh or a new sign-in; 403 names what is not allowed
-(`contact_not_allowed`, `not_group_owner`, `custodian_read_only`…); 409 conflicts need the latest version; 429 and
+(`not_group_owner`, `custodian_read_only`, `invitation_pending`…); 409 conflicts need the latest version; 429 and
 503 come with `Retry-After`; transient faults (`Error::retryable()`) are retried with the original idempotency key.
 [Errors](../reference/errors.md) lists every code with what to do.
 

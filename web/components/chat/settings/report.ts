@@ -6,8 +6,8 @@
  * looks like next to the field, instead of a refusal after the send.
  */
 
-/** The website's version, as reports quote it (`web-0.17.0`); the test keeps it equal to package.json. */
-export const WEB_VERSION = "0.17.0";
+/** The website's version, as reports quote it (`web-0.17.1`); the test keeps it equal to package.json. */
+export const WEB_VERSION = "0.17.1";
 
 /** DM's repository, where fixes go as pull requests. */
 export const PULL_REQUESTS = "https://github.com/teamofsilicons/silicon-dm/pull/";

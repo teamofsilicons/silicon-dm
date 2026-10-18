@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 // Proves the chat stack works end to end, part by part (run it after scripts/chat-stack/up.sh):
 //
-//   node scripts/chat-stack/smoke.mjs [--only dm,cli,deepgram,gifs,briefcase,web] [--keep-web]
+//   node scripts/chat-stack/smoke.mjs [--only dm,cli,reach,deepgram,gifs,briefcase,web] [--keep-web]
 //
 //   dm        dm-api answers /live and /ready (204)
 //   cli       a Silicon signs the dm CLI in with a short-lived token (in its own SILICON_HOME, with the stack's relay),
 //             sends a message to its custodian, and the custodian's DM token reads it back through the API
+//   reach     anyone signed in reaches any Silicon (DM 0.17.1): the contracts say so (features.reach); Di, who looks
+//             after nobody and is on no allow-list, messages a Silicon another Carbon looks after and invites it to a
+//             new group, where the invitation waits for the Silicon's answer (then Di withdraws it)
 //   deepgram  the stand-in's Voice Agent (key in the Authorization header, as DM's service connects, and as the
 //             ['token', key] subprotocol) speaks with the right shape and length, refuses a bad audio setup
 //             (INVALID_SETTINGS) and an unknown voice (FAILED_TO_SPEAK); /v1/listen transcribes a WAV and stays quiet
@@ -111,6 +114,34 @@ async function cli() {
   const listed = await dmCall(token, 'GET', `/api/v1/conversations/${encodeURIComponent(`${ada.id}::${scout.id}`)}/messages`, undefined, { stack });
   const found = listed.json?.data?.items?.find((message) => message['message-id'] === code);
   check("the custodian's DM token reads it back through the API", found?.message === text, `GET /api/v1/conversations/${ada.id}::${scout.id}/messages → ${listed.status}`);
+}
+
+// ------------------------------------------------------------------------------------------------ reach
+
+/**
+ * Anyone signed in reaches any Silicon. The group is new on every run, so a conversation an earlier run started cannot
+ * make the check pass; the invitation is withdrawn afterwards, so Quill's invitations do not pile up.
+ */
+async function reach() {
+  const di = who('di');
+  const quill = who('quill');
+  const token = (await appTokens(di, 'dm', stack)).access_token;
+  const contracts = await dmCall(token, 'GET', '/api/v1/contracts', undefined, { stack });
+  check('the contracts say anyone may start a conversation with any Silicon (features.reach)',
+    contracts.json?.data?.features?.reach?.anyone_may_start === true, `GET /api/v1/contracts → ${contracts.status}`);
+  const text = `Chat stack smoke reach ${new Date().toISOString().slice(11, 19)}`;
+  const sent = await dmCall(token, 'POST', '/api/v1/messages', { type: 'message.create', data: { recipient_id: quill.id, message: text } }, { stack });
+  check(`a stranger (${di.id}, on no allow-list) messages ${quill.id}, whom ${quill.custodian} looks after`, sent.status === 202,
+    `POST /api/v1/messages → ${sent.status} ${sent.json?.data?.error?.code ?? ''}`.trim());
+  const group = await dmCall(token, 'POST', '/api/v1/groups', { type: 'create_group', data: { name: `Smoke reach ${randomUUID().slice(0, 8)}`, member_ids: [quill.id] } }, { stack });
+  const ids = (key) => (group.json?.data?.group?.[key] ?? []).map((account) => account.id);
+  check(`... and invites it to a new group, where the invitation waits for ${quill.id}'s answer`,
+    group.status === 201 && ids('pending_invitations').includes(quill.id) && !ids('members').includes(quill.id),
+    `POST /api/v1/groups → ${group.status} ${group.json?.data?.error?.code ?? ''}`.trim());
+  if (group.json?.data?.id) {
+    const withdrawn = await dmCall(token, 'DELETE', `/api/v1/groups/${encodeURIComponent(group.json.data.id)}/members`, { type: 'remove_group_members', data: { member_ids: [quill.id] } }, { stack });
+    check('... and withdraws the invitation again', withdrawn.status === 200, `DELETE /api/v1/groups/${group.json.data.id}/members → ${withdrawn.status}`);
+  }
 }
 
 // ------------------------------------------------------------------------------------------------ Deepgram
@@ -406,7 +437,7 @@ async function hostedSignIn(url, ada) {
   }
 }
 
-const parts = { dm, cli, deepgram, gifs, briefcase, web };
+const parts = { dm, cli, reach, deepgram, gifs, briefcase, web };
 for (const [name, run] of Object.entries(parts)) {
   if (!wants(name)) continue;
   try {

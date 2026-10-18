@@ -78,7 +78,7 @@ The operations (the `operation` field):
 | Conversations | `list_conversations` (with optional `for`), `create_conversation` |
 | Drafts and bundles | `get_draft`, `put_draft`, `delete_draft`, `create_bundle`, `get_bundle` |
 | Groups | `list_groups`, `get_group`, `create_group`, `update_group`, `invite_group_members`, `remove_group_members`, `add_group_owners`, `remove_group_owners`, `list_invitations`, `accept_invitation`, `decline_invitation`, `leave_group` |
-| Allow-lists | `get_allow_list`, `allow`, `disallow` |
+| Allow-lists (kept for older clients; they limit nothing) | `get_allow_list`, `allow`, `disallow` |
 | Voices | `list_voices`, `get_voice` (`{account}`), `set_voice` (`{account, voice, idempotency_key}`), `reset_voice` (`{account}`) |
 | Presence and GIFs | `get_presence`, `get_scoped_presence`, `set_presence`, `set_scoped_presence`, `trending_gifs`, `search_gifs`, `recent_gifs` |
 | Discovery | `me`, `delivery` |

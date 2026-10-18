@@ -18,7 +18,6 @@ export const chatKeys = {
   presence: (account: string, conversation?: string | null) => ["dm", "presence", account, conversation ?? ""] as const,
   invitations: (view?: string | null) => ["dm", "invitations", viewKey(view)] as const,
   group: (id: string, view?: string | null) => ["dm", "group", id, viewKey(view)] as const,
-  allowList: (silicon: string) => ["dm", "allow-list", silicon] as const,
   gifs: (kind: "trending" | "recent" | "search", query = "") => ["dm", "gifs", kind, query] as const,
   voices: ["dm", "voices"] as const,
   voice: (account: string) => ["dm", "voice", account] as const,

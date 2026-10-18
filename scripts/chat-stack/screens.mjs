@@ -364,7 +364,7 @@ const SURFACES = [
     await conversation(page, 'bo');
     await detailsOpen(page);
   }, after: ({ page }) => detailsClosed(page) },
-  { name: 'details-silicon', what: 'The details panel of a Silicon (Sol): custodian, voice with Preview and Change, reach', run: async ({ page }) => {
+  { name: 'details-silicon', what: 'The details panel of a Silicon (Sol): custodian, voice with Preview and Change', run: async ({ page }) => {
     await conversation(page, 'sol');
     await detailsOpen(page);
   }, after: ({ page }) => detailsClosed(page) },
@@ -505,9 +505,9 @@ const SURFACES = [
     await page.getByText('Delete for everyone?').first().waitFor({ timeout: 10_000 });
     await settle(page, 300);
   }, after: ({ page }) => page.keyboard.press('Escape') },
-  ...['voice', 'listening', 'sending', 'keyboard', 'notifications', 'reach', 'account', 'report'].map((section) => ({
+  ...['voice', 'listening', 'sending', 'keyboard', 'notifications', 'account', 'report'].map((section) => ({
     name: `settings-${section}`,
-    what: `Settings, ${section === 'reach' ? 'Your Silicons\' reach' : section === 'report' ? 'Report a problem' : section[0].toUpperCase() + section.slice(1)}${section === 'voice' ? ' (your Silicons\' voices as radio cards, and yours)' : ''}`,
+    what: `Settings, ${section === 'report' ? 'Report a problem' : section[0].toUpperCase() + section.slice(1)}${section === 'voice' ? ' (your Silicons\' voices as radio cards, and yours)' : ''}`,
     run: async ({ page }) => {
       await open(page, `/settings#${section}`);
       await page.locator(`#${section}`).first().waitFor({ timeout: 30_000 });

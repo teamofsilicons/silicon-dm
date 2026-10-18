@@ -638,7 +638,7 @@ test("a conversation of several says how many people it has; opening it asks for
 /* A custodian's view ---------------------------------------------------------------------------------------------- */
 
 test("a custodian's view offers only what a custodian may do: read, listen for the Silicon (and delete its messages)", async ({ browser }) => {
-  // Bo and Scout talk (Scout allows Bo); Ada looks after Scout.
+  // Bo and Scout talk; Ada looks after Scout.
   const conversation = await dmApi<{ id: string }>("bo", "POST", "/api/v1/conversations", { type: "create_conversation", data: { participant_ids: ["si:dmc-scout"] } });
   const words = `From Scout to Bo ${stamp()}`;
   const sent = await send("scout", conversation.id, { message: words });

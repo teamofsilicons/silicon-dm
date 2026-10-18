@@ -360,14 +360,14 @@ its sync once; nothing is lost. The upgrade on the host has no such overlap: it 
 By hand, on a host of your own:
 
 ```sh
-docker build --tag silicon-dm:0.17.0 .
-docker run --rm --env-file /secure/silicon-dm/migration.env silicon-dm:0.17.0 dm-migrate
+docker build --tag silicon-dm:0.17.1 .
+docker run --rm --env-file /secure/silicon-dm/migration.env silicon-dm:0.17.1 dm-migrate
 psql 'service=dm_migrator' --set ON_ERROR_STOP=1 \
   --set runtime_role=dm_runtime --file deploy/runtime-grants.sql
 docker run --detach --name silicon-dm-api --restart unless-stopped \
-  --env-file /secure/silicon-dm/runtime.env --publish 127.0.0.1:8080:8080 silicon-dm:0.17.0 dm-api
+  --env-file /secure/silicon-dm/runtime.env --publish 127.0.0.1:8080:8080 silicon-dm:0.17.1 dm-api
 docker run --detach --name silicon-dm-worker --restart unless-stopped \
-  --env-file /secure/silicon-dm/runtime.env silicon-dm:0.17.0 dm-worker
+  --env-file /secure/silicon-dm/runtime.env silicon-dm:0.17.1 dm-worker
 ```
 
 The image contains `dm-api`, `dm-worker` and `dm-migrate` and runs as UID/GID 10001. Use private `--env-file`s; never

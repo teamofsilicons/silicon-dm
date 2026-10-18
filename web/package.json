@@ -1,6 +1,6 @@
 {
   "name": "@silicon-dm/web",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "private": true,
   "description": "Silicon DM website: the chat app for Carbons, with Silicon Accounts sign-in",
   "scripts": {

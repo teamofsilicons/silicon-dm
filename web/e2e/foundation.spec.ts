@@ -4,7 +4,8 @@
  *   is highlighted (and the active descendant), and the arrow keys walk the rows in the order they are drawn;
  * - a conversation opened at another name (`/c/si:dmc-scout`) moves to its own address and stays live;
  * - a draft sent in one tab leaves the other tab's field;
- * - Settings → reach: "Remove Bo?" waits for an answer, and a click elsewhere keeps the keyboard there;
+ * - a removal asked in place ("Remove Bo?" in a group's details) waits for an answer, and a click elsewhere keeps the
+ *   keyboard there;
  * - '/' where no search shows goes to the list and puts the keyboard in its search;
  * - someone's activity shows only when the DM service says it is about this conversation;
  * - signing out with messages not sent asks first, then leaves none of the Carbon's words in this browser.
@@ -148,39 +149,49 @@ test("a draft sent in one tab leaves the other tab's field", async ({ browser })
   }
 });
 
-test("Settings → reach: the question waits for an answer, and a click elsewhere keeps the keyboard there", async ({ browser }) => {
+test("a removal asked in place waits for an answer, and a click elsewhere keeps the keyboard there", async ({ browser }) => {
+  const group = await ownGroup(`Question ${stamp()}`);
   const { context, page } = await signedIn(browser, "ada");
   const writes: string[] = [];
   try {
-    // Ada's Silicons' lists are shared by every run: a change is answered here and never reaches the service.
-    await page.route(/\/api\/api\/v1\/allow-list/, route => {
+    // A removal is answered here, never by the service: the group stays as it is whatever the keys do.
+    await page.route(/\/api\/api\/v1\/groups\/[^/]+\/members/, route => {
       if (route.request().method() === "GET") return route.continue();
       writes.push(`${route.request().method()} ${route.request().postData()}`);
       return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ type: "error", data: { error: { code: "busy", message: "Held by the test." } } }) });
     });
-    await page.goto("/settings#reach");
-    const remove = page.getByRole("button", { name: /^Remove c:dmc-bo$/ }).first();
-    await remove.click();
-    const question = page.getByText(/^Remove Bo\?$/).first();
+    await page.goto(`/c/${group.id}`);
+    await expect(field(page)).toBeVisible();
+    // Wide screens remember the details panel open: give it a moment to show before toggling it (⌘.).
+    const panel = page.locator("[data-details-panel]");
+    if (!(await panel.waitFor({ state: "visible", timeout: 1500 }).then(() => true, () => false))) await page.keyboard.press(`${MOD}+Period`);
+    const bo = panel.locator('li[data-account="c:dmc-bo"]');
+    const menu = bo.getByRole("button", { name: /^Actions for Bo/ });
+    await menu.click();
+    await page.getByRole("menuitem", { name: "Remove from group" }).click();
+    const question = bo.getByText(/^Remove Bo\?$/);
     await expect(question).toBeVisible();
     await page.waitForTimeout(7000);
     await expect(question).toBeVisible();
     // A click into another field closes the question and keeps the keyboard there: spaces typed never answer it.
-    const report = page.getByRole("textbox", { name: /What happened/ });
-    await report.click();
+    await field(page).click();
     await page.keyboard.type("a b c d e", { delay: 80 });
-    await expect(report).toHaveValue("a b c d e");
-    await expect(report).toBeFocused();
+    await expect(field(page)).toHaveValue("a b c d e");
+    await expect(field(page)).toBeFocused();
+    await expect(question).toBeHidden();
     expect(writes).toEqual([]);
-    await report.fill("");
-    // Esc gives the keyboard back to Remove (once the question has taken it).
-    await remove.focus();
+    await field(page).fill("");
+    // Esc gives the keyboard back to the menu that asked (once the question has taken it).
+    await menu.focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("button", { name: "Remove", exact: true })).toBeFocused();
+    await page.getByRole("menuitem", { name: "Remove from group" }).press("Enter");
+    await expect(bo.getByRole("button", { name: "Remove", exact: true })).toBeFocused();
     await page.keyboard.press("Escape");
-    await expect(remove).toBeFocused();
+    await expect(menu).toBeFocused();
+    expect(writes).toEqual([]);
   } finally {
     await context.close();
+    await group.leave();
   }
 });
 

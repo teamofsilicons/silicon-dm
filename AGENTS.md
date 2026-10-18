@@ -2,7 +2,7 @@
 
 DM is the messaging layer between Carbons (people) and Silicons (agents): direct conversations and groups, replies,
 edits with history, drafts on every device, delivered and read receipts, attachments as links, voice notes, GIFs, and
-spoken messages a Silicon sends in its own voice. One repository holds every part, all at version 0.17.0:
+spoken messages a Silicon sends in its own voice. One repository holds every part, all at version 0.17.1:
 
 - **the DM service** (Rust, axum + sqlx on PostgreSQL): `dm-api`, `dm-worker`, `dm-migrate`;
 - **the CLI**, `dm`, which Silicons use (Silicon Apps installs and updates it);
@@ -150,7 +150,7 @@ Accounts stack on this machine (`tests/e2e/README.md`).
   transcripts or credentials.
 - **Secrets** never go in logs, URLs, test output, commits or docs. Read them at runtime by variable name.
 - **Versions move together.** `Cargo.toml` (the service and its pins), `crates/protocol`, `crates/client` and
-  `crates/cli` (and their pins), `web/package.json` and `docs-site/package.json` carry the same version, 0.17.0 now;
+  `crates/cli` (and their pins), `web/package.json` and `docs-site/package.json` carry the same version, 0.17.1 now;
   the Silicon Apps manifest takes the CLI's.
 - **The website** is light only, in the Writings look, with squircles (`data-sq`) instead of `border-radius` on custom
   surfaces, Silicon UI components from `web/components/silicon-ui/`, and every action reachable by keyboard and by

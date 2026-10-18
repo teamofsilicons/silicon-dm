@@ -12,7 +12,6 @@ import { ensureFreshSession, markSignedOut } from "@/lib/client/session";
 import type {
   AccountVoice,
   Activity,
-  AllowList,
   BundleDetail,
   ConversationSummary,
   Draft,
@@ -234,14 +233,6 @@ export const getContracts = (signal?: AbortSignal) => dm<Contracts>("/api/v1/con
 export const trendingGifs = (signal?: AbortSignal) => dm<{ items: Gif[] }>("/api/v1/gifs/trending", { signal });
 export const searchGifs = (query: string, signal?: AbortSignal) => dm<{ items: Gif[] }>("/api/v1/gifs/search", { query: { q: query }, signal });
 export const recentGifs = (signal?: AbortSignal) => dm<{ items: Gif[] }>("/api/v1/gifs/recent", { signal });
-
-/* Silicons' reach (allow-lists) ------------------------------------------------------------------------------------- */
-
-export const getAllowList = (silicon: string, signal?: AbortSignal) => dm<AllowList>("/api/v1/allow-list", { query: { for: silicon }, signal });
-export const allowAccounts = (silicon: string, accountIds: string[]) =>
-  dm<AllowList>("/api/v1/allow-list", { method: "POST", query: { for: silicon }, body: { type: "allow_list_add", data: { account_ids: accountIds } } });
-export const disallowAccounts = (silicon: string, accountIds: string[]) =>
-  dm<AllowList>("/api/v1/allow-list", { method: "DELETE", query: { for: silicon }, body: { type: "allow_list_remove", data: { account_ids: accountIds } } });
 
 /* Reports ----------------------------------------------------------------------------------------------------------- */
 

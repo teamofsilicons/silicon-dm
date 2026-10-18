@@ -97,7 +97,7 @@ under a file lock ([runtime](rust-runtime.md)).
 | Voices and speech | `voices`, `voice(account)`, `set_voice(account, voice, key)`, `reset_voice(account)`, `render_speech(script, voice)`, `message_speech(conversation, message, for_silicon)`, `transcribe(bytes, content_type, language)` |
 | Drafts and bundles | `draft`, `put_draft`, `delete_draft`, `create_bundle`, `bundle` |
 | Groups | `groups`, `group`, `create_group`, `update_group`, `invite_group_members`, `remove_group_members`, `add_group_owners`, `remove_group_owners`, `invitations`, `accept_invitation`, `decline_invitation`, `leave_group` |
-| Allow-lists | `allow_list`, `allow`, `disallow` (each with an optional Silicon for its custodian) |
+| Allow-lists (kept for older clients; they limit nothing) | `allow_list`, `allow`, `disallow` (each with an optional Silicon for its custodian) |
 | Updates | `sync(&SyncRequest { cursor, limit, reset, wait, include })`, `sync_reset`; `include: Some(SYNC_INCLUDE_CONVERSATIONS.into())` adds conversation events (`SyncEventKind::Conversation`, with `change`) |
 | Presence and GIFs | `presence`, `presence_in(account, conversation, for_silicon)`, `renew_presence`, `renew_presence_in(device, activity, conversation)`, `close_presence`, `gifs` |
 | Other | `report` |

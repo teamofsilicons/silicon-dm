@@ -2,8 +2,8 @@
 
 /**
  * The smaller settings: Sending and Notifications (this browser's), the Account (from Silicon Accounts) and Report a
- * problem. Settings → Keyboard is keyboard-section.tsx, your Silicons' reach reach-section.tsx; Voice and Listening come
- * from the voice area (components/chat/voice/settings-parts.tsx).
+ * problem. Settings → Keyboard is keyboard-section.tsx; Voice and Listening come from the voice area
+ * (components/chat/voice/settings-parts.tsx).
  */
 import { useState, useSyncExternalStore } from "react";
 import { ExternalLink } from "lucide-react";
@@ -117,13 +117,13 @@ export function AccountSection() {
         <AccountAvatar account={me.account} size="row" decorative />
         <span className={styles.accountText}>
           <span className={styles.accountName}>{name}</span>
-          <span className={styles.allowedMeta}><span>{account.id}</span><KindMarker kind={account.kind} size="xs" /></span>
+          <span className={styles.accountMeta}><span>{account.id}</span><KindMarker kind={account.kind} size="xs" /></span>
         </span>
       </div>
       {me.custodian_of.length ? (
         <p className={styles.text}>
-          You look after {listWords(me.custodian_of.map(accountName))}. You choose their voices and who may reach them, and you can read their
-          conversations with Viewing as, under the conversation list.
+          You look after {listWords(me.custodian_of.map(accountName))}. You choose their voices, and you can read their conversations with
+          Viewing as, under the conversation list.
         </p>
       ) : null}
       <p className={styles.text}>

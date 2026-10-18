@@ -14,7 +14,7 @@
 import { useInfiniteQuery, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { ApiError } from "@/lib/errors";
-import { getAllowList, getConversation, getGroup, getMe, listConversations, listInvitations, listMessages } from "./api";
+import { getConversation, getGroup, getMe, listConversations, listInvitations, listMessages } from "./api";
 import { mergeListHead, mergeNewestMessages, messagesOldestFirst, summariesOf, type ConversationPages, type MessagePages } from "./cache";
 import { useConversationEvents } from "./features";
 import { chatKeys } from "./keys";
@@ -263,16 +263,6 @@ export function useGroup(id: string | null, view: string | null) {
     queryKey: chatKeys.group(id ?? "", view),
     queryFn: ({ signal }) => getGroup(id!, { view, signal }),
     enabled: !!id,
-    staleTime: 30_000,
-    meta: { toast: false },
-  });
-}
-
-export function useAllowList(silicon: string | null) {
-  return useQuery({
-    queryKey: chatKeys.allowList(silicon ?? ""),
-    queryFn: ({ signal }) => getAllowList(silicon!, signal),
-    enabled: !!silicon,
     staleTime: 30_000,
     meta: { toast: false },
   });

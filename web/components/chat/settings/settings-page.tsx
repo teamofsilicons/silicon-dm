@@ -1,21 +1,21 @@
 "use client";
 
 /**
- * Settings (G S): Voice, Listening, Sending, Keyboard, Notifications, your Silicons' reach, Account and Report a
- * problem, in one calm column. On wide screens Silicon UI's nav list sits beside it and follows the reading position;
- * narrower, a line of the sections' names sits under the title (no sideways scrolling). Every section has an address
- * (`/settings#keyboard`), so the palette, the keyboard (G V) and links go straight to one.
+ * Settings (G S): Voice, Listening, Sending, Keyboard, Notifications, Account and Report a problem, in one calm
+ * column. On wide screens Silicon UI's nav list sits beside it and follows the reading position; narrower, a line of
+ * the sections' names sits under the title (no sideways scrolling). Every section has an address (`/settings#keyboard`),
+ * so the palette, the keyboard (G V) and links go straight to one. An address that names no section (`#reach`, which
+ * DM 0.17.0 and older linked to) opens the page at its top.
  */
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { ArrowLeft, Bell, Bug, CircleUserRound, Headphones, Keyboard, Send, ShieldCheck, Volume2 } from "lucide-react";
+import { ArrowLeft, Bell, Bug, CircleUserRound, Headphones, Keyboard, Send, Volume2 } from "lucide-react";
 import { NavItem, NavList } from "@/components/silicon-ui/nav-list/nav-list";
 import { inboxHref } from "@/lib/chat/address";
 import { useTitle } from "@/lib/chat/title";
 import { ListeningSettings, VoiceSettings } from "../voice/settings-parts";
 import { useChat } from "../shell/chat-context";
 import { KeyboardSection } from "./keyboard-section";
-import { ReachSection } from "./reach-section";
 import { AccountSection, NotificationsSection, ReportSection, SendingSection } from "./sections";
 import styles from "./settings.module.css";
 
@@ -86,8 +86,9 @@ function useSections(ids: string[]): { current: string; jump: (id: string, focus
       // Opening the page at a section lands there at once; a link on the page glides to it.
       jump(hash, false, !event);
     };
-    // Opened at a section (`/settings#reach`): it is there at once. Sections above it that grow while their data loads
-    // do not move it: the browser keeps what is on screen in place (scroll anchoring).
+    // Opened at a section (`/settings#keyboard`): it is there at once. Sections above it that grow while their data
+    // loads do not move it: the browser keeps what is on screen in place (scroll anchoring). An address naming no
+    // section stays at the top.
     fromHash();
     root.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("hashchange", fromHash);
@@ -102,7 +103,7 @@ function useSections(ids: string[]): { current: string; jump: (id: string, focus
 }
 
 export function SettingsPage() {
-  const { me, view } = useChat();
+  const { view } = useChat();
   useTitle("Settings · DM");
   const icon = (Icon: typeof Bell) => <Icon size={16} strokeWidth={1.75} />;
   const sections: SectionSpec[] = [
@@ -111,7 +112,6 @@ export function SettingsPage() {
     { id: "sending", title: "Sending", description: "Which keys send a message.", icon: icon(Send), body: <SendingSection /> },
     { id: "keyboard", title: "Keyboard", description: "Every shortcut, and your own keys for them.", icon: icon(Keyboard), body: <KeyboardSection /> },
     { id: "notifications", title: "Notifications", description: "When this browser tells you about new messages.", icon: icon(Bell), body: <NotificationsSection /> },
-    ...(me.custodian_of.length ? [{ id: "reach", title: "Your Silicons' reach", short: "Reach", description: "Who may start a conversation with a Silicon you look after, besides you and your other Silicons.", icon: icon(ShieldCheck), body: <ReachSection /> }] : []),
     { id: "account", title: "Account", description: "Who you are signed in as.", icon: icon(CircleUserRound), body: <AccountSection /> },
     { id: "report", title: "Report a problem", short: "Report", description: "Tell the people who build DM what went wrong.", icon: icon(Bug), body: <ReportSection /> },
   ];

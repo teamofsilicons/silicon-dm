@@ -83,7 +83,7 @@ export function typedAccount(text: string): { ok: true; account: AccountRef } | 
   return { ok: true, account: { type: check.value.kind, id: check.value.id } };
 }
 
-/** The chosen ids a refusal names ("si:scout only accepts…"), so their chips can show it too. */
+/** The chosen ids a refusal names ("No Silicon Accounts account has the id c:bo now."), so their chips can show it too. */
 export function idsNamedIn(text: string, accounts: Array<Pick<AccountRef, "id">>): string[] {
   return accounts.map(account => account.id).filter(id => new RegExp(`(^|[^a-z0-9:_-])${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^a-z0-9_-])`, "i").test(text));
 }

@@ -1007,8 +1007,8 @@ pub struct SignInDiscovery {
     pub speech: Option<SpeechDiscovery>,
 }
 
-/// Accounts a Silicon allows to start conversations with it and invite it to groups,
-/// besides its custodian and the custodian's other Silicons.
+/// A Silicon's allow-list, kept for older clients: since DM 0.17.1 anyone may start a
+/// conversation with any Silicon and invite it to groups, so the list limits nothing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AllowList {
     pub silicon: Actor,

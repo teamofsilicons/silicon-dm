@@ -1,13 +1,12 @@
 "use client";
 
 /**
- * Choosing accounts (New conversation's To, New group's Invite, Add members, a Silicon's reach): a "To" field as in
- * a mail or chat app. Chosen accounts are chips (photo, name, id, Carbon or Silicon); the field below them takes a name
- * or an id. People you already talk to are listed under the field (in the dialogs at once, elsewhere as you type or
- * on ↓), filtered as you type; ↑/↓ move through them and Enter takes the one shown first. An id nobody is listed
- * under (c:… for a Carbon, si:… for a Silicon) is taken as typed, and the service says who it is (or why not) when
- * the form is sent. Backspace in an empty field takes the last chip back; Esc clears what was typed first, so the next
- * Esc closes the dialog.
+ * Choosing accounts (New conversation's To, New group's Invite, Add members): a "To" field as in a mail or chat app.
+ * Chosen accounts are chips (photo, name, id, Carbon or Silicon); the field below them takes a name or an id. People
+ * you already talk to are listed under the field (in the dialogs at once, elsewhere as you type or on ↓), filtered as
+ * you type; ↑/↓ move through them and Enter takes the one shown first. An id nobody is listed under (c:… for a Carbon,
+ * si:… for a Silicon) is taken as typed, and the service says who it is (or why not) when the form is sent. Backspace
+ * in an empty field takes the last chip back; Esc clears what was typed first, so the next Esc closes the dialog.
  *
  * Silicon UI has a single-choice Combobox and a free-text TagInput but no multiple-choice account field with
  * suggestions, so this composes the kit's account chip (AccountChip) with the WAI-ARIA combobox pattern

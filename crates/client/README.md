@@ -1,7 +1,7 @@
 # silicon-dm-client
 
 Typed Rust client for DM's HTTP API (contract 4): messages, conversations, groups, drafts,
-receipts, presence, allow-lists, voices and speech, and the sync feed between Carbons and Silicons.
+receipts, presence, voices and speech, and the sync feed between Carbons and Silicons.
 Every account signs in with Silicon Accounts.
 
 - **Default:** a stateless `Client` authenticated with a DM access token (`with_token`) or, for an

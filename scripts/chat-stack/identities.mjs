@@ -4,7 +4,7 @@
 //
 //   node scripts/chat-stack/identities.mjs <command> [who] [options]
 //
-//   init [--force]                 create the pool once (or repair it): Carbons, Silicons, DM allow-lists
+//   init [--force]                 create the pool once (or repair it): Carbons and Silicons, admitted to DM
 //   list [--json]                  names, ids, kinds, custodians and homes (no secrets)
 //   show <who>                     one identity (no secrets)
 //   token <who> [--raw] [--app dm] a NEW sign-in at DM: {access_token, refresh_token, ...}; --raw prints the token only
@@ -31,9 +31,9 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ACCOUNTS_CHECKOUT, HERE, PATHS, StackError, describe, http, readJson, stackFile, withLock, writePrivate } from './lib/common.mjs';
 import {
-  ALLOW, CARBONS, SILICONS, appTokens, carbonId, cliEnv, dmBinary, dmCall, emailOf, findIdentity, homeOf,
+  CARBONS, SILICONS, appTokens, carbonId, cliEnv, dmBinary, dmCall, emailOf, findIdentity, homeOf,
   issueProof, loadPool, mintSlt, savePool, sessionHeaders, siliconFirstParty, siliconId, stackUrls, websiteCookie,
-  DEMO_ALLOW, DEMO_CARBONS, DEMO_SILICONS, demoHandle, withDemo,
+  DEMO_CARBONS, DEMO_SILICONS, demoHandle, withDemo,
 } from './lib/pool.mjs';
 
 const argv = process.argv.slice(2);
@@ -148,27 +148,16 @@ async function init() {
     const made = await ensureSilicon(spec, custodian, byName.get(spec.name), stack);
     pool.identities.push({
       name: spec.name, kind: 'silicon', id: siliconId(spec), uuid: made.uuid, display_name: spec.display_name,
-      custodian: custodian.id, home: homeOf(siliconId(spec)),
-      allow: ALLOW[spec.name].map((name) => {
-        const other = [...CARBONS.map((c) => ({ name: c.name, id: carbonId(c) })), ...SILICONS.map((s) => ({ name: s.name, id: siliconId(s) }))].find((x) => x.name === name);
-        return other.id;
-      }),
-      stk: made.stk,
+      custodian: custodian.id, home: homeOf(siliconId(spec)), stk: made.stk,
     });
     savePool(pool);
   }
 
-  // DM learns every account on its first request; then each Silicon lets in the accounts of its allow-list.
-  const tokens = new Map();
+  // DM learns every account on its first request. Nobody needs allowing: anyone may message any Silicon.
   for (const identity of pool.identities) {
     const signedIn = await appTokens(identity, 'dm', stack);
-    tokens.set(identity.name, signedIn.access_token);
     const me = await dmCall(signedIn.access_token, 'GET', '/api/v1/me', undefined, { stack });
     if (me.status !== 200) throw new StackError(`DM did not admit ${identity.id}: ${describe(me)}`, 'Is dm-api up? scripts/chat-stack/status.sh');
-  }
-  for (const identity of pool.identities.filter((x) => x.kind === 'silicon')) {
-    const answer = await dmCall(tokens.get(identity.name), 'POST', '/api/v1/allow-list', { type: 'allow_list_add', data: { account_ids: identity.allow } }, { stack });
-    if (answer.status !== 200) throw new StackError(`Setting ${identity.id}'s DM allow-list failed: ${describe(answer)}`);
   }
   for (const identity of pool.identities) {
     mkdirSync(identity.home, { recursive: true, mode: 0o700 });
@@ -194,9 +183,9 @@ async function cliSignedIn(identity, stack) {
 
 /**
  * The demo workspace's accounts, made once and checked on every run, the way init makes the pool: the Carbon keeps
- * her account-site session (one email code, the first time), each Silicon its STK; DM admits them, the Silicons let in
- * DEMO_ALLOW, and each Silicon's CLI is signed in in its own home (it speaks with `dm messages send --speak`). They
- * are written under `demo` in the pool file, holding the stack's lock so a concurrent up.sh never loses them.
+ * her account-site session (one email code, the first time), each Silicon its STK; DM admits them, and each Silicon's
+ * CLI is signed in in its own home (it speaks with `dm messages send --speak`). They are written under `demo` in the
+ * pool file, holding the stack's lock so a concurrent up.sh never loses them.
  */
 async function initDemo() {
   const stack = stackFile();
@@ -250,22 +239,16 @@ async function initDemo() {
       const made = await ensureSilicon(spec, custodian, existing?.id === siliconId(spec) ? existing : null, stack);
       demo.identities.push({
         name: spec.name, kind: 'silicon', id: siliconId(spec), uuid: made.uuid, display_name: spec.display_name, custodian: custodian.id,
-        home: homeOf(siliconId(spec)), allow: DEMO_ALLOW[spec.name].map((name) => findIdentity(withDemo({ ...pool, demo }), name).id), stk: made.stk, demo: true,
+        home: homeOf(siliconId(spec)), stk: made.stk, demo: true,
       });
       save();
     }
 
-    // DM learns each account on its first request; each Silicon lets in its DEMO_ALLOW (the custodian never needs it).
-    const tokens = new Map();
+    // DM learns each account on its first request.
     for (const identity of demo.identities) {
       const signedIn = await appTokens(identity, 'dm', stack);
-      tokens.set(identity.name, signedIn.access_token);
       const me = await dmCall(signedIn.access_token, 'GET', '/api/v1/me', undefined, { stack });
       if (me.status !== 200) throw new StackError(`DM did not admit ${identity.id}: ${describe(me)}`, 'Is dm-api up? scripts/chat-stack/status.sh');
-    }
-    for (const identity of demo.identities.filter((x) => x.kind === 'silicon')) {
-      const answer = await dmCall(tokens.get(identity.name), 'POST', '/api/v1/allow-list', { type: 'allow_list_add', data: { account_ids: identity.allow } }, { stack });
-      if (answer.status !== 200) throw new StackError(`Setting ${identity.id}'s DM allow-list failed: ${describe(answer)}`);
     }
     for (const identity of demo.identities) {
       mkdirSync(identity.home, { recursive: true, mode: 0o700 });
@@ -284,7 +267,7 @@ async function initDemo() {
     print({
       pool: PATHS.identities, set,
       carbons: demo.identities.filter((x) => x.kind === 'carbon').map((x) => `${x.id} (${x.display_name})`),
-      silicons: demo.identities.filter((x) => x.kind === 'silicon').map((x) => `${x.id} (${x.display_name}, custodian ${x.custodian}, allows ${x.allow.join(', ')})`),
+      silicons: demo.identities.filter((x) => x.kind === 'silicon').map((x) => `${x.id} (${x.display_name}, custodian ${x.custodian})`),
       cli_signed_in_now: signedInCli,
       ...(demo.retired.length ? { retired_sets: demo.retired.map((x) => x.set) } : {}),
     });

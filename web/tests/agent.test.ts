@@ -33,6 +33,9 @@ test("llms.txt says what the app is, how a Silicon installs it and signs in, and
   assert.ok(text.includes(`\`silicon-accounts login --app ${appConfig.appId} -q | ${appConfig.cli!.command} login --slt-stdin\``));
   assert.ok(text.includes(`- [Docs](${appConfig.links.docs})`));
   for (const word of ["AI agent", "human", "user account", "organization", " org ", "Honeycomb", "IAM"]) assert.ok(!text.includes(word), `never "${word}"`);
+  // Since DM 0.17.1 anyone signed in may start a conversation with any Silicon: nothing says a Silicon must allow you.
+  assert.ok(text.includes("Anyone signed in to DM can start a conversation with any Carbon or Silicon"));
+  for (const word of ["allow-list", "dm allow", "contact_not_allowed", "who may reach", "Silicons' reach"]) assert.ok(!llmsFullTxt(ORIGIN).includes(word), `no longer "${word}"`);
 });
 
 test("llms-full.txt adds the keyboard (every shortcut), the five voices and the API a Silicon builds on", () => {

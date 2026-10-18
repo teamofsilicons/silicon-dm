@@ -20,7 +20,8 @@ pub(crate) const FIRST_CONTACTS_PER_HOUR: i64 = 100;
 ///
 /// # Errors
 /// Not found when the conversation does not exist or the caller may not see it (the
-/// difference is not disclosed); refusals for new conversations the caller may not start.
+/// difference is not disclosed); refusals for a new conversation that cannot start (with a
+/// deleted account, or past the caller's first-contact budget).
 pub(crate) async fn resolve_conversation_path(
     state: &AppState,
     context: &AuthContext,
@@ -235,13 +236,15 @@ async fn recipient_conversation(
     start_conversation(state, context, &[recipient], None).await
 }
 
-/// Starts (or resolves) a direct conversation between the caller and `others`, applying
-/// the reach rules to a conversation that does not exist yet: Silicons only hear from
-/// their circle and their allow-list (in a conversation of several, that holds for every
-/// account in it), and every account has a first-contact budget.
+/// Starts (or resolves) a direct conversation between the caller and `others`. Anyone
+/// signed in to DM may start one with any account, Carbon or Silicon (DM 0.17.1 retired the
+/// rule that let a Silicon hear only from its custodian, the custodian's other Silicons and
+/// its allow-list). What still applies to a conversation that does not exist yet: nobody
+/// starts one with a deleted account, and every account has a first-contact budget, so no
+/// account can spray new conversations at everyone it finds.
 ///
 /// # Errors
-/// `contact_not_allowed`, `first_contact_limit`, or storage failures.
+/// `account_deleted`, `first_contact_limit`, or storage failures.
 pub(crate) async fn start_conversation(
     state: &AppState,
     context: &AuthContext,
@@ -257,20 +260,9 @@ pub(crate) async fn start_conversation(
     {
         return Ok(existing);
     }
-    for other in others {
-        if other.deleted {
-            return Err(AppError::account_deleted(other.display_id()));
-        }
-        state
-            .directory()
-            .require_may_reach(&context.actor, other)
-            .await?;
+    if let Some(deleted) = others.iter().find(|other| other.deleted) {
+        return Err(AppError::account_deleted(deleted.display_id()));
     }
-    // With two or more others, each of them talks to each Silicon too.
-    state
-        .directory()
-        .require_reach_among(&context.actor, others)
-        .await?;
     if let Some(wait) = state
         .store
         .first_contact_wait(&context.actor, FIRST_CONTACTS_PER_HOUR)

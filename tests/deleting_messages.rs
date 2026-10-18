@@ -210,12 +210,6 @@ async fn a_custodian_deletes_its_silicons_messages_and_nobody_elses() -> Result<
     }
 
     // A conversation Ada is not in: her custodian's view of Scout deletes there too.
-    app.post(
-        "/api/v1/allow-list",
-        &scout,
-        json!({"account_ids": ["c:bob"]}),
-    )
-    .await?;
     let direct = app
         .post(
             "/api/v1/messages",

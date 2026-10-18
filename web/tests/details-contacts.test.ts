@@ -53,7 +53,7 @@ test("listed accounts are found by uuid or by id, ids without regard to case", (
 test("a refusal's words name the chosen ids it is about", async () => {
   const { idsNamedIn } = await import("../components/chat/dialogs/contacts");
   const chosen = [{ id: "si:scout" }, { id: "si:scout-2" }, { id: "c:bo" }];
-  assert.deepEqual(idsNamedIn("si:scout only accepts new conversations from its custodian c:ada.", chosen), ["si:scout"]);
+  assert.deepEqual(idsNamedIn("si:scout belongs to a deleted Silicon Accounts account; it cannot receive messages or invitations.", chosen), ["si:scout"]);
   assert.deepEqual(idsNamedIn("No Silicon Accounts account has the id c:bo now.", chosen), ["c:bo"]);
   assert.deepEqual(idsNamedIn("Something else went wrong.", chosen), []);
 });

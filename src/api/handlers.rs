@@ -587,11 +587,16 @@ pub(super) async fn send_to_recipient(
         .to_owned();
     let (conversation_id, access) =
         super::access::resolve_conversation_path(&state, &context, &recipient, true).await?;
-    if access != ConversationAccess::Participant {
-        return Err(AppError::forbidden(
-            "custodian_read_only",
-            "You can read this conversation as a custodian but only its participants send to it.",
-        ));
+    match access {
+        ConversationAccess::Participant => {}
+        // Invited, not yet a member: the same answer the conversation's own route gives.
+        ConversationAccess::Invitee => return Err(super::groups::invitation_pending()),
+        ConversationAccess::Custodian => {
+            return Err(AppError::forbidden(
+                "custodian_read_only",
+                "You can read this conversation as a custodian but only its participants send to it.",
+            ));
+        }
     }
     state
         .store

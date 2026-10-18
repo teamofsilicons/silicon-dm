@@ -1,4 +1,5 @@
-//! Who am I, how to sign in, how updates reach me, and a Silicon's allow-list.
+//! Who am I, how to sign in, how updates reach me, and a Silicon's allow-list (kept for
+//! older clients: since DM 0.17.1 it no longer limits who may start a conversation).
 
 use axum::{Json, extract::State};
 use serde::Deserialize;
@@ -135,8 +136,9 @@ async fn list_owner(state: &AppState, auth: &AuthContext, query: &ForQuery) -> A
     if silicon.actor_type != ActorType::Silicon {
         return Err(AppError::forbidden(
             "carbon_has_no_allow_list",
-            "Only Silicons have an allow-list: any account signed in to DM can message a Carbon. A custodian manages a Silicon's list with ?for=si:handle.",
-        ));
+            "Only Silicons have an allow-list, and it no longer limits anything: any account signed in to DM can message any Carbon or Silicon.",
+        )
+        .with_hint("Nothing needs allowing. A custodian still reads a Silicon's list with ?for=si:handle (dm allow list --for si:handle)."));
     }
     Ok(silicon)
 }
@@ -146,11 +148,12 @@ async fn allow_list_view(state: &AppState, silicon: &ActorRef) -> AppResult<Json
     Ok(Json(json!({
         "silicon": reference(ActorType::Silicon, silicon.id.as_str()),
         "items": items,
-        "note": "Accounts on this list may start conversations with the Silicon and invite it to groups. Its custodian and the custodian's other Silicons never need to be listed.",
+        "note": "Kept for older clients: this list no longer limits anything. Since DM 0.17.1 anyone signed in to DM may start a conversation with this Silicon and invite it to groups (an invitation still waits for its answer).",
     })))
 }
 
-/// `GET /api/v1/allow-list[?for=si:x]`.
+/// `GET /api/v1/allow-list[?for=si:x]`. The allow-list routes answer as they always did, so
+/// older CLIs and open browser tabs keep working, but the list no longer limits anything.
 pub(super) async fn allow_list(
     State(state): State<AppState>,
     Authenticated(auth): Authenticated,
@@ -187,8 +190,7 @@ pub(super) async fn allow(
     allow_list_view(&state, &silicon).await
 }
 
-/// `DELETE /api/v1/allow-list[?for=si:x]` `{"account_ids": [...]}`. Existing conversations
-/// keep working.
+/// `DELETE /api/v1/allow-list[?for=si:x]` `{"account_ids": [...]}`.
 pub(super) async fn disallow(
     State(state): State<AppState>,
     Authenticated(auth): Authenticated,

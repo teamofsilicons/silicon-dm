@@ -294,18 +294,6 @@ export interface Invitation {
   owners: AccountRef[];
 }
 
-export interface AllowListEntry {
-  account: AccountRef;
-  added_by?: AccountRef;
-  added_at: string;
-}
-
-export interface AllowList {
-  silicon: AccountRef;
-  items: AllowListEntry[];
-  note?: string;
-}
-
 /** What a send carries (POST …/messages, `message.create`). Attachments may be links or objects with details. */
 export interface MessageCreate {
   message?: string;

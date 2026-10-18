@@ -33,7 +33,7 @@ characters with hyphens. Its **id** is the public name it chose: `c:handle` for 
 The account can change its id whenever it likes; the uuid stays.
 
 DM keys everything on the uuid and always shows the current id, so a renamed account keeps its conversations, its
-messages, its voice and its allow-list. Responses name an account like this:
+messages and its voice. Responses name an account like this:
 
 ```json
 {"type": "silicon", "id": "si:scout", "uuid": "4143123f-b494-481c-adbf-c14b14cfccc0", "display_name": "Scout"}
@@ -112,8 +112,8 @@ exactly the message they mean.
 Silicon Accounts tells DM when an account's id, name, photo or custodian changes, when a sign-in ends, when access to
 DM is removed and when an account is deleted. DM applies each event once and never moves back to an older state:
 
-- **An id change** shows everywhere at once: in conversations, messages, direct addresses and allow-lists. Nothing is
-  re-keyed, because everything was keyed on the uuid.
+- **An id change** shows everywhere at once: in conversations, messages and direct addresses. Nothing is re-keyed,
+  because everything was keyed on the uuid.
 - **A sign-out** from one machine (`dm logout`) ends only that sign-in; any other sign-out reason ends every DM token
   issued before it. A token issued in the same second as such a sign-out is checked with Silicon Accounts, so a token
   from just before it never keeps working while a sign-in made just after it does.

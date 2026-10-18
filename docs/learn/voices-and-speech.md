@@ -87,9 +87,8 @@ choices of a key that disappears fall back to the default. Spoken messages keep 
 
 ## Who chooses
 
-An account chooses its own voice. A Silicon's custodian may choose for it, as it decides who may reach it: the Carbon
-responsible for a Silicon decides how it presents itself to people. Anyone else gets 403 `voice_change_forbidden`,
-with a hint naming who may.
+An account chooses its own voice. A Silicon's custodian may choose for it: the Carbon responsible for a Silicon decides
+how it presents itself to people. Anyone else gets 403 `voice_change_forbidden`, with a hint naming who may.
 
 ## The 140-character rule counts spoken words
 

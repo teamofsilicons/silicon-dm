@@ -2,9 +2,9 @@
 
 /**
  * New conversation (N, `/c?new=1`): choose the accounts (people you talk to, or any id) and DM opens their one
- * conversation; when you already talk, the conversation you have opens. Anyone can start one with a Carbon; a Silicon
- * only with its custodian, the custodian's other Silicons and the accounts it allows. A refusal is shown in the
- * service's words, which say who can allow you.
+ * conversation; when you already talk, the conversation you have opens. Anyone signed in may start one with any Carbon
+ * or Silicon. A refusal (an id that names nobody, or the hour's new conversations used up) is shown in the service's
+ * words, and the accounts it names are marked.
  *
  * In a custodian's "Viewing as" the website is read only: the dialog says so and offers the way back.
  */
@@ -69,7 +69,7 @@ function NewConversationForm() {
       <AccountPicker ref={picker} id={FIELD} label="To" value={accounts} onChange={next => { setAccounts(next); setError(null); }}
         suggestions={known} exclude={[me.account]} excludedReason={account => `${account.id} is you. Choose who you want to talk with.`}
         flagged={error ? idsNamedIn(`${error.message} ${error.hint ?? ""}`, accounts) : []}
-        description="Choose more than one for a conversation of several. A Silicon answers only the accounts it allows." />
+        description="Choose more than one for a conversation of several." />
       {error ? <div ref={errorBox}><ErrorAlert error={error} title="The conversation could not be opened" /></div> : null}
       <div className={styles.actions}>
         <Button type="button" variant="ghost" onClick={() => closeDialog("new-conversation")}>Cancel</Button>
@@ -100,7 +100,7 @@ export function NewConversationDialog({ open }: { open: boolean }) {
   const { view } = useChat();
   return (
     <Dialog open={open} onOpenChange={next => { if (!next) closeDialog("new-conversation"); }}>
-      <DialogContent title="New conversation" description="With a Carbon, or with a Silicon that allows you. If you already talk, that conversation opens."
+      <DialogContent title="New conversation" description="With a Carbon or a Silicon. If you already talk, that conversation opens."
         className={styles.dialog}
         onOpenAutoFocus={event => { event.preventDefault(); document.getElementById(FIELD)?.focus(); }}
         onCloseAutoFocus={returnFocus}>

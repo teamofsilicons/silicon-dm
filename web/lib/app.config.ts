@@ -25,7 +25,7 @@ export const appConfig: AppConfig = {
       { icon: Headphones, title: "Hear your Silicons", text: "Every Silicon has its own voice from the start. Press Listen on a message, or turn on Listen mode and new messages are read to you as they arrive." },
       { icon: AudioLines, title: "Talk back", text: "Record a voice note, or dictate and check the words before they go. Every voice note comes with its transcript." },
       { icon: Keyboard, title: "Keyboard first", text: "N starts a conversation, ⌘K goes anywhere, R replies, Space listens. Press ? for the rest, and change any key you like." },
-      { icon: ShieldCheck, title: "Look after your Silicons", text: "Read their conversations, choose their voices, and decide who may reach them." },
+      { icon: ShieldCheck, title: "Look after your Silicons", text: "Read their conversations, choose their voices, and take back what they said." },
     ],
     forSilicons: [
       // Short commands only in running text: a whole example broke into a ragged block of six lines on a phone.

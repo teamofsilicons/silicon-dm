@@ -1,8 +1,8 @@
 //! Refusals say what happened, why and what to do: the words, hints and details of the
-//! refusals people meet most (an unreachable Silicon, a group name without an address, an
-//! unknown group, conversation, message or route, a malformed request, too many reports),
-//! and a Silicon's account reference naming its custodian. Codes never change; only the words
-//! around them do.
+//! refusals people meet most (an invitation not answered yet, a group name without an
+//! address, an unknown group, conversation, message or route, a malformed request, too many
+//! reports), and a Silicon's account reference naming its custodian. Codes never change; only
+//! the words around them do.
 #![allow(
     clippy::too_many_lines,
     reason = "each test is one scenario, read top to bottom"
@@ -35,7 +35,8 @@ async fn people(app: &TestApp) -> (TestAccount, TestAccount, TestAccount) {
 }
 
 #[tokio::test]
-async fn an_unreachable_silicon_says_where_its_custodian_allows_you() -> Result<(), BoxError> {
+async fn anyone_reaches_a_silicon_and_its_invitation_waits_for_its_answer() -> Result<(), BoxError>
+{
     let app = TestApp::start().await?;
     let (ada, bob, cos) = people(&app).await;
     // DM learns the custodian's id when the custodian signs in (as on the website).
@@ -43,39 +44,18 @@ async fn an_unreachable_silicon_says_where_its_custodian_allows_you() -> Result<
         &app.get("/api/v1/me", &app.accounts.token(&ada)).await?,
         StatusCode::OK,
     )?;
-    let refused = app
+    // c:bob is a stranger to si:cos, and nothing refuses it any more: no answer names a
+    // custodian to ask for permission.
+    let sent = app
         .post(
             "/api/v1/messages",
             &app.accounts.token(&bob),
             json!({"recipient_id": "si:cos", "message": "hello"}),
         )
         .await?;
-    assert_eq!(refused.0, StatusCode::FORBIDDEN, "{}", refused.1);
-    let error = &refused.1["error"];
-    assert_eq!(error["code"], "contact_not_allowed");
-    let message = text(&error["message"]);
-    assert!(
-        message.contains("si:cos") && message.contains("its custodian c:ada"),
-        "{message}"
-    );
-    assert!(message.contains("c:bob is not one of them"), "{message}");
-    let hint = text(&error["hint"]);
-    assert!(
-        hint.contains("Settings → Your Silicons' reach")
-            && hint.contains("/settings#reach")
-            && hint.contains("dm allow add c:bob --for si:cos")
-            && hint.contains("Ask si:cos to run dm allow add c:bob"),
-        "{hint}"
-    );
-    assert_eq!(error["details"]["silicon"], "si:cos");
-    assert_eq!(error["details"]["custodian"], "c:ada");
-    assert_eq!(error["details"]["requester"], "c:bob");
-    assert_eq!(
-        error["details"]["allow"],
-        json!({"by_silicon": "dm allow add c:bob", "by_custodian": "dm allow add c:bob --for si:cos",
-            "website": "/settings#reach"})
-    );
-    // An invitation to a group is refused with the same words.
+    expect_status(&sent, StatusCode::ACCEPTED)?;
+    assert_eq!(sent.1["conversation_id"], "c:bob::si:cos");
+    // Its invitation to a group is taken too, and waits for si:cos's own answer.
     let group = app
         .post(
             "/api/v1/groups",
@@ -83,13 +63,48 @@ async fn an_unreachable_silicon_says_where_its_custodian_allows_you() -> Result<
             json!({"name": "Strangers", "member_ids": ["si:cos"]}),
         )
         .await?;
+    expect_status(&group, StatusCode::CREATED)?;
+    let members: Vec<&str> = group.1["group"]["members"]
+        .as_array()
+        .map(|members| members.iter().filter_map(|m| m["id"].as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(members, vec!["c:bob"], "si:cos joins only when it accepts");
+    assert_eq!(group.1["group"]["pending_invitations"][0]["id"], "si:cos");
     assert_eq!(
-        group.1["error"]["code"], "contact_not_allowed",
-        "{}",
+        group.1["group"]["pending_invitations"][0]["custodian"]["id"], "c:ada",
+        "the invitee is named with its custodian: {}",
         group.1
     );
-    assert!(text(&group.1["error"]["hint"]).contains("/settings#reach"));
-    drop(cos);
+    // Until it accepts, the group says so, and how to join, wherever si:cos reaches into it.
+    let id = group.1["id"].as_str().unwrap_or_default().to_owned();
+    let pending = app
+        .get(
+            &format!("/api/v1/conversations/{id}/messages"),
+            &app.accounts.token(&cos),
+        )
+        .await?;
+    assert_eq!(pending.0, StatusCode::FORBIDDEN, "{}", pending.1);
+    assert_eq!(pending.1["error"]["code"], "invitation_pending");
+    assert!(
+        text(&pending.1["error"]["hint"]).contains("dm groups accept"),
+        "{}",
+        pending.1
+    );
+    // Sending to the group by address says the same (not that it is a custodian's view).
+    let sent_to_group = app
+        .post(
+            "/api/v1/messages",
+            &app.accounts.token(&cos),
+            json!({"recipient_id": id, "message": "am I in?"}),
+        )
+        .await?;
+    assert_eq!(
+        sent_to_group.0,
+        StatusCode::FORBIDDEN,
+        "{}",
+        sent_to_group.1
+    );
+    assert_eq!(sent_to_group.1["error"]["code"], "invitation_pending");
     app.close().await
 }
 

@@ -310,3 +310,37 @@ fn a_group_name_without_a_letter_or_digit_is_refused_before_queueing() -> Result
     assert!(crate::addressable(settings("Ops")).is_ok());
     Ok(())
 }
+
+/// `dm allow` is retired: it still runs, so older Silicons' scripts keep working, but `dm --help`
+/// no longer offers it and its own help says that the list limits nothing.
+#[test]
+fn dm_allow_is_hidden_and_says_the_list_no_longer_limits_anything() -> Result<()> {
+    let mut root = Cli::command();
+    root.build();
+    let listed = root.clone().render_long_help().to_string();
+    assert!(
+        !listed
+            .lines()
+            .any(|line| line.trim_start().starts_with("allow")),
+        "dm --help lists dm allow:\n{listed}"
+    );
+    let allow = root
+        .find_subcommand("allow")
+        .context("dm allow still exists")?;
+    assert!(allow.is_hide_set());
+    for command in std::iter::once(allow).chain(
+        allow
+            .get_subcommands()
+            .filter(|sub| sub.get_name() != "help"),
+    ) {
+        let help = command.clone().render_long_help().to_string();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            help.contains("no longer limits who may start a conversation"),
+            "dm allow {}: {help}",
+            command.get_name()
+        );
+    }
+    Cli::try_parse_from(["dm", "allow", "add", "c:ada", "--for", "si:scout"])?;
+    Ok(())
+}

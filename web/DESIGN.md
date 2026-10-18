@@ -65,7 +65,7 @@ The 4 px scale (`--space-1` 4 … `--space-24` 96 px), nothing in between.
   list, the thread and the settings scroll on their own; nothing scrolls sideways except code.
 - **Messages**: grouped by sender within 5 minutes; others' bubbles on `--surface-muted`, yours on `--accent-subtle`,
   ink text, squircles (18 px, tighter corners where a run continues), no shadows, at most about 72 % of the column.
-- **Rows** (conversations, people, allowed accounts): about 56–64 px, no box, a hairline between; actions are quiet
+- **Rows** (conversations, people, shortcuts): about 56–64 px, no box, a hairline between; actions are quiet
   words or a ⋯ menu, and a question (Remove Bo?) takes its own line when asked.
 - **Settings**: one column of sections, rows of label and description with the control at the end; a nav list beside
   the column at 1100 px and wider, a wrapping line of section links narrower.

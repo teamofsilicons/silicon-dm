@@ -14,7 +14,7 @@ first (the Writings look, light only).
 | `/c/<address>#<code>` | Opens at a message and highlights it | `thread/message-list.tsx` |
 | `?for=si:x` | A custodian's read-only view of a Silicon's conversations (list and threads) | `shell/chat-context.tsx` (`view`, `perspective`, `readOnly`) |
 | `/c?new=1`, `/c?new=group` | Opens New conversation / New group | `shell/chat-app.tsx` (`DialogFromAddress`) |
-| `/settings#<section>` | Settings: `voice`, `listening`, `sending`, `keyboard`, `notifications`, `reach`, `account`, `report`; `?silicon=si:x` puts that Silicon first (`#voice`, `#reach`) | `settings/settings-page.tsx` |
+| `/settings#<section>` | Settings: `voice`, `listening`, `sending`, `keyboard`, `notifications`, `account`, `report`; `?silicon=si:x` puts that Silicon first in `#voice`. An address naming no section (`#reach`, which 0.17.0 and older linked to) opens at the top | `settings/settings-page.tsx` |
 | `/conversations…`, `/groups…` | Older addresses: redirect to the above | `app/conversations/**`, `app/groups/**` |
 
 The workspace layout (`app/(workspace)/layout.tsx`) checks the session on the server, reads `/api/v1/me`, the first
@@ -120,7 +120,7 @@ Unread counts stop at 1,000 at the service and show as "999+" (`format.ts` `unre
 | --- | --- |
 | `types.ts` | The service's shapes. 0.17 fields are optional (`speech`, `voice`, `gif`, `attachment_details`, `metadata`, `unread_count`, `last_read_message_id`, `me.speech`, a Silicon's `custodian`), so the website works against an older service too. |
 | `api.ts` | One typed function per route the website uses. `getConversation` falls back to the group route or the list on an older service; `getContracts` says what the service offers (read once by the sync loop). |
-| `hooks.ts` | `useMe`, `useConversations` (infinite; your own list's pages tell `unread-total.ts`), `useListSafetyNet`, `useLoadEverything`, `loadConversationsUntil`, `useConversation` (a list row only for exactly its address: one kept for its history is fetched as itself, with its banner), `useMessages` (the newest 50, then older pages of 100, `OLDER_PAGE_LIMIT`, so a first unread far up takes half the round trips; `messages` oldest first; a view polls its newest page), `useInvitations` (15 s; 60 s while conversation events flow), `useGroup`, `useAllowList`. |
+| `hooks.ts` | `useMe`, `useConversations` (infinite; your own list's pages tell `unread-total.ts`), `useListSafetyNet`, `useLoadEverything`, `loadConversationsUntil`, `useConversation` (a list row only for exactly its address: one kept for its history is fetched as itself, with its banner), `useMessages` (the newest 50, then older pages of 100, `OLDER_PAGE_LIMIT`, so a first unread far up takes half the round trips; `messages` oldest first; a view polls its newest page), `useInvitations` (15 s; 60 s while conversation events flow), `useGroup`. |
 | `cache.ts` | Pure cache updates: merge (a deletion is never undone, receipts never go back), upsert in order, a row moves up with its preview, time and unread count, read results, unread totals, a fresh first page over the loaded ones (`mergeListHead`, `mergeNewestMessages`). |
 | `sync-plan.ts`, `sync.ts` | Dedupe on `event_id`, one fetch per message applied in the page's order (`planFeed`, `fetchInOrder`, reads applied among them, `applyRead`), a message that keeps failing left behind, conversation events (`planConversationEvents`, `applyConversationPlan`), cursor in sessionStorage, 409 → `reset=true` and refresh everything, backoff 1 s → 30 s, wakes on `online`, a visible tab and `wakeSync`, then `recoverQueries`; stops on 401; `refreshConversationsSoon`, `refreshInvitationsSoon`. One loop per tab. |
 | `features.ts` | What the contracts offer: conversation events (`offersConversationEvents`, `useConversationEvents`) and activity per conversation (`offersScopedActivity`, `useScopedActivity`). |
@@ -281,17 +281,16 @@ Listening). `data-voice-ui` marks every voice surface. What the recorder, Listen
 live regions that are always on the page (inserted with their words, a region is not read out).
 
 ### Details, dialogs, settings (`details/**`, `dialogs/**`, `settings/**`)
-`details/details-panel.tsx` renders inside `<DetailsPortal>` (no padding or title of its own; `data-details-panel`):
-a Carbon (`person.tsx` `Profile`), a Silicon (plus `silicon-facts.tsx`: its custodian, its voice, its reach for its
-custodian), a group (`group-details.tsx`: rename and describe in place, members owners first with each Silicon's
-custodian, add members, invitations, hold to leave; refreshed every 30 s while shown), several people, and every
-conversation's address and CLI (`address-section.tsx`, laid out by `cli.ts`). `group-actions.ts` writes each answer
-into every cache and tells the other tabs. `dialogs/`: `store.ts` (open, close, where focus returns; the chat's dialogs hang from the top and grow downward, so
-the field being typed in never moves), `sign-out-dialog.tsx` (`askToSignOut`),
-`account-picker.tsx` (chips and a combobox; `contacts.ts` pure), `open-conversation.ts`, the New conversation, New
-group and Invitations dialogs. `settings/settings-page.tsx`: the sections, a nav list with a scroll spy at 1100 px and
-wider; `sections.tsx` (Sending, Notifications, Account, Report a problem), `keyboard-section.tsx`, `reach-section.tsx`
-(one block per Silicon; Remove rests as words and asks in place, with no timeout).
+`details/details-panel.tsx` renders inside `<DetailsPortal>` (no padding or title of its own; `data-details-panel`): a
+Carbon (`person.tsx` `Profile`), a Silicon (plus `silicon-facts.tsx`: its custodian and its voice), a group
+(`group-details.tsx`: rename and describe in place, members owners first with each Silicon's custodian, add members,
+invitations, hold to leave; refreshed every 30 s while shown), several people, and every conversation's address and CLI
+(`address-section.tsx`, laid out by `cli.ts`). `group-actions.ts` writes each answer into every cache and tells the
+other tabs. `dialogs/`: `store.ts` (open, close, where focus returns; the chat's dialogs hang from the top and grow
+downward, so the field being typed in never moves), `sign-out-dialog.tsx` (`askToSignOut`), `account-picker.tsx` (chips
+and a combobox; `contacts.ts` pure), `open-conversation.ts`, the New conversation, New group and Invitations dialogs.
+`settings/settings-page.tsx`: the sections, a nav list with a scroll spy at 1100 px and wider; `sections.tsx` (Sending,
+Notifications, Account, Report a problem), `keyboard-section.tsx`.
 
 ### Public pages and files
 The landing page's words live in `lib/app.config.ts` `landing` (`components/landing/landing-page.tsx`); sign-in and
@@ -348,18 +347,18 @@ tables, llms commands, words), the session and the proxy, and the kit's manifest
 
 The browser tests (`e2e/*.spec.ts`, Playwright) run against the local chat stack (`../scripts/chat-stack/up.sh`: Silicon
 Accounts, dm-api on 4521, stand-ins for Deepgram on 4540, Briefcase on 4541 and Giphy on 4543, four Carbons and six
-Silicons). `accounts.setup.ts` takes two Carbons from the stack's identity pool (ada is "carbon", bo is "friend"), so
-no email code is spent; `support.ts` signs each test in with "Continue as". The specs: `product` (two Carbons end to
-end, a report), `thread`, `composer`, `uploads` (every way in, large files, cancelling), `voice` (Chrome's fake
-microphone fed a WAV), `details`, `sync` (conversations that start, change or end elsewhere: with conversation events,
-and with the contracts held without them for the older signals; a read on another device clearing a row's count and
-the title's at once), `shell` (toasts never cover the composer; on a phone,
-a tall dialog keeps its actions and a rename in place keeps Save and Cancel), `foundation` (⌘K's ranking and
-highlight, a conversation under another name, a draft sent in another tab, the reach question, '/' with no search on
-screen, activity per conversation, signing out with messages not sent, the sign-in page's codes), `a11y` (axe WCAG 2.2
-A/AA on every page, the run's own conversation, the palette, the account menu and a shortcut being recorded; a walk
-through the shell and the run's conversation that measures each focus stop pixel by pixel, at least 3:1 over three
-quarters of its edge, and fails on Silicon UI's ring over a control's own edge), `public`, `session`, `refresh`.
+Silicons). `accounts.setup.ts` takes two Carbons from the stack's identity pool (ada is "carbon", bo is "friend"), so no
+email code is spent; `support.ts` signs each test in with "Continue as". The specs: `product` (two Carbons end to end, a
+report), `thread`, `composer`, `uploads` (every way in, large files, cancelling), `voice` (Chrome's fake microphone fed
+a WAV), `details`, `sync` (conversations that start, change or end elsewhere: with conversation events, and with the
+contracts held without them for the older signals; a read on another device clearing a row's count and the title's at
+once), `shell` (toasts never cover the composer; on a phone, a tall dialog keeps its actions and a rename in place keeps
+Save and Cancel), `foundation` (⌘K's ranking and highlight, a conversation under another name, a draft sent in another
+tab, a removal's question in the details panel, '/' with no search on screen, activity per conversation, signing out
+with messages not sent, the sign-in page's codes), `a11y` (axe WCAG 2.2 A/AA on every page, the run's own conversation,
+the palette, the account menu and a shortcut being recorded; a walk through the shell and the run's conversation that
+measures each focus stop pixel by pixel, at least 3:1 over three quarters of its edge, and fails on Silicon UI's ring
+over a control's own edge), `public`, `session`, `refresh`.
 
 - **One run per port.** `pnpm test:e2e` builds into `.next-e2e` and serves on 4530. Parallel runs take a port of their
   own from 4700–4749 and a build directory of their own: `E2E_PORT=4712 E2E_DIST_DIR=.next-e2e-<name> pnpm exec
@@ -369,7 +368,7 @@ quarters of its edge, and fails on Silicon UI's ring over a control's own edge),
   resets its module state.
 - **Shared stack, own data.** Several people and agents use one stack at once: every test makes its own group with a
   unique name and asserts only on what it made (never on list order or total unread counts), and puts back anything
-  shared it changes (allow-lists, voices, keys). Faults are made with `page.route` in the test's own page, never through
+  shared it changes (voices, keys). Faults are made with `page.route` in the test's own page, never through
   the stand-ins' shared `/_faults`.
 - **Looking at it.** `node ../scripts/chat-stack/identities.mjs cookie ada` gives a website session cookie for any
   127.0.0.1 port; screenshots go to the ignored `screens/`.

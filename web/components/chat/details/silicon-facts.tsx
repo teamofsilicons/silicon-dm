@@ -1,18 +1,14 @@
 "use client";
 
 /**
- * What the details panel says about a Silicon: who looks after it (its custodian), its voice (the voice area's
- * AccountVoiceRow: the voice's name, a preview, and Change for whoever may change it), and, for its custodian, who may
- * start a conversation with it (its allow-list) with the way to change that.
+ * What the details panel says about a Silicon: who looks after it (its custodian) and its voice (the voice area's
+ * AccountVoiceRow: the voice's name, a preview, and Change for whoever may change it).
  *
  * DM names a Silicon's custodian on the Silicon itself (`custodian` on its AccountRef, DM 0.17); an older service only
  * through a direct conversation's `visible_to_custodians`, so there it is said for direct conversations and your own
  * Silicons.
  */
-import Link from "next/link";
-import { ArrowRight } from "lucide-react";
 import { accountName, custodianFromRef, firstName, sameAccount } from "@/lib/chat/address";
-import { useAllowList } from "@/lib/chat/hooks";
 import type { AccountRef, ConversationSummary, Me } from "@/lib/chat/types";
 import { AccountVoiceRow } from "../voice/voice-parts";
 import styles from "./details.module.css";
@@ -34,27 +30,7 @@ export function listWords(names: string[]): string {
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
-function Reach({ silicon }: { silicon: AccountRef }) {
-  const list = useAllowList(silicon.id);
-  const name = firstName(silicon);
-  const allowed = list.data?.items.map(entry => firstName(entry.account)) ?? [];
-  const words = !list.data
-    ? null
-    : allowed.length
-      ? `${listWords(allowed.length > 4 ? [...allowed.slice(0, 3), `${allowed.length - 3} more`] : allowed)} may start conversations with ${name}, besides you and your other Silicons.`
-      : `Only you and your other Silicons can start a conversation with ${name}.`;
-  return (
-    <div className={styles.fact}>
-      <span className={styles.factLabel}>Reach</span>
-      <p className={styles.text}>{words ?? (list.error ? `${name}'s allow-list could not be loaded.` : "Looking up who may reach it…")}</p>
-      <Link className={styles.factLink} href={`/settings?silicon=${encodeURIComponent(silicon.id)}#reach`}>
-        Change who can reach {name}<ArrowRight size={14} strokeWidth={1.75} aria-hidden="true" />
-      </Link>
-    </div>
-  );
-}
-
-export function SiliconFacts({ silicon, conversation, me, readOnly }: { silicon: AccountRef; conversation: ConversationSummary | undefined; me: Me; readOnly: boolean }) {
+export function SiliconFacts({ silicon, conversation, me }: { silicon: AccountRef; conversation: ConversationSummary | undefined; me: Me }) {
   const custodian = custodianOf(silicon, conversation, me);
   return (
     <section className={styles.section} aria-label={`About ${accountName(silicon)}`}>
@@ -69,7 +45,6 @@ export function SiliconFacts({ silicon, conversation, me, readOnly }: { silicon:
         <span className={styles.factLabel}>Voice</span>
         <div className={styles.voiceRow}><AccountVoiceRow account={silicon.id} /></div>
       </div>
-      {custodian === "you" && !readOnly ? <Reach silicon={silicon} /> : null}
     </section>
   );
 }

@@ -1,6 +1,6 @@
-//! The local cache of Silicon Accounts accounts, the custodian circle and Silicon
-//! allow-lists. Accounts is authoritative; every write here comes from a verified token,
-//! an app lookup or a signed webhook.
+//! The local cache of Silicon Accounts accounts and who looks after each Silicon (its
+//! custodian). Accounts is authoritative; every write here comes from a verified token, an
+//! app lookup or a signed webhook.
 
 use std::collections::HashMap;
 
@@ -440,59 +440,6 @@ impl PostgresStore {
         )
         .bind(custodian)
         .fetch_all(self.pool())
-        .await?)
-    }
-
-    /// Whether `other` may reach the Silicon `silicon` unasked: it is the Silicon itself,
-    /// its custodian, another Silicon of the same custodian, or on its allow-list.
-    ///
-    /// # Errors
-    /// Propagates database failures.
-    pub async fn may_reach_silicon(&self, silicon: &str, other: &str) -> AppResult<bool> {
-        Ok(sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1 FROM accounts s WHERE s.uuid = $1 AND (
-                    s.uuid = $2
-                    OR s.custodian_uuid = $2
-                    OR EXISTS (SELECT 1 FROM accounts o WHERE o.uuid = $2 AND o.kind = 'silicon'
-                               AND o.custodian_uuid IS NOT NULL AND o.custodian_uuid = s.custodian_uuid)
-                    OR EXISTS (SELECT 1 FROM silicon_contact_allowances a
-                               WHERE a.silicon_id = s.uuid AND a.allowed_id = $2)))",
-        )
-        .bind(silicon)
-        .bind(other)
-        .fetch_one(self.pool())
-        .await?)
-    }
-
-    /// The first (Silicon, account) pair in which the account may not reach the Silicon
-    /// unasked ([`Self::may_reach_silicon`] for every pair of `silicons` × `accounts` at once,
-    /// in their order), or `None` when every account may reach every Silicon.
-    ///
-    /// # Errors
-    /// Propagates database failures.
-    pub async fn first_unreachable_silicon(
-        &self,
-        silicons: &[&str],
-        accounts: &[&str],
-    ) -> AppResult<Option<(String, String)>> {
-        Ok(sqlx::query_as(
-            "SELECT t.id, o.id
-             FROM unnest($1::text[]) WITH ORDINALITY AS t(id, position)
-             LEFT JOIN accounts s ON s.uuid = t.id
-             CROSS JOIN unnest($2::text[]) WITH ORDINALITY AS o(id, position)
-             WHERE o.id <> t.id
-               AND s.custodian_uuid IS DISTINCT FROM o.id
-               AND NOT EXISTS (SELECT 1 FROM accounts x WHERE x.uuid = o.id AND x.kind = 'silicon'
-                               AND x.custodian_uuid IS NOT NULL AND x.custodian_uuid = s.custodian_uuid)
-               AND NOT EXISTS (SELECT 1 FROM silicon_contact_allowances a
-                               WHERE a.silicon_id = t.id AND a.allowed_id = o.id)
-             ORDER BY t.position, o.position
-             LIMIT 1",
-        )
-        .bind(silicons)
-        .bind(accounts)
-        .fetch_optional(self.pool())
         .await?)
     }
 }

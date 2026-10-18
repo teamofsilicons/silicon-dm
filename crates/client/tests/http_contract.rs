@@ -158,8 +158,8 @@ async fn handler(State(requests): State<Requests>, request: Request) -> Response
         "/api/v1/messages" => {
             return failure(
                 StatusCode::FORBIDDEN,
-                "contact_not_allowed",
-                Some("Ask si:other's custodian to allow you."),
+                "custodian_read_only",
+                Some("You read si:other's conversation as its custodian; write in one you are in."),
             );
         }
         "/api/v1/conversations/c:ada::si:cos/messages/000" => {
@@ -347,7 +347,7 @@ async fn sync_long_polls_and_errors_keep_code_message_and_hint() -> Result {
         .ok_or("expected a refusal")?;
     assert_eq!(
         (refused.code(), refused.status()),
-        ("contact_not_allowed", Some(403))
+        ("custodian_read_only", Some(403))
     );
     assert!(refused.hint().is_some_and(|h| h.contains("custodian")));
     let lease = client

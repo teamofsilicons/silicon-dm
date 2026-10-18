@@ -683,7 +683,7 @@ def allowed(value):
 
 
 def scenario_4(ids):
-    RUN.section(4, "the custodian rule, sharing by id, and Silicons only reached by accounts they allowed")
+    RUN.section(4, "the custodian rule, sharing by id, and Silicons reached by anyone signed in")
     c1, c2, s1, s2 = ids["c1"], ids["c2"], ids["s1"], ids["s2"]
     home, gid = ids["s1_home"], ids["group_s1"]
     group, history = f"/api/v1/groups/{path_of(gid)}", f"/api/v1/conversations/{path_of(gid)}/messages"
@@ -735,41 +735,39 @@ def scenario_4(ids):
     s, v = api("GET", history, c2.token)
     RUN.check("... nor its messages -> 404", s == 404, f"{s} {v}")
 
-    s, v = api("POST", "/api/v1/messages", c2.token, {"recipient_id": s1.id, "message": "hello stranger"})
-    RUN.check("c2 cannot start a conversation with the Silicon -> 403 contact_not_allowed",
-              s == 403 and code_of(v) == "contact_not_allowed", f"{s} {v}")
+    s, v = api("POST", "/api/v1/messages", c2.token, {"recipient_id": s1.id, "message": f"hello s1 {RUN.number}"})
+    RUN.check("c2, a stranger to the Silicon, starts a conversation with it (nothing needs allowing)", s == 202,
+              f"{s} {v}")
     s, v = api("POST", "/api/v1/groups", c2.token, {"name": f"C2 room {RUN.number}", "member_ids": [s1.id]})
-    RUN.check("... nor invite it to a group -> 403 contact_not_allowed",
-              s == 403 and code_of(v) == "contact_not_allowed", f"{s} {v}")
+    RUN.check("... and invites it to a group: the invitation waits for the Silicon's answer",
+              s == 201 and s1.uuid in uuids(((v or {}).get("group") or {}).get("pending_invitations"))
+              and s1.uuid not in uuids(((v or {}).get("group") or {}).get("members")), f"{s} {v}")
     silicon_token(s2)
     s, v = api("POST", "/api/v1/messages", s2.token, {"recipient_id": s1.id, "message": f"hi from s2 {RUN.number}"})
-    RUN.check("another Silicon of the same custodian reaches it without being allowed", s == 202, f"{s} {v}")
+    RUN.check("another Silicon of the same custodian reaches it too", s == 202, f"{s} {v}")
+    s, v = api("GET", "/api/v1/contracts", None)
+    reach = ((((v or {}).get("features") or {}).get("reach")) or {})
+    RUN.check("the contracts say anyone may start a conversation with any Silicon (features.reach)",
+              s == 200 and reach.get("anyone_may_start") is True, f"{s} {reach}")
 
+    # The allow-list is kept for older clients: its command and routes answer as before but limit nothing.
     code, out, err = dm(home, "--json", "allow", "add", c2.id)
-    RUN.check("the Silicon allows c2 (dm allow add)", code == 0 and c2.uuid in allowed(payload(out)),
+    RUN.check("dm allow add still answers, for older scripts", code == 0 and c2.uuid in allowed(payload(out)),
               (out + err)[-400:])
     s, v = api("GET", f"/api/v1/allow-list?for={quote(s1.id)}", c1.token)
-    RUN.check("its custodian sees the list (?for=si:...)", s == 200 and c2.uuid in allowed(v), f"{s} {v}")
-    s, v = api("POST", "/api/v1/messages", c2.token, {"recipient_id": s1.id, "message": f"hello s1 {RUN.number}"})
-    RUN.check("now c2 can start a conversation with it", s == 202, f"{s} {v}")
-    s, v = api("POST", "/api/v1/groups", c2.token, {"name": f"C2 room {RUN.number}", "member_ids": [s1.id]})
-    RUN.check("and invite it to a group (the Silicon still accepts or declines)",
-              s == 201 and s1.uuid in uuids(((v or {}).get("group") or {}).get("pending_invitations")), f"{s} {v}")
+    RUN.check("its custodian still reads the list (?for=si:...)", s == 200 and c2.uuid in allowed(v), f"{s} {v}")
     code, out, err = dm(home, "--json", "allow", "remove", c2.id)
-    RUN.check("the Silicon removes c2 from its list (dm allow remove)",
-              code == 0 and c2.uuid not in allowed(payload(out)), (out + err)[-400:])
+    RUN.check("dm allow remove still answers", code == 0 and c2.uuid not in allowed(payload(out)), (out + err)[-400:])
     s, v = api("POST", "/api/v1/groups", c2.token, {"name": f"C2 second room {RUN.number}", "member_ids": [s1.id]})
-    RUN.check("a new invitation from c2 is refused again -> 403 contact_not_allowed",
-              s == 403 and code_of(v) == "contact_not_allowed", f"{s} {v}")
+    RUN.check("off the list, c2 still invites the Silicon (the list limits nothing)", s == 201, f"{s} {v}")
     s, v = api("POST", "/api/v1/messages", c2.token, {"recipient_id": s1.id, "message": "still there?"})
-    RUN.check("the conversation they already have keeps working (the list governs new contact)", s == 202,
-              f"{s} {v}")
+    RUN.check("... and their conversation keeps working", s == 202, f"{s} {v}")
     s, v = api("POST", f"/api/v1/allow-list?for={quote(s1.id)}", c1.token, {"account_ids": [c2.id]})
-    RUN.check("the custodian allows an account for its Silicon", s == 200 and c2.uuid in allowed(v), f"{s} {v}")
+    RUN.check("the custodian still changes the list for its Silicon", s == 200 and c2.uuid in allowed(v), f"{s} {v}")
     s, v = api("DELETE", f"/api/v1/allow-list?for={quote(s1.id)}", c1.token, {"account_ids": [c2.id]})
-    RUN.check("... and removes it", s == 200 and c2.uuid not in allowed(v), f"{s} {v}")
+    RUN.check("... and takes the account off again", s == 200 and c2.uuid not in allowed(v), f"{s} {v}")
     s, v = api("POST", f"/api/v1/allow-list?for={quote(s1.id)}", c2.token, {"account_ids": [c2.id]})
-    RUN.check("an unrelated Carbon cannot allow itself -> 403 not_custodian",
+    RUN.check("an unrelated Carbon cannot change it -> 403 not_custodian",
               s == 403 and code_of(v) == "not_custodian", f"{s} {v}")
 
 

@@ -9,7 +9,7 @@ never printed unless a command was asked for exactly that secret.
 scripts/chat-stack/up.sh                  # start whatever is not running (idempotent), print the URLs
 scripts/chat-stack/up.sh --restart-dm     # rebuild DM, re-run its migrations, restart dm-api (picks up new routes)
 scripts/chat-stack/status.sh              # JSON health of every part; exit 1 when a required part is down
-node scripts/chat-stack/smoke.mjs         # prove it: CLI send, API read, both Deepgram protocols, GIFs, a Briefcase upload, the website
+node scripts/chat-stack/smoke.mjs         # prove it: CLI send, API read, a stranger reaching a Silicon, both Deepgram protocols, GIFs, a Briefcase upload, the website
 scripts/chat-stack/down.sh                # stop what up.sh started (--keep-accounts, --db)
 ```
 
@@ -39,15 +39,18 @@ development secrets.
 
 `up.sh` creates the pool once (`.dev/identities.json`, 0600): four Carbons and six Silicons.
 
-| Carbon | Looks after | Silicon allow-lists in DM |
-|---|---|---|
-| `ada` (`c:dmc-ada`) | `scout`, `quill` | scout: bo, cy, atlas, ember. quill: bo, cy |
-| `bo` (`c:dmc-bo`) | `atlas`, `pip` | atlas: ada, cy, scout, ember. pip: ada, cy |
-| `cy` (`c:dmc-cy`) | `ember`, `nova` | ember: ada, bo, scout, atlas. nova: ada, bo |
-| `di` (`c:dmc-di`) | nobody | on nobody's list: use Di to see a refusal |
+| Carbon | Looks after |
+|---|---|
+| `ada` (`c:dmc-ada`) | `scout`, `quill` |
+| `bo` (`c:dmc-bo`) | `atlas`, `pip` |
+| `cy` (`c:dmc-cy`) | `ember`, `nova` |
+| `di` (`c:dmc-di`) | nobody: a stranger to every Silicon |
 
-Silicon ids are `si:dmc-<name>`. A custodian and its other Silicons never need listing; every `up.sh` puts these
-allow-lists back. Name anyone by short name, id (`c:dmc-ada`, also `c:ada`) or uuid:
+Silicon ids are `si:dmc-<name>`. Anyone signed in to DM may message any Silicon and invite it to a group (since DM
+0.17.1), so the pool sets no allow-lists, and nothing is ever refused with `contact_not_allowed`; lists that earlier
+runs set stay in DM's database, where they limit nothing. Use Di to see what a stranger meets: its first message to
+any Silicon goes through, and its invitation waits for the Silicon's answer (`smoke.mjs` checks both). Name anyone by
+short name, id (`c:dmc-ada`, also `c:ada`) or uuid:
 
 ```sh
 H=scripts/chat-stack/identities.mjs

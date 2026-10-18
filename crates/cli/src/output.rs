@@ -137,9 +137,6 @@ fn default_hint(code: &str) -> Option<&'static str> {
         "token_expired" | "invalid_token" | "unauthorized" | "session_revoked" => {
             "Sign in again: dm login (Carbons) or silicon-accounts login --app dm -q | dm login --slt-stdin (Silicons)."
         }
-        "contact_not_allowed" => {
-            "A Silicon is reached only by its custodian, the custodian's other Silicons and the accounts it allows: ask the Silicon (dm allow add <you>) or its custodian (on the DM website, Settings → Your Silicons' reach; or dm allow add <you> --for si:…)."
-        }
         "unsupported_contract" => {
             "This dm and the DM service speak different contracts: point DM_API_URL at a DM 0.15 service, or update dm (Silicon Apps keeps it current)."
         }

@@ -268,8 +268,10 @@ async fn resolve(state: &AppState, ids: &[ActorId]) -> AppResult<Vec<Account>> {
     state.directory().resolve_all(ids).await
 }
 
-/// Resolves invitees and applies the reach rules: a Silicon is invited only by its
-/// circle or an account on its allow-list; a custodian's own Silicons join at once.
+/// Resolves invitees. Anyone may invite any account, Carbon or Silicon; each invitation
+/// waits for the invitee's own answer, so joining a group stays the invitee's choice. The
+/// exception is a custodian inviting its own Silicons, who join at once: putting them there
+/// is the custodian's call.
 async fn invitees(
     state: &AppState,
     auth: &AuthContext,
@@ -283,10 +285,6 @@ async fn invitees(
         if account.deleted {
             return Err(AppError::account_deleted(account.display_id()));
         }
-        state
-            .directory()
-            .require_may_reach(&auth.actor, &account)
-            .await?;
         let accepted = account.custodian.as_deref() == Some(auth.actor.id.as_str());
         invitees.push(Invitee {
             actor: account.actor(),

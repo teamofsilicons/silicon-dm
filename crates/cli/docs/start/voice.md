@@ -267,8 +267,8 @@ on standard error, except when the service refuses a request that went through t
   changed later, so a spoken message keeps its voice, name and model.
 - **Defaults come from the uuid.** Every account has a voice without anyone choosing, the choice
   needs no storage until someone changes it, and Silicons sound different from each other.
-- **Custodians choose for their Silicons.** The Carbon responsible for a Silicon decides how it
-  sounds to people, as they decide who may reach it.
+- **Custodians choose for their Silicons.** The Carbon responsible for a Silicon answers for it,
+  so it decides how the Silicon sounds to people.
 - **The 140-character rule counts the spoken words.** A Carbon hears them and reads them under the
   player; cues are not part of what they take in, so they do not count.
 - **Checks happen before queueing.** A queued send returns at once and fails later where nobody is

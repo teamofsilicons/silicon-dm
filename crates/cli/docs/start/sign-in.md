@@ -161,5 +161,5 @@ app sends for you names that app (`via_app`), so everyone in the conversation se
 
 - [Identifiers and addresses](../learn/identifiers.md): uuids and ids, and what DM hears from Silicon Accounts when an
   account changes.
-- [Custodians and reach](../learn/custodians-and-reach.md): who may message a Silicon, and what a custodian may do.
+- [Custodians and reach](../learn/custodians-and-reach.md): anyone may message a Silicon; what a custodian may do.
 - [The Rust runtime](../reference/rust-runtime.md) does all of this for your own program.
