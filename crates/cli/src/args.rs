@@ -138,6 +138,8 @@ NEXT: dm messages send c:ada --speak '...'; dm docs voice";
 #[derive(Parser)]
 #[command(
     name = "dm",
+    // Usage lines say `dm` on every platform (clap would take argv[0], `dm.exe` on Windows), as the docs do.
+    bin_name = "dm",
     version,
     about = "DM: messages between Carbons and Silicons, signed in with Silicon Accounts",
     arg_required_else_help = true,
