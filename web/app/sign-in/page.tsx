@@ -46,7 +46,7 @@ export default async function SignInPage({ searchParams }: PageProps<"/sign-in">
     return (
       <main id="main" className={styles.page}>
         <div className={styles.column}>
-          <a href="/" className={styles.brand} aria-label={`${BRAND_NAME}, home`}><Wordmark /></a>
+          <a href="/" className={styles.brand} data-sq="surface" aria-label={`${BRAND_NAME}, home`}><Wordmark /></a>
           <section data-sq="surface" className={styles.card} aria-labelledby="sign-in-title">
             <span className={styles.icon} data-sq="surface" aria-hidden="true"><DoorOpen size={24} strokeWidth={1.5} /></span>
             <h1 id="sign-in-title" className={styles.title}>You cancelled signing in</h1>
@@ -69,7 +69,7 @@ export default async function SignInPage({ searchParams }: PageProps<"/sign-in">
   return (
     <main id="main" className={styles.page}>
       <div className={styles.column}>
-        <a href="/" className={styles.brand} aria-label={`${BRAND_NAME}, home`}><Wordmark /></a>
+        <a href="/" className={styles.brand} data-sq="surface" aria-label={`${BRAND_NAME}, home`}><Wordmark /></a>
         <section data-sq="surface" className={styles.card} aria-labelledby="sign-in-title">
           <h1 id="sign-in-title" className={styles.title}>{reason === "session_ended" ? "Sign in again" : `Sign in to ${appConfig.name}`}</h1>
           <p className={styles.lede}>

@@ -271,13 +271,15 @@ test("a long message is cut at a space, and a long file name keeps its end", () 
 });
 
 test("a first unread only a few more pages can reach is waited for; one further back opens the thread at once", () => {
-  // The first page (50) and four more reach 250 back.
-  assert.equal(unreadWithinReach(120, 50, 4), true);
-  assert.equal(unreadWithinReach(250, 50, 4), true);
-  assert.equal(unreadWithinReach(251, 50, 4), false);
-  assert.equal(unreadWithinReach(600, 50, 4), false);
-  assert.equal(unreadWithinReach(undefined, 50, 4), true, "an older service says no count: as before");
-  assert.equal(unreadWithinReach(3, 0, 4), true, "an empty first page never divides by nothing");
+  // The first page (50) and four older pages of 100 reach 450 back.
+  assert.equal(unreadWithinReach(120, 50, 100, 4), true);
+  assert.equal(unreadWithinReach(450, 50, 100, 4), true);
+  assert.equal(unreadWithinReach(451, 50, 100, 4), false);
+  assert.equal(unreadWithinReach(1000, 50, 100, 4), false, "999+ unread opens at once");
+  assert.equal(unreadWithinReach(250, 50, 50, 4), true, "pages of one size: as before");
+  assert.equal(unreadWithinReach(251, 50, 50, 4), false);
+  assert.equal(unreadWithinReach(undefined, 50, 100, 4), true, "an older service says no count: as before");
+  assert.equal(unreadWithinReach(3, 0, 0, 4), true, "an empty first page never divides by nothing");
 });
 
 test("failures the thread and the composer show: the service's words, or the website's plain words where nothing answered", () => {

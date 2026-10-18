@@ -15,6 +15,8 @@
 .control { position: relative; display: flex; min-width: 0; height: var(--control-height-md); box-sizing: border-box; align-items: center; border: 1px solid var(--border-strong); border-radius: var(--radius-control); corner-shape: var(--corner-shape); background: var(--surface); transition: border-color var(--duration-fast) var(--ease-standard), background-color var(--duration-fast) var(--ease-standard); }
 @media (hover: hover) and (pointer: fine) { .control[data-state="idle"]:hover { border-color: var(--foreground); } }
 .control:has(.recorder:focus-visible) { border-color: var(--foreground); }
+/* The control's ink edge is the recorder's focus: the global keyboard ring (which outlives `outline: none`) is off here. */
+.recorder:focus-visible { --focus-outline: transparent; }
 .control[data-state="recording"] { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 4%, var(--surface)); }
 .control[data-state="conflict"] { border-color: var(--warning); }
 .field[data-disabled] .control { opacity: .5; background: var(--surface-muted); }
@@ -34,6 +36,7 @@
 .action { display: grid; width: 32px; height: 32px; place-items: center; padding: 0; border: 0; border-radius: calc(var(--radius-control) - var(--space-tight)); corner-shape: var(--corner-shape); background: transparent; color: var(--text-muted); cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard); }
 @media (hover: hover) and (pointer: fine) { .action:hover { background: var(--surface-muted); color: var(--foreground); } }
 .action:active, .action:focus-visible { background: var(--surface-muted); color: var(--foreground); outline: none; }
+.action:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); --focus-outline: transparent; }
 
 .messageSlot { position: relative; overflow: hidden; }
 .message { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-hair) var(--space-group); padding-top: var(--space-related); font-size: var(--text-xs); line-height: var(--leading-body); }

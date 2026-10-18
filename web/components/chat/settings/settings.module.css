@@ -11,6 +11,9 @@
 .title { color: var(--accent-ink); font-family: var(--font-serif); font-size: clamp(2rem, 3.4vw, 2.75rem); font-weight: 400; letter-spacing: -.01em; line-height: 1.05; }
 .lede { color: var(--text-secondary); text-wrap: pretty; }
 .toc { position: sticky; top: var(--space-8); align-self: start; grid-area: toc; }
+/* Keyboard focus on a section in Silicon UI's nav list: an accent edge inside the item (the links' faint 12 % halo
+   alone did not show). */
+.toc a:focus-visible { box-shadow: var(--focus-edge); outline: none; --focus-outline: transparent; }
 .sections { display: grid; min-width: 0; grid-area: sections; }
 
 /* Narrower than the nav list: the sections' names as one wrapping line of links. */

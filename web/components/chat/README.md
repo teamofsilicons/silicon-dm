@@ -69,7 +69,9 @@ service ──GET /api/v1/sync?wait=25──▶ sync.ts ──getMessage──�
    ├── outbox-store.ts ◀── queueSend (composer): localStorage, one Idempotency-Key per send, Waiting/Failed
    ├── draft-store.ts  ◀── useDraft (composer): localStorage at once, PUT after 1.5 s with If-Match, 409 → merge
    ├── receipts.ts     ◀── noteRead (message list, on screen in a focused tab): receipts.read up_to, ≤ 1 per second
-   └── presence.ts     ◀── startPresence (lease every 25 s), reportActivity (≤ 1 per 3 s), useParticipantsPresence (15 s)
+   │                       (a read covers the delivered receipt; busy or away → wait, Retry-After first)
+   └── presence.ts     ◀── startPresence (lease every 25 s), reportActivity (≤ 1 per 3 s, about its conversation),
+                           useParticipantsPresence (15 s; 4 s while someone's activity shows)
 news.ts ◀▶ this browser's other tabs (BroadcastChannel): a conversation started, joined or left here refreshes theirs;
            a conversation read here takes the service's unread count there
 ```
@@ -77,8 +79,11 @@ news.ts ◀▶ this browser's other tabs (BroadcastChannel): a conversation star
 Conversations reach an open list through the sync feed too. When GET /api/v1/contracts announces
 `features.conversation_events` (DM 0.17), the loop asks for them (`include=conversations`): a conversation created
 with you, an invitation, a group joined (`added`, `invitation_accepted`) or left (`left`, `removed`) on any device, a
-rename, a new description, members or owners. `sync-plan.ts` `planConversationEvents` turns a page of them into what
-to do, the last word on each conversation winning; `sync.ts` `applyConversationPlan` drops what you left at once,
+rename, a new description, members or owners, and a read of yours on any device (`read`, with its unread count and
+read position as of its place in the feed). `sync-plan.ts` `planConversationEvents` turns a page of them into what
+to do, the last word on each conversation winning (a read is not among them: `planFeed` puts it among the page's
+messages in the feed's order, and `sync.ts` `applyRead` sets the row's count there, so a message before it is in its
+count and one after it counts on top; the badge and "(n) DM" follow a read on your phone at once); `sync.ts` `applyConversationPlan` drops what you left at once,
 asks for a changed conversation again and puts it in its row's place (`cache.ts` `replaceSummary`, which keeps a
 newer last message the feed brought meanwhile), and asks for the list or the invitations once per burst. While the
 service offers them (`features.ts` `useConversationEvents`), the invitations are asked for every 60 s instead of 15
@@ -105,28 +110,32 @@ another device is not in your feed), and the whole list every 10 minutes. A cust
 page and its thread's newest page every 10 s (`mergeNewestMessages`). A message deleted while it counted as unread makes
 its row ask the service for its count. A search (the sidebar's, or a query in ⌘K) loads the rest of the list page by
 page (`useLoadEverything`, at most 2000 conversations; the service has no search of its own), and so do ⌥⇧↓ when
-nothing unread is loaded below and Mark everything read (`loadConversationsUntil`). The title's "(n)" counts the loaded
-conversations.
+nothing unread is loaded below and Mark everything read (`loadConversationsUntil`). The title's "(n)" counts every
+conversation (`unread-total.ts`): the first page of your list carries the service's unread total (DM 0.17,
+`unread: {conversations, messages}`), the part of it in conversations not loaded is kept, and the loaded rows are added
+as they are now; a later page takes its rows out of that part. Against an older service it counts the loaded rows.
+Unread counts stop at 1,000 at the service and show as "999+" (`format.ts` `unreadBadge`).
 
 | Module | What |
 | --- | --- |
 | `types.ts` | The service's shapes. 0.17 fields are optional (`speech`, `voice`, `gif`, `attachment_details`, `metadata`, `unread_count`, `last_read_message_id`, `me.speech`, a Silicon's `custodian`), so the website works against an older service too. |
 | `api.ts` | One typed function per route the website uses. `getConversation` falls back to the group route or the list on an older service; `getContracts` says what the service offers (read once by the sync loop). |
-| `hooks.ts` | `useMe`, `useConversations` (infinite), `useListSafetyNet`, `useLoadEverything`, `loadConversationsUntil`, `useConversation` (a list row only for exactly its address: one kept for its history is fetched as itself, with its banner), `useMessages` (newest page first; `messages` oldest first; a view polls its newest page), `useInvitations` (15 s; 60 s while conversation events flow), `useGroup`, `useAllowList`. |
+| `hooks.ts` | `useMe`, `useConversations` (infinite; your own list's pages tell `unread-total.ts`), `useListSafetyNet`, `useLoadEverything`, `loadConversationsUntil`, `useConversation` (a list row only for exactly its address: one kept for its history is fetched as itself, with its banner), `useMessages` (the newest 50, then older pages of 100, `OLDER_PAGE_LIMIT`, so a first unread far up takes half the round trips; `messages` oldest first; a view polls its newest page), `useInvitations` (15 s; 60 s while conversation events flow), `useGroup`, `useAllowList`. |
 | `cache.ts` | Pure cache updates: merge (a deletion is never undone, receipts never go back), upsert in order, a row moves up with its preview, time and unread count, read results, unread totals, a fresh first page over the loaded ones (`mergeListHead`, `mergeNewestMessages`). |
-| `sync-plan.ts`, `sync.ts` | Dedupe on `event_id`, one fetch per message applied in the page's order (`fetchInOrder`), a message that keeps failing left behind, conversation events (`planConversationEvents`, `applyConversationPlan`), cursor in sessionStorage, 409 → `reset=true` and refresh everything, backoff 1 s → 30 s, wakes on `online`, a visible tab and `wakeSync`, then `recoverQueries`; stops on 401; `refreshConversationsSoon`, `refreshInvitationsSoon`. One loop per tab. |
+| `sync-plan.ts`, `sync.ts` | Dedupe on `event_id`, one fetch per message applied in the page's order (`planFeed`, `fetchInOrder`, reads applied among them, `applyRead`), a message that keeps failing left behind, conversation events (`planConversationEvents`, `applyConversationPlan`), cursor in sessionStorage, 409 → `reset=true` and refresh everything, backoff 1 s → 30 s, wakes on `online`, a visible tab and `wakeSync`, then `recoverQueries`; stops on 401; `refreshConversationsSoon`, `refreshInvitationsSoon`. One loop per tab. |
 | `features.ts` | What the contracts offer: conversation events (`offersConversationEvents`, `useConversationEvents`) and activity per conversation (`offersScopedActivity`, `useScopedActivity`). |
 | `news.ts` | Conversation news and reads between this browser's tabs. |
 | `outbox.ts`, `outbox-store.ts` | The send state machine (pure, tested) and its runner: 5 automatic attempts while online (1, 2, 4, 8 s apart), offline attempts don't count, Retry/Discard, per-conversation order, a Web Lock per item across tabs (an item another tab sends is left alone 2 s at a time, or until that tab's outbox changes; one the stored outbox no longer has was sent there, and is dropped); `unsentCount` for signing out. |
 | `drafts.ts`, `draft-store.ts` | The draft merge (pure, tested) and its runner: one request per opening, a 404 is "no draft"; the tabs follow each other's stored drafts (`adoptStored`: a draft sent in one leaves the others, a stale tab never answers another's draft with one keystroke); a send while a save is on its way deletes the draft once that save answers. |
 | `local-data.ts` | The Carbon's words this browser keeps (outbox, drafts, tray, screens, photo shapes, sync cursors): `forgetChatData` on signing out (storage takes no new writes after it), `forgetOtherAccounts` when an account signs in. |
-| `receipts.ts` | Read when on screen in a focused tab, delivered when fetched, `markAllRead` (⇧Esc). Never in a custodian's view. |
-| `presence.ts` | This tab's lease and activity (about the conversation on screen, `setPresenceConversation`); others' presence for the open conversation only. Someone's activity shows only when the service says it per conversation (contracts `features.presence_activity`, `scope: "conversation"`: renew_presence takes `conversation_id`, GET presence `?conversation=`); otherwise it may be about another conversation and is not shown (`presenceHere`). |
+| `receipts.ts`, `receipt-plan.ts` | Read when on screen in a focused tab, delivered when fetched, `markAllRead` (⇧Esc); one entry per conversation, so a delivered receipt waits a moment for a read that covers it and is then not sent (`flushPlan`); a bulk call that marked a full 5,000 is made again while the count says more are left (`leftOlder`, at most 20 calls); a failure that passes (offline, 408, 429, 5xx) waits for Retry-After, else 2 s doubling to a minute, six times, and a refusal waits for a newer message (`receiptRetryDelay`). Never in a custodian's view. |
+| `presence.ts` | This tab's lease and activity: `reportActivity(activity, conversation)` is about the composer's own conversation (an upload goes on in its own after you move on), else the one on screen. Others' presence for the open conversation only, every 15 s, every 4 s while someone's activity shows. Someone's activity shows only when the service says it per conversation (contracts `features.presence_activity`, `scope: "conversation"`: renew_presence takes `conversation_id`, GET presence `?conversation=`); otherwise it may be about another conversation and is not shown (`presenceHere`). On such a service activity about no conversation is not sent at all, and a renewal refused for its conversation (left, only invited) renews the lease alone. |
+| `unread-total.ts` | "(n) DM" over every conversation: the service's total from the list's first page, minus the rows it covered, plus the loaded rows now (`noteListHead`, `noteListPage`, `useUnreadTotal`). |
 | `address.ts` | Addresses and titles, `custodianFromRef` and `custodianWords` ("Looked after by Ada Marlow"). |
 | `timeline.ts`, `markdown.ts` | Day dividers, the New messages divider and runs of one sender within 5 minutes; markdown-lite to a tree (`thread/rich-text.tsx` renders it as React elements, never HTML). Both pure and tested. |
 | `preview.ts`, `format.ts`, `media.ts`, `compose.ts`, `codes.ts` | Row lines, times and sizes, attachment kinds, edit content and reply previews, code order. |
 | `settings.ts` | This browser's preferences (`dm:settings:v1`): `sendWith`, `notifications`, `autoplaySpeech`, `playbackSpeed`, `listenModeByDefault`, `detailsOpen`. |
-| `title.ts`, `hydrated.ts`, `storage.ts`, `notifications.ts` | "(n) DM"; render-after-hydration; storage that never throws (and `freezeStorage`); opt-in notifications, never for a conversation another tab shows (`trackScreen`, `setScreenConversation`). |
+| `title.ts`, `hydrated.ts`, `storage.ts`, `notifications.ts` | "(n) DM" ("999+" from 1,000); render-after-hydration; storage that never throws (and `freezeStorage`); opt-in notifications, never for a conversation another tab shows (`trackScreen`, `setScreenConversation`). |
 
 Kept in the browser: `dm:outbox:v1:<account>`, `dm:draft:v1:<account>:<address>`, `dm:tray:v1:<account>:<address>`,
 `dm:screen:v1:<account>` (which conversation each visible tab shows), `dm:settings:v1`, `dm:shortcuts:v1`, `dm:voices:v1`, `dm:voice-cache:v1` (the index of Cache Storage
@@ -151,7 +160,9 @@ fire in fields), and `react.tsx` dispatches:
   Settings → Keyboard show the reason ("Speech is not set up on this DM service, …"), and the palette leaves them out.
 
 A message has the keyboard only when it was reached by keyboard (`:focus-visible` on `[data-message-row]`); a message
-key that does not apply to it is swallowed. Printable keys typed outside fields in a thread go to the composer. The
+key that does not apply to it is swallowed. Printable keys typed outside fields in a thread, or with the keyboard
+nowhere, go to the composer; opening a conversation gives its field the keyboard (not on touch screens, where it would
+raise the on-screen keyboard; `thread/open-focus.ts`). The
 cheatsheet (`keyboard/cheatsheet.tsx`) and Settings → Keyboard (`settings/keyboard-section.tsx`, Silicon UI's
 ShortcutRecorder) are generated from the registry, and so is `docs/reference/keyboard-shortcuts.md`
 (`tests/docs-shortcuts.test.ts` fails until the page matches, and prints its tables).
@@ -172,9 +183,10 @@ focus fell to the page or stayed in the row).
 | File | What |
 | --- | --- |
 | `conversation-view.tsx` | Owns the conversation, its messages and the outbox; opens at the first unread. Provides `ThreadActions` (stable for the visit) and `ThreadPeople`. The offline banner, the load-failure state, the custodian view's note (it says whose messages may be deleted there). |
-| `message-list.tsx` | `role="log"`, `aria-live="polite"`. Rows added above the old top come in quietly (only new messages from others are read out). The reading position is anchored to the first message on screen; a 140-row window for long threads; older pages load within 1600 px of the top; "Jump to latest ↓ (n)"; `#code` links and reply jumps (`thread-model` `locateCode`); one IntersectionObserver for receipts; message keys. |
+| `open-focus.ts` | Where the keyboard goes as conversations open and close: `takeKeyboardOnOpen` (on opening, a keyboard on the page or on a list row moves to the field; it waits while a closing palette gives the keyboard back), `takeKeyboardFromOwnRow` (a click or Enter on the open conversation's own row), `returnKeyboardToRow` (Back in the one-pane layout puts it on that conversation's row). Never on touch screens. |
+| `message-list.tsx` | `role="log"`, `aria-live="polite"`. Rows added above the old top come in quietly (only new messages from others are read out). The reading position is anchored to the first message on screen, and kept while a toolbar is open under a selected message (instead of sticking to the bottom); a 140-row window for long threads, which shrinks back to the newest rows once the reader is at the bottom (Jump to latest, End, a send, or resting there); older pages load within 1600 px of the top; "Jump to latest ↓ (n)"; `#code` links and reply jumps (`thread-model` `locateCode`); one IntersectionObserver for receipts; message keys. A standing live region says Listen's progress and offline. |
 | `message-row.tsx`, `thread-actions.tsx` | `MessageRow` (memoized on `sameMessageVersion`): the bubble, meta (time, state, Edited, via, ISI), Listen, delete asked in place (the question focuses Delete: Enter deletes, Esc keeps). One message is in use at a time (`thread-actions` InUse store, set by the message list): a selection, by keyboard or a tap (a finger, or any click under 768 px), wins over a hover, hover counts only on devices that hover and never in the phone layout, and focus moving within the selected row (its ⋯) keeps the selection. Its toolbar is placed by `thread-model` `toolbarPlacement`: beside the bubble, beside it without the time (compact), under a selected message in the thread's flow, over its top edge only where nothing is drawn, or not at all; a hover never moves the thread. One action layer at a time: `ThreadActions.layers` counts what is open over the thread (the message menu, the Edited popover, Message details, the lightbox through `useLayer(open)`; account cards through one MutationObserver on `data-hover-card`; `useLayerOpen()` reads it), and while one is, the message in use stays as it is and its toolbar is hidden in place (`visibility: hidden`, so nothing moves). `canDelete`: your own messages, and in a custodian's view the viewed Silicon's own (`deleteMessage(…, view)` sends `?for=si:x`); `cancelDelete(code)` takes the question back. `PendingRow` draws a Waiting or Failed send as the message will look (`pendingMedia`: its pictures, voice and files from the tray). |
-| `message-content.tsx`, `attachments.tsx`, `rich-text.tsx` | Reply quote, text, speech and voice notes (with address and code; a spoken message with a written caption shows the caption first, then the player and the spoken words as a one-line transcript), photos at their own shape (one alone up to 360 × 420 px, `photoRatio`; two to four in rows of one height, `thread-model` `galleryRows` and `galleryRatio`; shapes remembered in `dm:photo-shapes:v1` so a reopened thread does not move) with the lightbox, video, files, GIFs (pausable), bundles, tombstones. Every attachment address goes through `displayUrl`, downloads through `downloadUrl`. |
+| `message-content.tsx`, `attachments.tsx`, `rich-text.tsx` | Listen on words is `ListenProgress` inside the bubble (a faint tint and a line at its foot; it moves nothing). Reply quote, text, speech and voice notes (with address and code; a spoken message with a written caption shows the caption first, then the player and the spoken words as a one-line transcript), photos at their own shape (one alone up to 360 × 420 px, `photoRatio`; two to four in rows of one height, `thread-model` `galleryRows` and `galleryRatio`; shapes remembered in `dm:photo-shapes:v1` so a reopened thread does not move) with the lightbox, video, files, GIFs (pausable), bundles, tombstones. Every attachment address goes through `displayUrl`, downloads through `downloadUrl`. A photo or GIF that could not load is a card with Try again, tried again by itself after 4 s and when the browser is back online (`useRetries`); a file card under a photo, gallery or video is as wide as they are. Pictures, videos and GIFs on other sites load inline, as in 0.16.1 (`lib/upload/display.ts` `loadsByItself`/`remoteSite` say which would tell their site who reads; a placeholder that loads them on request is a Carbon's decision). |
 | `message-menu.tsx`, `message-details-dialog.tsx` | One menu for the thread; Message details (Silicon UI JSON viewer, the link, the `dm` commands from `messageCommands`, laid out by `details/cli.ts` `layoutCommand`). |
 | `thread-header.tsx`, `thread-beginning.tsx`, `account-card.tsx` | The status line (presence, activity, "N members" or "3 people"), Listen mode, details, ⋯ (copy the address, link, CLI command; Mark as read); the top of history; a person's hover card in groups. |
 | `row-focus.ts`, `thread-model.ts`, `use-online.ts` | Roving Tab order (`data-row-tab`, `data-row-keep-tab`); pure logic, tested in `tests/thread-model.test.ts`: among it `plainFailure` (a failure where nothing answered, or the answer said nothing, in a Carbon's words; its code and status kept so what branches on them still works), `routingOf` (`routed_to`, or an older service's `recipient_id` with an `@`), `messageLabel` (a row's name: sender, time, the caption or words), `sentSentence` and `conversationPhrase` (Message details: "Sent today at 09:55 by Sol in your conversation with Sol."; the conversation view passes `where`). `useOnline`: no presence is shown while this browser is offline. |
@@ -208,22 +220,32 @@ its link (never fetched by DM's server). The path a file takes:
    Carbon's own Briefcase (`apps/dm/`) as they arrive, never holding them on disk or in memory: as DM acting for the
    Carbon (a User verification proof per upload, a fresh proof token per Briefcase request, revoked after), reserve,
    transfer with the exact Content-Length (asking `Expect: 100-continue`, so a refusal from the headers arrives before
-   any byte is sent), commit, link; a failure anywhere cancels the reservation. Node's 5-minute deadline for a
-   request's body is lifted on the website's server (`liftRequestDeadline`, through the `http.server.request.start`
-   diagnostics channel: per server, not per route); headers must still arrive in 60 s. It answers
-   `{url, name, content_type, size}`.
+   any byte is sent), commit, link; a failure anywhere cancels the reservation. It answers
+   `{url, name, content_type, size}`. When the server starts, `instrumentation.ts` runs `prepareServer`
+   (`lib/server/briefcase.ts`): from the server's first request, whatever its path, a request's body may take a day
+   (Node's own deadline is 5 minutes, and a route's code loads too late for that route's first request; headers must
+   still arrive in 60 s), and idle connections are kept 185 s, longer than a load balancer's, unless
+   `KEEP_ALIVE_TIMEOUT` is set. Told to stop (SIGTERM, a deploy), the server takes no new upload (503
+   `website_restarting`; the page sends the file again by itself) and stops those under way, cancelling their
+   reservations (`stopUploads`; a save after its 202 is kept alive for Next's exit with `after()`). A cancel Briefcase
+   refuses is logged and never reported as done.
 4. **Still saving**: when Briefcase has not answered 20 s after the last byte (it stores a large file for minutes
    before it answers, and a load balancer cuts a request that stays silent), the server answers 202
    `{"type": "upload.saving", "data": {id, name, content_type, size}}` and goes on saving; the page asks
    `GET /api/uploads/saving?id=…` (each ask waits up to 25 s) until it has the link, and `DELETE` cancels it (the tray's
-   Cancel; a page that goes sends it as it goes). A save nobody asks about for 10 minutes is cancelled. The tray says
+   Cancel; a page that goes sends it as it goes), answering its state: `cancelled` (stopped, and Briefcase let go),
+   `stopped` (stopped here, but Briefcase did not let go: the reservation expires there within a day), `cancelling`
+   (still stopping after 5 s) or `saved`. A save nobody asks about for 10 minutes is cancelled. The tray says
    "Saving… this can take a few minutes".
 
 Its rules: same-origin writes only (`cross_site_request`), at most 6 uploads per account at once (429
 `too_many_uploads`; a tab sends 3 at a time, the rest wait in the tray), file names cleaned of control and direction
 characters, a sign-in in its last 30 s answers 401 `session_refresh_needed` (the page renews and sends again), and it
 never logs a file's name or bytes. The tray shows each file's stage, bytes, speed and time left, with Cancel (at most
-100 items, DM's own limit for a message; folders bringing more than 20 files ask first). `GET|HEAD /api/uploads/file?url=` is the only way the browser loads
+100 items, DM's own limit for a message). A drop's loose files go in at once; a dropped folder with more than 20 files
+asks only about the folder's files and names what it left out (`composer/drop-plan.ts` `planDrop`). What the composer
+says goes through two always-mounted live regions, and the empty field's words fit its width
+(`composer/placeholder.ts` `fitPlaceholder`). `GET|HEAD /api/uploads/file?url=` is the only way the browser loads
 Briefcase's bytes (they come with `Cross-Origin-Resource-Policy: same-origin`): only the configured Briefcase's public
 files, Range passed through, inline only for raster images, audio, video and PDF, everything else
 `application/octet-stream` as an attachment, always `nosniff` and a sandbox CSP, so an uploaded file can never run as
@@ -235,8 +257,11 @@ from local bytes, never other types, since a `blob:` URL is DM's origin.
 `useListenModeView`, `useListenModeRuntime`, `canListen`, `toggleListen` (in a gesture), `warmListen`,
 `useListenState`, `messageKey`. Behind it: `player.ts` (one `<audio>` per tab, speed with pitch kept, Media Session),
 `sources.ts` (speech fetched once with If-None-Match, a 64 MB memory LRU and per-account Cache Storage, voice notes
-decoded into peaks), `listen-mode.ts` + `queue.ts` (one tab speaks per conversation through a Web Lock, Listen here
-moves it; tabs on different conversations take turns; it holds while you type or record; a deleted message stops),
+decoded into peaks; a busy voice, 503 `speech_unavailable`, is asked again quietly after its Retry-After, up to three
+times, `whileBusy`), `listen-mode.ts` + `queue.ts` (one tab speaks per conversation through a Web Lock, Listen here
+moves it; tabs on different conversations take turns; it holds while you type or record; a deleted message stops;
+the queue keeps the codes it has seen after the moment Listen mode started, so a message that lands after a newer one
+is still spoken, once),
 `recorder.ts` + `microphone.ts` (recording keeps what a vanished microphone recorded), `takes.ts` (a voice message up
 to 48 hours, `recorder.ts` `MAX_RECORDING_MS`, with `limitWarning` and `limitReached`: written as it is recorded to the
 origin's private file system (`dm-recordings/<id>/`), else IndexedDB (`dm-recordings`), else memory, in segments every
@@ -249,9 +274,11 @@ being downloaded and decoded whole),
 `account-voices.ts`, `voices.ts` (the default rule and the sample line), `words.ts` (`voiceWords`: every voice failure
 a Carbon reads, in their words),
 `peaks.ts`, `wav.ts`, `lru.ts`. Components: `voice-parts.tsx` (`VoiceNote`, `SpeechMessage`, and re-exports),
-`player-ui.tsx`, `listen-mode-toggle.tsx`, `composer-voice.tsx` (the microphone and its recording bar),
+`player-ui.tsx`, `listen-mode-toggle.tsx` (`silicons`: Listen mode only where a Silicon takes part), `composer-voice.tsx`
+(the microphone and its recording bar, which shows the field's words: they go with the voice note as its caption),
 `voice-picker.tsx` (radio cards with ▶ samples, in a popover, or a bottom sheet under 768 px; `AccountVoiceRow`), `settings-parts.tsx` (Settings → Voice and
-Listening). `data-voice-ui` marks every voice surface.
+Listening). `data-voice-ui` marks every voice surface. What the recorder, Listen mode and the player say goes through
+live regions that are always on the page (inserted with their words, a region is not read out).
 
 ### Details, dialogs, settings (`details/**`, `dialogs/**`, `settings/**`)
 `details/details-panel.tsx` renders inside `<DetailsPortal>` (no padding or title of its own; `data-details-panel`):
@@ -281,9 +308,12 @@ change, keep the edit small, record its new hash and a `local_edit` saying what 
 ranking `filter`, draw-order rows and highlighted best match; dialog's focus brought into view; tooltip opening on
 keyboard focus only; user-menu's name and sheet; shortcut-recorder's "Esc" and its name while recording; json-viewer's
 tree item names and stable layout group; segmented-control's stable layout group; dropdown-menu's hints hidden on touch;
-hold-to-confirm's painted fill text; inline-edit's room for its actions). Silicon UI draws a keyboard ring with
-`!important`: a control that draws its own focus (a fill, an edge, an underline) sets `--focus-outline: transparent` in
-that rule.
+hold-to-confirm's painted fill text; inline-edit's room for its actions; shortcut-recorder's one focus indicator).
+Keyboard focus is one indicator that changes the control by at least 3:1 (`DESIGN.md`, Focus and accessibility): an
+accent edge inside the control (`box-shadow: var(--focus-edge)`, `--focus-edge-on-fill` on a filled one), a bordered
+control's own edge in accent, a field's ink edge, an underline, or Silicon UI's ring. Silicon UI draws its ring with
+`!important`: a rule that draws its own focus sets `--focus-outline: transparent`, or the ring lands on it as a second
+line. Silicon UI's code block clips its own ring, so `styles/base.css` draws the edge inside its source.
 
 ## Extension points
 
@@ -322,12 +352,14 @@ Silicons). `accounts.setup.ts` takes two Carbons from the stack's identity pool 
 no email code is spent; `support.ts` signs each test in with "Continue as". The specs: `product` (two Carbons end to
 end, a report), `thread`, `composer`, `uploads` (every way in, large files, cancelling), `voice` (Chrome's fake
 microphone fed a WAV), `details`, `sync` (conversations that start, change or end elsewhere: with conversation events,
-and with the contracts held without them for the older signals), `shell` (toasts never cover the composer; on a phone,
+and with the contracts held without them for the older signals; a read on another device clearing a row's count and
+the title's at once), `shell` (toasts never cover the composer; on a phone,
 a tall dialog keeps its actions and a rename in place keeps Save and Cancel), `foundation` (⌘K's ranking and
 highlight, a conversation under another name, a draft sent in another tab, the reach question, '/' with no search on
 screen, activity per conversation, signing out with messages not sent, the sign-in page's codes), `a11y` (axe WCAG 2.2
-A/AA on every page, the run's own conversation, the palette, the account menu and a shortcut being recorded; no ring
-over a control's own focus look), `public`, `session`, `refresh`.
+A/AA on every page, the run's own conversation, the palette, the account menu and a shortcut being recorded; a walk
+through the shell and the run's conversation that measures each focus stop pixel by pixel, at least 3:1 over three
+quarters of its edge, and fails on Silicon UI's ring over a control's own edge), `public`, `session`, `refresh`.
 
 - **One run per port.** `pnpm test:e2e` builds into `.next-e2e` and serves on 4530. Parallel runs take a port of their
   own from 4700–4749 and a build directory of their own: `E2E_PORT=4712 E2E_DIST_DIR=.next-e2e-<name> pnpm exec

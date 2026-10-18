@@ -26,6 +26,7 @@ import { ArrowDown } from "lucide-react";
 import { motionTokens } from "@/components/silicon-ui/lib/motion-tokens";
 import { compareCodes, isAfter, isMessageCode } from "@/lib/chat/codes";
 import { canEditHere } from "@/lib/chat/compose";
+import { unreadBadge } from "@/lib/chat/format";
 import type { OutboxItem } from "@/lib/chat/outbox";
 import { noteRead } from "@/lib/chat/receipts";
 import { buildTimeline, type TimelineEntry, type TimelineRow } from "@/lib/chat/timeline";
@@ -873,7 +874,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
                 return <div key={row.key} data-row-key={row.key} className={styles.day} role="separator" aria-label={row.label}><span>{row.label}</span></div>;
               }
               if (row.type === "unread") {
-                return <div key={row.key} data-row-key={row.key} className={styles.unread} role="separator" aria-label={`New messages${row.count ? `, ${row.count}` : ""}`} data-unread-divider=""><span>New messages</span></div>;
+                return <div key={row.key} data-row-key={row.key} className={styles.unread} role="separator" aria-label={`New messages${row.count ? `, ${unreadBadge(row.count)}` : ""}`} data-unread-divider=""><span>New messages</span></div>;
               }
               const value = row.entry.value;
               if (value.kind === "pending") return <PendingRow key={row.key} item={value.item} first={row.first} last={row.last} group={group} fresh={openedNewest !== null} />;

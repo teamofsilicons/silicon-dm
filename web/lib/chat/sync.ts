@@ -18,8 +18,11 @@
  * Conversation events (DM 0.17): when GET /api/v1/contracts announces them, the loop asks for them too
  * (`include=conversations`), so a conversation created with you, an invitation, a group joined or left on another
  * device, a rename and a change of members or owners reach the list and the invitations within a second
- * (planConversationEvents, then applyConversationPlan). Against an older service it reads messages only, and the
- * invitations' 15 s check and the list's own refresh keep things complete (lib/chat/features.ts).
+ * (planConversationEvents, then applyConversationPlan). A read on any device of yours (`read`, with its unread count
+ * as of its place in the feed) is applied in the feed's order among the messages (planFeed, applyRead): the row's
+ * badge and the title's "(n)" follow at once, where they used to wait up to a minute for the list's refresh. Against
+ * an older service it reads messages only, and the invitations' 15 s check and the list's own refresh keep things
+ * complete (lib/chat/features.ts).
  *
  * Only your own account syncs: a custodian's view of a Silicon's conversations refreshes by polling instead
  * (lib/chat/hooks.ts).
@@ -27,10 +30,10 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { ApiError } from "@/lib/errors";
 import { getContracts, getConversation, getMessage, syncPage } from "./api";
-import { applyMessageToSummaries, dropSummary, replaceSummary, summariesOf, upsertMessage, type ConversationPages, type MessagePages } from "./cache";
+import { applyMessageToSummaries, applyReadToSummaries, dropSummary, replaceSummary, summariesOf, upsertMessage, type ConversationPages, type MessagePages } from "./cache";
 import { offersConversationEvents, offersScopedActivity, setConversationEventsActive, setScopedActivity } from "./features";
 import { chatKeys } from "./keys";
-import { failureOfMessage, fetchInOrder, planConversationEvents, planEvents, SeenEvents, syncDelay, type ConversationPlan, type MessageRef } from "./sync-plan";
+import { failureOfMessage, fetchInOrder, planConversationEvents, planFeed, SeenEvents, syncDelay, type ConversationPlan, type MessageRef, type ReadRef } from "./sync-plan";
 import { readText, writeText } from "./storage";
 import type { AccountRef, ConversationSummary, Message } from "./types";
 import { sameAccount } from "./address";
@@ -270,6 +273,20 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
     void queryClient.invalidateQueries({ queryKey: chatKeys.messages(ref.conversation), exact: true });
     refreshConversationsSoon(queryClient);
   };
+  /**
+   * A read on any device of yours: the row takes the count and the read position the service had then (the messages
+   * before the read are in it; the ones after it are applied on top, in order). A conversation the list has not loaded
+   * makes the list be asked for again, for the title's total.
+   */
+  const applyRead = (ref: ReadRef) => {
+    let listed = false;
+    queryClient.setQueryData<ConversationPages>(chatKeys.conversations(), data => {
+      listed = summariesOf(data).some(item => item.id === ref.conversation);
+      return applyReadToSummaries(data, ref.conversation, { unread_count: ref.unreadCount, ...(ref.lastRead !== undefined ? { last_read_message_id: ref.lastRead } : {}) });
+    });
+    if (!listed && queryClient.getQueryData(chatKeys.conversations())) refreshConversationsSoon(queryClient);
+    for (const id of ref.eventIds) seen.add(id);
+  };
   const LEFT = Symbol("left");
   const fetchRef = async (ref: MessageRef): Promise<Message | null | typeof LEFT> => {
     try {
@@ -325,7 +342,15 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
       await applyConversationPlan(queryClient, plan, signal, options.onConversationGone);
       for (const id of plan.eventIds) seen.add(id);
       try {
-        await fetchInOrder(planEvents(page.events, seen), FETCH_CONCURRENCY, fetchRef, applyFetched);
+        await fetchInOrder<MessageRef | ReadRef, Message | null | typeof LEFT | ReadRef>(
+          planFeed(page.events, seen),
+          FETCH_CONCURRENCY,
+          async item => ("read" in item ? item : fetchRef(item)),
+          (item, result) => {
+            if ("read" in item) applyRead(item);
+            else applyFetched(item, result as Message | null | typeof LEFT);
+          },
+        );
       } finally {
         for (const id of recount) void refreshConversation(queryClient, id, signal);
         recount.clear();

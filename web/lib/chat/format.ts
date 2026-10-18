@@ -58,6 +58,18 @@ export function lastSeen(value: string | null | undefined, now: Date = new Date(
   return `last seen ${new Intl.DateTimeFormat(LOCALE, { month: "short", day: "numeric", timeZone }).format(date)}`;
 }
 
+/**
+ * The most an unread count shows. The DM service stops counting a conversation's unread messages at 1,000 (counting is
+ * a scan, and a Silicon that never marks anything read would otherwise pay for its whole history on every list), so
+ * from 1,000 on a count is "999+": it means "a thousand or more", never an exact number.
+ */
+export const UNREAD_SHOWN_MAX = 999;
+
+/** An unread count as a badge, a divider or the tab's title shows it: "7", "999+" from 1,000 on. */
+export function unreadBadge(count: number): string {
+  return count > UNREAD_SHOWN_MAX ? `${UNREAD_SHOWN_MAX}+` : String(Math.max(0, Math.round(count)));
+}
+
 /** 1536 → "1.5 KB". */
 export function fileSize(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return "";

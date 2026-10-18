@@ -9,7 +9,7 @@ import Link from "next/link";
 import { memo, type ReactNode } from "react";
 import { conversationHref, conversationKind, conversationKindWords, conversationTitle, otherParticipants, sameAccount } from "@/lib/chat/address";
 import { unreadOf } from "@/lib/chat/cache";
-import { rowTime } from "@/lib/chat/format";
+import { rowTime, unreadBadge } from "@/lib/chat/format";
 import { plainPreview } from "@/lib/chat/markdown";
 import { activityWords } from "@/lib/chat/presence";
 import { rowPreview } from "@/lib/chat/preview";
@@ -88,8 +88,8 @@ export const ConversationRow = memo(function ConversationRow({ conversation, per
           <span className={styles.rowBottom}>
             {line}
             {unread > 0 ? (
-              <span className={styles.badge} data-sq="surface">
-                {unread > 99 ? "99+" : unread}
+              <span className={styles.badge} data-sq="surface" data-unread-count={unread}>
+                {unreadBadge(unread)}
                 <span className="sr-only"> unread</span>
               </span>
             ) : state ? (

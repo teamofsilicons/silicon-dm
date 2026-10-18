@@ -1,13 +1,14 @@
 /**
  * What the player says when audio cannot be had (lib/voice/player.ts `playbackError`, in lib/voice/words.ts's words,
  * as transcription and dictation failures are), and where a voice note is read from (lib/voice/sources.ts
- * `noteSource`): the page reads bytes only from this site, anything else plays as it is.
+ * `noteSource`): the page reads bytes only from this site, anything else plays as it is. A busy voice is asked again
+ * quietly (`whileBusy`) before a failure shows.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ApiError } from "../lib/errors";
 import { playbackError } from "../lib/voice/player";
-import { noteSource } from "../lib/voice/sources";
+import { BUSY_RETRIES, busyWait, noteSource, voiceBusy, whileBusy } from "../lib/voice/sources";
 import { voiceWords } from "../lib/voice/words";
 
 test("a request that never got an answer is told in plain words, not as the request", () => {
@@ -106,4 +107,51 @@ test("a voice note is read through this site when it is a Briefcase file; other 
   assert.equal(noteSource("https://user:secret@cdn.example.com/note.ogg"), null, "never with credentials in the link");
   assert.equal(noteSource("javascript:alert(1)"), null);
   assert.equal(noteSource("not a url"), null);
+});
+
+test("a busy voice (503 speech_unavailable) is asked again after the wait it asks for, a few times, before it fails", async () => {
+  const busy = new ApiError({ status: 503, code: "speech_unavailable", message: "Speech is busy.", retryAfter: 0 });
+  assert.equal(voiceBusy(busy), true);
+  assert.equal(voiceBusy(new ApiError({ status: 503, code: "server_unavailable", message: "Down." })), false, "only the voice being busy");
+  assert.equal(voiceBusy(new ApiError({ status: 429, code: "speech_rate_limited", message: "Limit." })), false, "a limit is said at once");
+  assert.equal(busyWait(new ApiError({ status: 503, code: "speech_unavailable", message: "", retryAfter: 5 })), 5000);
+  assert.equal(busyWait(new ApiError({ status: 503, code: "speech_unavailable", message: "" })), 5000, "5 s when it said nothing");
+  assert.equal(busyWait(new ApiError({ status: 503, code: "speech_unavailable", message: "", retryAfter: 120 })), 10_000, "never more than 10 s at a time");
+  assert.equal(busyWait(busy), 1000, "never at once");
+
+  let calls = 0;
+  const started = Date.now();
+  const audio = await whileBusy(async () => {
+    calls += 1;
+    if (calls < 3) throw busy;
+    return "audio";
+  });
+  assert.equal(audio, "audio");
+  assert.equal(calls, 3, "two busy answers, then the audio");
+  assert.ok(Date.now() - started >= 1900, "it waited between the tries");
+
+  calls = 0;
+  await assert.rejects(whileBusy(async () => {
+    calls += 1;
+    throw busy;
+  }), (error: unknown) => error === busy);
+  assert.equal(calls, BUSY_RETRIES + 1, "bounded: then the failure shows");
+
+  calls = 0;
+  const refused = new ApiError({ status: 422, code: "speech_rejected", message: "No." });
+  await assert.rejects(whileBusy(async () => {
+    calls += 1;
+    throw refused;
+  }), (error: unknown) => error === refused);
+  assert.equal(calls, 1, "a refusal is not asked again");
+
+  const controller = new AbortController();
+  const slow = new ApiError({ status: 503, code: "speech_unavailable", message: "Speech is busy.", retryAfter: 5 });
+  const waiting = whileBusy(async () => {
+    throw slow;
+  }, controller.signal);
+  setTimeout(() => controller.abort(), 50);
+  const before = Date.now();
+  await assert.rejects(waiting, (error: unknown) => (error as { name?: string }).name === "AbortError", "a press elsewhere stops the wait");
+  assert.ok(Date.now() - before < 2000, "at once, not after the 5 s");
 });

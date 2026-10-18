@@ -113,10 +113,28 @@ photos are 30 % squircles (Silicon UI's Avatar), never circles. Silicon UI compo
 
 ## Focus and accessibility
 
-- **No outline rings.** Keyboard focus is a fill (`--surface-muted`), an edge (`--sq-stroke: var(--accent)`) or an
-  underline on plain links, always different from the resting look (`e2e/a11y.spec.ts` walks the shell to check, and
-  fails on a ring). Silicon UI draws its keyboard ring with `!important`, so `outline: none` does not remove it: a rule
-  that draws its own focus also sets `--focus-outline: transparent`.
+- **One focus indicator, and it changes the control by at least 3:1** (WCAG 1.4.11 asks that of a focus indicator
+  against what it covers). Which one depends on the control:
+  - **Squircle buttons and rows** (the composer's +, Send and microphone, the thread header's buttons, `IconAction`,
+    the recording bar's ✕ and ✓, Stop speaking, the list's rows, the menus' triggers): their hover fill and an accent edge inside their own shape,
+    `box-shadow: var(--focus-edge)` (2 px of accent), or `var(--focus-edge-on-fill)` (a light ring inside the edge) on
+    a filled one such as Send. A control with a border of its own turns that border accent instead
+    (`--sq-stroke: var(--accent)`, with a 1 px inset line so the edge is 2 px). Inside the shape, the edge never meets a
+    neighbour's: the composer's field, the header's hairline, the next row.
+  - **Fields**: their edge in ink, as Silicon UI's fields show it (the composer's box takes it from its field only,
+    `:has()`), and the caret.
+  - **Text-like controls** (links, a sender's name, Edited, Show all, Back): an underline, thicker or in ink with the
+    keyboard on it. A change of colour alone is not enough.
+  - **Silicon UI's own components**, and controls inside a message with room around them and no edge of their own (a
+    file's Download, a GIF's pause, an audio file's play, the waveform): their fill and Silicon UI's 2 px accent ring
+    (`foundation.css`).
+- **Never two at once.** Silicon UI draws its ring with `!important`, so `outline: none` does not remove it: a rule that
+  draws its own focus (an edge, an underline) sets `--focus-outline: transparent` in the same rule, or the ring lands on
+  top of it as a second line. A fill alone (1.1:1) or a hairline (`--border-strong`, 1.4:1) is not a focus indicator.
+- `e2e/a11y.spec.ts` walks the shell and a conversation (the header, the message list, the composer) and fails on a
+  stop whose focus changes less than 3:1 (fewer than three quarters of its edge's length of pixels changing that much
+  against its resting look) or that draws Silicon UI's ring over an edge of its own; `e2e/thread.spec.ts` and
+  `e2e/voice.spec.ts` measure the thread's and the voice area's controls the same way.
 - **Tooltips** open on hover, and on focus only when the keyboard put it there (never after a click or a tap, never on
   a touch screen alone); menus show their keys only where there is a keyboard to press them.
 - A skip link to `#main`, one `main`, labelled navigation, one `h1`.

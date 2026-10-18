@@ -99,7 +99,7 @@ under a file lock ([runtime](rust-runtime.md)).
 | Groups | `groups`, `group`, `create_group`, `update_group`, `invite_group_members`, `remove_group_members`, `add_group_owners`, `remove_group_owners`, `invitations`, `accept_invitation`, `decline_invitation`, `leave_group` |
 | Allow-lists | `allow_list`, `allow`, `disallow` (each with an optional Silicon for its custodian) |
 | Updates | `sync(&SyncRequest { cursor, limit, reset, wait, include })`, `sync_reset`; `include: Some(SYNC_INCLUDE_CONVERSATIONS.into())` adds conversation events (`SyncEventKind::Conversation`, with `change`) |
-| Presence and GIFs | `presence`, `renew_presence`, `close_presence`, `gifs` |
+| Presence and GIFs | `presence`, `presence_in(account, conversation, for_silicon)`, `renew_presence`, `renew_presence_in(device, activity, conversation)`, `close_presence`, `gifs` |
 | Other | `report` |
 
 DM records no telemetry; `with_telemetry`, `with_source` and `telemetry` remain as deprecated methods that do
@@ -120,7 +120,9 @@ What 0.17 added (every field is optional on the wire, so the client reads older 
 | `MessageCreate` | `speech: Option<SpeechInput>`; `SpeechInput { script, voice }` (`voice` `None`: the sender's voice). It is sent whole: attachment objects with `name`, `content_type` and `size` (a bare link stays a URL), `voice` as a voice note, `gif` as a GIF and `metadata`, each only when present, so a plain message keeps the shape every service takes. `needs_dm_0_17()` says whether it carries any of them; `Operation::send_message` then picks `send_spoken_message` or `send_rich_message`, which relays before 0.17 leave queued instead of stripping. |
 | `Message` | `speech` (`{voice, voice_name, script, model, status, duration_milliseconds, peaks}`), `voice` (`VoiceNote { url, permanent_url, name, content_type, size, duration_milliseconds }`), `gif`, `attachment_details` (`AttachmentDetails { kind: attachment\|voice\|gif, url, name, content_type, size }`), `routed_to` (the routing address the sender gave, or `None`) |
 | `Conversation` | `unread_count`, `last_read_message_id`, `draft_version` (your draft's version, `None` when there is none) |
-| `SyncRequest`, `SyncEvent` | `include` (`SYNC_INCLUDE_CONVERSATIONS`); `SyncEventKind::Conversation` events carry `change` and an empty `message_id` |
+| `SyncRequest`, `SyncEvent` | `include` (`SYNC_INCLUDE_CONVERSATIONS`); `SyncEventKind::Conversation` events carry `change` and an empty `message_id`; a `read` event also `unread_count` and `last_read_message_id` |
+| `Page` | `unread: Option<UnreadTotal { conversations, messages }>` on a conversation list's first page |
+| `PresenceLease` | `conversation_id`: the conversation this device's activity is about |
 | `Actor` | `custodian: Option<Box<Actor>>` (a Silicon's custodian) |
 | `SignInDiscovery`, `Me` | `speech` (`enabled`, models, `voices_path`, limits; `Me` adds your voice) |
 | `VoiceCatalog` | `model`, `enabled`, `items: Vec<Voice>`, `default_rule`; `get(key)`, `keys()` |
@@ -175,7 +177,11 @@ A DM service configured for Ting also hands each update to Ting; validate and hy
 Receipts are explicit: `record_receipt(conversation, message, ReceiptStatus::Delivered, device)` once the message
 reached the device, `Read` once it was read, or `read_up_to(conversation, "0a3")` for everything from others up to a
 message. Presence leases use a stable device id: `renew_presence(device, activity)` while active,
-`close_presence(device)` when done.
+`close_presence(device)` when done. Say which conversation the activity is in with
+`renew_presence_in(device, Some(Activity::Typing), Some("c:ada::si:scout"))`: only accounts in it see it (the website
+shows activity only there), and `presence_in(account, Some(conversation), None)` reads someone's activity in one
+conversation. Both need a DM 0.17 service (`features.presence_activity` in `contracts()`); an older one refuses the
+conversation.
 
 ## ISI addresses
 

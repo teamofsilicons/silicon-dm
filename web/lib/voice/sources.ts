@@ -11,6 +11,9 @@
  *   recording, which carries no duration. A long one (past 12 MB, about half an hour; a voice message may last 48
  *   hours) is never downloaded whole: the <audio> element streams it in ranges, with the length the message gives.
  * - Voice samples: POST /api/v1/speech with the sample line, in the voice being tried.
+ * - A busy voice (503 `speech_unavailable`, Retry-After 5: the service's renders or audio streams are all taken) is
+ *   asked again quietly, up to three times after the wait it asks for, while the bubble says "Preparing audio…"
+ *   (whileBusy); only then does the failure show.
  *
  * Caches: an in-memory LRU of object URLs (64 MB; what is playing is pinned), and Cache Storage behind it so a reload
  * (or a dropped connection) still has what was heard. The persisted copy belongs to the signed-in account (one cache
@@ -246,6 +249,53 @@ async function fetchSpeech(url: string, etag: string | null): Promise<Fetched> {
   return { blob, etag: response.headers.get("etag"), durationMs: await durationOf(blob, response.headers.get("x-dm-duration-ms")) };
 }
 
+/**
+ * How often a busy voice is asked again, quietly, before the Carbon hears that it failed. The service answers 503
+ * `speech_unavailable` with Retry-After (5 s) when its renders or its audio streams are all taken, or when the voice did
+ * not answer in time: both pass within seconds, so the bubble goes on saying "Preparing audio…" meanwhile.
+ */
+export const BUSY_RETRIES = 3;
+const BUSY_WAIT_MAX_MS = 10_000;
+
+/** A busy voice (503 `speech_unavailable`), as opposed to a refusal or a service that is not there. */
+export function voiceBusy(error: unknown): boolean {
+  const failure = ApiError.from(error);
+  return failure.status === 503 && failure.code === "speech_unavailable";
+}
+
+/** The wait the service asked for (Retry-After), between 1 and 10 seconds, 5 when it said nothing. */
+export function busyWait(error: unknown): number {
+  const seconds = ApiError.from(error).retryAfter;
+  return Math.min(BUSY_WAIT_MAX_MS, Math.max(1000, Math.round((typeof seconds === "number" && Number.isFinite(seconds) ? seconds : 5) * 1000)));
+}
+
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("The audio is no longer wanted.", "AbortError"));
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("The audio is no longer wanted.", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Runs `work`, and again after the service's wait while the voice is busy (BUSY_RETRIES times at most). */
+export async function whileBusy<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await work();
+    } catch (error) {
+      if (attempt >= BUSY_RETRIES || !voiceBusy(error) || signal?.aborted) throw error;
+      await pause(busyWait(error), signal);
+    }
+  }
+}
+
 /* Spoken messages and Listen ---------------------------------------------------------------------------------------- */
 
 /** What a message's speech is: where to fetch it, and what makes one rendering differ from another. */
@@ -274,7 +324,7 @@ async function fetchSpeechAudio(source: SpeechSource, key: string): Promise<Cach
   if (stored && pinned) return remember(key, stored.blob, { durationMs: stored.durationMs, etag: stored.etag, speaker });
   let fetched: Fetched;
   try {
-    fetched = await fetchSpeech(messageSpeechUrl(source.address, source.code, source.view), stored?.etag ?? null);
+    fetched = await whileBusy(() => fetchSpeech(messageSpeechUrl(source.address, source.code, source.view), stored?.etag ?? null));
   } catch (error) {
     // Offline with a copy at hand: the copy, even if a newer voice exists.
     if (stored && ApiError.from(error).isNetwork) return remember(key, stored.blob, { durationMs: stored.durationMs, etag: stored.etag, speaker });
@@ -573,7 +623,7 @@ export function sampleTrack(voice: Pick<VoiceOption, "key" | "name">, name: stri
       if (hit) return loaded(key, hit);
       const stored = await persistedGet(key);
       if (stored) return loaded(key, remember(key, stored.blob, { durationMs: stored.durationMs, etag: stored.etag, speaker: null }));
-      const { blob, headers } = await renderSpeech(sampleScript(name), voice.key, signal);
+      const { blob, headers } = await whileBusy(() => renderSpeech(sampleScript(name), voice.key, signal), signal);
       const durationMs = await durationOf(blob, headers.get("x-dm-duration-ms"));
       const entry = remember(key, blob, { durationMs, etag: headers.get("etag"), speaker: null });
       void persistedPut(key, blob, { etag: headers.get("etag"), durationMs });

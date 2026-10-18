@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { conversationHref, conversationKind, conversationKindWords, conversationTitle, custodianFromRef, custodianWords, decodeAddress, directParticipants, encodeAddress, isiOf, shellQuote } from "../lib/chat/address";
 import { canEditHere, editContent, replyPreviewOf } from "../lib/chat/compose";
-import { clockDuration, fileSize, lastSeen, rowTime } from "../lib/chat/format";
+import { clockDuration, fileSize, lastSeen, rowTime, unreadBadge } from "../lib/chat/format";
 import { attachmentName, mediaKind, messageMedia, safeHttpsUrl } from "../lib/chat/media";
 import { messageGist, rowPreview, spokenWords } from "../lib/chat/preview";
 import type { AccountRef, ConversationSummary, Message } from "../lib/chat/types";
@@ -37,6 +37,14 @@ test("durations, sizes and last seen read the way people say them", () => {
   assert.equal(lastSeen("2026-10-17T14:55:00+05:30", now, TZ), "last seen 5 minutes ago");
   assert.equal(lastSeen("2026-10-17T09:30:00+05:30", now, TZ), "last seen today at 09:30");
   assert.equal(lastSeen(null, now, TZ), "offline");
+});
+
+test("unread counts: the number up to 999, then 999+ (the DM service stops counting at 1,000)", () => {
+  assert.equal(unreadBadge(1), "1");
+  assert.equal(unreadBadge(120), "120");
+  assert.equal(unreadBadge(999), "999");
+  assert.equal(unreadBadge(1000), "999+", "the service's cap: a thousand or more");
+  assert.equal(unreadBadge(3000), "999+", "a total of capped counts is no exact number either");
 });
 
 test("a row's line: You:, a sender's first name in groups, and what a message carries", () => {

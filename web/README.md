@@ -54,6 +54,7 @@ Read on the server at request time (a missing or malformed value stops the serve
 | `EXTRA_IMG_ORIGINS`, `EXTRA_ORIGINS` | More profile-photo origins; another explicitly trusted origin of this site |
 | `BRIEFCASE_API_URL` | Silicon Briefcase's API origin, where this website saves a Carbon's files and voice notes (https; plain http only for a stand-in on this machine). Unset: uploads are off, the + menu and the microphone say so, and links, GIFs and dictation still work |
 | `UPLOADS_MAX_BYTES` | Optional: the largest file this website takes, in bytes, for an operator who wants a limit of their own (a larger one is refused before any byte is sent). Unset, the only limit is Silicon Briefcase's, 5 TiB a file; files pass through without being held on disk or in memory |
+| `KEEP_ALIVE_TIMEOUT` | Optional, in milliseconds (Next's own setting): how long an idle connection is kept. Unset, the website keeps it 185 s, longer than a load balancer's 180 s, so the balancer never reuses a connection the server just closed (`prepareServer`, `instrumentation.ts`) |
 
 Production uses https and Secure cookies. Uploads in production also need Briefcase to accept DM's proofs for its
 upload scopes.
@@ -79,9 +80,13 @@ Testing section has the rules for running beside others on one stack.
 
 ## Deployment
 
-Build `Dockerfile.gateway` with the web directory as its context. It produces the Next standalone server, listening
-on port 4315 (the artifact keeps the gateway name for release compatibility). `deploy/aws/web.yaml` deploys the
-website to the existing ALB and ECS cluster at the public DM hostname.
+Build `Dockerfile.gateway` with the web directory as its context. It produces the Next standalone server (`node
+server.js`; the artifact keeps the gateway name for release compatibility). Production runs it as `dm-accounts-web` on
+port 4316 behind the load balancer, upgraded with `deploy/parallel/upgrade_web.py`; `deploy/aws/web.yaml` is the
+Fargate alternative. When the server starts, `instrumentation.ts` runs `prepareServer` (`lib/server/briefcase.ts`):
+from its first request a request's body may take a day (Node's own limit is 5 minutes) and idle connections are kept
+185 s; told to stop, it takes no new upload and cancels those under way. `../docs/operations/deployment.md` has the
+host, the settings, stopping, rolling back and the checks after a deployment.
 
 Register the production `PUBLIC_URL/auth/callback` before switching traffic. Keep one website build and secret per
 deployment. Sign-in redirects, refreshed sessions, writes, uploads and sign-out must be checked on the deployed origin;

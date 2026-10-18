@@ -142,7 +142,7 @@ pub(crate) fn lane(operation: &crate::relay::Operation) -> String {
         | GetBundle {
             conversation_id, ..
         } => format!("conversation:{conversation_id}"),
-        SetPresence { .. } => "presence".into(),
+        SetPresence { .. } | SetScopedPresence { .. } => "presence".into(),
         _ => String::new(),
     }
 }
@@ -358,7 +358,7 @@ impl Queue {
 }
 impl Queue {
     pub fn expire_transient_commands(&self) -> Result<()> {
-        self.database()?.execute("UPDATE outbox SET state='failed',error=?1 WHERE state='pending' AND json_extract(request,'$.request.operation')='set_presence'",params![json!({"code":"transient_expired","message":"presence change expired when the daemon stopped; send a current activity"}).to_string()])?;
+        self.database()?.execute("UPDATE outbox SET state='failed',error=?1 WHERE state='pending' AND json_extract(request,'$.request.operation') IN ('set_presence','set_scoped_presence')",params![json!({"code":"transient_expired","message":"presence change expired when the daemon stopped; send a current activity"}).to_string()])?;
         Ok(())
     }
 }

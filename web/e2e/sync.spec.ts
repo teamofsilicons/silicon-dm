@@ -227,3 +227,59 @@ test("with conversation events, an invitation, a join, a rename and a removal on
   await ada.close();
   await bo.close();
 });
+
+/** Whether the stack's DM service puts your own reads in your sync feed (conversation event `read`, DM 0.17). */
+async function serviceHasReadEvents(context: BrowserContext): Promise<boolean> {
+  const response = await context.request.get("/api/api/v1/contracts", { headers: sameOrigin({ "x-dm-contract-version": "4" }) });
+  const body = (await response.json().catch(() => null)) as { data?: { features?: { conversation_events?: { changes?: string[] } } } } | null;
+  return !!body?.data?.features?.conversation_events?.changes?.includes("read");
+}
+
+/** The "(n)" in front of the tab's title (0 without one; "999+" is 1000). */
+const titleCount = async (page: Page) => {
+  const match = /^\((\d+)(\+)?\)\s/.exec(await page.title());
+  return match ? Number(match[1]) + (match[2] ? 1 : 0) : 0;
+};
+
+test("a read on another device clears the row's count and lowers the tab's title at once; the title counts every conversation", async ({ browser }) => {
+  const stamp = Date.now().toString(36);
+  const ada = await accountsSession(browser, "carbon");
+  const bo = await accountsSession(browser, "friend");
+  const page = await ada.newPage();
+  const errors = watchErrors(page);
+  const friend = await bo.newPage();
+  await signIn(page, runAccounts().carbon.email);
+  test.skip(!(await serviceHasReadEvents(ada)), "the DM service on the stack does not put reads in the sync feed");
+  await signIn(friend, runAccounts().friend.email);
+  const name = `Read check ${stamp}`;
+  const group = await api(bo, "POST", "/api/v1/groups", { type: "create_group", data: { name, member_ids: [runAccounts().carbon.id] } });
+  await api(ada, "POST", `/api/v1/groups/${encodeURIComponent(group.id)}/accept`);
+  await page.goto("/c");
+  await expect(row(page, name)).toBeVisible();
+
+  // Bo writes twice: Ada's row counts them, and so does the title.
+  const words = [`One ${stamp}`, `Two ${stamp}`];
+  let last: { "message-id": string } | null = null;
+  for (const message of words) last = await api<{ "message-id": string }>(bo, "POST", `/api/v1/conversations/${encodeURIComponent(group.id)}/messages`, { type: "message.create", data: { message } });
+  const badge = row(page, name).locator("[data-unread-count]");
+  await expect(badge).toHaveAttribute("data-unread-count", "2");
+  // The title counts every conversation, loaded or not: the service's total (the first page of the list says it).
+  const total = async () => (await api<{ unread?: { messages: number } }>(ada, "GET", "/api/v1/conversations?limit=50")).unread?.messages ?? null;
+  const serviceTotal = await total();
+  if (serviceTotal !== null && serviceTotal < 1000) await expect.poll(() => titleCount(page)).toBe(serviceTotal);
+  const before = await titleCount(page);
+
+  // Ada reads them on her phone: this tab hears it from the sync feed (conversation event `read`), not a minute later.
+  const at = Date.now();
+  await api(ada, "POST", `/api/v1/conversations/${encodeURIComponent(group.id)}/receipts`, { type: "receipts.read", data: { up_to: last!["message-id"] } });
+  await expect(badge).toHaveCount(0, { timeout: 5_000 });
+  const took = Date.now() - at;
+  test.info().annotations.push({ type: "latency", description: `the row's count cleared ${took} ms after the read elsewhere` });
+  if (before < 1000) await expect.poll(() => titleCount(page), { timeout: 5_000 }).toBe(before - 2);
+
+  // Ada leaves the run's group, so her list does not keep it (Bo stays its owner).
+  await api(ada, "POST", `/api/v1/groups/${encodeURIComponent(group.id)}/leave`);
+  expect(errors).toEqual([]);
+  await ada.close();
+  await bo.close();
+});

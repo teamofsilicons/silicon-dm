@@ -8,7 +8,7 @@
 /* The padding (taken back by the negative margin) gives keyboard focus a soft fill to show in. */
 .brand { --sq-r: 12px; --sq-fill: transparent; display: inline-flex; min-width: 0; align-items: center; margin: -6px -8px; padding: 6px 8px; background: var(--sq-fill); color: var(--foreground); text-decoration: none; transition: background-color var(--duration-fast) var(--ease-standard); }
 .brand:hover { color: var(--foreground); }
-.brand:focus-visible { --sq-fill: var(--surface-muted); outline: none !important; --focus-outline: transparent; }
+.brand:focus-visible { --sq-fill: var(--surface-muted); box-shadow: var(--focus-edge); outline: none !important; --focus-outline: transparent; }
 
 .newButton {
   --sq-r: var(--radius-pill);
@@ -79,7 +79,7 @@
 .invitations > svg { flex: none; color: var(--accent); }
 .invitationsLabel { flex: 1; font-weight: 500; }
 @media (hover: hover) and (pointer: fine) { .invitations:hover { --sq-fill: var(--surface-muted); } }
-.invitations:focus-visible { --sq-fill: var(--surface-muted); outline: none !important; --focus-outline: transparent; }
+.invitations:focus-visible { --sq-fill: var(--surface-muted); box-shadow: var(--focus-edge); outline: none !important; --focus-outline: transparent; }
 
 .listWrap { display: flex; min-height: 0; flex: 1; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; padding: 0 var(--space-2) var(--space-3); scrollbar-gutter: stable; }
 .list { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; }
@@ -104,7 +104,8 @@
 }
 @media (hover: hover) and (pointer: fine) { .row:hover { --sq-fill: var(--surface-muted); color: var(--foreground); } }
 .row[aria-current="page"] { --sq-fill: var(--surface-pressed); }
-.row:focus-visible { --sq-fill: var(--surface-muted); --sq-stroke: var(--border-strong); outline: none !important; --focus-outline: transparent; }
+/* A row's keyboard focus: its hover fill and its edge in accent (a hairline in --border-strong was 1.4:1). */
+.row:focus-visible { --sq-fill: var(--surface-muted); --sq-stroke: var(--accent); outline: none !important; --focus-outline: transparent; }
 .row[aria-current="page"]:focus-visible { --sq-fill: var(--surface-pressed); --sq-stroke: var(--foreground); --focus-outline: transparent; }
 
 .rowMain { display: grid; min-width: 0; flex: 1; gap: 3px; }
@@ -160,7 +161,7 @@
    photo under 640 px, which suits a crowded top bar, and this bar has room. A long name ends in an ellipsis first. */
 .account.account { min-width: 0; flex: 0 1 auto; }
 /* Keyboard focus is its hover fill (the kit's trigger has no focus look of its own, only the ring we turn off). */
-.account.account:focus-visible { --presence-surface: var(--surface-muted); background: var(--surface-muted); box-shadow: inset 0 0 0 1.5px var(--border-strong); --focus-outline: transparent; }
+.account.account:focus-visible { --presence-surface: var(--surface-muted); background: var(--surface-muted); box-shadow: var(--focus-edge); --focus-outline: transparent; }
 @media (max-width: 639px) {
   .account.account[data-name] { padding-right: var(--space-3); }
   .account[data-name] > span:nth-child(2), .account[data-name] > svg { display: block; }
@@ -190,6 +191,7 @@
 .viewAs > svg { color: var(--text-muted); grid-column: 2; grid-row: 1 / span 2; }
 @media (hover: hover) and (pointer: fine) { .viewAs:hover { --sq-fill: var(--surface-muted); } }
 .viewAs:focus-visible, .viewAs[data-state="open"] { --sq-fill: var(--surface-muted); outline: none !important; --focus-outline: transparent; }
+.viewAs:focus-visible { box-shadow: var(--focus-edge); }
 
 /* On the inbox page (phones), the list is the page: it fills the screen under the safe area. */
 .pane[data-pane="page"] .head { padding-top: env(safe-area-inset-top, 0px); height: calc(var(--topbar-height) + env(safe-area-inset-top, 0px)); }

@@ -202,17 +202,28 @@ export interface Page<T> {
 /**
  * A change to a conversation as it concerns you (DM 0.17, only with `include=conversations`; GET /api/v1/contracts
  * announces it as `features.conversation_events`): it was created with you, you were invited, added, or took part in
- * an invitation's answer, you left or were removed, or the group was renamed, described or changed its members or
- * owners. A value a later service adds is treated as "something changed": the conversation is asked for again.
+ * an invitation's answer, you left or were removed, the group was renamed, described or changed its members or
+ * owners, or you read it (on any device: `read`, with its unread count and read position as of the event's place in
+ * the feed). A value a later service adds is treated as "something changed": the conversation is asked for again.
  */
 export type ConversationChange =
   | "created" | "invited" | "added" | "invitation_accepted" | "invitation_declined" | "invitation_cancelled"
-  | "left" | "removed" | "renamed" | "description_changed" | "members_changed" | "owners_changed";
+  | "left" | "removed" | "renamed" | "description_changed" | "members_changed" | "owners_changed" | "read";
 
 export type SyncEvent =
   | { event_id: string; sequence: number; type: "message" | "message_status"; conversation_id: string; message_id: string }
   /** No message_id: the event is about the conversation (its `id` as the list names it: g:…, c:a::si:b, or a UUID). */
-  | { event_id: string; sequence: number; type: "conversation"; conversation_id: string; change: ConversationChange | (string & {}); message_id?: undefined };
+  | {
+      event_id: string;
+      sequence: number;
+      type: "conversation";
+      conversation_id: string;
+      change: ConversationChange | (string & {});
+      message_id?: undefined;
+      /** `read` only: your unread messages there, and the newest you read, as of this event (DM 0.17). */
+      unread_count?: number;
+      last_read_message_id?: string | null;
+    };
 
 export interface SyncPage {
   events: SyncEvent[];

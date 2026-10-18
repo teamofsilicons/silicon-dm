@@ -1027,23 +1027,61 @@ impl Client {
         )?)
         .await
     }
-    /// Availability, activity and last-seen time of an account (`c:`/`si:` id or uuid).
+    /// Availability, activity and last-seen time of an account (`c:`/`si:` id or uuid). Its
+    /// activity here is about no conversation in particular, or about one you are in; see
+    /// [`Client::presence_in`] for one conversation's.
     pub async fn presence(&self, account: &str) -> Result<Presence> {
+        self.presence_in(account, None, None).await
+    }
+    /// An account's presence with its activity about `conversation` only (an address or
+    /// UUID; none when you are not in it), and, with `for_silicon`, as a Silicon you look
+    /// after sees it (DM 0.17, `features.presence_activity` in the contracts).
+    pub async fn presence_in(
+        &self,
+        account: &str,
+        conversation: Option<&str>,
+        for_silicon: Option<&str>,
+    ) -> Result<Presence> {
         let encoded: String = url::form_urlencoded::byte_serialize(account.as_bytes()).collect();
-        self.json(self.request(Method::GET, &format!("presence/{encoded}"))?)
-            .await
+        let mut query: Vec<(&str, &str)> = Vec::new();
+        if let Some(conversation) = conversation {
+            query.push(("conversation", conversation));
+        }
+        if let Some(silicon) = for_silicon {
+            query.push(("for", silicon));
+        }
+        let request = self.request(Method::GET, &format!("presence/{encoded}"))?;
+        self.json(if query.is_empty() {
+            request
+        } else {
+            request.query(&query)
+        })
+        .await
     }
     pub async fn renew_presence(
         &self,
         device_id: &str,
         activity: Option<Activity>,
     ) -> Result<PresenceLease> {
+        self.renew_presence_in(device_id, activity, None).await
+    }
+    /// Renews this device's lease with what it is doing and the conversation that is about
+    /// (an address or UUID of one you are in): only accounts in it see the activity. Services
+    /// before DM 0.17 refuse `conversation`; they announce it as
+    /// `features.presence_activity` in [`Client::contracts`].
+    pub async fn renew_presence_in(
+        &self,
+        device_id: &str,
+        activity: Option<Activity>,
+        conversation: Option<&str>,
+    ) -> Result<PresenceLease> {
         let path = presence_device_path(device_id)?;
-        self.json(
-            self.request(Method::PUT, &path)?
-                .json(&json!({"activity":activity})),
-        )
-        .await
+        let body = match conversation {
+            Some(conversation) => json!({"activity": activity, "conversation_id": conversation}),
+            None => json!({"activity": activity}),
+        };
+        self.json(self.request(Method::PUT, &path)?.json(&body))
+            .await
     }
     pub async fn close_presence(&self, device_id: &str) -> Result<()> {
         self.empty(self.request(Method::DELETE, &presence_device_path(device_id)?)?)

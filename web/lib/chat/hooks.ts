@@ -19,6 +19,7 @@ import { mergeListHead, mergeNewestMessages, messagesOldestFirst, summariesOf, t
 import { useConversationEvents } from "./features";
 import { chatKeys } from "./keys";
 import type { ConversationSummary, Me, Message, Page } from "./types";
+import { noteListHead, noteListPage } from "./unread-total";
 
 const VIEW_POLL_MS = 10_000;
 const SAFETY_REFRESH_MS = 60_000;
@@ -45,11 +46,25 @@ export function useMe(initial?: Me) {
   return useQuery({ queryKey: chatKeys.me, queryFn: ({ signal }) => getMe(signal), initialData: initial, staleTime: 5 * 60_000 });
 }
 
+/**
+ * Your own list's pages as they arrive: the first carries the service's unread total for every conversation, loaded or
+ * not (the title's "(n)", lib/chat/unread-total.ts); a later one's rows were in that total.
+ */
+function noteOwnListPage(queryClient: QueryClient, page: Page<ConversationSummary>, first: boolean): void {
+  if (first) noteListHead(page, summariesOf(queryClient.getQueryData<ConversationPages>(chatKeys.conversations())));
+  else noteListPage(page);
+}
+
 /** The conversation list (pages of 50, newest activity first). */
 export function useConversations(view: string | null, initial?: Page<ConversationSummary>) {
+  const queryClient = useQueryClient();
   const query = useInfiniteQuery({
     queryKey: chatKeys.conversations(view),
-    queryFn: ({ pageParam, signal }) => listConversations({ view, cursor: pageParam, signal }),
+    queryFn: async ({ pageParam, signal }) => {
+      const page = await listConversations({ view, cursor: pageParam, signal });
+      if (!view) noteOwnListPage(queryClient, page, !pageParam);
+      return page;
+    },
     initialPageParam: null as string | null,
     getNextPageParam: last => last.next_cursor ?? undefined,
     initialData: initial && !view ? { pages: [initial], pageParams: [null] } : undefined,
@@ -110,6 +125,7 @@ export async function refreshListHead(queryClient: QueryClient, view: string | n
   if (!queryClient.getQueryData(key) || queryClient.isFetching({ queryKey: key, exact: true })) return;
   try {
     const page = await listConversations({ view });
+    if (!view) noteOwnListPage(queryClient, page, true);
     queryClient.setQueryData<ConversationPages>(key, current => (current ? mergeListHead(current, page) : current));
   } catch {
     // The next tick, the sync loop or a reload catches up.
@@ -186,12 +202,18 @@ export function useConversation(address: string, view: string | null) {
   return { conversation: fromList ?? single.data, error: fromList ? null : single.error, loading: !fromList && (waitForList || single.isPending) };
 }
 
-/** A conversation's messages: pages of 50, newest first; `messages` is every loaded one, oldest first. */
+/**
+ * How many messages an older page asks for: the service's largest page. The newest page stays at 50 (a thread opens as
+ * fast as before); going back, to a first unread far up or by scrolling, takes half the round trips.
+ */
+export const OLDER_PAGE_LIMIT = 100;
+
+/** A conversation's messages: the newest 50, then older pages of 100, newest first; `messages` is every loaded one, oldest first. */
 export function useMessages(address: string, view: string | null) {
   const queryClient = useQueryClient();
   const query = useInfiniteQuery({
     queryKey: chatKeys.messages(address, view),
-    queryFn: ({ pageParam, signal }) => listMessages(address, { view, cursor: pageParam, signal }),
+    queryFn: ({ pageParam, signal }) => listMessages(address, { view, cursor: pageParam, limit: pageParam ? OLDER_PAGE_LIMIT : undefined, signal }),
     initialPageParam: null as string | null,
     getNextPageParam: last => last.next_cursor ?? undefined,
     // Your own conversations change through the sync loop; a custodian's view polls its newest page (below).

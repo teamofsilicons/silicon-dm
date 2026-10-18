@@ -80,7 +80,7 @@ The operations (the `operation` field):
 | Groups | `list_groups`, `get_group`, `create_group`, `update_group`, `invite_group_members`, `remove_group_members`, `add_group_owners`, `remove_group_owners`, `list_invitations`, `accept_invitation`, `decline_invitation`, `leave_group` |
 | Allow-lists | `get_allow_list`, `allow`, `disallow` |
 | Voices | `list_voices`, `get_voice` (`{account}`), `set_voice` (`{account, voice, idempotency_key}`), `reset_voice` (`{account}`) |
-| Presence and GIFs | `get_presence`, `set_presence`, `trending_gifs`, `search_gifs`, `recent_gifs` |
+| Presence and GIFs | `get_presence`, `get_scoped_presence`, `set_presence`, `set_scoped_presence`, `trending_gifs`, `search_gifs`, `recent_gifs` |
 | Discovery | `me`, `delivery` |
 
 A spoken message never travels as `send_message` with `speech`: it is `send_spoken_message` (or
@@ -89,7 +89,10 @@ type or size, or metadata travels as `send_rich_message` (or `edit_rich_message`
 these releases turned voice notes and GIFs into plain links and dropped the rest. A relay that
 cannot parse an operation leaves it queued for the newer relay that replaces it, instead of sending
 the message without its speech or its parts. A missing voice or GIF would be a silent change of
-meaning; a delay of one upgrade is not.
+meaning; a delay of one upgrade is not. Presence about one conversation (`dm presence set …
+--conversation`) is `set_scoped_presence`, and a read of one conversation's activity, or as a Silicon
+you look after sees it, `get_scoped_presence`, for the same reason: an older relay would say the
+activity about no conversation, or answer without the conversation it was asked about.
 
 ## Ordering, retries and speed
 

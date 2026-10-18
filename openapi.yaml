@@ -329,7 +329,9 @@ paths:
       description: >-
         A custodian lists a Silicon's conversations with `?for=si:handle` (read-only).
         Conversations kept only for their history (superseded) are not listed; the canonical
-        one names them in `supersedes`. Proofs need scope `dm.conversations.read`.
+        one names them in `supersedes`. Proofs need scope `dm.conversations.read`. The first
+        page (no cursor) also says what is unread across the listed account's conversations
+        (`unread`, DM 0.17), so a badge or a window title need not page through the list.
       security: [{bearerAuth: []}, {proofAuth: []}]
       parameters:
         - {$ref: '#/components/parameters/Cursor'}
@@ -351,6 +353,17 @@ paths:
                     properties:
                       items: {type: array, items: {$ref: '#/components/schemas/ConversationSummary'}}
                       next_cursor: {type: [string, 'null']}
+                      unread:
+                        type: object
+                        description: >-
+                          The first page only: conversations with an unread message, and the unread messages in
+                          them, across the listed account's 1,000 most recently active conversations. `messages`
+                          stops at 1,000 (show it as 999+), like each conversation's `unread_count`.
+                        required: [conversations, messages]
+                        properties:
+                          conversations: {type: integer, minimum: 0, maximum: 1000}
+                          messages: {type: integer, minimum: 0, maximum: 1000}
+                        examples: [{conversations: 2, messages: 5}]
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Error'}
     post:
@@ -1019,8 +1032,16 @@ paths:
     put:
       operationId: renewDevicePresence
       tags: [Presence]
-      summary: Renew this device's presence lease, with an optional activity.
-      description: A lease never grants access to messages and is not a receipt.
+      summary: Renew this device's presence lease, with an optional activity and the conversation it is about.
+      description: >-
+        A lease never grants access to messages and is not a receipt. An activity (typing, recording…) is about the
+        conversation named in `conversation_id`, and only accounts in that conversation see it
+        (`GET /api/v1/contracts` announces this as `features.presence_activity`; services before DM 0.17 refuse the
+        field). The conversation must be one the account is in: one it is not in is 404, a custodian's view of its
+        Silicon's conversation 403 `read_only_view`, a group it is only invited to 403 `invitation_pending`; a refused
+        renewal renews nothing. The conversation is kept with the activity and cleared with it (a renewal without an
+        activity, closing the device, the activity's expiry). An activity without `conversation_id` is about no
+        conversation in particular: it shows only to readers who do not name a conversation.
       requestBody:
         required: true
         content:
@@ -1037,6 +1058,11 @@ paths:
                     activity:
                       type: [string, 'null']
                       enum: [typing, recording_voice, transcribing_voice, uploading_file, searching_gifs, null]
+                    conversation_id:
+                      type: string
+                      description: The address or UUID of the conversation the activity is in (one the account is in).
+                      examples: ['c:ada::si:scout', 'g:product-design']
+            example: {type: renew_presence, data: {activity: typing, conversation_id: 'c:ada::si:scout'}}
       responses:
         '200':
           description: The renewed lease and the account's presence.
@@ -1048,7 +1074,16 @@ paths:
                 properties:
                   type: {type: string, const: renew_presence}
                   data: {$ref: '#/components/schemas/PresenceLease'}
+              example:
+                type: renew_presence
+                data:
+                  presence: {member_id: 'c:ada', member_uuid: zQo, availability: online, activity: typing, last_seen_at: null}
+                  lease_expires_at: '2026-10-18T11:32:00Z'
+                  activity_expires_at: '2026-10-18T11:30:10Z'
+                  conversation_id: 'c:ada::si:scout'
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
     delete:
       operationId: closeDevicePresence
@@ -1067,6 +1102,20 @@ paths:
       operationId: getPresence
       tags: [Presence]
       summary: An account's presence, for the people it talks with and its custodian.
+      description: >-
+        Availability and last seen come from all of the account's devices. Its activity is about one conversation and
+        is shown only to accounts in it: with `conversation`, the answer carries activity about that conversation only
+        (none when you are not in it, for example in a custodian's view without `for`); without it, never activity
+        about a conversation you are not in (activity about no conversation in particular still shows). A custodian
+        adding `for=si:x` sees what that Silicon would see.
+      parameters:
+        - name: conversation
+          in: query
+          schema: {type: string, examples: ['c:ada::si:scout', 'g:product-design']}
+          description: >-
+            The address or UUID of the conversation on screen: only activity about it is answered. A conversation you
+            cannot see is 404.
+        - {$ref: '#/components/parameters/For'}
       responses:
         '200':
           description: Presence.
@@ -1078,8 +1127,13 @@ paths:
                 properties:
                   type: {type: string, const: presence}
                   data: {$ref: '#/components/schemas/Presence'}
+              example:
+                type: presence
+                data: {member_id: 'si:scout', member_uuid: K1E, availability: online, activity: typing, last_seen_at: null}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /api/v1/gifs/trending:
     get:
       operationId: listTrendingGifs
@@ -1787,7 +1841,9 @@ components:
         A reference to fetch: `message` and `message_status` name a message (`message_id`);
         `conversation` (only with `include=conversations`) names a conversation and what
         happened to it (`change`). Read the current state with your own permissions; an event
-        never carries content.
+        never carries content. A `read` event also carries your unread facts afterwards
+        (`unread_count`, `last_read_message_id`), as of its place in the feed: applied in order,
+        with each later message from someone else counted, they give the count the list shows.
       properties:
         event_id: {type: string, format: uuid, description: Stable event identity; deduplicate on it.}
         sequence: {type: integer, format: int64, minimum: 1}
@@ -1795,20 +1851,25 @@ components:
         conversation_id: {$ref: '#/components/schemas/ConversationAddress'}
         message_id: {$ref: '#/components/schemas/MessageCode', description: 'Message events only.'}
         change: {$ref: '#/components/schemas/ConversationChange'}
+        unread_count: {type: integer, minimum: 0, maximum: 1000, description: '`read` events only (DM 0.17): your unread messages there afterwards; 1,000 means 1,000 or more.'}
+        last_read_message_id: {$ref: '#/components/schemas/MessageCode', description: '`read` events only (DM 0.17): the newest message you have read there.'}
       examples:
         - {event_id: 0199f2a1-5d0e-7c11-9a43-0c6f9b8e2d10, sequence: 56, type: message, conversation_id: 'c:ada::si:scout', message_id: 00a}
         - {event_id: 0199f2a1-5d0e-7c11-9a43-0c6f9b8e2d11, sequence: 57, type: conversation, conversation_id: 'g:launch-week', change: renamed}
+        - {event_id: 0199f2a1-5d0e-7c11-9a43-0c6f9b8e2d12, sequence: 58, type: conversation, conversation_id: 'c:ada::si:scout', change: read, unread_count: 0, last_read_message_id: 00a}
     ConversationChange:
       type: string
       enum: [created, invited, added, invitation_accepted, invitation_declined, invitation_cancelled,
-        left, removed, renamed, description_changed, members_changed, owners_changed]
+        left, removed, renamed, description_changed, members_changed, owners_changed, read]
       description: >-
         Conversation events only. To the account itself: `created` (a conversation with you in
         it; the creator too), `invited` (a new pending invitation), `added` (a member without
         accepting: your custodian added you), `invitation_accepted` / `invitation_declined` (on
         any device; a custodian may decline for its Silicon), `invitation_cancelled` (an owner
-        withdrew it), `left`, `removed` (drop the conversation: reading it is 404 now). To the
-        others: `renamed` and `description_changed` (members and pending invitees),
+        withdrew it), `left`, `removed` (drop the conversation: reading it is 404 now), `read`
+        (you read messages there on one of your devices, one by one or in bulk; with
+        `unread_count` and `last_read_message_id`, so your other devices update their badges).
+        To the others: `renamed` and `description_changed` (members and pending invitees),
         `members_changed` (members), `owners_changed` (members and pending invitees).
     SyncPage:
       type: object
@@ -1836,6 +1897,9 @@ components:
         presence: {$ref: '#/components/schemas/Presence'}
         lease_expires_at: {type: string, format: date-time}
         activity_expires_at: {type: [string, 'null'], format: date-time}
+        conversation_id:
+          type: [string, 'null']
+          description: The address of the conversation this device's activity is about (DM 0.17), or null.
     MessageCreate:
       type: object
       properties:

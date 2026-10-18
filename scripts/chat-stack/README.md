@@ -146,12 +146,26 @@ The **Briefcase stand-in** implements Briefcase 4's delegated uploads with the s
 `POST /api/v1/obo/folders/create`, `POST /api/v1/obo/link-access` and `GET /api/v1/public/{owner}/{path}?view=inline|attachment|metadata|contents`.
 Every proof is verified with the local Accounts stack using briefcase's credentials and must carry the route's
 scope. Like Briefcase, public bytes come with `Cross-Origin-Resource-Policy: same-origin` and a sandbox CSP, so the
-website must serve them through its own origin rather than embed them directly. Files live in `.dev/briefcase/`;
-`GET /_state` lists them. Transfers stream to disk (runs of zeros are left as holes, so big test files cost no disk),
-up to Briefcase's 5 TiB; names follow Briefcase's `EntryName` (trimmed, at most 255 bytes of UTF-8).
-`POST /_faults` takes `{"route","status","code","count"}` and `"match"`: a text in the upload's name, so a test on this
-shared stand-in never trips anyone else's; for the transfer, `"delay_ms"` (with `"match"`) holds the answer after the
-last byte, as Briefcase storing a large file does. `DELETE /_files/{sha256}` removes a test file's bytes.
+website must serve them through its own origin rather than embed them directly. As in Briefcase, an issuer reaches
+only `apps/{issuer}/` in the account's own drive (`BRIEFCASE_PROOF_ISSUERS`, default `dm` for every delegated scope),
+and a reservation lasts a day.
+
+- **Bytes.** Transfers stream to disk as they arrive, hashed on the way, with backpressure: never held in memory, of
+  any size up to Briefcase's 5 TiB (`BRIEFCASE_STANDIN_MAX_BYTES` lowers it). Runs of zeros are left as holes in the
+  file (it reads back the same), so a big test file of zeros costs no disk. Files live in `.dev/briefcase/`
+  (`state.json`, `blobs/<sha256>`, `staging/<upload_id>`).
+- **Names** follow Briefcase's `EntryName`: trimmed the way Rust's `str::trim` trims (U+0085 included, U+FEFF not),
+  then 1 to 255 bytes of UTF-8 (bytes, not characters), no NUL, no slash, not `.` or `..`.
+- **Faults.** `POST /_faults` with `{"route", "status", "code", "count"}` (`route` one of `reserve`, `transfer`,
+  `commit`, `status`, `cancel`, `link-access`, `folders-create`, `public`) fails that route's next `count` requests.
+  Add `"match"`, a text in the upload's name, so the fault trips only that upload: a fault without it trips the next
+  request of anyone on this shared stand-in. For the transfer, `"delay_ms"` (which needs `"match"`) takes the bytes and
+  then holds the answer that long, as Briefcase storing a large file does. `GET /_faults` lists what is set, `DELETE
+  /_faults` clears it.
+- **Looking.** `GET /_state` lists accounts, entries (with their link access) and uploads (with the `received` bytes
+  of one still arriving); `GET /_requests` the recent requests (method, path, status, sizes; never bodies, proofs or
+  capabilities), `DELETE /_requests` forgets them; `DELETE /_files/{sha256}` removes a test file's bytes and entries.
+  It logs to `.dev/logs/briefcase.log`.
 
 ## When something is wrong
 

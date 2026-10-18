@@ -132,7 +132,7 @@ async function handOver(bridge: ComposerVoiceBridge, recording: Recording, voice
       // Read from disk as it uploads instead.
     }
   }
-  reportActivity("transcribing_voice");
+  reportActivity("transcribing_voice", bridge.address);
   const name = noteFileName(recording.type);
   // Transcribed when DM takes it at once (100 MB by default); a longer one goes without its words, and says why.
   const transcribable = voice.transcripts && blob.size <= voice.transcribeMaxBytes;
@@ -321,7 +321,7 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
   /** Dictation's second half: the recording's words, typed at the caret. */
   const transcribeDictation = useCallback(async (recording: Recording, mine: number) => {
     const current = latest.current.bridge;
-    reportActivity("typing");
+    reportActivity("typing", current?.address);
     try {
       if (!recording.blob.size) throw new ApiError({ status: 0, code: "nothing_recorded", message: "Nothing was recorded: the microphone gave no sound.", hint: "Check the microphone (and that the right one is chosen in the system's sound settings), then try again." });
       const result = await transcribe(recording.blob, { contentType: baseType(recording.type) });
@@ -427,7 +427,7 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
       dispatch({ type: "tick", elapsedMs, level });
       setLevels(previous => [...previous.slice(1 - METER_BARS), level]);
       setBytes(opened.bytes());
-      reportActivity(mode.current === "note" ? "recording_voice" : "typing");
+      reportActivity(mode.current === "note" ? "recording_voice" : "typing", latest.current.bridge?.address);
       const features = latest.current.voice;
       if (limitReached({ elapsedMs, bytes: opened.bytes(), maxBytes: mode.current === "note" ? features.maxUploadBytes : features.transcribeMaxBytes })) void finish();
     }, TICK_MS);

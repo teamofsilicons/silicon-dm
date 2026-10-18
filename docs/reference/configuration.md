@@ -80,9 +80,9 @@ requires no account details (email and timezone are optional).
 | `DM_SHUTDOWN_TIMEOUT_SECONDS` | `30` | Graceful shutdown deadline |
 | `DM_MAX_HTTP_BODY_BYTES` | `134217728` (128 MiB) | Largest request body (1 byte to 3 GiB) |
 | `DM_DATABASE_URL` | required | PostgreSQL; production needs exactly one `sslmode=verify-full` |
-| `DM_DATABASE_MAX_CONNECTIONS`, `DM_DATABASE_MIN_CONNECTIONS` | `16`, `1` | The connection pool |
+| `DM_DATABASE_MAX_CONNECTIONS`, `DM_DATABASE_MIN_CONNECTIONS` | `16`, `1` | The connection pool for queries. Each process also opens up to three connections of its own for `LISTEN` wake-ups, outside it (`dm-api` three, `dm-worker` two; none with a pool of one) |
 | `DM_DATABASE_ACQUIRE_TIMEOUT_SECONDS` | `5` | Waiting for a pooled connection |
-| `DM_DATABASE_STATEMENT_TIMEOUT_SECONDS` | `10` | One statement's limit |
+| `DM_DATABASE_STATEMENT_TIMEOUT_SECONDS` | `10` | One statement's limit in `dm-api` and `dm-worker`; `dm-migrate` runs without it (a backfill must not be cut short) |
 | `DM_LOG_FILTER` | `info,silicon_dm=debug` | Log levels. Whatever the level, DM never logs scripts, audio, transcripts or credentials |
 
 Plain `http` is accepted only for this machine.

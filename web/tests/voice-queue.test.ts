@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AccountRef, Message } from "../lib/chat/types";
-import { beginSpeaking, clearQueue, EMPTY_QUEUE, finishSpeaking, headDeadline, nextToSpeak, observeMessages, PENDING_GRACE_MS, returnToQueue, speakable, startQueue } from "../lib/voice/queue";
+import { beginSpeaking, clearQueue, EMPTY_QUEUE, finishSpeaking, headDeadline, nextToSpeak, observeMessages, PENDING_GRACE_MS, returnToQueue, SEEN_LIMIT, speakable, startQueue } from "../lib/voice/queue";
 
 const ada: AccountRef = { type: "carbon", id: "c:ada", uuid: "u-ada" };
 const scout: AccountRef = { type: "silicon", id: "si:scout", uuid: "u-scout" };
@@ -68,14 +68,41 @@ test("before the messages were seen, the first look starts the queue without spe
   assert.deepEqual(next.waiting, [{ code: "000", since: 5 }], "in an empty conversation every arrival is new");
 });
 
-test("new Silicon messages queue in code order; mine move the mark but are never spoken", () => {
+test("new Silicon messages queue in code order; mine are seen but never spoken", () => {
   let queue = startQueue([message("00a", scout, "old")]);
   const later = [message("00a", scout, "old"), message("00c", scout, "second"), message("00b", scout, "first"), message("00d", ada, "my reply")];
   queue = observeMessages(queue, later, ada, "all", 100);
   assert.deepEqual(queue.waiting.map(item => item.code), ["00b", "00c"]);
-  assert.equal(queue.mark, "00d");
+  assert.equal(queue.mark, "00a", "the mark is where Listen mode started");
+  assert.deepEqual(queue.seen, ["00b", "00c", "00d"]);
   const again = observeMessages(queue, later, ada, "all", 200);
   assert.equal(again, queue, "nothing changed: the same queue");
+});
+
+test("a message that lands after a newer one is still spoken, once", () => {
+  const old = [message("00a", scout, "old")];
+  let queue = startQueue(old);
+  // 00c arrives first (a slower fetch held 00b back), and is spoken.
+  queue = observeMessages(queue, [...old, message("00c", scout, "third")], ada, "all", 100);
+  assert.deepEqual(queue.waiting.map(item => item.code), ["00c"]);
+  queue = finishSpeaking(beginSpeaking(queue, "00c"), "00c");
+  // Then 00b lands: below the newest code seen, but never seen itself.
+  const all = [...old, message("00b", scout, "second"), message("00c", scout, "third")];
+  queue = observeMessages(queue, all, ada, "all", 200);
+  assert.deepEqual(queue.waiting.map(item => item.code), ["00b"], "a newest-code mark lost it");
+  queue = finishSpeaking(beginSpeaking(queue, "00b"), "00b");
+  assert.deepEqual(observeMessages(queue, all, ada, "all", 300).waiting, [], "and it is not spoken twice");
+});
+
+test("the seen codes stay bounded: the oldest fold into the mark", () => {
+  const code = (index: number) => index.toString(36).padStart(3, "0");
+  let queue = startQueue([]);
+  const many = Array.from({ length: SEEN_LIMIT + 5 }, (_, index) => message(code(index), ada, `mine ${index}`));
+  queue = observeMessages(queue, many, ada);
+  assert.equal(queue.seen.length, SEEN_LIMIT);
+  assert.equal(queue.mark, code(4), "the five oldest are now the past");
+  assert.deepEqual(queue.waiting, [], "my own messages are never spoken");
+  assert.deepEqual(observeMessages(queue, many, ada).waiting, [], "nothing comes back as new");
 });
 
 test("one at a time, in order; finishing lets the next one go", () => {

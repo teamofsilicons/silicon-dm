@@ -12,7 +12,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { whenSignedOut } from "@/lib/client/session";
 import { conversationTitle, inboxHref, sameAccount } from "@/lib/chat/address";
-import { summariesOf, totalUnread, type ConversationPages } from "@/lib/chat/cache";
+import { summariesOf, type ConversationPages } from "@/lib/chat/cache";
 import { useConversations, useInvitations, useListSafetyNet } from "@/lib/chat/hooks";
 import { chatKeys } from "@/lib/chat/keys";
 import { forgetChatData, forgetOtherAccounts } from "@/lib/chat/local-data";
@@ -23,6 +23,7 @@ import { setPresenceConversation, startPresence } from "@/lib/chat/presence";
 import { attachReceipts, noteDelivered } from "@/lib/chat/receipts";
 import { refreshConversationsSoon, startSync, wakeSync, type GoneConversation } from "@/lib/chat/sync";
 import { useUnreadTitle } from "@/lib/chat/title";
+import { noteListHead, resetUnreadTotal, useUnreadTotal } from "@/lib/chat/unread-total";
 import { notify } from "@/lib/notify";
 import type { Message } from "@/lib/chat/types";
 import { useOpenAddress } from "../sidebar/conversations-pane";
@@ -95,7 +96,14 @@ export function ChatRuntime() {
     if (before && [...before].some(id => !now.has(id))) refreshConversationsSoon(queryClient);
   }, [invitations.data, queryClient]);
 
+  // The service's unread total for every conversation, loaded or not (DM 0.17): from the first page the server
+  // rendered, then from each first page fetched (lib/chat/hooks.ts); another account starts over.
+  useEffect(() => {
+    const list = queryClient.getQueryData<ConversationPages>(chatKeys.conversations());
+    if (list?.pages[0]) noteListHead(list.pages[0], summariesOf(list));
+    return () => resetUnreadTotal();
+  }, [queryClient, accountKey]);
   const { items } = useConversations(null);
-  useUnreadTitle(totalUnread(items, account));
+  useUnreadTitle(useUnreadTotal(items, account));
   return null;
 }

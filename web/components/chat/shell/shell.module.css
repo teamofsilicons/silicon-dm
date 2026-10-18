@@ -32,7 +32,7 @@
 
 .iconButton { --sq-r: 12px; --sq-fill: transparent; display: inline-grid; width: 36px; height: 36px; flex: none; place-items: center; border: 0; padding: 0; background: var(--sq-fill); color: var(--text-secondary); cursor: pointer; transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard); }
 @media (hover: hover) and (pointer: fine) { .iconButton:hover { --sq-fill: var(--surface-muted); color: var(--foreground); } }
-.iconButton:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); outline: none !important; --focus-outline: transparent; }
+.iconButton:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); box-shadow: var(--focus-edge); outline: none !important; --focus-outline: transparent; }
 
 @media (max-width: 1099px) {
   .app { grid-template-columns: var(--sidebar) minmax(0, 1fr); }

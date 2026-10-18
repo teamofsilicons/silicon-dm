@@ -149,7 +149,11 @@ async fn handler(State(requests): State<Requests>, request: Request) -> Response
                 return StatusCode::NO_CONTENT.into_response();
             }
             json!({"presence":{"member_id":"si:cos","member_uuid":"K1E","availability":"online","activity":"typing","last_seen_at":null},
-                "lease_expires_at":"2026-10-10T10:02:00Z","activity_expires_at":"2026-10-10T10:00:10Z"})
+                "lease_expires_at":"2026-10-10T10:02:00Z","activity_expires_at":"2026-10-10T10:00:10Z",
+                "conversation_id":"c:ada::si:cos"})
+        }
+        "/api/v1/presence/c%3Aada" => {
+            json!({"member_id":"c:ada","member_uuid":"a8K","availability":"online","activity":"typing","last_seen_at":null})
         }
         "/api/v1/messages" => {
             return failure(
@@ -356,6 +360,40 @@ async fn sync_long_polls_and_errors_keep_code_message_and_hint() -> Result {
             .seen()
             .iter()
             .any(|s| s.path == "/api/v1/presence/devices/device%201")
+    );
+    // Activity about one conversation: the lease names it, and so does a read of it.
+    let scoped = client
+        .renew_presence_in("device 1", Some(Activity::Typing), Some("c:ada::si:cos"))
+        .await?;
+    assert_eq!(scoped.conversation_id.as_deref(), Some("c:ada::si:cos"));
+    let presence = client
+        .presence_in("c:ada", Some("c:ada::si:cos"), Some("si:cos"))
+        .await?;
+    assert!(matches!(presence.activity, Some(Activity::Typing)));
+    let seen = fixture.seen();
+    let renewal = seen
+        .iter()
+        .rev()
+        .find(|s| s.method == "PUT")
+        .ok_or("no renewal")?;
+    assert_eq!(renewal.body["data"]["conversation_id"], "c:ada::si:cos");
+    assert_eq!(renewal.body["data"]["activity"], "typing");
+    let unscoped = seen
+        .iter()
+        .find(|s| s.method == "PUT")
+        .ok_or("no first renewal")?;
+    assert!(
+        unscoped.body["data"].get("conversation_id").is_none(),
+        "an older service refuses the field, so it is sent only when asked: {}",
+        unscoped.body
+    );
+    let read = seen
+        .iter()
+        .find(|s| s.path == "/api/v1/presence/c%3Aada")
+        .ok_or("no presence read")?;
+    assert_eq!(
+        read.query.as_deref(),
+        Some("conversation=c%3Aada%3A%3Asi%3Acos&for=si%3Acos")
     );
     Ok(())
 }

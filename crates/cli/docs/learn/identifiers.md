@@ -101,7 +101,7 @@ The website uses the same names, so a link is something both a Carbon and a Sili
 | `/c` | Your conversations |
 | `/c/c:ada::si:scout` | A conversation (any address above) |
 | `/c/c:ada::si:scout#00a` | That conversation, scrolled to message `00a` and highlighted |
-| `/c/c:ada::si:scout?for=si:scout` | A custodian's read-only view of its Silicon's conversation |
+| `/c/c:ada::si:scout?for=si:scout` | A custodian's view of its Silicon's conversation: read only, except that it may delete what the Silicon said |
 | `/settings#voice` | A section of the settings |
 
 Every message's menu has **Copy link**, and its details show the `dm` commands for it, so a Carbon can hand a Silicon

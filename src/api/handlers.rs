@@ -24,7 +24,7 @@ use crate::{
         ConversationPage, Draft, DraftInput, GifPage, MAX_CONVERSATION_PARTICIPANTS, Message,
         MessageCreate, MessagePage, PageRequest, Presence, ReceiptStatus,
     },
-    infrastructure::postgres::Reviser,
+    infrastructure::postgres::{ActivityView, Reviser},
 };
 
 /// `GET /api/v1/conversations[?for=si:x]`: the caller's conversations, or (for a
@@ -43,11 +43,17 @@ pub(super) async fn list_conversations(
         Some(silicon) => looked_after(&state, &context, silicon).await?,
         None => context.actor.clone(),
     };
-    state
+    let first = page.cursor.is_none();
+    let mut listed = state
         .store
         .list_conversations(&context.actor, &subject, &page, false)
-        .await
-        .map(Json)
+        .await?;
+    // The first page says what is unread in all of them, so a badge or a window title need
+    // not page through the list.
+    if first {
+        listed.unread = Some(state.store.unread_total(&subject).await?);
+    }
+    Ok(Json(listed))
 }
 
 /// `GET /api/v1/conversations/{conversation}[?for=si:x]`: one conversation summary, with
@@ -456,27 +462,65 @@ fn require_participant_access(access: ConversationAccess) -> AppResult<()> {
     }
 }
 
-/// Online state and activity of an account the caller shares a conversation with (or
-/// a Silicon it looks after).
+/// `GET /api/v1/presence/{account}[?conversation=…][&for=si:x]`: availability, last seen and
+/// what the account is doing, seen by the caller (or, for a custodian's `for`, by the Silicon
+/// it looks after). Activity is about one conversation and shown only to accounts in it:
+/// with `conversation`, only activity about that conversation (none when the viewer is not in
+/// it); without, activity about no conversation in particular or about one the viewer is in.
 pub(super) async fn get_presence(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
     ApiPath(path): ApiPath<PresencePath>,
+    ApiQuery(query): ApiQuery<PresenceQuery>,
 ) -> AppResult<Json<Presence>> {
+    let viewer = match &query.for_account {
+        Some(silicon) => looked_after(&state, &context, silicon).await?,
+        None => context.actor.clone(),
+    };
     let account = state.directory().resolve(path.actor_id.as_str()).await?;
     let target = account.actor();
-    if !state
-        .store
-        .may_see_presence(&context.actor, &target)
-        .await?
-    {
+    if !state.store.may_see_presence(&viewer, &target).await? {
         return Err(AppError::not_found(format!(
             "{} shares its presence only with the accounts it has a conversation with (and a Silicon with its custodian).",
             account.display_id()
         ))
         .with_hint("Presence follows conversations: once you share one, GET /api/v1/presence/{account} answers."));
     }
-    state.store.get_presence(&target).await.map(Json)
+    let view = match query.conversation.as_deref().map(str::trim) {
+        Some(value) => {
+            ActivityView::Conversation(viewer_conversation(&state, &context, &viewer, value).await?)
+        }
+        None => ActivityView::Viewer(&viewer),
+    };
+    state.store.get_presence(&target, view).await.map(Json)
+}
+
+/// The conversation `?conversation=` names, when the viewer is in it; `None` when the viewer
+/// may read it but is not in it (a custodian's view without `for`, an invitation): no activity
+/// is shown then. One the caller cannot see at all is refused, as everywhere.
+async fn viewer_conversation(
+    state: &AppState,
+    context: &AuthContext,
+    viewer: &ActorRef,
+    value: &str,
+) -> AppResult<Option<Uuid>> {
+    const HINT: &str = "Name a conversation you are in by its address or UUID (GET /api/v1/conversations, dm conversations list), or leave conversation out for availability and last seen alone.";
+    if value.is_empty() {
+        return Err(AppError::invalid(
+            "conversation is empty: it names the conversation whose activity you want to see.",
+        )
+        .with_hint(HINT)
+        .with_details(serde_json::json!({"field": "conversation"})));
+    }
+    let (id, access) = super::access::resolve_conversation_path(state, context, value, false)
+        .await
+        .map_err(|error| super::sync::named_field(error, "conversation", HINT))?;
+    let inside = if *viewer == context.actor {
+        access == ConversationAccess::Participant
+    } else {
+        state.store.conversation_access(viewer, id).await? == Some(ConversationAccess::Participant)
+    };
+    Ok(inside.then_some(id))
 }
 
 /// Returns provider-filtered trending GIFs.
@@ -655,6 +699,15 @@ pub(super) struct BundlePath {
 #[derive(Debug, Deserialize)]
 pub(super) struct PresencePath {
     actor_id: ActorId,
+}
+
+/// Unknown query fields stay ignored here, as before DM 0.17 (the route had no query).
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct PresenceQuery {
+    /// The conversation whose activity to show (an address or UUID).
+    conversation: Option<String>,
+    #[serde(rename = "for")]
+    for_account: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

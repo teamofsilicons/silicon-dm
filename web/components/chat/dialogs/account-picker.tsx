@@ -292,8 +292,8 @@ export const AccountPicker = forwardRef<AccountPickerHandle, AccountPickerProps>
       </div>
       {problem ? <p id={problemId} className={styles.problem} role="alert">{problem}</p> : null}
       {description ? <p id={hintId} className={styles.hint}>{description}</p> : null}
-      <div id={listId} role="listbox" aria-label={text.trim() ? `Accounts matching ${text.trim()}` : "People you talk to"} className={styles.list} hidden={!options.length || disabled}>
-        {!text.trim() && options.length ? <div className={styles.listLabel} aria-hidden="true">People you talk to</div> : null}
+      <div id={listId} role="listbox" aria-label={text.trim() ? `Accounts matching ${text.trim()}` : "From your conversations"} className={styles.list} hidden={!options.length || disabled}>
+        {!text.trim() && options.length ? <div className={styles.listLabel} aria-hidden="true">From your conversations</div> : null}
         {options.map((option, index) => (
           <div key={`${option.kind}:${accountKey(option.account)}`} id={optionId(index)} role="option" aria-selected={index === activeIndex}
             className={styles.option} data-sq="surface" data-active={index === activeIndex ? "" : undefined}

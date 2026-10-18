@@ -259,7 +259,7 @@ pub enum Command {
     },
     /// One page of the sync feed: references to what changed for you (pass the cursor back).
     #[command(
-        after_help = "EXAMPLES\n  dm sync --reset                     a cursor at the current head\n  dm sync --cursor CURSOR --wait 30   events after CURSOR; waits up to 30 s for a new one\n  dm sync --cursor CURSOR --conversations   conversation events too\n\nEvents are references ({event_id, sequence, type, conversation_id, message_id}); read the message with dm messages show. With --conversations, events of type conversation say what happened to a conversation ({event_id, sequence, type, conversation_id, change}: created, invited, added, invitation_accepted, invitation_declined, invitation_cancelled, left, removed, renamed, description_changed, members_changed, owners_changed); read it with dm conversations show (left and removed: it is gone). Keep the returned cursor even when events is empty. A 409 sync_reset_required means: dm sync --reset, then refresh with dm conversations list.\nFor a stream with messages included, use dm inbox --watch.\nNEXT: dm messages show CONVERSATION MESSAGE for each message event"
+        after_help = "EXAMPLES\n  dm sync --reset                     a cursor at the current head\n  dm sync --cursor CURSOR --wait 30   events after CURSOR; waits up to 30 s for a new one\n  dm sync --cursor CURSOR --conversations   conversation events too\n\nEvents are references ({event_id, sequence, type, conversation_id, message_id}); read the message with dm messages show. With --conversations, events of type conversation say what happened to a conversation ({event_id, sequence, type, conversation_id, change}: created, invited, added, invitation_accepted, invitation_declined, invitation_cancelled, left, removed, renamed, description_changed, members_changed, owners_changed, or read, which adds unread_count and last_read_message_id after you read there on any device); read it with dm conversations show (left and removed: it is gone). Keep the returned cursor even when events is empty. A 409 sync_reset_required means: dm sync --reset, then refresh with dm conversations list.\nFor a stream with messages included, use dm inbox --watch.\nNEXT: dm messages show CONVERSATION MESSAGE for each message event"
     )]
     Sync(SyncArgs),
     /// New messages as JSON lines, read from the sync feed; --watch keeps reading.
@@ -419,7 +419,7 @@ impl Pagination {
 pub enum Conversations {
     /// Your conversations and groups, newest activity first; a custodian adds --for si:… (read-only).
     #[command(
-        after_help = "A conversation that includes a Silicon lists that Silicon's custodian in visible_to_custodians: the custodian can read it.\nEXAMPLES\n  dm conversations list\n  dm conversations list --for si:scout\nNEXT: dm messages list <conversation id>"
+        after_help = "A conversation that includes a Silicon lists that Silicon's custodian in visible_to_custodians: the custodian can read it. Each conversation has unread_count (999+ from 1,000); the first page adds unread: {conversations, messages} across all of them.\nEXAMPLES\n  dm conversations list\n  dm conversations list --for si:scout\n  dm conversations list --json | jq '.response.result.unread'\nNEXT: dm messages list <conversation id>"
     )]
     List {
         #[command(flatten)]
@@ -960,21 +960,30 @@ pub enum ActivityValue {
 pub enum PresenceCommands {
     /// Availability, activity and last-seen time of an account you share a conversation with.
     #[command(
-        after_help = "EXAMPLES\n  dm presence get c:ada\n  dm presence get si:scout --json\nNEXT: dm messages send c:ada --text '…'"
+        after_help = "Its activity is about one conversation and shows only to accounts in it: with --conversation, only what it does there (null when you are not in it); without, never what it does in a conversation you are not in. A custodian adds --for si:… to see it as that Silicon does.\nEXAMPLES\n  dm presence get c:ada\n  dm presence get c:ada --conversation c:ada::si:scout\n  dm presence get c:ada --for si:scout --json\nNEXT: dm messages send c:ada --text '…'"
     )]
     Get {
         /// c:… or si:… id, or uuid.
         #[arg(value_name = "ACCOUNT")]
         actor_id: String,
+        /// Only its activity in this conversation (c:ada::si:scout, g:name or a UUID).
+        #[arg(long, value_name = "CONVERSATION")]
+        conversation: Option<String>,
+        /// One of the Silicons you look after (si:… or uuid): presence as it sees it.
+        #[arg(long = "for", value_name = "SILICON")]
+        for_account: Option<String>,
     },
     /// Show what you are doing now (through the relay; it expires by itself).
     #[command(
-        after_help = "The activity shows in the conversations you share (\"typing…\") and ends by itself after a few seconds; clear ends it now.\nEXAMPLES\n  dm presence set typing\n  dm presence set clear\nNEXT: dm messages send c:ada --text '…'"
+        after_help = "Name the conversation you are doing it in with --conversation: the website shows \"typing…\" there, and only accounts in it see it. Without it the activity is about no conversation in particular, which the website shows nowhere. It ends by itself after a few seconds; clear ends it now.\nEXAMPLES\n  dm presence set typing --conversation c:ada::si:scout\n  dm presence set recording-voice --conversation g:launch-week\n  dm presence set clear\nNEXT: dm messages send c:ada::si:scout --text '…'"
     )]
     Set {
         /// What you are doing now.
         #[arg(value_enum)]
         activity: ActivityValue,
+        /// The conversation you are doing it in (one you are in): c:ada::si:scout, g:name, an account id or a UUID.
+        #[arg(long, value_name = "CONVERSATION")]
+        conversation: Option<String>,
     },
 }
 

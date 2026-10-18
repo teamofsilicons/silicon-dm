@@ -87,9 +87,33 @@ to stop and cancels their reservations at Briefcase, and the page sends each suc
 
 **Rolling back.** The previous containers keep their names with a suffix: `dm-accounts-api-before-0.17-<time>` and
 `dm-accounts-worker-before-0.17-<time>`, with their environment files in the backup folder, and
-`dm-accounts-web-before-<time>`. Stop and rename the new container, rename the old one back, and start it. 0.17's
-migrations only add tables, columns, functions and triggers that 0.16 never touches, so 0.16 runs on the migrated
-database.
+`dm-accounts-web-before-<time>`. Stop and rename the new container, rename the old one back, and start it. 0.16 runs on
+the migrated database ([0.17's migrations](#the-migrations-of-017) say why for each). Its sync feed then meets
+positions it does not know, the ones 0.17's conversation events took, and answers 409 `sync_reset_required`: each
+client resets its sync once and refreshes its lists, and nothing is lost (0.16 writes no conversation events, so it
+happens once).
+
+### The migrations of 0.17
+
+`dm-migrate` applies them in order (the journal is `public._sqlx_migrations`), without the statement timeout the
+service uses (`DM_DATABASE_STATEMENT_TIMEOUT_SECONDS` does not apply to it: a backfill on a large table must not be cut
+short), and on failure prints the whole chain of causes. Then run `deploy/runtime-grants.sql` (`upgrade_service.py`
+does both).
+
+| Migration | What it does | DM 0.16 on the migrated database |
+| --- | --- | --- |
+| 0043 voices, speech and unread | Voice choices, the speech cache and renders, per-account speech usage, read positions (with a backfill from the receipts already recorded) | Never touches the new tables |
+| 0044 conversations of several and large files | Conversations of three or more accounts, attachment sizes up to 5 TiB | Its rows keep fitting |
+| 0045 conversation events | Per-account conversation events in the sync stream | Never reads or writes them (its feed resets once: above) |
+| 0046 delivery anchors without waiting | Fan-out triggers that no longer wait on another writer's directory refresh | Its writes fire them, with the same results |
+| 0047 outbox lookups and retention | Who received each message (`message_recipients`), keyed trigger lookups, 30 days of sync feed, `delivered_through_sequence` | Its writes fire the replaced trigger functions, with the same results through keyed lookups |
+| 0048 speech cache scopes | Speech audio cached per conversation, and per account for `POST /speech` | Never touches the speech tables |
+| 0049 message recipients recorded on send | The database records a message's recipients from its outbox rows, whichever version sends | Its sends record them too, so ticks keep moving |
+| 0050 presence activity conversation | The conversation a device's activity is about (`client_presence_leases.activity_conversation_id`) | Writes leases without it; nothing breaks |
+| 0051 read events | `read` conversation events with the reader's unread facts | Never reads or writes conversation events |
+
+All of them are additive: nothing 0.16 reads changes meaning, and no data is removed except the sync feed's events
+older than 30 days, which no client can still ask for.
 
 ### The website's settings in production
 
@@ -119,9 +143,12 @@ stopped (`dm: stopping; one upload was under way…`). Without that, each reserv
 for up to a day, counted against the Carbon's daily allowance and their 32 unfinished uploads. The page sends each
 stopped file again from its first byte once the website is back.
 
-`docker stop` waits 10 seconds before it kills the process, which is usually enough for those cancels. Give it 30
-(`docker stop --time 30`, and `--stop-timeout 30` on `docker run`) when Briefcase answers slowly. A deployment during a
-large upload costs that upload its progress, so check the website's log, or wait, when that matters.
+`docker stop` waits only 10 seconds by default before it kills the process, so the scripts give every part 30:
+`docker stop --time 30` for the website, the service and the worker, and `--stop-timeout 30` on the website's
+`docker run`. The website's cancels then have room even when Briefcase answers slowly, and the service finishes its
+requests (a sync long-poll holds up to 30 seconds; `DM_SHUTDOWN_TIMEOUT_SECONDS` is 30 by default). Stopping a part by
+hand, do the same. A deployment during a large upload costs that upload its progress, so check the website's log, or
+wait, when that matters.
 
 ## The DM service's settings
 
@@ -150,6 +177,12 @@ Without `DM_DEEPGRAM_API_KEY` the service runs, says `speech.enabled: false` in 
 the speech routes with 503 `speech_not_configured`; everything else works. Both the API and the worker render speech
 (they share the work through the database), so both need the key. The speech limits (`DM_SPEECH_RENDERS_PER_MINUTE`,
 `DM_SPEECH_DAILY_CHARACTERS`, the cache size) are in [configuration](../reference/configuration.md#speech).
+
+**Database connections.** Each process keeps a pool of `DM_DATABASE_MAX_CONNECTIONS` for its queries, and up to three
+more connections of its own, outside that pool, for `LISTEN` (the wake-ups that let a sync long-poll, the Ting worker
+and the speech worker react at once): `dm-api` opens three, `dm-worker` two. Count them when sizing the database's
+connection limit: with a pool of 4, the service and the worker hold up to 13 together (4 + 3 + 4 + 2). A deployment
+with a pool of one connection opens no listener and relies on polling.
 
 Production database URLs must include exactly one `sslmode=verify-full` and a host matching the certificate; never
 disable verification. Other production upstream URLs use HTTPS. [`.env.example`](../../.env.example) lists pool,
@@ -194,8 +227,9 @@ their files and voice notes in Silicon Briefcase. Its settings are in
 | `/api/…` (the proxy) | As the service's routes above: the sync long-poll holds 45 s, speech answers within 200 s, transcription uploads up to `DM_TRANSCRIBE_MAX_BYTES` within 10 minutes |
 | `/auth/callback` | Registered at Silicon Accounts as `PUBLIC_URL/auth/callback` before traffic moves |
 
-The website keeps one replica. Its session refresh uses an in-process cache, and a file it is still saving into
-Briefcase lives in its memory, so with several replicas a Carbon's requests must reach the same one.
+The website runs as one process, in one replica. Its session refresh uses an in-process cache, and a file it is still
+saving into Briefcase after its 202 lives in that process's memory (the page's `GET /api/uploads/saving` must reach
+it), so do not run it in cluster mode or with several replicas unless a Carbon's requests always reach the same one.
 
 **Its own server.** The website sets up its server when it starts, before it answers anything (`instrumentation.ts`,
 `prepareServer` in `web/lib/server/briefcase.ts`), so these hold from the first request after a start, an upload

@@ -96,7 +96,12 @@ their own `event_id` and `sequence`:
 `change` is `created`, `invited`, `added`, `invitation_accepted`, `invitation_declined`, `invitation_cancelled`,
 `left`, `removed` (each about your own place in it), or `renamed`, `description_changed`, `members_changed`,
 `owners_changed` (the conversation changed for you). Read the conversation (or `GET /api/v1/invitations`) on any of
-them; after `left` or `removed` it is 404, so drop it. Without `include` these events are skipped and the cursor
+them; after `left` or `removed` it is 404, so drop it. `read` means you read messages there on one of your devices;
+it carries what is unread now, so there is nothing to read:
+
+```json
+{"event_id":"0199f2a1-5d0e-7c11-9a43-0c6f9b8e2d12","sequence":43,"type":"conversation","conversation_id":"c:ada::si:scout","change":"read","unread_count":0,"last_read_message_id":"00a"}
+``` Without `include` these events are skipped and the cursor
 moves past them, so a client that never asks never meets one.
 
 Draft saves use compare-and-swap versions. A stale save returns HTTP 409 with `data.error.code: draft_conflict`, recovery instructions, and the current draft fields in `data`. The save was not applied. Keep local content, resolve against the returned version, and retry explicitly.

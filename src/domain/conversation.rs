@@ -56,6 +56,20 @@ pub struct ConversationPage {
     pub items: Vec<Conversation>,
     /// Opaque cursor for the next page.
     pub next_cursor: Option<String>,
+    /// What is unread across the listed account's conversations (the first page only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<UnreadTotal>,
+}
+
+/// Unread messages across an account's conversations, for a badge or a window title: counted
+/// over its most recently active conversations, with the messages counted up to the same
+/// bound as one conversation's (shown as "999+").
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UnreadTotal {
+    /// Conversations with at least one unread message.
+    pub conversations: i64,
+    /// Unread messages in them, at most 1,000.
+    pub messages: i64,
 }
 
 /// How an account may use a conversation or group.
@@ -72,7 +86,8 @@ pub enum ConversationAccess {
 
 /// What happened to a conversation for one account: a conversation event in that account's
 /// sync feed (`GET /api/v1/sync?include=conversations`). Events name the conversation and the
-/// change only; clients read the conversation itself with their own permissions.
+/// change only (a `read` event adds the account's unread facts); clients read the
+/// conversation itself with their own permissions.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ConversationChange {
     /// A conversation was created with the account in it (it created it, or it is a member
@@ -100,11 +115,14 @@ pub enum ConversationChange {
     MembersChanged,
     /// Owners were added or removed.
     OwnersChanged,
+    /// The account read messages there (on any of its devices): the event carries its unread
+    /// count and newest read message afterwards, so its other devices update their badges.
+    Read,
 }
 
 impl ConversationChange {
     /// Every change, in the order the docs list them.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Created,
         Self::Invited,
         Self::Added,
@@ -117,6 +135,7 @@ impl ConversationChange {
         Self::DescriptionChanged,
         Self::MembersChanged,
         Self::OwnersChanged,
+        Self::Read,
     ];
 
     /// The wire name (`change` in a conversation event).
@@ -135,6 +154,7 @@ impl ConversationChange {
             Self::DescriptionChanged => "description_changed",
             Self::MembersChanged => "members_changed",
             Self::OwnersChanged => "owners_changed",
+            Self::Read => "read",
         }
     }
 }

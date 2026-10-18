@@ -156,6 +156,114 @@ for (const theme of ["light", "dark"] as const) {
   }
 }
 
+/** One focus stop as the walk measured it. */
+interface FocusStop {
+  name: string;
+  /** Pixels that changed by 3:1 or more with the keyboard on it, and the length of the measured edge. */
+  strong: number;
+  edge: number;
+  /** Silicon UI's ring drawn on top of an edge the control (or its field) draws itself: two indicators. */
+  doubled: boolean;
+}
+
+/**
+ * How much keyboard focus changes the control that has it, as WCAG 1.4.11 measures a focus indicator: each pixel of
+ * the control (and 4 px around it; for a field, the edge around it that shows its focus) with the keyboard on it,
+ * against the same pixel at rest, transitions off, as a contrast ratio. A 2 px edge all around changes about twice the
+ * edge's length of pixels; a fill or a hairline alone changes none by 3:1.
+ */
+async function focusStop(page: Page): Promise<FocusStop | null> {
+  const found = await page.evaluate(() => {
+    const element = document.activeElement as HTMLElement | null;
+    if (!element || element === document.body) return null;
+    const name = `${element.tagName.toLowerCase()} "${(element.getAttribute("aria-label") ?? element.textContent ?? "").trim().slice(0, 40)}"`;
+    const edgeOf = (node: Element) => {
+      const style = getComputedStyle(node);
+      return [style.boxShadow, parseFloat(style.borderTopWidth) > 0 ? style.borderTopColor : "", style.getPropertyValue("--sq-stroke").trim()].join("|");
+    };
+    const ringOf = (node: Element) => {
+      const style = getComputedStyle(node);
+      return style.outlineStyle !== "none" && parseFloat(style.outlineWidth) > 0 && !/\/ 0\)|rgba\(0, 0, 0, 0\)|transparent/.test(style.outlineColor);
+    };
+    // A field shows focus on the edge around it (Silicon UI's fields, the composer's box): measure that.
+    const field = element.matches("input, textarea, select, [contenteditable]:not([contenteditable='false'])");
+    const candidates = [element, element.parentElement, element.parentElement?.parentElement].filter((node): node is HTMLElement => !!node);
+    const focused = candidates.map(edgeOf);
+    const ring = ringOf(element);
+    element.blur();
+    const rest = candidates.map(edgeOf);
+    element.focus({ preventScroll: true });
+    const changed = candidates.map((_, index) => focused[index] !== rest[index]);
+    const measured = field ? candidates.find((_, index) => changed[index]) ?? element : element;
+    measured.setAttribute("data-focus-walk", "");
+    const box = measured.getBoundingClientRect();
+    return { name, ring, edge: changed[0] || (field && changed.some(Boolean)), box: { x: box.x, y: box.y, width: box.width, height: box.height } };
+  });
+  if (!found) return null;
+  const viewport = page.viewportSize()!;
+  const { box } = found;
+  // The edges of the measured box that are on screen (a list taller than the window shows only some of its edge).
+  const left = Math.max(0, box.x - 4);
+  const top = Math.max(0, box.y - 4);
+  const clip = { x: left, y: top, width: Math.max(1, Math.min(viewport.width, box.x + box.width + 4) - left), height: Math.max(1, Math.min(viewport.height, box.y + box.height + 4) - top) };
+  const shownWidth = Math.min(viewport.width, box.x + box.width) - Math.max(0, box.x);
+  const shownHeight = Math.min(viewport.height, box.y + box.height) - Math.max(0, box.y);
+  const edge = Math.round((box.y >= 0 ? shownWidth : 0) + (box.y + box.height <= viewport.height ? shownWidth : 0) + (box.x >= 0 ? shownHeight : 0) + (box.x + box.width <= viewport.width ? shownHeight : 0));
+  const focused = await page.screenshot({ clip });
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  const rest = await page.screenshot({ clip });
+  // Back where it was, shown as the keyboard shows it (a key first: :focus-visible), so the walk goes on from here.
+  await page.keyboard.press("Shift");
+  await page.locator("[data-focus-walk]").evaluate(element => element.removeAttribute("data-focus-walk"));
+  const strong = await page.evaluate(async ([a, b]) => {
+    const pixels = async (base64: string) => {
+      const bitmap = await createImageBitmap(new Blob([Uint8Array.from(atob(base64), c => c.charCodeAt(0))], { type: "image/png" }));
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const context = canvas.getContext("2d")!;
+      context.drawImage(bitmap, 0, 0);
+      return context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+    };
+    const [p, q] = await Promise.all([pixels(a), pixels(b)]);
+    const channel = (value: number) => {
+      const c = value / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+    const luminance = (d: Uint8ClampedArray, i: number) => 0.2126 * channel(d[i]!) + 0.7152 * channel(d[i + 1]!) + 0.0722 * channel(d[i + 2]!);
+    let count = 0;
+    for (let i = 0; i < p.length; i += 4) {
+      const one = luminance(p, i);
+      const two = luminance(q, i);
+      if ((Math.max(one, two) + 0.05) / (Math.min(one, two) + 0.05) >= 3) count++;
+    }
+    return count;
+  }, [rest.toString("base64"), focused.toString("base64")] as const);
+  return { name: found.name, strong, edge, doubled: found.ring && found.edge };
+}
+
+/**
+ * Tabs through `steps` stops from where the keyboard is, measuring each (focusStop) and putting the keyboard back on it
+ * before the next Tab. `within`: stop once the keyboard leaves this element.
+ */
+async function walkFocus(page: Page, steps: number, within?: string): Promise<{ weak: string[]; doubled: string[] }> {
+  const weak: string[] = [];
+  const doubled: string[] = [];
+  const seen = new Set<string>();
+  for (let step = 0; step < steps; step++) {
+    await page.keyboard.press("Tab");
+    if (within && !(await page.evaluate(selector => !!document.activeElement?.closest(selector), within))) break;
+    const handle = await page.evaluateHandle(() => document.activeElement);
+    const stop = await focusStop(page);
+    await (handle as import("@playwright/test").ElementHandle<HTMLElement>).focus().catch(() => undefined);
+    if (!stop || seen.has(stop.name)) continue;
+    seen.add(stop.name);
+    if (process.env.FOCUS_WALK_DEBUG) console.log(`${stop.strong} of ${stop.edge}${stop.doubled ? " (doubled)" : ""}: ${stop.name}`);
+    // WCAG 1.4.11: at least three quarters of its edge's length of pixels change by 3:1 or more.
+    if (stop.strong < stop.edge * 0.75) weak.push(`${stop.name} (${stop.strong} of ${stop.edge})`);
+    if (stop.doubled) doubled.push(stop.name);
+  }
+  return { weak, doubled };
+}
+
 test("the keyboard reaches everything in the shell, and focus is always visible", async ({ browser }) => {
   const context = await contextFor(browser, "light", false, await signedIn.storageState());
   const page = await context.newPage();
@@ -164,38 +272,25 @@ test("the keyboard reaches everything in the shell, and focus is always visible"
   await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.locator("main#main")).toBeFocused();
-  // Every focus stop shows where it is: a fill, an edge or an underline that differs from its resting look (compared
-  // with transitions off, so a fading fill is not read mid-way).
+  // Every focus stop shows where it is by a change of at least 3:1 (WCAG 1.4.11; DESIGN.md, Focus and accessibility),
+  // and with one indicator: never Silicon UI's ring on top of an edge the control draws itself. Measured with
+  // transitions off and tooltips hidden (a tooltip is no focus indicator).
+  const quiet = "*, *::before, *::after { transition: none !important; animation: none !important; } [role=tooltip] { display: none !important; }";
   await page.goto(appConfig.home);
-  await page.addStyleTag({ content: "*, *::before, *::after { transition: none !important; animation: none !important; }" });
-  const unseen: string[] = [];
-  const ringed: string[] = [];
-  for (let step = 0; step < 14; step++) {
-    await page.keyboard.press("Tab");
-    const visible = await page.evaluate(() => {
-      const element = document.activeElement as HTMLElement | null;
-      if (!element || element === document.body) return { name: "body", changed: true, ring: false };
-      const name = `${element.tagName.toLowerCase()} "${(element.getAttribute("aria-label") ?? element.textContent ?? "").trim().slice(0, 40)}"`;
-      // No outline ring on top of the fill or edge a control draws (Silicon UI's ring wins over `outline: none`).
-      const own = getComputedStyle(element);
-      const ring = own.outlineStyle !== "none" && parseFloat(own.outlineWidth) > 0 && !/\/ 0\)|rgba\(0, 0, 0, 0\)|transparent/.test(own.outlineColor);
-      // Arc draws focus on the control, or on what paints it: a highlight inside it, the field around it
-      // (:focus-within) or the surface right after it (Add filter). Look at all of them.
-      const painted = [element, element.parentElement, element.parentElement?.parentElement, element.nextElementSibling, ...Array.from(element.children).slice(0, 3)].filter((node): node is Element => !!node);
-      const snapshot = () => painted.map(node => {
-        const style = getComputedStyle(node);
-        return [style.backgroundColor, style.borderColor, style.boxShadow, style.color, style.textDecorationLine, style.outlineStyle, style.transform, style.opacity].join("|");
-      }).join("/");
-      const now = snapshot();
-      element.blur();
-      const rest = snapshot();
-      element.focus({ preventScroll: true });
-      return { name, changed: now !== rest, ring };
-    });
-    if (!visible.changed) unseen.push(visible.name);
-    if (visible.ring) ringed.push(visible.name);
-  }
-  expect(unseen, `focus not visible on: ${unseen.join(", ")}`).toEqual([]);
-  expect(ringed, `a ring drawn over the focus look on: ${ringed.join(", ")}`).toEqual([]);
+  await page.addStyleTag({ content: quiet });
+  const shell = await walkFocus(page, 14);
+  // The run's own conversation: its header, the message list and the composer (+, the field, Send, the microphone).
+  await page.goto(`/c/${conversation.address}`);
+  await expect(page.getByRole("textbox", { name: /^Message / })).toBeFocused();
+  await page.addStyleTag({ content: quiet });
+  await page.locator("main header").first().evaluate(header => {
+    header.setAttribute("tabindex", "-1");
+    header.focus();
+  });
+  const thread = await walkFocus(page, 12, "main");
+  const weak = [...shell.weak, ...thread.weak];
+  const doubled = [...shell.doubled, ...thread.doubled];
+  expect(weak, `focus changes less than 3:1 on: ${weak.join(", ")}`).toEqual([]);
+  expect(doubled, `Silicon UI's ring drawn over the control's own focus edge on: ${doubled.join(", ")}`).toEqual([]);
   await context.close();
 });

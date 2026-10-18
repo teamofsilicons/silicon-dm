@@ -18,7 +18,9 @@ pub use actor::{
     ACCOUNTS_PARTITION, ActorId, ActorRef, ActorType, OrganizationId, is_account_uuid,
 };
 pub use bundle::{Bundle, BundleCreate, BundleDetail, BundleRef, BundleRole};
-pub use conversation::{Conversation, ConversationAccess, ConversationChange, ConversationPage};
+pub use conversation::{
+    Conversation, ConversationAccess, ConversationChange, ConversationPage, UnreadTotal,
+};
 pub use draft::{Draft, DraftInput};
 pub use group::{
     GroupCreate, GroupDetails, GroupSettings, MAX_GROUP_DESCRIPTION_CHARACTERS,

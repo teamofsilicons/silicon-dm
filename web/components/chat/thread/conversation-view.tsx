@@ -19,7 +19,7 @@ import { accountName, conversationHref, conversationKind, conversationTitle, dir
 import { deleteMessage } from "@/lib/chat/api";
 import { draftHint, type DraftHint } from "@/lib/chat/drafts";
 import { replaceMessage, upsertMessage, type MessagePages } from "@/lib/chat/cache";
-import { useConversation, useMessages } from "@/lib/chat/hooks";
+import { OLDER_PAGE_LIMIT, useConversation, useMessages } from "@/lib/chat/hooks";
 import { chatKeys } from "@/lib/chat/keys";
 import { discardSend, retrySend, useConversationOutbox } from "@/lib/chat/outbox-store";
 import { useParticipantsPresence } from "@/lib/chat/presence";
@@ -119,7 +119,7 @@ export function ConversationView({ address }: { address: string }) {
   const [opened, setOpened] = useState<{ firstUnread: FirstUnread | null } | null>(null);
   const known = thread.isSuccess && (!!conversation || !!conversationError);
   // Only while a few pages can reach it (thread-model.ts unreadWithinReach): a first unread further back opens at once.
-  const reachable = unreadWithinReach(conversation?.unread_count, thread.data?.pages[0]?.items.length || 50, UNREAD_PAGES);
+  const reachable = unreadWithinReach(conversation?.unread_count, thread.data?.pages[0]?.items.length || 50, OLDER_PAGE_LIMIT, UNREAD_PAGES);
   const needOlder = known && !opened && reachable && unreadBeyondLoaded(conversation, thread.messages, perspective) && !!thread.hasNextPage && (thread.data?.pages.length ?? 0) <= UNREAD_PAGES;
   if (!opened && known && !needOlder && !thread.isFetchingNextPage) setOpened({ firstUnread: findFirstUnread(conversation, thread.messages, perspective) });
   const { isFetchingNextPage, fetchNextPage } = thread;

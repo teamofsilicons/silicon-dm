@@ -6,17 +6,19 @@
  * the browser) sets its own with useTitle, and the unread count is put back in front whenever the title changes.
  */
 import { useEffect } from "react";
+import { unreadBadge } from "./format";
 
 let unread = 0;
 let base: string | null = null;
 let observer: MutationObserver | null = null;
 
-const strip = (title: string) => title.replace(/^\(\d+\)\s+/, "");
+const strip = (title: string) => title.replace(/^\(\d+\+?\)\s+/, "");
 
 function apply() {
   if (typeof document === "undefined") return;
   const own = base ?? strip(document.title);
-  const next = unread > 0 ? `(${unread}) ${own}` : own;
+  // 1,000 or more is "999+" (the service stops counting there; lib/chat/format.ts).
+  const next = unread > 0 ? `(${unreadBadge(unread)}) ${own}` : own;
   if (document.title !== next) document.title = next;
 }
 

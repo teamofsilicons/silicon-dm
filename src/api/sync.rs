@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq as _;
 use time::OffsetDateTime;
 
-use super::extract::{ApiJson, ApiPath, ApiQuery, Authenticated};
+use super::extract::{ApiJson, ApiPath, ApiQuery, Authenticated, ConversationAccess};
 use crate::{
     AppError, AppResult,
     application::{
@@ -286,6 +286,12 @@ fn decode_cursor(value: &str, key: &[u8; 32], scope: &str, now: i64) -> AppResul
 pub(super) struct PresenceInput {
     #[serde(default)]
     activity: Option<Activity>,
+    /// The conversation the activity is about (an address or UUID of a conversation the
+    /// account is in): only accounts in it see the activity. DM 0.17; older services refuse
+    /// the field, so clients send it once `GET /api/v1/contracts` announces
+    /// `features.presence_activity`.
+    #[serde(default)]
+    conversation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -299,17 +305,74 @@ pub(super) async fn renew_presence(
     ApiPath(device): ApiPath<DevicePath>,
     ApiJson(input): ApiJson<PresenceInput>,
 ) -> AppResult<Json<PresenceLease>> {
+    let conversation = match input.conversation_id.as_deref() {
+        Some(value) => Some(activity_conversation(&state, &auth, value).await?),
+        None => None,
+    };
     state
         .store
         .renew_http_presence(
             &auth,
             &device.device_id,
             input.activity,
+            conversation,
             state.settings.realtime.heartbeat_timeout,
             state.settings.realtime.activity_ttl,
         )
         .await
         .map(Json)
+}
+
+/// The conversation a device's activity is about: one the account is in. A conversation
+/// it reads only as a custodian, or is only invited to, is not where it types.
+async fn activity_conversation(
+    state: &AppState,
+    auth: &AuthContext,
+    value: &str,
+) -> AppResult<uuid::Uuid> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::invalid(
+            "conversation_id is empty: it names the conversation the activity is about.",
+        )
+        .with_hint(ACTIVITY_CONVERSATION_HINT)
+        .with_details(serde_json::json!({"field": "conversation_id"})));
+    }
+    let (id, access) = super::access::resolve_conversation_path(state, auth, value, false)
+        .await
+        .map_err(|error| named_field(error, "conversation_id", ACTIVITY_CONVERSATION_HINT))?;
+    match access {
+        ConversationAccess::Participant => Ok(id),
+        ConversationAccess::Custodian => Err(AppError::forbidden(
+            "read_only_view",
+            "You see this conversation as the custodian of a Silicon in it, not as one of its members: a custodian's view is read only, so your activity (typing, recording…) cannot be about it.",
+        )
+        .with_hint("Report activity in conversations you are in, or renew the lease without conversation_id.")
+        .with_details(serde_json::json!({"field": "conversation_id"}))),
+        ConversationAccess::Invitee => Err(super::groups::invitation_pending()
+            .with_details(serde_json::json!({"field": "conversation_id"}))),
+    }
+}
+
+const ACTIVITY_CONVERSATION_HINT: &str = "Send the address or UUID of the conversation the activity happens in, one you are in (GET /api/v1/conversations, dm conversations list), or leave conversation_id out.";
+
+/// A conversation named in a field that could not be resolved: the same code and words, the
+/// field it came from, and what to do about that field.
+pub(super) fn named_field(error: AppError, field: &str, hint: &str) -> AppError {
+    if matches!(error, AppError::NotFound) {
+        return AppError::not_found(format!(
+            "{field} names no conversation visible to you: it does not exist, or you are not in it (DM does not say which)."
+        ))
+        .with_hint(hint)
+        .with_details(serde_json::json!({"field": field}));
+    }
+    if error.hint().is_some() {
+        error
+            .with_hint(hint)
+            .with_details(serde_json::json!({"field": field}))
+    } else {
+        error.with_details(serde_json::json!({"field": field}))
+    }
 }
 
 pub(super) async fn close_presence(

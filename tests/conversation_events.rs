@@ -636,7 +636,12 @@ async fn only_clients_that_ask_get_conversation_events() -> Result<(), BoxError>
     let contracts = app.get("/api/v1/contracts", &bob).await?;
     let feature = &contracts.1["features"]["conversation_events"];
     assert_eq!(feature["sync_query"], "include=conversations");
-    assert_eq!(feature["changes"].as_array().map(Vec::len), Some(12));
+    assert_eq!(feature["changes"].as_array().map(Vec::len), Some(13));
+    assert_eq!(feature["read"]["change"], "read");
+    assert_eq!(
+        feature["read"]["fields"],
+        json!(["unread_count", "last_read_message_id"])
+    );
     app.close().await
 }
 

@@ -1008,9 +1008,32 @@ async fn relay_command(
             },
         },
         Command::Presence { command } => match command {
-            PresenceCommands::Get { actor_id } => Operation::GetPresence { actor_id },
-            PresenceCommands::Set { activity: value } => Operation::SetPresence {
+            PresenceCommands::Get {
+                actor_id,
+                conversation: None,
+                for_account: None,
+            } => Operation::GetPresence { actor_id },
+            PresenceCommands::Get {
+                actor_id,
+                conversation,
+                for_account,
+            } => Operation::GetScopedPresence {
+                actor_id,
+                conversation_id: conversation,
+                for_account,
+            },
+            PresenceCommands::Set {
+                activity: value,
+                conversation: None,
+            } => Operation::SetPresence {
                 activity: activity(value),
+            },
+            PresenceCommands::Set {
+                activity: value,
+                conversation: Some(conversation_id),
+            } => Operation::SetScopedPresence {
+                activity: activity(value),
+                conversation_id,
             },
         },
         Command::Gifs { command } => match command {

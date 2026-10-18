@@ -63,11 +63,11 @@ export function unreadBeyondLoaded(conversation: Pick<ConversationSummary, "last
 /**
  * Whether the first unread message is worth waiting for as the thread opens: the pages of messages come one after
  * another (each answer names the next), so a first unread further back than `pages` more pages could bring is not
- * waited for at all (the thread opens at once, at the oldest unread message loaded). `pageSize` is what the first
- * page held.
+ * waited for at all (the thread opens at once, at the oldest unread message loaded). `firstPage` is what the first
+ * page held, `olderPage` what each older page asks for (lib/chat/hooks.ts OLDER_PAGE_LIMIT).
  */
-export function unreadWithinReach(unreadCount: number | undefined, pageSize: number, pages: number): boolean {
-  return (unreadCount ?? 0) <= (pages + 1) * Math.max(1, pageSize);
+export function unreadWithinReach(unreadCount: number | undefined, firstPage: number, olderPage: number, pages: number): boolean {
+  return (unreadCount ?? 0) <= Math.max(1, firstPage) + pages * Math.max(1, olderPage);
 }
 
 /** Messages from others below what was seen: the count on the "Jump to latest" pill. */

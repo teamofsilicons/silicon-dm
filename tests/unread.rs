@@ -727,9 +727,15 @@ async fn unread_counts_stop_at_a_thousand() -> Result<(), BoxError> {
         expect_status(&sent, StatusCode::ACCEPTED)?;
         last = code(&sent.1);
     }
-    // A Silicon that never marks anything read: its count says "a thousand or more".
+    // A Silicon that never marks anything read: its count says "a thousand or more", and so
+    // does the total on its first page.
     let listed = summary(&app, &scout, "", pair).await?;
     assert_eq!(listed["unread_count"], cap, "{listed}");
+    let first = app.get("/api/v1/conversations", &scout).await?;
+    assert_eq!(
+        first.1["unread"],
+        json!({"conversations": 1, "messages": cap})
+    );
     let (status, outcome) = bulk(
         &app,
         &scout,
@@ -740,5 +746,403 @@ async fn unread_counts_stop_at_a_thousand() -> Result<(), BoxError> {
     assert_eq!(status, StatusCode::OK, "{outcome}");
     assert_eq!(outcome["updated"], cap + 1);
     assert_eq!(outcome["unread_count"], 0);
+    app.close().await
+}
+
+/// Every event of `token`'s feed after `cursor` (conversation events included when `include`),
+/// and the cursor to continue from.
+async fn feed(
+    app: &TestApp,
+    token: &str,
+    cursor: &str,
+    include: bool,
+) -> Result<(Vec<Value>, String), BoxError> {
+    let mut cursor = cursor.to_owned();
+    let mut events = Vec::new();
+    loop {
+        let page = app
+            .get(
+                &format!(
+                    "/api/v1/sync?limit=100&cursor={cursor}{}",
+                    if include {
+                        "&include=conversations"
+                    } else {
+                        ""
+                    }
+                ),
+                token,
+            )
+            .await?;
+        expect_status(&page, StatusCode::OK)?;
+        events.extend(page.1["events"].as_array().cloned().unwrap_or_default());
+        page.1["cursor"]
+            .as_str()
+            .unwrap_or_default()
+            .clone_into(&mut cursor);
+        if page.1["has_more"] != true {
+            return Ok((events, cursor));
+        }
+    }
+}
+
+async fn head(app: &TestApp, token: &str) -> Result<String, BoxError> {
+    let reset = app
+        .get("/api/v1/sync?reset=true&include=conversations", token)
+        .await?;
+    expect_status(&reset, StatusCode::OK)?;
+    Ok(reset.1["cursor"].as_str().unwrap_or_default().to_owned())
+}
+
+fn reads(events: &[Value]) -> Vec<&Value> {
+    events
+        .iter()
+        .filter(|event| event["type"] == "conversation" && event["change"] == "read")
+        .collect()
+}
+
+#[tokio::test]
+async fn reading_tells_the_readers_other_devices_its_unread_count() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let p = people(&app).await;
+    let ada = app.accounts.token(&p.ada);
+    let bob = app.accounts.token(&p.bob);
+    let mut codes = Vec::new();
+    for text in ["one", "two", "three"] {
+        let sent = app
+            .post(
+                "/api/v1/messages",
+                &bob,
+                json!({"recipient_id": "c:ada", "message": text}),
+            )
+            .await?;
+        expect_status(&sent, StatusCode::ACCEPTED)?;
+        codes.push(code(&sent.1));
+    }
+    let pair = "c:ada::c:bob";
+    let ada_start = head(&app, &ada).await?;
+    let bob_start = head(&app, &bob).await?;
+
+    // One read on Ada's phone: her feed says what is left unread.
+    let read = app
+        .post(
+            &format!(
+                "/api/v1/conversations/{pair}/messages/{}/receipts",
+                codes[1]
+            ),
+            &ada,
+            json!({"status": "read", "device_id": "ada-phone"}),
+        )
+        .await?;
+    expect_status(&read, StatusCode::OK)?;
+    let (events, cursor) = feed(&app, &ada, &ada_start, true).await?;
+    let heard = reads(&events);
+    assert_eq!(heard.len(), 1, "{events:?}");
+    assert_eq!(heard[0]["conversation_id"], pair);
+    assert_eq!(heard[0]["unread_count"], 2);
+    assert_eq!(heard[0]["last_read_message_id"], codes[1].as_str());
+    assert!(heard[0]["message_id"].is_null(), "{}", heard[0]);
+    // The same message read again on her laptop, and a delivered receipt, change no count:
+    // no event.
+    for (status, device) in [("read", "ada-laptop"), ("delivered", "ada-laptop")] {
+        expect_status(
+            &app.post(
+                &format!(
+                    "/api/v1/conversations/{pair}/messages/{}/receipts",
+                    codes[if status == "read" { 1 } else { 2 }]
+                ),
+                &ada,
+                json!({"status": status, "device_id": device}),
+            )
+            .await?,
+            StatusCode::OK,
+        )?;
+    }
+    let (events, cursor) = feed(&app, &ada, &cursor, true).await?;
+    assert!(reads(&events).is_empty(), "{events:?}");
+
+    // Reading in bulk: one event, the answer's count, the newest read message.
+    let (status, outcome) = bulk(
+        &app,
+        &ada,
+        pair,
+        json!({"type": "receipts.read", "data": {"up_to": codes[2]}}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{outcome}");
+    assert_eq!(outcome["unread_count"], 0);
+    let (events, cursor) = feed(&app, &ada, &cursor, true).await?;
+    let heard = reads(&events);
+    assert_eq!(heard.len(), 1, "{events:?}");
+    assert_eq!(heard[0]["unread_count"], 0);
+    assert_eq!(heard[0]["last_read_message_id"], codes[2].as_str());
+    // Repeating it marks nothing: no event.
+    bulk(
+        &app,
+        &ada,
+        pair,
+        json!({"type": "receipts.read", "data": {"up_to": codes[2]}}),
+    )
+    .await?;
+    let (events, cursor) = feed(&app, &ada, &cursor, true).await?;
+    assert!(reads(&events).is_empty(), "{events:?}");
+
+    // In feed order the count is right: a message after the read comes after its event.
+    let later = app
+        .post(
+            "/api/v1/messages",
+            &bob,
+            json!({"recipient_id": "c:ada", "message": "four"}),
+        )
+        .await?;
+    expect_status(&later, StatusCode::ACCEPTED)?;
+    let (events, _) = feed(&app, &ada, &cursor, true).await?;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["type"], "message");
+
+    // Without include=conversations the feed never carries them; the sender never gets them.
+    let (plain, _) = feed(&app, &ada, &ada_start, false).await?;
+    assert!(
+        plain.iter().all(|event| event["type"] != "conversation"),
+        "{plain:?}"
+    );
+    let (bobs, _) = feed(&app, &bob, &bob_start, true).await?;
+    assert!(reads(&bobs).is_empty(), "{bobs:?}");
+    assert!(
+        bobs.iter().any(|event| event["type"] == "message_status"),
+        "Bob still hears his messages were read: {bobs:?}"
+    );
+
+    // The contracts announce the event and its fields.
+    let contracts = app.get("/api/v1/contracts", &ada).await?;
+    let feature = &contracts.1["features"]["conversation_events"];
+    assert!(
+        feature["changes"]
+            .as_array()
+            .is_some_and(|changes| changes.contains(&json!("read"))),
+        "{feature}"
+    );
+    app.close().await
+}
+
+#[tokio::test]
+async fn read_events_race_sends_and_end_with_the_count_the_list_shows() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let p = people(&app).await;
+    let ada = app.accounts.token(&p.ada);
+    let bob = app.accounts.token(&p.bob);
+    let cy = app.accounts.token(&p.cy);
+    // Readers that sort before and after the senders, reading one by one and in bulk while
+    // the others send: their stream locks are taken in every order a writer could choose.
+    let created = app
+        .post(
+            "/api/v1/groups",
+            &ada,
+            json!({"name": "Read race", "member_ids": ["c:bob", "c:cy"]}),
+        )
+        .await?;
+    expect_status(&created, StatusCode::CREATED)?;
+    let group = created.1["id"].as_str().unwrap_or_default().to_owned();
+    for token in [&bob, &cy] {
+        expect_status(
+            &app.post(
+                &format!("/api/v1/groups/{group}/accept"),
+                token,
+                json!(null),
+            )
+            .await?,
+            StatusCode::OK,
+        )?;
+    }
+    let starts = [head(&app, &ada).await?, head(&app, &cy).await?];
+    let rounds = 10;
+    let senders = async {
+        for round in 0..rounds {
+            for (token, who) in [(&bob, "bob"), (&cy, "cy")] {
+                let sent = app
+                    .post(
+                        &format!("/api/v1/conversations/{group}/messages"),
+                        token,
+                        json!({"message": format!("{who} {round}")}),
+                    )
+                    .await?;
+                expect_status(&sent, StatusCode::ACCEPTED)?;
+            }
+        }
+        Ok::<(), BoxError>(())
+    };
+    let one_by_one = async {
+        for _ in 0..rounds * 2 {
+            let latest = app
+                .get(
+                    &format!("/api/v1/conversations/{group}/messages?limit=1"),
+                    &ada,
+                )
+                .await?;
+            let item = &latest.1["items"][0];
+            if item["sender"]["id"] == "c:ada" || item["message-id"].is_null() {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            let receipt = app
+                .post(
+                    &format!(
+                        "/api/v1/conversations/{group}/messages/{}/receipts",
+                        code(item)
+                    ),
+                    &ada,
+                    json!({"status": "read", "device_id": "ada-phone"}),
+                )
+                .await?;
+            expect_status(&receipt, StatusCode::OK)?;
+        }
+        Ok::<(), BoxError>(())
+    };
+    let in_bulk = async {
+        for _ in 0..rounds * 2 {
+            let latest = app
+                .get(
+                    &format!("/api/v1/conversations/{group}/messages?limit=1"),
+                    &cy,
+                )
+                .await?;
+            let Some(newest) = latest.1["items"][0]["message-id"].as_str() else {
+                tokio::task::yield_now().await;
+                continue;
+            };
+            let (status, outcome) = bulk(
+                &app,
+                &cy,
+                &group,
+                json!({"type": "receipts.read", "data": {"up_to": newest}}),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{outcome}");
+        }
+        Ok::<(), BoxError>(())
+    };
+    let (sent, one, many) = tokio::join!(senders, one_by_one, in_bulk);
+    sent?;
+    one?;
+    many?;
+    // Each reader's feed, applied in order, ends with the count its list shows: the last read
+    // event's count plus the messages from others that came after it.
+    for (token, start) in [&ada, &cy].into_iter().zip(&starts) {
+        let (events, _) = feed(&app, token, start, true).await?;
+        let me = if *token == ada { "c:ada" } else { "c:cy" };
+        let last = events
+            .iter()
+            .rposition(|event| event["change"] == "read")
+            .ok_or_else(|| format!("{me} heard no read event: {events:?}"))?;
+        let mut expected = events[last]["unread_count"].as_i64().unwrap_or(-1);
+        for event in &events[last + 1..] {
+            if event["type"] == "message" {
+                let message = app
+                    .get(
+                        &format!(
+                            "/api/v1/conversations/{group}/messages/{}",
+                            event["message_id"].as_str().unwrap_or_default()
+                        ),
+                        token,
+                    )
+                    .await?;
+                if message.1["sender"]["id"] != me {
+                    expected += 1;
+                }
+            }
+        }
+        let listed = summary(&app, token, "", &group).await?;
+        assert_eq!(
+            listed["unread_count"], expected,
+            "{me}: {listed} after {events:?}"
+        );
+    }
+    app.close().await
+}
+
+#[tokio::test]
+async fn the_first_page_says_what_is_unread_in_every_conversation() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let p = people(&app).await;
+    let ada = app.accounts.token(&p.ada);
+    let bob = app.accounts.token(&p.bob);
+    let scout = app.accounts.token(&p.scout);
+    let mut last = String::new();
+    for text in ["one", "two"] {
+        let sent = app
+            .post(
+                "/api/v1/messages",
+                &bob,
+                json!({"recipient_id": "c:ada", "message": text}),
+            )
+            .await?;
+        expect_status(&sent, StatusCode::ACCEPTED)?;
+        last = code(&sent.1);
+    }
+    for text in ["three", "four", "five"] {
+        expect_status(
+            &app.post(
+                "/api/v1/messages",
+                &scout,
+                json!({"recipient_id": "c:ada", "message": text}),
+            )
+            .await?,
+            StatusCode::ACCEPTED,
+        )?;
+    }
+    // A first page of one conversation still counts all of them; later pages do not repeat it.
+    let first = app.get("/api/v1/conversations?limit=1", &ada).await?;
+    expect_status(&first, StatusCode::OK)?;
+    assert_eq!(first.1["items"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        first.1["unread"],
+        json!({"conversations": 2, "messages": 5}),
+        "{}",
+        first.1
+    );
+    let cursor = first.1["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let second = app
+        .get(
+            &format!("/api/v1/conversations?limit=1&cursor={cursor}"),
+            &ada,
+        )
+        .await?;
+    expect_status(&second, StatusCode::OK)?;
+    assert_eq!(second.1["items"].as_array().map(Vec::len), Some(1));
+    assert!(second.1.get("unread").is_none(), "{}", second.1);
+    // Reading one conversation takes it out of the total; the sender has nothing unread.
+    let (status, outcome) = bulk(
+        &app,
+        &ada,
+        "c:ada::c:bob",
+        json!({"type": "receipts.read", "data": {"up_to": last}}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{outcome}");
+    let after = app.get("/api/v1/conversations", &ada).await?;
+    assert_eq!(
+        after.1["unread"],
+        json!({"conversations": 1, "messages": 3})
+    );
+    let sender = app.get("/api/v1/conversations", &bob).await?;
+    assert_eq!(
+        sender.1["unread"],
+        json!({"conversations": 0, "messages": 0})
+    );
+    // A custodian's view counts its Silicon's unread messages, not its own.
+    expect_status(
+        &app.post(
+            "/api/v1/messages",
+            &ada,
+            json!({"recipient_id": "si:scout", "message": "six"}),
+        )
+        .await?,
+        StatusCode::ACCEPTED,
+    )?;
+    let view = app.get("/api/v1/conversations?for=si:scout", &ada).await?;
+    expect_status(&view, StatusCode::OK)?;
+    assert_eq!(view.1["unread"], json!({"conversations": 1, "messages": 1}));
     app.close().await
 }

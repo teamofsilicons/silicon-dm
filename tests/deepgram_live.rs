@@ -1,11 +1,10 @@
 //! A smoke test against the real Deepgram (ignored by default): one script rendered through
 //! the Voice Agent (managed `ElevenLabs`) and its audio transcribed through `/v1/listen`, both
-//! through DM's own routes. It reads the key at run time from the file named by
-//! `DM_SMOKE_ENV_FILE` (default: the silicon-waveform `.env`, variable
-//! `WAVEFORM_DEEPGRAM_API_KEY`) and never prints it.
+//! through DM's own routes. It reads the key at run time from the env file named by
+//! `DM_SMOKE_ENV_FILE` (variable `WAVEFORM_DEEPGRAM_API_KEY`) and never prints it.
 //!
 //! ```sh
-//! DM_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5500/postgres \
+//! DM_SMOKE_ENV_FILE=<an env file with the key> DM_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5500/postgres \
 //!   cargo test -p silicon-dm --test deepgram_live -- --ignored --nocapture
 //! ```
 mod support;
@@ -24,12 +23,13 @@ use support::{
     app::{TestApp, data_of},
 };
 
-const DEFAULT_ENV_FILE: &str = "/Users/codanium/Documents/silicon/silicon-waveform/.env";
 const KEY_VARIABLE: &str = "WAVEFORM_DEEPGRAM_API_KEY";
 
-/// The key, read by variable name from the env file; never printed.
+/// The key, read by variable name from the env file `DM_SMOKE_ENV_FILE` names; never printed.
 fn deepgram_key() -> Result<SecretString, BoxError> {
-    let path = std::env::var("DM_SMOKE_ENV_FILE").unwrap_or_else(|_| DEFAULT_ENV_FILE.to_owned());
+    let path = std::env::var("DM_SMOKE_ENV_FILE").map_err(|_| {
+        format!("set DM_SMOKE_ENV_FILE to an env file that holds {KEY_VARIABLE} (this smoke calls the real Deepgram)")
+    })?;
     let text =
         std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path}: {error}"))?;
     let value = text
@@ -42,7 +42,7 @@ fn deepgram_key() -> Result<SecretString, BoxError> {
 }
 
 #[tokio::test]
-#[ignore = "calls the real Deepgram with a key read from silicon-waveform/.env"]
+#[ignore = "calls the real Deepgram with a key read from the env file DM_SMOKE_ENV_FILE names"]
 async fn a_script_renders_through_the_voice_agent_and_transcribes_back() -> Result<(), BoxError> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let key = deepgram_key()?;

@@ -63,7 +63,8 @@ export const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 export const PG_BIN = process.env.PG_BIN || '/opt/homebrew/opt/postgresql@16/bin';
 export const ACCOUNTS_CHECKOUT = process.env.SILICON_ACCOUNTS_DIR || resolve(ROOT, '..', '..', 'silicon-accounts');
 export const WAVEFORM_ENV = process.env.WAVEFORM_ENV_FILE || resolve(ROOT, '..', '..', 'silicon-waveform', '.env');
-export const SHARED_TARGET = '/Users/codanium/Documents/silicon/.worktrees/dm-ting-delivery-20261017/target';
+// Where cargo builds DM: CARGO_TARGET_DIR when set (a shared target on a Mac with little disk), else the repository's own.
+export const SHARED_TARGET = process.env.CARGO_TARGET_DIR || resolve(ROOT, 'target');
 export const GIT = existsSync('/Library/Developer/CommandLineTools/usr/bin/git') ? '/Library/Developer/CommandLineTools/usr/bin/git' : 'git';
 
 /** A failure with the words to show (what happened, why, what to do). */

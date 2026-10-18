@@ -449,6 +449,19 @@ impl PostgresStore {
         let receipt_id = existing
             .as_ref()
             .map_or_else(Uuid::now_v7, |record| record.id);
+        // A read the account had not made on any device yet changes its unread count: its
+        // other devices hear of it (a read event).
+        let newly_read = command.status == ReceiptStatus::Read
+            && !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM message_receipts WHERE message_id = $1
+                     AND recipient_kind = $2::text::actor_kind AND recipient_id = $3
+                     AND status = 'read')",
+            )
+            .bind(command.message_id)
+            .bind(command.recipient.actor_type.as_str())
+            .bind(command.recipient.id.as_str())
+            .fetch_one(&mut *transaction)
+            .await?;
         sqlx::query(
             r#"
             INSERT INTO message_receipts (
@@ -506,12 +519,35 @@ impl PostgresStore {
         .await
         .map_err(map_constraint_error)
         .and_then(|status| parse_message_status(&status))?;
-        if aggregate_status != previous_aggregate_status
+        let announce = aggregate_status != previous_aggregate_status
             && matches!(
                 aggregate_status,
                 MessageStatus::Delivered | MessageStatus::Read
+            );
+        // The read position before any stream, as every writer that moves it takes them.
+        if command.status == ReceiptStatus::Read {
+            super::read_states::advance_read_state_in(
+                &mut transaction,
+                command.conversation_id,
+                &command.recipient,
+                Some(message.sequence),
             )
-        {
+            .await?;
+        }
+        // The sender's stream (its message's new status) and the reader's (the read event)
+        // are locked together, in the order every writer takes streams in.
+        let mut streams: Vec<(&str, &str)> = Vec::new();
+        if announce {
+            streams.push((sender.actor_type.as_str(), sender.id.as_str()));
+        }
+        if newly_read {
+            streams.push((
+                command.recipient.actor_type.as_str(),
+                command.recipient.id.as_str(),
+            ));
+        }
+        super::read_states::lock_streams_in(&mut transaction, &streams).await?;
+        if announce {
             enqueue_message_status_delivery_in(
                 &mut transaction,
                 &partition,
@@ -523,12 +559,11 @@ impl PostgresStore {
             )
             .await?;
         }
-        if command.status == ReceiptStatus::Read {
-            super::read_states::advance_read_state_in(
+        if newly_read {
+            super::read_states::record_read_event_in(
                 &mut transaction,
                 command.conversation_id,
                 &command.recipient,
-                Some(message.sequence),
             )
             .await?;
         }

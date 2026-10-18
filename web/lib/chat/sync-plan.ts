@@ -17,6 +17,26 @@ export interface MessageRef {
   eventIds: string[];
 }
 
+/**
+ * A read of a conversation by this account, on this device or any other (the conversation event `read`, DM 0.17): its
+ * unread count and read position as of the event's place in the feed. Applied in the feed's order among the messages:
+ * a message before it is in its count, one after it counts on top.
+ */
+export interface ReadRef {
+  read: true;
+  conversation: string;
+  unreadCount: number;
+  /** The newest message read there, null for none, undefined when the event did not say. */
+  lastRead: string | null | undefined;
+  eventIds: string[];
+}
+
+/** The facts a `read` conversation event carries, or null (another change, or a read without its count). */
+export function readFacts(event: SyncEvent): { unread_count: number; last_read_message_id?: string | null } | null {
+  if (event.type !== "conversation" || event.change !== "read" || typeof event.unread_count !== "number" || !Number.isFinite(event.unread_count)) return null;
+  return { unread_count: Math.max(0, event.unread_count), ...(event.last_read_message_id !== undefined ? { last_read_message_id: event.last_read_message_id } : {}) };
+}
+
 /** What a page's conversation events ask for (`include=conversations`, DM 0.17). */
 export interface ConversationPlan {
   /** Conversations you are no longer in (you left, or were removed, as of the page's last word on them): drop them. */
@@ -50,6 +70,8 @@ export function planConversationEvents(events: SyncEvent[], seen: SeenEvents): C
   const changed = new Set<string>();
   for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
     if (!event?.event_id || event.type !== "conversation" || !event.conversation_id || seen.has(event.event_id)) continue;
+    // A read with its count is applied in the feed's order with the messages (planFeed), not asked for again.
+    if (readFacts(event)) continue;
     plan.eventIds.push(event.event_id);
     const change = String(event.change ?? "");
     if (INVITATIONS.has(change)) plan.invitations = true;
@@ -94,6 +116,34 @@ export class SeenEvents {
   get size(): number {
     return this.ids.size;
   }
+}
+
+/**
+ * A page of the feed as what to do, in its order: each message to fetch (once, where it first appears, as planEvents)
+ * and each read to apply where it happened, so its count lands between the messages it covers and the ones after it.
+ */
+export function planFeed(events: SyncEvent[], seen: SeenEvents): Array<MessageRef | ReadRef> {
+  const refs = new Map<string, MessageRef>();
+  const out: Array<MessageRef | ReadRef> = [];
+  for (const event of events) {
+    if (!event?.event_id || seen.has(event.event_id) || !event.conversation_id) continue;
+    if (event.type === "conversation") {
+      const facts = readFacts(event);
+      if (facts) out.push({ read: true, conversation: event.conversation_id, unreadCount: facts.unread_count, lastRead: facts.last_read_message_id, eventIds: [event.event_id] });
+      continue;
+    }
+    if (!event.message_id) continue;
+    const key = `${event.conversation_id}\u0000${event.message_id}`;
+    let ref = refs.get(key);
+    if (!ref) {
+      ref = { conversation: event.conversation_id, code: event.message_id, kinds: [], eventIds: [] };
+      refs.set(key, ref);
+      out.push(ref);
+    }
+    if (!ref.kinds.includes(event.type)) ref.kinds.push(event.type);
+    ref.eventIds.push(event.event_id);
+  }
+  return out;
 }
 
 /** The messages to fetch for a page of events, each once, in the order they first appear; applied events are skipped. */

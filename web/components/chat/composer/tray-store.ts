@@ -190,7 +190,8 @@ function upload(entry: Entry, id: string, file: File) {
     onProgress: (sent, total) => {
       // Every byte sent is 100 %: the item then says "Saving…" while the website hands the file to Briefcase.
       report("sending", sent, total);
-      if (sent > 0) reportActivity("uploading_file");
+      // About this tray's conversation, wherever the Carbon is now (an upload goes on after they move on).
+      if (sent > 0) reportActivity("uploading_file", entry.address);
     },
     onRestart: () => {
       meter.reset();

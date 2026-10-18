@@ -638,7 +638,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   draft.setText(value);
                   setSlashIndex(0);
                   if (!value.startsWith("/")) setSlashDismissed(false);
-                  reportActivity(value.trim() ? "typing" : null);
+                  reportActivity(value.trim() ? "typing" : null, address);
                 }}
                 onKeyDown={event => {
                   if (!slash.length || event.nativeEvent.isComposing) return;

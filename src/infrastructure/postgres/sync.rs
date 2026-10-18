@@ -28,6 +28,13 @@ pub struct SyncEvent {
     /// What happened to the conversation (conversation events only), such as `renamed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change: Option<String>,
+    /// Read events only: the account's unread messages in the conversation after it read
+    /// (at most 1,000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unread_count: Option<i64>,
+    /// Read events only: the code of the newest message the account has read there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_read_message_id: Option<String>,
 }
 
 /// One bounded scan; position advances over currently inaccessible events too.
@@ -48,6 +55,8 @@ struct SyncRow {
     conversation_id: Option<Uuid>,
     message_sequence: Option<i64>,
     change: Option<String>,
+    unread_count: Option<i32>,
+    last_read_sequence: Option<i64>,
 }
 
 impl PostgresStore {
@@ -89,10 +98,12 @@ impl PostgresStore {
         }
         let mut rows = sqlx::query_as::<_, SyncRow>(
             r#"
-            SELECT id, sequence, kind, conversation_id, message_sequence, change
+            SELECT id, sequence, kind, conversation_id, message_sequence, change, unread_count,
+                   last_read_sequence
             FROM (
                 (SELECT d.id, d.sequence, d.delivery_kind::text AS kind, d.conversation_id,
-                        message.sequence AS message_sequence, NULL::text AS change
+                        message.sequence AS message_sequence, NULL::text AS change,
+                        NULL::integer AS unread_count, NULL::bigint AS last_read_sequence
                  FROM actor_deliveries d
                  LEFT JOIN messages message ON message.id = d.message_id
                  WHERE d.target_kind = $1::text::actor_kind
@@ -101,7 +112,7 @@ impl PostgresStore {
                  LIMIT $5)
                 UNION ALL
                 (SELECT e.id, e.sequence, 'conversation', e.conversation_id,
-                        NULL::bigint, e.change
+                        NULL::bigint, e.change, e.unread_count, e.last_read_sequence
                  FROM conversation_events e
                  WHERE e.target_kind = $1::text::actor_kind
                    AND e.target_id = $2 AND e.sequence > $3 AND e.sequence <= $4
@@ -161,6 +172,10 @@ impl PostgresStore {
                     conversation_id,
                     message_id,
                     change: row.change,
+                    unread_count: row.unread_count.map(i64::from),
+                    last_read_message_id: row
+                        .last_read_sequence
+                        .and_then(silicon_dm_protocol::message_code),
                 });
             }
         }

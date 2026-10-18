@@ -155,9 +155,26 @@ pub enum Operation {
     GetPresence {
         actor_id: String,
     },
+    /// [`Operation::GetPresence`] with one conversation's activity (`conversation_id`), or as
+    /// a Silicon its custodian looks after sees it (`for`): DM 0.17. A relay before it cannot
+    /// parse this operation, so it waits for the newer relay instead of answering without them.
+    GetScopedPresence {
+        actor_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<String>,
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+        for_account: Option<String>,
+    },
     /// Transient activity renews the local daemon's account-owned HTTP device lease.
     SetPresence {
         activity: Option<Activity>,
+    },
+    /// [`Operation::SetPresence`] about one conversation (DM 0.17): only accounts in it see
+    /// the activity. A relay before it cannot parse this operation, so it waits for the newer
+    /// relay instead of saying the activity about no conversation.
+    SetScopedPresence {
+        activity: Option<Activity>,
+        conversation_id: String,
     },
     TrendingGifs,
     SearchGifs {
@@ -310,16 +327,32 @@ impl Operation {
                 | Self::DeleteDraft { .. }
                 | Self::CreateBundle { .. }
                 | Self::SetPresence { .. }
+                | Self::SetScopedPresence { .. }
+        )
+    }
+    /// Whether this is a presence change: transient, so never replayed after a failure.
+    pub fn is_presence_change(&self) -> bool {
+        matches!(
+            self,
+            Self::SetPresence { .. } | Self::SetScopedPresence { .. }
         )
     }
     /// Executes a command with the caller's stable HTTP presence device identity.
     pub async fn execute_with_device(&self, client: &Client, device_id: &str) -> Result<Value> {
-        if let Self::SetPresence { activity } = self {
-            return Ok(serde_json::to_value(
+        match self {
+            Self::SetPresence { activity } => Ok(serde_json::to_value(
                 client.renew_presence(device_id, *activity).await?,
-            )?);
+            )?),
+            Self::SetScopedPresence {
+                activity,
+                conversation_id,
+            } => Ok(serde_json::to_value(
+                client
+                    .renew_presence_in(device_id, *activity, Some(conversation_id))
+                    .await?,
+            )?),
+            _ => self.execute(client).await,
         }
-        self.execute(client).await
     }
     /// Calls only the public DM client. Presence writes additionally need a device ID.
     pub async fn execute(&self, client: &Client) -> Result<Value> {
@@ -508,7 +541,16 @@ impl Operation {
             Self::GetPresence { actor_id } => {
                 serde_json::to_value(client.presence(actor_id).await?)?
             }
-            Self::SetPresence { .. } => {
+            Self::GetScopedPresence {
+                actor_id,
+                conversation_id,
+                for_account,
+            } => serde_json::to_value(
+                client
+                    .presence_in(actor_id, conversation_id.as_deref(), for_account.as_deref())
+                    .await?,
+            )?,
+            Self::SetPresence { .. } | Self::SetScopedPresence { .. } => {
                 return Err(crate::Error::Configuration(
                     "presence changes require execute_with_device() or Client::renew_presence() with a stable device ID".into(),
                 ));

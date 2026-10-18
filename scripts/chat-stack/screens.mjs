@@ -72,14 +72,18 @@ function cliSend(name, conversation, text) {
   return parsed.response.result;
 }
 
-/** Who looks online while the harness runs (a presence lease each, renewed); Bo's activity is set per surface. */
-const presence = { timer: null, activity: { bo: null } };
-async function lease(name, activity = null) {
-  await dmCall(await tokenOf(name), 'PUT', '/api/v1/presence/devices/demo-screens', { type: 'renew_presence', data: { activity } }, { stack });
+/**
+ * Who looks online while the harness runs (a presence lease each, renewed); Bo's activity is set per surface, about the
+ * conversation it happens in (`conversation_id`): the website shows someone's activity only in that conversation.
+ */
+const presence = { timer: null, activity: { bo: null }, where: { bo: null } };
+async function lease(name, activity = null, conversation = null) {
+  const data = { activity, ...(activity && conversation ? { conversation_id: conversation } : {}) };
+  await dmCall(await tokenOf(name), 'PUT', '/api/v1/presence/devices/demo-screens', { type: 'renew_presence', data }, { stack });
 }
 async function startPresence() {
   const renew = async () => {
-    for (const name of ['sol', 'wren', 'bo']) await lease(name, presence.activity[name] ?? null).catch(() => undefined);
+    for (const name of ['sol', 'wren', 'bo']) await lease(name, presence.activity[name] ?? null, presence.where[name] ?? null).catch(() => undefined);
   };
   await renew();
   presence.timer = setInterval(() => void renew(), 15_000);
@@ -196,17 +200,18 @@ async function blur(page) {
   await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
 }
 
+// The details toggle is one button, always named "Show details"; aria-pressed says whether the panel is open.
 async function detailsOpen(page) {
   const panel = page.locator('[data-details-panel]');
-  if (!(await panel.isVisible().catch(() => false))) await page.getByRole('button', { name: 'Show details' }).first().click();
+  if (!(await panel.isVisible().catch(() => false))) await page.getByRole('button', { name: 'Show details', pressed: false }).first().click();
   await panel.waitFor({ state: 'visible', timeout: 15_000 });
   await settle(page, 400);
   return panel;
 }
 
 async function detailsClosed(page) {
-  const hide = page.getByRole('button', { name: 'Hide details' }).first();
-  if (await hide.isVisible().catch(() => false)) await hide.click();
+  const open = page.getByRole('button', { name: 'Show details', pressed: true }).first();
+  if (await open.isVisible().catch(() => false)) await open.click();
   else await page.keyboard.press('Escape');
   await page.locator('[data-details-panel]').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => undefined);
 }
@@ -242,7 +247,7 @@ const SURFACES = [
     await page.goto(`${base}/sign-in`, { waitUntil: 'load' });
     await settle(page, 500);
   } },
-  { name: 'inbox', what: 'The inbox: four conversations, unread badges (Launch week 2, Wren 1), an invitation, Mira\'s account at the bottom', run: async ({ page }) => {
+  { name: 'inbox', what: 'The inbox: four conversations, an unread badge (Wren 1: the line Listen mode heard on the last run), an invitation, Mira\'s account at the bottom', run: async ({ page }) => {
     await open(page, '/c');
     await page.locator('a[data-row]:visible').nth(3).waitFor({ timeout: 30_000 });
     await settle(page, 600);
@@ -272,14 +277,15 @@ const SURFACES = [
     await row(page, 'Signups this week against last week').evaluate((node) => node.scrollIntoView({ block: 'start' }));
     await settle(page, 500);
   } },
-  { name: 'group-bottom', what: 'Launch week, bottom: the whiteboard photo, Sol\'s bundled checklist, "New messages", a message Wren routed to Sol, Bo\'s GIF', run: async ({ page }) => {
+  { name: 'group-bottom', what: 'Launch week, bottom: the whiteboard photo, Sol\'s bundled checklist, a message Wren routed to Sol, Bo\'s GIF', run: async ({ page }) => {
     await conversation(page, 'group');
     await scrollThread(page, 'bottom');
   } },
   { name: 'bo-typing', what: 'Mira and Bo, a Carbon conversation, while Bo types (header and the end of the thread)', run: async ({ page }) => {
     presence.activity.bo = 'typing';
-    await lease('bo', 'typing');
-    const keep = setInterval(() => void lease('bo', 'typing').catch(() => undefined), 2_000);
+    presence.where.bo = address('bo');
+    await lease('bo', 'typing', address('bo'));
+    const keep = setInterval(() => void lease('bo', 'typing', address('bo')).catch(() => undefined), 2_000);
     try {
       await conversation(page, 'bo');
       await scrollThread(page, 'bottom');
@@ -290,6 +296,7 @@ const SURFACES = [
     }
   }, after: async () => {
     presence.activity.bo = null;
+    presence.where.bo = null;
     await lease('bo', null).catch(() => undefined);
   } },
   { name: 'custodian-view', what: 'Viewing as Sol: Sol and Wren\'s own conversation, read only, with the intents each message was routed to', run: async ({ page }) => {

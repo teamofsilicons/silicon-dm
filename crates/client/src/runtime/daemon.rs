@@ -896,7 +896,7 @@ async fn maintenance(host: Arc<Host>) {
 }
 
 fn transient_request(request: &RelayRequest) -> bool {
-    matches!(request.request, crate::relay::Operation::SetPresence { .. })
+    request.request.is_presence_change()
 }
 
 fn retry_or_finish(context: &RuntimeContext, request: &RelayRequest, detail: &Value) {

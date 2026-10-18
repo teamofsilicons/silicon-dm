@@ -60,6 +60,10 @@ pub struct StubState {
     pub messages: HashMap<String, Value>,
     /// Headers of every request to the stand-in attachment host (`/files/…`).
     pub attachment_requests: Vec<HeaderMap>,
+    /// Presence renewals: the device and the body.
+    pub presence_renewals: Vec<(String, Value)>,
+    /// Presence reads: the account and the query.
+    pub presence_reads: Vec<(String, HashMap<String, String>)>,
     counter: u64,
 }
 
@@ -573,6 +577,48 @@ async fn bulk_receipt(
     )
 }
 
+async fn renew_presence(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(device): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+    if caller(&state, &headers).is_none() {
+        return unauthorized();
+    }
+    let conversation = body["data"]["conversation_id"].clone();
+    let activity = body["data"]["activity"].clone();
+    state.presence_renewals.push((device, body));
+    envelope(
+        "renew_presence",
+        json!({"presence":{"member_id":"si:dm-cli-silicon","member_uuid":"S1l","availability":"online",
+            "activity":activity,"last_seen_at":null},
+            "lease_expires_at":"2026-10-18T10:02:00Z",
+            "activity_expires_at":if activity.is_null() { Value::Null } else { json!("2026-10-18T10:00:10Z") },
+            "conversation_id":conversation}),
+    )
+}
+
+async fn presence(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(account): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+    if caller(&state, &headers).is_none() {
+        return unauthorized();
+    }
+    let scoped = query.contains_key("conversation");
+    state.presence_reads.push((account.clone(), query));
+    envelope(
+        "presence",
+        json!({"member_id":account,"availability":"online",
+            "activity":if scoped { json!("typing") } else { Value::Null },"last_seen_at":null}),
+    )
+}
+
 async fn attachment(
     State(state): State<Shared>,
     headers: HeaderMap,
@@ -643,6 +689,8 @@ impl Stub {
             bulk_receipts: Vec::new(),
             messages: HashMap::new(),
             attachment_requests: Vec::new(),
+            presence_renewals: Vec::new(),
+            presence_reads: Vec::new(),
             counter: 0,
         }));
         let app = Router::new()
@@ -677,6 +725,11 @@ impl Stub {
                 "/api/v1/conversations/{conversation}/receipts",
                 post(bulk_receipt),
             )
+            .route(
+                "/api/v1/presence/devices/{device}",
+                axum::routing::put(renew_presence),
+            )
+            .route("/api/v1/presence/{account}", get(presence))
             .route("/files/{name}", get(attachment))
             .route("/live", get(|| async { StatusCode::NO_CONTENT }))
             .with_state(state.clone());

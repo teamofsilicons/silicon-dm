@@ -652,7 +652,11 @@ impl PostgresStore {
         } else {
             None
         };
-        Ok(ConversationPage { items, next_cursor })
+        Ok(ConversationPage {
+            items,
+            next_cursor,
+            unread: None,
+        })
     }
 }
 

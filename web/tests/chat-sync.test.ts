@@ -12,7 +12,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { chatKeys } from "../lib/chat/keys";
 import { offersConversationEvents } from "../lib/chat/features";
 import { applyConversationPlan, applyMessage, refetchAfterReset, refreshConversationsSoon } from "../lib/chat/sync";
-import { failureOfMessage, fetchInOrder, planConversationEvents, planEvents, SeenEvents, syncDelay } from "../lib/chat/sync-plan";
+import { failureOfMessage, fetchInOrder, planConversationEvents, planEvents, planFeed, readFacts, SeenEvents, syncDelay } from "../lib/chat/sync-plan";
 import type { AccountRef, ConversationSummary, Message, SyncEvent } from "../lib/chat/types";
 
 const ada: AccountRef = { type: "carbon", id: "c:ada", uuid: "u-ada", display_name: "Ada" };
@@ -217,6 +217,34 @@ test("conversation events: the list for what joined it, the invitations for thei
   assert.deepEqual(planConversationEvents([change("d1", 1, "g:x", "invitation_declined"), change("d2", 2, "g:y", "invitation_cancelled")], new SeenEvents()), { drop: [], removed: [], refresh: [], list: false, invitations: true, eventIds: ["d1", "d2"] });
   const accepted = planConversationEvents([change("e1", 1, "g:x", "invitation_accepted")], new SeenEvents());
   assert.equal(accepted.list && accepted.invitations, true);
+});
+
+test("a read on any device lands in the feed's order: its count, then the messages after it on top", () => {
+  const read = (event_id: string, sequence: number, unread_count: number, last: string | null): SyncEvent => ({ event_id, sequence, type: "conversation", conversation_id: CONV, change: "read", unread_count, last_read_message_id: last });
+  const events: SyncEvent[] = [
+    { event_id: "m1", sequence: 1, type: "message", conversation_id: CONV, message_id: "00a" },
+    read("r1", 2, 0, "00a"),
+    { event_id: "m2", sequence: 3, type: "message", conversation_id: CONV, message_id: "00b" },
+    { event_id: "s1", sequence: 4, type: "message_status", conversation_id: CONV, message_id: "00a" },
+  ];
+  const seen = new SeenEvents();
+  const feed = planFeed(events, seen);
+  assert.deepEqual(feed.map(item => ("read" in item ? `read ${item.unreadCount} ${item.lastRead}` : `${item.code} ${item.kinds.join("+")}`)), ["00a message+message_status", "read 0 00a", "00b message"], "a message once, where it first appears; the read between");
+  // Not a change to ask the conversation for again (it would cost a GET for what the event says).
+  assert.deepEqual(planConversationEvents(events, seen).refresh, []);
+  assert.deepEqual(readFacts(read("r2", 5, 3, null)), { unread_count: 3, last_read_message_id: null });
+  assert.equal(readFacts(change("r3", 6, CONV, "read")), null, "a read without its count is a change like any other");
+  assert.deepEqual(planConversationEvents([change("r3", 6, CONV, "read")], new SeenEvents()).refresh, [CONV], "so it is asked for again");
+
+  // Applied in that order: Scout's 00a counts, the read (on another device) sets 0, Scout's 00b counts on top.
+  let data: ConversationPages | undefined = list(summary(CONV, message("009", scout), { unread_count: 2, last_read_message_id: "008" }));
+  data = applyMessageToSummaries(data, message("00a", scout), ada).data;
+  assert.equal(summariesOf(data)[0]!.unread_count, 3);
+  data = applyReadToSummaries(data, CONV, { unread_count: 0, last_read_message_id: "00a" });
+  data = applyMessageToSummaries(data, message("00b", scout), ada).data;
+  assert.deepEqual([summariesOf(data)[0]!.unread_count, summariesOf(data)[0]!.last_read_message_id], [1, "00a"]);
+  for (const item of feed) for (const id of item.eventIds) seen.add(id);
+  assert.deepEqual(planFeed(events, seen), [], "nothing again once applied");
 });
 
 test("the contracts announce conversation events in the shape the website reads", () => {

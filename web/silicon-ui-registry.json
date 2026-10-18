@@ -316,7 +316,8 @@
     },
     "components/silicon-ui/shortcut-recorder/shortcut-recorder.module.css": {
       "registry": "https://ui.teamofsilicons.com/r/shortcut-recorder.json",
-      "sha256": "c95c9e93a85078a31fe8011e6f4911b41ba74c13f9186cc526ff55372d5fe4ab"
+      "sha256": "739e463f9c94cc518d7afa88341a8af5413424b912d7ece7b37281ecb55343ca",
+      "local_edit": "Keyboard focus is one indicator: the recorder's is the control's ink edge, so the global keyboard ring (which outlives the recorder's `outline: none`, being !important) is turned off on it (`--focus-outline: transparent`); it drew a blue ring across the ink edge. Clear and Reset show their fill and a 2 px accent edge inside (`inset 0 0 0 2px var(--accent)`), also without the ring, which met the control's edge (the website's focus rule: one indicator, at least 3:1)."
     },
     "components/silicon-ui/shortcut-recorder/shortcut-recorder.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/shortcut-recorder.json",

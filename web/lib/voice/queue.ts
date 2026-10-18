@@ -4,6 +4,10 @@
  *
  * - Only what arrives after Listen mode was turned on: the newest code at that moment is the mark, and nothing at or
  *   before it is ever spoken (old messages, and the backlog that loads with the page, stay quiet).
+ * - Each message after the mark is looked at once, whatever order messages land in: the queue keeps the codes it has
+ *   seen (queued, spoken, or not for speaking). A newest-code-seen mark lost a message that landed after a newer one
+ *   (a slower fetch, a page applied late): it was below the mark before it was ever seen. Past SEEN_LIMIT codes the
+ *   oldest are folded into the mark.
  * - Only Silicons' messages with something to say (words, or a spoken message), never the Carbon's own (in a
  *   custodian's view, never the viewed Silicon's), never a deleted one. "Play spoken messages when they arrive"
  *   (Settings → Listening) uses the same queue with the `speech` filter: spoken messages only.
@@ -25,17 +29,22 @@ export interface QueueItem {
 export interface ListenQueue {
   /** False until the conversation's messages were seen once (the mark is set from them). */
   started: boolean;
-  /** The newest code seen: only messages after it are new. */
+  /** The newest code when the queue started (later, the oldest codes folded in): nothing at or before it is new. */
   mark: string | null;
+  /** Codes after the mark already looked at, oldest first: each is queued (or passed over) once. */
+  seen: string[];
   waiting: QueueItem[];
   /** The code being spoken now, or null. */
   current: string | null;
 }
 
+/** How many seen codes the queue keeps before the oldest are folded into the mark. */
+export const SEEN_LIMIT = 2000;
+
 /** How long a spoken message may stay `pending` at the head before it is tried anyway. */
 export const PENDING_GRACE_MS = 12_000;
 
-export const EMPTY_QUEUE: ListenQueue = { started: false, mark: null, waiting: [], current: null };
+export const EMPTY_QUEUE: ListenQueue = { started: false, mark: null, seen: [], waiting: [], current: null };
 
 /** Whether Listen mode (or autoplay, with `speech`) would speak this message for `perspective`. */
 export function speakable(message: Message, perspective: Pick<AccountRef, "id" | "uuid">, filter: QueueFilter = "all"): boolean {
@@ -53,12 +62,13 @@ function newest(messages: readonly Message[]): string | null {
 
 /** The queue as Listen mode starts: the conversation as it is now is the past. */
 export function startQueue(messages: readonly Message[]): ListenQueue {
-  return { started: true, mark: newest(messages), waiting: [], current: null };
+  return { started: true, mark: newest(messages), seen: [], waiting: [], current: null };
 }
 
 /**
- * The messages as the cache has them now (any order). New speakable ones join the queue in code order; deleted ones
- * leave it; the mark moves to the newest code seen. Before the queue started, this starts it (nothing is spoken).
+ * The messages as the cache has them now (any order). Each one after the mark that was not seen before is looked at
+ * once: a speakable one joins the queue in code order, whatever order they landed in; deleted ones leave it. Before the
+ * queue started, this starts it (nothing is spoken).
  */
 export function observeMessages(queue: ListenQueue, messages: readonly Message[], perspective: Pick<AccountRef, "id" | "uuid">, filter: QueueFilter = "all", now = Date.now()): ListenQueue {
   if (!queue.started) return startQueue(messages);
@@ -67,16 +77,26 @@ export function observeMessages(queue: ListenQueue, messages: readonly Message[]
     const message = byCode.get(item.code);
     return !message || speakable(message, perspective, filter);
   });
+  const seen = new Set(queue.seen);
+  const unseen = messages.filter(message => (!queue.mark || compareCodes(message["message-id"], queue.mark) > 0) && !seen.has(message["message-id"]));
   const known = new Set(waiting.map(item => item.code));
   if (queue.current) known.add(queue.current);
-  const fresh = messages
-    .filter(message => (!queue.mark || compareCodes(message["message-id"], queue.mark) > 0) && !known.has(message["message-id"]) && speakable(message, perspective, filter))
+  const fresh = unseen
+    .filter(message => !known.has(message["message-id"]) && speakable(message, perspective, filter))
     .map(message => ({ code: message["message-id"], since: now }));
   if (fresh.length) waiting = [...waiting, ...fresh].sort((a, b) => compareCodes(a.code, b.code));
-  const seen = newest(messages);
-  const mark = !queue.mark ? seen : seen && compareCodes(seen, queue.mark) > 0 ? seen : queue.mark;
-  if (mark === queue.mark && waiting.length === queue.waiting.length && waiting.every((item, index) => item === queue.waiting[index])) return queue;
-  return { ...queue, mark, waiting };
+  if (!unseen.length && waiting.length === queue.waiting.length && waiting.every((item, index) => item === queue.waiting[index])) return queue;
+  let mark = queue.mark;
+  let codes = queue.seen;
+  if (unseen.length) {
+    codes = [...queue.seen, ...unseen.map(message => message["message-id"])].sort(compareCodes);
+    // Too many to keep: the oldest fold into the mark (what is at or before it is never new again).
+    if (codes.length > SEEN_LIMIT) {
+      mark = codes[codes.length - SEEN_LIMIT - 1]!;
+      codes = codes.slice(codes.length - SEEN_LIMIT);
+    }
+  }
+  return { ...queue, mark, seen: codes, waiting };
 }
 
 /** Whether a message is ready to be spoken now (a pending render waits, up to the grace). */

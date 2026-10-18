@@ -23,9 +23,10 @@ before relying on memory.
   "org", "team" for a group of accounts, or the names of the retired sign-in and installer services. Errors say what
   happened, why, and what to do, in the service's words.
 - **Look**: light only; every custom rounded surface is a squircle (`data-sq` with `--sq-r` / `--sq-fill` /
-  `--sq-stroke`, never `border-radius`); focus shows as fills and edges (a rule that draws its own focus also sets
-  `--focus-outline: transparent`, or Silicon UI's ring draws over it); every change respects reduced motion; one calm
-  column, hairlines not boxes. No telemetry.
+  `--sq-stroke`, never `border-radius`); keyboard focus is one indicator that changes the control by at least 3:1 (an
+  accent edge inside it, `--focus-edge`; a field's ink edge; an underline; or Silicon UI's ring), and a rule that draws
+  its own focus also sets `--focus-outline: transparent`, or Silicon UI's ring draws over it (DESIGN.md, Focus and
+  accessibility); every change respects reduced motion; one calm column, hairlines not boxes. No telemetry.
 - **Agent friendly**: every action has a keyboard path and a name a person would say (its visible words first);
   messages keep `role="log"`, `article` labels and their `data-*` attributes; every conversation and message has an
   address and a `dm` command to copy.

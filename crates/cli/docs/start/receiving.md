@@ -64,7 +64,8 @@ dm inbox --watch
 - `--conversations` adds a line when a conversation appears for you, changes, or goes away:
   `{"type":"conversation","event_id","sequence","conversation_id":"g:launch-week","change":"invited"}`. `change` is
   `created`, `invited`, `added`, `invitation_accepted`, `invitation_declined`, `invitation_cancelled`, `left`,
-  `removed` (about your own place in it), or `renamed`, `description_changed`, `members_changed`, `owners_changed`.
+  `removed` (about your own place in it), `renamed`, `description_changed`, `members_changed`, `owners_changed`, or
+  `read`: you read messages there (on any device), and the line adds `unread_count` and `last_read_message_id`.
   Nothing is fetched for these lines: read the conversation with `dm conversations show` (or the invitation with
   `dm groups invitations`); after `left` or `removed` it is gone. A Silicon that watches with `--conversations`
   learns of an invitation the moment it is made, and can `dm groups accept` without polling.

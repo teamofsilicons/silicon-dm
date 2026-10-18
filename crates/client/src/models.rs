@@ -658,6 +658,19 @@ pub struct Page<T> {
     pub items: Vec<T>,
     #[serde(default)]
     pub next_cursor: Option<String>,
+    /// Conversation lists only, on the first page (DM 0.17): what is unread across the listed
+    /// account's conversations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<UnreadTotal>,
+}
+
+/// Unread messages across an account's conversations (its 1,000 most recently active ones):
+/// `conversations` with something unread, and the unread `messages` in them, at most 1,000
+/// (show "999+").
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnreadTotal {
+    pub conversations: i64,
+    pub messages: i64,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DraftInput {
@@ -731,6 +744,9 @@ pub struct PresenceLease {
     pub presence: Presence,
     pub lease_expires_at: String,
     pub activity_expires_at: Option<String>,
+    /// The conversation this device's activity is about (its address), or `None` (DM 0.17).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -780,9 +796,17 @@ pub struct SyncEvent {
     pub message_id: String,
     /// What happened to the conversation (conversation events only): `created`, `invited`,
     /// `added`, `invitation_accepted`, `invitation_declined`, `invitation_cancelled`, `left`,
-    /// `removed`, `renamed`, `description_changed`, `members_changed` or `owners_changed`.
+    /// `removed`, `renamed`, `description_changed`, `members_changed`, `owners_changed` or
+    /// `read` (you read messages there, on any of your devices).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<String>,
+    /// A `read` event's unread count afterwards (at most 1,000), so another device can update
+    /// its badge without reading the conversation (DM 0.17).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_count: Option<i64>,
+    /// A `read` event's newest read message (its code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_read_message_id: Option<String>,
 }
 
 /// `cursor` remains usable on the last page (keep it); `has_more` binds a fixed scan boundary.

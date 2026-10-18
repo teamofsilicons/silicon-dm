@@ -9,7 +9,7 @@
 .search input { min-width: 0; flex: 1; border: 0; background: transparent; color: var(--foreground); font: inherit; font-size: var(--text-sm); outline: none; }
 .search input::-webkit-search-cancel-button { display: none; }
 
-.sheet:focus-visible { outline: none !important; box-shadow: inset 0 0 0 1.5px var(--border-strong); --focus-outline: transparent; }
+.sheet:focus-visible { outline: none !important; box-shadow: var(--focus-edge); --focus-outline: transparent; }
 /* The sheet scrolls by itself inside the dialog, as tall as the screen leaves room for (the dialog's title, the search
    and the footnote take about 300 px), and positioned, so the hidden words in its rows stay inside it rather than
    giving the dialog a scroll of its own. Where more is below, its bottom edge fades (data-more, set by cheatsheet.tsx):

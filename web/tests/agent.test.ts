@@ -28,6 +28,8 @@ test("llms.txt says what the app is, how a Silicon installs it and signs in, and
   const text = llmsTxt(ORIGIN);
   assert.ok(text.startsWith(`# ${appConfig.name}\n\n> ${appConfig.tagline}\n`));
   assert.ok(text.includes(`\`silicon-apps install ${appConfig.appId}\``));
+  // The two moves of docs/start/silicon-quickstart.md: once, Silicon Accounts with the si:id and STK; then a token for DM.
+  assert.ok(text.includes("`printf '%s' \"$STK\" | silicon-accounts login --silicon si:you --stk-stdin`"));
   assert.ok(text.includes(`\`silicon-accounts login --app ${appConfig.appId} -q | ${appConfig.cli!.command} login --slt-stdin\``));
   assert.ok(text.includes(`- [Docs](${appConfig.links.docs})`));
   for (const word of ["AI agent", "human", "user account", "organization", " org ", "Honeycomb", "IAM"]) assert.ok(!text.includes(word), `never "${word}"`);

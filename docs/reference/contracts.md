@@ -45,14 +45,19 @@ Everything below is additive: older clients keep working and never see a change 
   the audio is ready.
 - Listening and transcription: `GET …/messages/{message}/speech`, `POST /speech`, `POST /speech/transcriptions`.
 - Unread counts: `unread_count` and `last_read_message_id` on conversation summaries;
-  `GET /conversations/{conversation}` for any address; reading in bulk with `POST …/receipts`.
+  `GET /conversations/{conversation}` for any address; reading in bulk with `POST …/receipts`; an `unread` total on the
+  first page of `GET /conversations` (`features.unread.list_total`).
 - Richer messages: `attachment_details`, `voice`, `gif` and `metadata` on every rendered message, next to the
   `attachments` URL list older clients read.
 - Routing you can see in every conversation: `routed_to` on every message (`recipient_id` keeps its older meaning,
   which names the group in a group).
 - Drafts without guessing: `draft_version` on every conversation summary (null when there is no draft).
 - Conversation events in the sync feed, only when asked for (`GET /sync?include=conversations`): a conversation
-  that appeared, changed or went away for the account.
+  that appeared, changed or went away for the account, and `read` when it read there on any device, with its unread
+  facts (`features.conversation_events.read`).
+- Activity about one conversation: `conversation_id` on `renew_presence` and `?conversation=` (and `?for=`) on
+  `GET /presence/{account}`, so typing shows only in the conversation it is in (`features.presence_activity`). A
+  service before 0.17 refuses `conversation_id`: send it once the feature is announced.
 - A custodian's delete from its view of a Silicon: `DELETE …/messages/{message}?for=si:…`.
 - Conversations of several (three or more accounts, not a group) take messages; they are addressed by their UUID.
 - Attachments may declare any size up to 5 TiB (it was 5 GiB): `features.attachments` says the limits.

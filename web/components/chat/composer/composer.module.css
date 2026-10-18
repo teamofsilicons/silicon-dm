@@ -28,7 +28,9 @@
   background: var(--sq-fill);
   transition: border-color var(--duration-fast) var(--ease-standard);
 }
-.box:focus-within { --sq-stroke: var(--border-strong); }
+/* The field's own focus: its edge in ink, as Silicon UI's fields show it (a --border-strong hairline was 1.4:1). Only
+   the field's: Send inside the box draws its own edge. */
+.box:has(> [data-composer-field]:focus) { --sq-stroke: var(--foreground); }
 
 .field {
   display: block;
@@ -70,8 +72,9 @@
 .send[data-ready] { --sq-fill: var(--accent); color: var(--accent-foreground); cursor: pointer; }
 .send[data-ready]:active { transform: scale(.94); }
 .send[data-pending] { --sq-fill: var(--accent-subtle); color: var(--accent); }
-.send:focus-visible { --sq-fill: var(--surface-pressed); color: var(--foreground); outline: none !important; }
-.send[data-ready]:focus-visible { --sq-fill: var(--accent-strong); color: var(--accent-foreground); }
+/* Keyboard focus inside its own shape (Silicon UI's ring around it met the field's edge: two lines). */
+.send:focus-visible { --sq-fill: var(--surface-pressed); color: var(--foreground); box-shadow: var(--focus-edge); outline: none !important; --focus-outline: transparent; }
+.send[data-ready]:focus-visible { --sq-fill: var(--accent-strong); color: var(--accent-foreground); box-shadow: var(--focus-edge-on-fill); }
 
 .bar {
   display: flex;
@@ -88,6 +91,7 @@
 .barLine { overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .barClose { --sq-r: 9px; --sq-fill: transparent; display: grid; width: 30px; height: 30px; flex: none; place-items: center; border: 0; background: var(--sq-fill); color: var(--text-muted); cursor: pointer; }
 .barClose:hover, .barClose:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); outline: none !important; }
+.barClose:focus-visible { box-shadow: var(--focus-edge); --focus-outline: transparent; }
 
 /* The tray: chips that say what each thing is, up to three to a row in the column, sharing the width (a lone item
    takes all of it, so a long name or a big file's progress has room); a failed upload takes a whole row for its
@@ -166,6 +170,8 @@
 }
 .chipRetry { padding: 0 var(--space-2); color: var(--foreground); }
 .chipRemove:hover, .chipRemove:focus-visible, .chipRetry:hover, .chipRetry:focus-visible { --sq-fill: var(--surface-pressed); color: var(--foreground); outline: none !important; }
+/* Inside the chip's own edge, never a ring over it. */
+.chipRemove:focus-visible, .chipRetry:focus-visible { box-shadow: var(--focus-edge); --focus-outline: transparent; }
 .chip[data-status="failed"] .chipRemove, .chip[data-status="failed"] .chipRetry { align-self: center; }
 
 /* Add a link: one field above the message, the same squircle as the message's. */
@@ -299,8 +305,8 @@
   text-underline-offset: 3px;
 }
 .noteAction:hover { text-decoration-color: currentColor; }
-/* The keyboard on one of these answers: a quiet fill inside the kit's accent edge (which follows the squircle). */
-.noteAction:focus-visible { --sq-fill: var(--surface-muted); text-decoration-color: currentColor; }
+/* The keyboard on one of these answers: a quiet fill and an accent edge inside its own shape. */
+.noteAction:focus-visible { --sq-fill: var(--surface-muted); text-decoration-color: currentColor; box-shadow: var(--focus-edge); outline: none !important; --focus-outline: transparent; }
 
 @media (max-width: 767px) {
   .composer { padding: var(--space-2) var(--space-3) calc(var(--space-2) + env(safe-area-inset-bottom, 0px)); }

@@ -26,7 +26,7 @@ mod ting;
 use std::time::Duration;
 
 use secrecy::ExposeSecret as _;
-use sqlx::{Connection as _, PgPool, migrate::Migrator, postgres::PgPoolOptions};
+use sqlx::{Connection as _, PgPool, Row as _, migrate::Migrator, postgres::PgPoolOptions};
 
 use crate::{
     AppError, AppResult,
@@ -37,7 +37,11 @@ pub use accounts::{Applied, StoredAccount, valid_public_id};
 pub use allow_list::AllowListEntry;
 pub use delivery::{Pruned, SYNC_RETENTION};
 pub use http_presence::PresenceLease;
-pub use read_states::{BulkReceiptOutcome, MAX_BULK_RECEIPTS, UNREAD_COUNT_CAP, UnreadSummary};
+pub use presence::ActivityView;
+pub use read_states::{
+    BulkReceiptOutcome, MAX_BULK_RECEIPTS, UNREAD_COUNT_CAP, UNREAD_TOTAL_CONVERSATIONS,
+    UnreadSummary,
+};
 pub use revisions::Reviser;
 pub use speech::{
     AudioMeta, ChosenVoice, LimitExceeded, MAX_RENDER_ATTEMPTS, RenderClaim, RenderOutcome,
@@ -94,7 +98,21 @@ impl PostgresStore {
                     // A 100 MB result must not permanently enlarge every pooled
                     // connection's read/write buffers after the request ends.
                     connection.shrink_buffers();
-                    Ok(true)
+                    // A request cancelled while sqlx's begin() still waited for BEGIN's answer (a client that
+                    // went away mid-request) hands its connection back inside that transaction: sqlx arms its
+                    // rollback only once BEGIN is answered. Reused, it would let later autocommit statements
+                    // join that transaction, hold their row locks and lose their writes if it rolled back. Such
+                    // a connection is closed instead, which ends the transaction on the server. sqlx keeps the
+                    // transaction state private, so the server is asked (off the request's path: release runs
+                    // in its own task). As one simple-protocol query, outside a transaction the statement is its
+                    // own transaction and both timestamps are equal; inside one they differ. (A prepared query's
+                    // Parse/Bind/Execute would give the statement a later timestamp than its implicit transaction.)
+                    let idle =
+                        sqlx::raw_sql("SELECT transaction_timestamp() = statement_timestamp()")
+                            .fetch_one(&mut *connection)
+                            .await
+                            .and_then(|row| row.try_get::<bool, _>(0));
+                    Ok(matches!(idle, Ok(true)))
                 })
             })
             .after_connect(move |connection, _metadata| {
@@ -107,8 +125,16 @@ impl PostgresStore {
                     let timeout = duration_as_postgres_milliseconds(statement_timeout);
                     sqlx::query("SELECT set_config('statement_timeout', $1, false)")
                         .bind(timeout)
-                        .execute(connection)
+                        .execute(&mut *connection)
                         .await?;
+                    // The backstop for what after_release closes: the server ends a session that sits inside a
+                    // transaction doing nothing for a minute. DM's transactions never wait that long between
+                    // statements (the longest wait is a 10 s Postmark call while a report is claimed).
+                    sqlx::query(
+                        "SELECT set_config('idle_in_transaction_session_timeout', '60s', false)",
+                    )
+                    .execute(connection)
+                    .await?;
                     Ok(())
                 })
             })

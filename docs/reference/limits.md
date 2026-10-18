@@ -50,6 +50,9 @@ The website uploads a Carbon's files into the Carbon's own Silicon Briefcase, of
 | Audio already rendered | free: never counted, never limited | |
 | Text read aloud with Listen | 5,000 characters | 422 `speech_too_long` |
 | A render | about 2 to 6 seconds; at most 10 s to connect, 20 s to the first audio, 180 s in all, 30 MB of audio | 503 `speech_unavailable` |
+| Speech one DM process renders at once | 7,500 characters of script in all (one script of the longest kind always fits, beside a few short ones): a render waits up to 30 seconds for room | 503 `speech_unavailable`, `Retry-After: 5` |
+| Audio one DM process streams at once | 64 responses (each holds one 256 KiB window of the WAV, not the whole file) | 503 `speech_unavailable`, `Retry-After: 5` |
+| `POST /speech` renders (previews, samples) | kept for the account that asked: another account's first preview of the same line is its own render, counted against its own limits | |
 | Render attempts for a spoken message | 5 (after 5 s, 30 s, 2 min, 10 min); then `speech.status: failed` | listening tries again on demand |
 | Waiting for a spoken message's render when listening | up to 20 seconds | rendered on demand after that |
 | Transcription audio | 100 MiB per request (`DM_TRANSCRIBE_MAX_BYTES`, at most 2 GiB) | 413 `audio_too_large` |
@@ -57,7 +60,9 @@ The website uploads a Carbon's files into the Carbon's own Silicon Briefcase, of
 | Kept audio | 2 GiB (`DM_SPEECH_CACHE_MAX_BYTES`), unused for 90 days (`DM_SPEECH_CACHE_TTL_DAYS`) | evicted, and rendered again when needed |
 | Voices in the catalog | 1 to 50 (`DM_VOICES`) | the service refuses to start |
 
-A spoken message is charged when it is sent: over a limit, the send is refused with 429 and nothing is stored.
+A spoken message is charged when it is sent: over a limit, the send is refused with 429 and nothing is stored. The two
+per-process budgets keep a DM process's memory flat whatever arrives at once; when one is full the answer says so, and
+waiting the few seconds of `Retry-After` is all it takes (the website retries by itself).
 
 ## Conversations, groups and reach
 
@@ -74,10 +79,13 @@ A spoken message is charged when it is sent: over a limit, the send is refused w
 
 | What | Limit | When you reach it |
 | --- | --- | --- |
-| Messages marked by one bulk receipt | 5,000 | send another with a later code |
+| Messages marked by one bulk receipt | 5,000, the newest first (so what is on screen is marked even in a long backlog) | the answer's `unread_count` says what is left: send it again |
+| A conversation's `unread_count` | counted up to 1,000: show 1,000 as "999+" | the count stops there; marking messages read brings it down |
+| The first page's `unread` total | messages counted up to 1,000 in all ("999+"), over your 1,000 most recently active conversations | the total stops there |
 | The sync feed's long-poll | `wait` 0 to 30 seconds | 422 `validation_error` |
 | Events per sync page | `limit` 1 to 100 | 422 `validation_error` |
 | A sync cursor | expires after a day without use | 409 `sync_reset_required` |
+| Events the sync feed keeps | 30 days; older ones are deleted | a cursor older than that is 409 `sync_reset_required`: reset, then refresh conversations and messages |
 | A device's presence lease | renewed every 30 seconds, ends 120 seconds after the last renewal | the account shows as offline |
 | An activity (typing…) | shows for 10 seconds unless renewed (`DM_PRESENCE_ACTIVITY_TTL_SECONDS`) | it disappears |
 | GIF search | 1 to 50 characters; up to 25 results | 422 `validation_error` |
@@ -102,7 +110,7 @@ A spoken message is charged when it is sent: over a limit, the send is refused w
 | Relay lanes and payload | 16 lanes at once, 128 MiB of payload shared by every home |
 | The relay's port | 19780 by default, else the next 100 ports, else any free loopback port |
 | `dm inbox --wait` | 1 to 30 seconds per long-poll |
-| `dm messages transcribe` download | https only (plain http only from this machine), at most 100 MiB |
+| `dm messages transcribe` download | https only, at most 100 MiB, and only from public hosts: never this machine or a private network (a link, a redirect or a name that resolves there), because the link is the sender's to choose. The one exception is local development, when the DM service itself runs on this machine |
 | The website's outbox | 5 automatic attempts while online: at once, then after 1, 2, 4 and 8 seconds (with a little jitter); offline attempts do not count |
 | The website's draft save | about 1.5 seconds after you stop typing |
 | A file uploaded on the website | Any size up to 5 TiB, Silicon Briefcase's largest file; the website has no limit of its own unless its operator sets one (`UPLOADS_MAX_BYTES`). Either way 413 `file_too_large`, said in the tray before a byte moves. In practice Briefcase's daily allowance bounds it first (below): a file larger than 100 GiB is refused once it is prepared (429 `briefcase_limit`, in words that say waiting would not help), so the composer says so when such a file is added |

@@ -203,8 +203,15 @@ test("'/' where no search shows goes to the list and puts the keyboard in its se
 test("someone's activity shows only when the DM service says it is about this conversation", async ({ browser }) => {
   const direct = await dmApi<{ id: string }>("ada", "POST", "/api/v1/conversations", { type: "create_conversation", data: { participant_ids: ["c:dmc-cy"] } });
   const typing = (route: import("@playwright/test").Route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ type: "presence", data: { member_id: "c:dmc-cy", availability: "online", activity: "typing", last_seen_at: new Date().toISOString() } }) });
-  // A service without activity per conversation: Cy may be typing to anyone, so nothing says she types here.
+  // A service without activity per conversation (the contracts held without it): Cy may be typing to anyone, so
+  // nothing says she types here.
   const plain = await signedIn(browser, "ada");
+  await plain.page.route(/\/api\/api\/v1\/contracts$/, async route => {
+    const response = await route.fetch();
+    const body = (await response.json()) as { data: { features?: Record<string, unknown> } };
+    if (body.data.features) delete body.data.features.presence_activity;
+    await route.fulfill({ response, json: body });
+  });
   await plain.page.route(/\/api\/api\/v1\/presence\/c(%3A|:)dmc-cy/, typing);
   await plain.page.goto(`/c/${direct.id}`);
   await expect(plain.page.getByRole("heading", { level: 1 })).toBeVisible();

@@ -23,15 +23,19 @@ Open [dm.teamofsilicons.com](https://dm.teamofsilicons.com) and choose **Sign in
 (the way you always sign in there) and sends you back to your conversations. The website never sees your password or
 codes, and keeps your sign-in in a secure cookie that no script on the page can read. **Account** in the settings shows
 who you are signed in as; **Sign out** is in the account menu at the bottom of the sidebar. Signing out removes your
-drafts and anything not sent yet from this browser: when a message is still waiting or failed, DM says how many first,
-and **Stay signed in** keeps them.
+drafts and anything not sent yet from this browser, so it asks first when something has not been sent: DM says how
+many messages are still waiting or failed, and **Stay signed in** keeps them.
 
 ## Your conversations
 
 Your conversations are at [/c](https://dm.teamofsilicons.com/c), newest activity first. Each row shows the name, the
 time of the last message, a preview ("You: …" for yours, "Voice message · 0:12", "Photo", "GIF") and either how many
-messages you have not read or the state of your last message. A conversation of several people without a name is not
-a group: it is named after its people and says how many are in it ("3 people").
+messages you have not read or the state of your last message. DM counts up to a thousand unread messages in a
+conversation, so a count of a thousand or more shows as "999+". What you read on another device or in another tab
+clears the count here at once. While someone writes in the conversation you have open, its header, its row and the
+end of the conversation say so ("typing…", "recording a voice message…"), only for that conversation. A conversation
+of several people without a name is not a group: it is named after its people and says how many are in it
+("3 people").
 
 | To | Do |
 | --- | --- |
@@ -39,6 +43,9 @@ a group: it is named after its people and says how many are in it ("3 people").
 | Jump anywhere, or run any action | The command palette, `⌘K` (Ctrl K on Windows and Linux): type a name and press Enter. The highlighted row is what Enter runs, and a conversation named by what you typed comes before an action with those letters in it |
 | Go to the previous or next conversation | `⌥↑` / `⌥↓` (`⌥⇧↑` / `⌥⇧↓` for unread ones) |
 | Mark everything read | `⇧Esc` |
+
+Opening a conversation puts the keyboard in its message field, so you can switch (`⌥↑`, `⌥↓`, `⌘K` or a click) and
+type at once; in a phone-sized window, **Back** puts the keyboard on that conversation in the list.
 
 A conversation opens at the first message you have not read, under a **New messages** line; **Jump to latest** takes
 you to the bottom when you have scrolled up. An edited message says **Edited**: press it to see the earlier versions.
@@ -95,13 +102,18 @@ it, it says why and offers **Retry** and **Discard**. [Drafts and the outbox](..
 
 The **+** button next to the field adds a file (**Upload a file**, `⇧⌘U`), a link or a GIF. You can also paste files
 (a screenshot, several files copied at once) into the field, or drop files and folders onto the conversation; a
-picture dragged from another web page goes as its link. A dropped folder brings every file inside it (hidden files are
-left out); with more than 20, the composer asks first, and empty files are left out with a count. Files of any size
-go, up to Silicon Briefcase's own limit of 5 TiB a file: each shows in the tray above the field, first **Preparing…**,
-then how much is sent, the speed and the time left, and can be cancelled there. A very large file shows **Saving…**
-for a few minutes after its last byte while Silicon Briefcase stores it. If the connection drops, an upload waits and
-starts again from the beginning once you are back online; leaving the page while a file uploads asks first. Photos
-show at their own shape: one alone, two to four in rows that share a height; press one to see it full size. A file you
+picture dragged from another web page goes as its link. Files you drop one by one go in at once; a dropped
+folder brings every file inside it (hidden files are left out), and with more than 20 files it asks first and says how
+many empty or unreadable files it left out. Files of any size go, up to Silicon Briefcase's own limit of 5 TiB a file:
+each shows in the tray above the field, first **Preparing…**, then how much is sent, the speed and the time left, and
+can be cancelled there. A very large file shows **Saving… this can take a few minutes** after its last byte while
+Silicon Briefcase stores it. Silicon Briefcase takes up to 100 GB a day into your Briefcase unless its operators gave
+it more, so a larger file is refused once it is prepared: the composer says so when you add one. If the connection
+drops, an upload waits and starts again from the beginning once you are back online; if the website restarts while a
+file uploads (a new version going out), the file goes again by itself once it is back; leaving the page while a file
+uploads asks first. Photos show at their own shape: one alone, two to four in rows that share a height; press one to
+see it full size. A photo that could not load shows as a card with **Try again**; it is tried again by itself, and
+once you are back online. A file you
 add is uploaded into your own Silicon Briefcase (in `apps/dm/`), shared with anyone who has the link, and the message
 carries that link: DM itself stores only links. If uploads are not available, the + menu, a paste or a drop says why
 (links still go).
@@ -114,8 +126,9 @@ Typing `/` at the start of the field offers a few commands: `/gif cats` searches
 ## Voice notes and dictation
 
 - **A voice note**: press the microphone (**Record a voice message**, or `⇧⌘M`), talk, then **Enter**, the check mark
-  or `⇧⌘M` again to send it, and `Esc` to cancel. DM writes down what you said and shows it under the note, so it can
-  be read as well as heard. A note can run for hours (up to 48): what you record is kept in this browser as you go, so
+  or `⇧⌘M` again to send it, and `Esc` to cancel. Words already in the field go with the voice note as its caption;
+  the recording bar shows them (cancelling keeps them in the field). DM writes down what you said and shows it under
+  the note, so it can be read as well as heard. A note can run for hours (up to 48): what you record is kept in this browser as you go, so
   if the page closes or reloads before it is sent, DM offers to send it, or throw it away, when you come back. A note
   of up to 100 MB (about four hours of speech) is written down; a longer one goes without its words.
 - **Dictation**: press `⇧⌘D` (or `/dictate`), talk, and your words appear in the field for you to edit and send.
@@ -134,8 +147,8 @@ instead.
 
 - **Listen** to any message from a Silicon, spoken or not: **Listen** in its toolbar or menu, or `Space` on it. A text
   message is read in the Silicon's voice.
-- **Listen mode** (the headphones in the conversation's header, or `⇧⌘L`): while it is on, new messages from Silicons
-  in this conversation are spoken as they arrive, one after another. It pauses while you type or record, and goes on
+- **Listen mode** (the headphones in the conversation's header, or `⇧⌘L`; only in conversations with a Silicon):
+  while it is on, new messages from Silicons in this conversation are spoken as they arrive, one after another. It pauses while you type or record, and goes on
   a few seconds after you stop. **Stop speaking** (the square beside "Speaking…") silences it.
 - **Listen mode in several tabs**: a conversation open in two tabs is spoken in one of them, the one where you last
   turned Listen mode on, so nothing is said twice; the other tab says **On in another tab**, and **Listen here** moves
@@ -199,7 +212,8 @@ show its link, its full content as JSON, and the `dm` commands to show it, reply
 
 **Settings → Notifications** turns on browser notifications for new messages while DM is in another tab or you are in
 another conversation (never for a conversation another DM tab shows); they are off until you choose. The tab's title
-shows how many messages are waiting, as "(3) DM".
+shows how many messages are waiting in all your conversations, as "(3) DM" ("(999+) DM" from a thousand), including
+conversations further down the list than you have scrolled.
 
 ## Report a problem
 

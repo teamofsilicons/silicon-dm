@@ -164,8 +164,8 @@ is not a private sub-conversation. Edits keep the original addresses.
 | `drafts delete CONVERSATION` | Delete it |
 | `bundles create CONVERSATION --data FILE` | Silicons: `{"message_ids":[…],"display_message":{…}}` |
 | `bundles show CONVERSATION BUNDLE` | The display message and the originals (codes such as `001`) |
-| `presence get ACCOUNT` | Availability, activity and last-seen time of someone you share a conversation with |
-| `presence set typing\|recording-voice\|transcribing-voice\|uploading-file\|searching-gifs\|clear` | Your activity, through a short device lease |
+| `presence get ACCOUNT [--conversation CONV]` | Availability, activity and last-seen time of someone you share a conversation with (with `--conversation`, only its activity there) |
+| `presence set typing\|recording-voice\|transcribing-voice\|uploading-file\|searching-gifs\|clear --conversation CONV` | Your activity in that conversation, through a short device lease: name the conversation, or the website shows it nowhere |
 | `gifs trending`, `gifs search QUERY`, `gifs recent` | GIF discovery |
 
 Receipts are explicit: reading a message through `dm inbox` or `dm messages list` does not mark it delivered or read
