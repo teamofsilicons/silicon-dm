@@ -3,7 +3,8 @@
 .column { display: grid; width: min(100%, 480px); gap: var(--space-6); }
 .brand { --sq-r: 12px; --sq-fill: transparent; display: inline-flex; width: fit-content; margin: -6px -8px; padding: 6px 8px; background: var(--sq-fill); color: var(--foreground); text-decoration: none; }
 .brand:hover { color: var(--foreground); }
-.brand:focus-visible { outline: none; --sq-fill: var(--surface-muted); }
+/* The keyboard on the mark: its fill and an accent edge inside it (DESIGN.md, Focus and accessibility). */
+.brand:focus-visible { outline: none; --sq-fill: var(--surface-muted); box-shadow: var(--focus-edge); --focus-outline: transparent; }
 .card { --sq-r: var(--radius-surface); --sq-fill: var(--surface); --sq-stroke: var(--border); position: relative; display: grid; gap: var(--space-5); border: 1px solid var(--sq-stroke); padding: var(--space-8); background: var(--sq-fill); }
 @media (max-width: 480px) { .card { padding: var(--space-6); } }
 .icon { --sq-r: 16px; --sq-fill: var(--surface-muted); display: grid; width: 52px; height: 52px; place-items: center; background: var(--sq-fill); color: var(--text-secondary); }

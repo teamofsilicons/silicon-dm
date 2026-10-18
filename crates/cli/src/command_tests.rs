@@ -40,6 +40,77 @@ fn documented_forms_parse() -> Result<()> {
         vec!["dm", "inbox", "--from", "beginning"],
         vec!["dm", "config", "telemetry", "false"],
         vec!["dm", "report", "replay failed"],
+        vec!["dm", "voices", "list"],
+        vec!["dm", "voices", "show"],
+        vec!["dm", "voices", "show", "si:scout"],
+        vec!["dm", "voices", "set", "brittney"],
+        vec!["dm", "voices", "set", "hope", "--for", "si:scout"],
+        vec!["dm", "voices", "reset", "--for", "si:scout"],
+        vec![
+            "dm", "voices", "preview", "mark", "--script", "Hi.", "--out", "-",
+        ],
+        vec![
+            "dm",
+            "speech",
+            "render",
+            "--script",
+            "[warmly] Hi.",
+            "--voice",
+            "hope",
+        ],
+        vec![
+            "dm", "speech", "render", "--script", "Hi.", "--out", "x.wav", "--force",
+        ],
+        vec!["dm", "speech", "transcribe", "note.ogg", "--language", "en"],
+        vec![
+            "dm",
+            "speech",
+            "transcribe",
+            "-",
+            "--content-type",
+            "audio/webm",
+        ],
+        vec![
+            "dm", "messages", "listen", "c:ada", "00a", "--out", "a.wav", "--force",
+        ],
+        vec![
+            "dm",
+            "messages",
+            "listen",
+            "c:ada::si:scout",
+            "00a",
+            "--for",
+            "si:scout",
+        ],
+        vec![
+            "dm",
+            "messages",
+            "transcribe",
+            "c:ada",
+            "00a",
+            "--language",
+            "en",
+        ],
+        vec![
+            "dm",
+            "messages",
+            "send",
+            "c:ada",
+            "--speak",
+            "[excited] Done!",
+        ],
+        vec![
+            "dm", "messages", "send", "c:ada", "--speak", "Hi.", "--voice", "mark", "--text", "x",
+        ],
+        vec![
+            "dm", "messages", "edit", "c:ada", "00a", "--speak", "Fixed.",
+        ],
+        vec!["dm", "receipts", "read", "c:ada", "00a"],
+        vec!["dm", "receipts", "read", "c:ada", "--up-to", "01f"],
+        vec!["dm", "receipts", "delivered", "c:ada", "--up-to", "01f"],
+        vec!["dm", "docs", "voice"],
+        vec!["dm", "docs", "expressive"],
+        vec!["dm", "docs", "write-for-the-ear"],
     ] {
         Cli::try_parse_from(&args).map_err(|e| anyhow::anyhow!("{args:?}: {e}"))?;
     }
@@ -82,9 +153,66 @@ fn removed_forms_do_not_parse() {
         vec!["dm", "sync", "--reset", "--cursor", "x"],
         vec!["dm", "sync", "--wait", "31"],
         vec!["dm", "profiles", "webhook", "http://localhost"],
+        vec!["dm", "receipts", "read", "c:ada"],
+        vec!["dm", "receipts", "read", "c:ada", "00a", "--up-to", "01f"],
+        vec!["dm", "voices", "set"],
+        vec!["dm", "speech", "render"],
+        vec!["dm", "speech", "transcribe"],
+        vec!["dm", "messages", "listen", "c:ada"],
     ] {
         assert!(Cli::try_parse_from(&args).is_err(), "{args:?} parsed");
     }
+}
+
+fn send_content(args: &[&str]) -> Result<MessageCreate> {
+    let mut all = vec!["dm", "messages", "send", "c:ada"];
+    all.extend(args);
+    let Command::Messages {
+        command: Messages::Send { content: input, .. },
+    } = Cli::try_parse_from(all)?.command
+    else {
+        bail!("wrong command")
+    };
+    content(input)
+}
+
+#[test]
+fn spoken_content_is_built_and_checked_before_anything_is_queued() -> Result<()> {
+    let spoken = send_content(&[
+        "--speak",
+        "[warmly] Done.",
+        "--voice",
+        " Hope ",
+        "--text",
+        "x",
+    ])?;
+    assert_eq!(
+        spoken.speech,
+        Some(SpeechInput {
+            script: "[warmly] Done.".into(),
+            voice: Some("hope".into()),
+        })
+    );
+    assert_eq!(spoken.text.as_deref(), Some("x"));
+    // A spoken message needs no text.
+    assert!(send_content(&["--speak", "Done."])?.text.is_none());
+    let unclosed = send_content(&["--speak", "[warmly Done."])
+        .err()
+        .context("unclosed cue")?;
+    let problem = unclosed
+        .downcast_ref::<silicon_dm_client::speech::SpeechError>()
+        .context("a speech error")?;
+    assert_eq!(
+        (problem.reason, problem.position),
+        (Some("unclosed_cue"), Some(1))
+    );
+    let output = output::error_json(&unclosed);
+    assert_eq!(output["error"]["code"], "invalid_speech_script");
+    assert_eq!(output["error"]["reason"], "unclosed_cue");
+    assert_eq!(output["error"]["position"], 1);
+    assert!(send_content(&["--text", "hi", "--voice", "mark"]).is_err());
+    assert!(send_content(&[]).is_err(), "nothing to send");
+    Ok(())
 }
 
 fn walk(command: &clap::Command, path: &str, visit: &mut dyn FnMut(&str, &clap::Command)) {
@@ -132,4 +260,87 @@ fn every_visible_command_explains_itself_without_retired_words() {
         }
     });
     assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// Every command a Silicon can run says how, with an example, and what usually comes next
+/// (AGENTS.md: "give it EXAMPLES and NEXT in its help").
+#[test]
+fn every_leaf_command_has_examples_and_a_next_step() {
+    let mut root = Cli::command();
+    root.build();
+    let mut missing = Vec::new();
+    walk(&root, "dm", &mut |path, command| {
+        let leaf = command
+            .get_subcommands()
+            .all(|sub| sub.is_hide_set() || sub.get_name() == "help");
+        let generated_help = path.split(' ').any(|word| word == "help");
+        if command.is_hide_set() || generated_help || !leaf || path == "dm" {
+            return;
+        }
+        let help = command.clone().render_long_help().to_string();
+        if !help.contains("EXAMPLE") {
+            missing.push(format!("{path}: no EXAMPLES"));
+        }
+        if !help.contains("NEXT") {
+            missing.push(format!("{path}: no NEXT"));
+        }
+    });
+    assert!(missing.is_empty(), "{missing:#?}");
+}
+
+#[test]
+fn a_group_name_without_a_letter_or_digit_is_refused_before_queueing() -> Result<()> {
+    let settings = |name: &str| silicon_dm_client::models::GroupSettings {
+        name: name.to_owned(),
+        description: String::new(),
+    };
+    let refused = crate::addressable(settings("🎉🎉"))
+        .err()
+        .context("refused")?;
+    let output = output::error_json(&refused);
+    assert_eq!(output["error"]["code"], "validation_error");
+    assert!(
+        output["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("needs a letter or a digit")
+                && message.contains("Nothing was queued")),
+        "{output}"
+    );
+    assert!(crate::addressable(settings("🎉 2026")).is_ok());
+    assert!(crate::addressable(settings("Ops")).is_ok());
+    Ok(())
+}
+
+/// `dm allow` is retired: it still runs, so older Silicons' scripts keep working, but `dm --help`
+/// no longer offers it and its own help says that the list limits nothing.
+#[test]
+fn dm_allow_is_hidden_and_says_the_list_no_longer_limits_anything() -> Result<()> {
+    let mut root = Cli::command();
+    root.build();
+    let listed = root.clone().render_long_help().to_string();
+    assert!(
+        !listed
+            .lines()
+            .any(|line| line.trim_start().starts_with("allow")),
+        "dm --help lists dm allow:\n{listed}"
+    );
+    let allow = root
+        .find_subcommand("allow")
+        .context("dm allow still exists")?;
+    assert!(allow.is_hide_set());
+    for command in std::iter::once(allow).chain(
+        allow
+            .get_subcommands()
+            .filter(|sub| sub.get_name() != "help"),
+    ) {
+        let help = command.clone().render_long_help().to_string();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            help.contains("no longer limits who may start a conversation"),
+            "dm allow {}: {help}",
+            command.get_name()
+        );
+    }
+    Cli::try_parse_from(["dm", "allow", "add", "c:ada", "--for", "si:scout"])?;
+    Ok(())
 }

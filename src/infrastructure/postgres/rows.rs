@@ -11,7 +11,8 @@ use crate::{
     AppError, AppResult,
     domain::{
         ActorId, ActorRef, ActorType, Attachment, BundleRef, BundleRole, Gif,
-        MAX_VOICE_DURATION_MILLISECONDS, Message, MessageCreate, MessageStatus, VoiceAttachment,
+        MAX_VOICE_DURATION_MILLISECONDS, Message, MessageCreate, MessageStatus, Speech,
+        VoiceAttachment,
     },
 };
 
@@ -57,6 +58,7 @@ pub(crate) struct MessageRecord {
     pub delivered_at: Option<OffsetDateTime>,
     pub read_at: Option<OffsetDateTime>,
     pub via_app: Option<String>,
+    pub speech: Option<sqlx::types::Json<Speech>>,
 }
 
 #[derive(Debug, FromRow)]
@@ -95,7 +97,92 @@ struct BundleReferenceRecord {
     role: String,
 }
 
+/// What a message's JSON adds to the sizes [`MESSAGE_SIZE_ESTIMATE`] counts (its other
+/// fields, attachments and the like), so a batch of small messages is planned close to its
+/// real size.
+const ESTIMATE_OVERHEAD_BYTES: usize = 4096;
+
+/// SQL for the bytes a message's text, transcript and history take (`message` is the row):
+/// cheap to read, and close to its JSON size, which those dominate.
+pub(crate) const MESSAGE_SIZE_ESTIMATE: &str =
+    "(COALESCE(octet_length(message.text_content), 0)::bigint
+    + COALESCE(octet_length(message.voice_transcript), 0)::bigint
+    + COALESCE((SELECT octet_length(history.history::text)::bigint
+                       + COALESCE(octet_length(history.content::text), 0)::bigint
+                FROM message_history AS history
+                WHERE history.message_id = message.id), 0))";
+
 impl PostgresStore {
+    /// Size estimates for messages, in the order given (missing ones are left out).
+    pub(crate) async fn message_size_estimates(&self, ids: &[Uuid]) -> AppResult<Vec<(Uuid, i64)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let estimates: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
+            sqlx::AssertSqlSafe(format!(
+                "SELECT message.id, {MESSAGE_SIZE_ESTIMATE} FROM messages AS message WHERE message.id = ANY($1)"
+            )),
+        )
+        .bind(ids)
+        .fetch_all(self.pool())
+        .await?
+        .into_iter()
+        .collect();
+        Ok(ids
+            .iter()
+            .filter_map(|id| estimates.get(id).map(|estimate| (*id, *estimate)))
+            .collect())
+    }
+
+    /// Loads messages in order while their JSON stays within [`MESSAGE_PAGE_BYTE_BUDGET`]
+    /// (the first always comes, so every message stays retrievable). Batches are planned from
+    /// size estimates so a message past the budget is never hydrated, and an ordinary page is
+    /// one batch: five queries, not five per message.
+    pub(crate) async fn load_messages_within_budget(
+        &self,
+        candidates: &[(Uuid, i64)],
+    ) -> AppResult<Vec<Message>> {
+        let mut items = Vec::with_capacity(candidates.len());
+        let mut payload_bytes: usize = 0;
+        let mut next = 0;
+        'page: while next < candidates.len() {
+            let mut batch = Vec::new();
+            let mut planned = payload_bytes;
+            while let Some((id, estimate)) = candidates.get(next) {
+                let estimate = usize::try_from(*estimate)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(ESTIMATE_OVERHEAD_BYTES);
+                let first = items.is_empty() && batch.is_empty();
+                if !first && planned.saturating_add(estimate) > MESSAGE_PAGE_BYTE_BUDGET {
+                    break;
+                }
+                batch.push(*id);
+                planned = planned.saturating_add(estimate);
+                next += 1;
+                if planned >= MESSAGE_PAGE_BYTE_BUDGET {
+                    break;
+                }
+            }
+            if batch.is_empty() {
+                break;
+            }
+            for message in self.load_messages(&batch).await? {
+                let bytes = message_payload_bytes(&message)?;
+                if !items.is_empty()
+                    && payload_bytes.saturating_add(bytes) > MESSAGE_PAGE_BYTE_BUDGET
+                {
+                    break 'page;
+                }
+                payload_bytes = payload_bytes.saturating_add(bytes);
+                items.push(message);
+                if payload_bytes >= MESSAGE_PAGE_BYTE_BUDGET {
+                    break 'page;
+                }
+            }
+        }
+        Ok(items)
+    }
+
     pub(crate) async fn load_message(&self, message_id: Uuid) -> AppResult<Message> {
         let messages = self.load_messages(&[message_id]).await?;
         messages.into_iter().next().ok_or(AppError::NotFound)
@@ -124,7 +211,8 @@ impl PostgresStore {
                 created_at,
                 delivered_at,
                 read_at,
-                via_app
+                via_app,
+                speech
             FROM messages
             WHERE id = ANY($1)
             "#,
@@ -262,6 +350,7 @@ impl PostgresStore {
                 message.voice = content.voice;
                 message.voice_transcript = content.voice_transcript;
                 message.gif = content.gif;
+                message.speech = content.speech;
                 message.metadata = content.metadata;
                 message.reply_to_message_id = content.reply_to_message_id;
             }
@@ -314,6 +403,7 @@ fn map_message(
         voice,
         voice_transcript: record.voice_transcript,
         gif,
+        speech: record.speech.map(|speech| speech.0),
         bundle,
         created_at: record.created_at,
         delivered_at: record.delivered_at,

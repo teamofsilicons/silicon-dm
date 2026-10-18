@@ -307,10 +307,22 @@ pub async fn start(
     loop {
         match host::state(&home)? {
             host::HostState::Running(record) => {
+                let older = older_than_this(&json!({"version": record.version}));
                 let owner = crate::relay::RelayClient::new(
                     &format!("http://127.0.0.1:{}/", record.port),
                     record.token,
                 )?;
+                // The old relay may be unable to parse this home's new credential
+                // format. Upgrade before asking it to attach that home. The host
+                // record is private and shutdown still uses its authenticated token.
+                if older {
+                    if !replacing {
+                        let _ = owner.stop().await;
+                        replacing = true;
+                    }
+                    continue_after_pause(deadline, &log).await?;
+                    continue;
+                }
                 // Attaching may wait up to 5s for an older per-home relay to stop.
                 let attached =
                     tokio::time::timeout(Duration::from_secs(8), owner.attach(&directory)).await;
@@ -884,7 +896,7 @@ async fn maintenance(host: Arc<Host>) {
 }
 
 fn transient_request(request: &RelayRequest) -> bool {
-    matches!(request.request, crate::relay::Operation::SetPresence { .. })
+    request.request.is_presence_change()
 }
 
 fn retry_or_finish(context: &RuntimeContext, request: &RelayRequest, detail: &Value) {
@@ -1149,6 +1161,91 @@ mod tests {
         assert_eq!(activities.load(Ordering::SeqCst), 1);
         assert_eq!(sends.load(Ordering::SeqCst), 1);
         assert!(context.queue.request_candidates()?.is_empty());
+        worker.0.abort();
+        server.abort();
+        let _ = server.await;
+        drop(context);
+        std::fs::remove_dir_all(state.directory())?;
+        Ok(())
+    }
+
+    /// What a relay from before DM 0.17 does with `send_spoken_message`: it cannot parse the
+    /// operation, so the request stays queued, untouched, for the newer relay that replaces it,
+    /// and other conversations keep moving.
+    #[tokio::test]
+    async fn an_operation_this_relay_cannot_read_stays_queued_for_a_newer_one() -> Result<()> {
+        let sends = Arc::new(AtomicUsize::new(0));
+        let counter = sends.clone();
+        let router = Router::new().route(
+            "/api/v1/conversations/c:alice::c:carol/messages",
+            post(move |Json(body): Json<Value>| {
+                let counter = counter.clone();
+                async move {
+                    assert_eq!(body["data"]["message"], "unrelated");
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"type":"message","data":{
+                        "message-id":"001","conversation_id":"c:alice::c:carol","sender":{"type":"carbon","id":"c:bob"},
+                        "message":"unrelated","created_at":"2026-10-17T00:00:00Z"
+                    }}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let state = fixture_store(&format!("http://{}", listener.local_addr()?))?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let context = RuntimeContext {
+            queue: queue::Queue::open(&state)?,
+            store: state.clone(),
+            payload_budget: Arc::new(Semaphore::new(PAYLOAD_BUDGET_MIB as usize)),
+            workers: Arc::new(Semaphore::new(WORKERS)),
+            http: Arc::new(Pool::new()?),
+            wake: Arc::default(),
+        };
+        let send = |conversation: &str, text: &str| {
+            RelayRequest::new(
+                "default",
+                crate::relay::Operation::SendMessage {
+                    conversation_id: conversation.into(),
+                    message: crate::MessageCreate {
+                        text: Some(text.into()),
+                        ..Default::default()
+                    },
+                    idempotency_key: format!("key-{text}"),
+                },
+            )
+        };
+        let future = send("c:alice::c:bob", "future");
+        let mut unreadable = serde_json::to_value(&future)?;
+        unreadable["request"]["operation"] = json!("send_hologram_message");
+        context.queue.enqueue(&future, &unreadable)?;
+        let unrelated = send("c:alice::c:carol", "unrelated");
+        context
+            .queue
+            .enqueue(&unrelated, &serde_json::to_value(&unrelated)?)?;
+        let worker = AbortOnDrop(tokio::spawn(outbox(context.clone())));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if context
+                    .queue
+                    .result(unrelated.request_id)?
+                    .is_some_and(|r| r.state == "completed")
+                {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await??;
+        // Several scans later the unreadable request is still pending and unchanged.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let kept = context
+            .queue
+            .result(future.request_id)?
+            .context("still queued")?;
+        assert_eq!(kept.state, "pending");
+        assert_eq!(kept.request, unreadable);
+        assert!(kept.error.is_none(), "it was never attempted");
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
         worker.0.abort();
         server.abort();
         let _ = server.await;
@@ -1506,7 +1603,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_newer_client_replaces_an_older_shared_relay() -> Result<()> {
+    async fn a_newer_client_replaces_an_older_shared_relay_before_attaching() -> Result<()> {
         let state = fixture_store("http://localhost")?;
         let shared = state.relay_home()?;
         // Stand in for an older shared relay: it holds the host lock and
@@ -1517,19 +1614,28 @@ mod tests {
         let stopped = Arc::new(AtomicUsize::new(0));
         let (release, stopped_handler) = (held.clone(), stopped.clone());
         let router = Router::new()
-            .route("/homes", post(|| async {
-                Json(json!({"type":"relay_status","data":{"running":true,"pid":123,"version":"0.0.1",
-                    "profiles":{},"queues":{},"incoming_delivery":{"code":"delivery_moved_to_ting","provider":"ting","forwarding":false},
-                    "host":{"shared":true,"port":1}}}))
-            }))
-            .route("/shutdown", post(move || {
-                let (release, stopped) = (release.clone(), stopped_handler.clone());
-                async move {
-                    stopped.fetch_add(1, Ordering::SeqCst);
-                    release.lock().unwrap().take();
-                    StatusCode::NO_CONTENT
-                }
-            }));
+            .route(
+                "/homes",
+                post(|| async {
+                    // The actual pre-Accounts relay rejects new profiles this way.
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({"error":{"code":"attach_failed",
+                    "message":"missing field `token_type`"}})),
+                    )
+                }),
+            )
+            .route(
+                "/shutdown",
+                post(move || {
+                    let (release, stopped) = (release.clone(), stopped_handler.clone());
+                    async move {
+                        stopped.fetch_add(1, Ordering::SeqCst);
+                        release.lock().unwrap().take();
+                        StatusCode::NO_CONTENT
+                    }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         host::publish(
             &shared,

@@ -2,7 +2,7 @@
 //!
 //! Ting accepts a recipient only with a proof of the recipient's own agreement: a User
 //! verification proof DM obtains with the account's current DM access token (receiving
-//! app Ting, named by `DM_TING_APP_ID`; scope `tings.subscribe`). DM enrols an account
+//! app Ting, named by `DM_TING_APP_ID`; scope `subscriptions.register`). DM enrols an account
 //! the first time it sees one of its requests; the proof's refresh token is kept
 //! encrypted with `DM_DATA_KEY`.
 
@@ -21,7 +21,10 @@ use crate::{
 };
 
 /// Scope DM asks for when enrolling a recipient.
-pub const SUBSCRIBE_SCOPE: &str = "tings.subscribe";
+pub const SUBSCRIBE_SCOPE: &str = "subscriptions.register";
+// This is a persisted encryption/row label, not the scope requested from Accounts.
+// Preserve it so existing grants remain decryptable without a data migration.
+const GRANT_PURPOSE: &str = "tings.subscribe";
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
 fn http() -> &'static reqwest::Client {
@@ -91,7 +94,7 @@ async fn enrol(state: &AppState, context: &AuthContext) -> AppResult<()> {
             .save_ting_proof_grant(
                 &app_id,
                 &context.actor,
-                SUBSCRIBE_SCOPE,
+                GRANT_PURPOSE,
                 &proof.proof_id,
                 &nonce,
                 &ciphertext,
@@ -105,7 +108,6 @@ async fn enrol(state: &AppState, context: &AuthContext) -> AppResult<()> {
         &proof.token,
         &app_id,
         context.actor.id.as_str(),
-        Some(context.public_id.as_str()),
     )
     .await;
     match outcome {
@@ -133,17 +135,13 @@ async fn subscribe(
     proof: &secrecy::SecretString,
     app_id: &str,
     account: &str,
-    public_id: Option<&str>,
 ) -> Result<String, String> {
     endpoint.set_path("/v1/subscriptions");
     let response = http()
         .post(endpoint)
         .timeout(state.settings.ting.request_timeout)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Proof {}", proof.expose_secret()),
-        )
-        .json(&json!({ "app_id": app_id, "for": { "uuid": account, "id": public_id } }))
+        .bearer_auth(proof.expose_secret())
+        .json(&json!({ "app_id": app_id, "for": account }))
         .send()
         .await
         .map_err(|_| "ting_unreachable".to_owned())?;
@@ -177,7 +175,7 @@ fn seal(
         .derive("silicon-dm ting proof refresh tokens v1");
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(AppError::internal)?;
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    let aad = format!("{app_id}\u{1f}{account}\u{1f}{SUBSCRIBE_SCOPE}");
+    let aad = format!("{app_id}\u{1f}{account}\u{1f}{GRANT_PURPOSE}");
     let ciphertext = cipher
         .encrypt(
             &nonce,
@@ -207,7 +205,7 @@ fn open(
     let nonce: [u8; 12] = nonce.try_into().map_err(|_| {
         AppError::internal(anyhow::anyhow!("stored proof nonce has the wrong length"))
     })?;
-    let aad = format!("{app_id}\u{1f}{account}\u{1f}{SUBSCRIBE_SCOPE}");
+    let aad = format!("{app_id}\u{1f}{account}\u{1f}{GRANT_PURPOSE}");
     let plaintext = cipher
         .decrypt(
             &aes_gcm::Nonce::from(nonce),
@@ -267,7 +265,7 @@ async fn reenrol_locked(state: &AppState, target: &crate::domain::ActorRef) -> A
     };
     let grant = state
         .store
-        .ting_proof_grant(&app_id, target, SUBSCRIBE_SCOPE)
+        .ting_proof_grant(&app_id, target, GRANT_PURPOSE)
         .await?;
     let Some((nonce, ciphertext)) = grant else {
         return state.store.forget_ting_enrolment(&app_id, target).await;
@@ -299,7 +297,7 @@ async fn reenrol_locked(state: &AppState, target: &crate::domain::ActorRef) -> A
             .save_ting_proof_grant(
                 &app_id,
                 target,
-                SUBSCRIBE_SCOPE,
+                GRANT_PURPOSE,
                 &proof.proof_id,
                 &nonce,
                 &ciphertext,
@@ -307,21 +305,9 @@ async fn reenrol_locked(state: &AppState, target: &crate::domain::ActorRef) -> A
             )
             .await?;
     }
-    let current_id = state
-        .store
-        .stored_account(target.id.as_str())
-        .await?
-        .and_then(|stored| stored.current_id);
-    let accepted = subscribe(
-        state,
-        ting,
-        &proof.token,
-        &app_id,
-        target.id.as_str(),
-        current_id.as_deref(),
-    )
-    .await
-    .is_ok();
+    let accepted = subscribe(state, ting, &proof.token, &app_id, target.id.as_str())
+        .await
+        .is_ok();
     if !accepted {
         state.store.forget_ting_enrolment(&app_id, target).await?;
     }

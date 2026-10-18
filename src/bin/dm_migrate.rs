@@ -52,7 +52,10 @@ async fn main() -> ExitCode {
         None => match silicon_dm::bootstrap::run_migrations(settings).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                tracing::error!(error = %error, "DM migration failed");
+                // The whole chain: "internal server error" alone tells an operator nothing.
+                let cause = causes(&error);
+                tracing::error!(error = %error, cause = %cause, "DM migration failed");
+                eprintln!("DM migration failed: {cause}");
                 ExitCode::FAILURE
             }
         },
@@ -127,4 +130,23 @@ async fn main() -> ExitCode {
 fn usage_error(message: &str) -> ExitCode {
     eprintln!("dm-migrate: {message}\n\n{USAGE}");
     ExitCode::from(2)
+}
+
+/// An error and its sources, outermost first ("database migration failed: while executing
+/// migration 43: error returned from database: canceling statement due to statement timeout").
+/// DM's errors never carry the database URL or its password.
+fn causes(error: &silicon_dm::AppError) -> String {
+    let mut words = vec![error.to_string()];
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if words.last() != Some(&text) {
+            words.push(text);
+        }
+        source = cause.source();
+    }
+    if words.len() > 1 && words[0] == "internal server error" {
+        words.remove(0);
+    }
+    words.join(": ")
 }

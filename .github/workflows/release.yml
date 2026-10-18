@@ -8,7 +8,7 @@ name: Build Silicon Apps release
 # target with scripts/package-apps.sh (`silicon-apps validate` + `silicon-apps
 # pack`) and uploads them with SHA256SUMS as the workflow artifact
 # `dm-silicon-apps-release`. It publishes nothing: uploading to Silicon Apps and
-# publishing the crates are separate, reviewed steps (docs/releasing.md).
+# publishing the crates are separate, reviewed steps (docs/operations/releasing.md).
 
 on:
   workflow_dispatch:

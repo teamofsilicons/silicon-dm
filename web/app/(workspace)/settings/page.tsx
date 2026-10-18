@@ -1,5 +1,9 @@
-import {apiFetch} from "@/lib/server/rsc";
-import {Settings} from "@/components/product/settings";
-import type {Envelope} from "@/components/product/common";
-import type {Me} from "@/lib/product/types";
-export default async function Route(){const me=await apiFetch<Envelope<Me>>("/api/v1/me");return <Settings me={me.data}/>;}
+/** /settings: Voice, Listening, Sending, Keyboard, Notifications, Account, Report a problem. */
+import type { Metadata } from "next";
+import { SettingsPage } from "@/components/chat/settings/settings-page";
+
+export const metadata: Metadata = { title: "Settings" };
+
+export default function Settings() {
+  return <SettingsPage />;
+}

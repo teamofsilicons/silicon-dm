@@ -50,10 +50,13 @@ function DrawnCheck({ reduced }: { reduced: boolean }) {
   </svg>;
 }
 
-type FaceProps = { icon: ReactNode; text: string; done: boolean; width: MotionValue<number | "auto">; reduced: boolean; measure?: (node: HTMLSpanElement | null) => void };
+type FaceProps = { icon: ReactNode; text: string; done: boolean; width: MotionValue<number | "auto">; reduced: boolean; measure?: (node: HTMLSpanElement | null) => void; painted?: boolean };
 
-/** Icon and label. The button renders it twice: once on the surface and once inside the fill, so the text changes colour exactly at the fill edge. */
-function Face({ icon, text, done, width, reduced, measure }: FaceProps) {
+/**
+ * Icon and label. The button renders it twice: once on the surface and once inside the fill, so the text changes colour exactly at the fill edge.
+ * The fill's copy is `painted`: its words come from CSS (attr()), not text, so the button's text is its label once (WCAG 2.5.3 checks read it).
+ */
+function Face({ icon, text, done, width, reduced, measure, painted = false }: FaceProps) {
   return <span className={styles.face}>
     <span className={styles.iconSlot}>
       <AnimatePresence initial={false}>
@@ -65,7 +68,7 @@ function Face({ icon, text, done, width, reduced, measure }: FaceProps) {
     <motion.span className={styles.labelFrame} style={{ width }}>
       {measure && <span ref={measure} className={styles.measure}>{text}</span>}
       <AnimatePresence mode="popLayout" initial={false}>
-        <motion.span key={text} className={styles.label} initial={reduced ? fadeIn : textIn} animate={rest} exit={reduced ? fadeOut : textOut} transition={{ duration: reduced ? motionTokens.duration.fast : motionTokens.duration.standard, ease: enter }}>{text}</motion.span>
+        <motion.span key={text} className={styles.label} data-text={painted ? text : undefined} initial={reduced ? fadeIn : textIn} animate={rest} exit={reduced ? fadeOut : textOut} transition={{ duration: reduced ? motionTokens.duration.fast : motionTokens.duration.standard, ease: enter }}>{painted ? null : text}</motion.span>
       </AnimatePresence>
     </motion.span>
   </span>;
@@ -198,7 +201,7 @@ export function HoldToConfirm({ label, confirmedLabel = "Done", onConfirm, durat
       onKeyDown={onKeyDown} onKeyUp={onKeyUp} onBlur={release} onContextMenu={event => event.preventDefault()}>
       <Face icon={icon} text={text} done={done} width={width} reduced={reduced} measure={measure} />
       <motion.span className={styles.fill} style={{ clipPath }} aria-hidden="true">
-        <Face icon={icon} text={text} done={done} width={width} reduced={reduced} />
+        <Face icon={icon} text={text} done={done} width={width} reduced={reduced} painted />
       </motion.span>
     </motion.button>
     <span id={hintId} className={styles.srOnly}>{`Press and hold for ${seconds} seconds to confirm. With a keyboard, hold Space or Enter.`}</span>

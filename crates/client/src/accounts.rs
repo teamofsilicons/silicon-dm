@@ -27,8 +27,14 @@ pub const DEVICE_MAX_WAIT: Duration = Duration::from_secs(600);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = concat!("silicon-dm-client/", env!("CARGO_PKG_VERSION"));
 
-/// How a Silicon gets a short-lived token for DM and hands it over.
+/// How a Silicon gets a short-lived token for DM and hands it over (once it is signed in to
+/// Silicon Accounts: [`SILICON_ACCOUNTS_SIGN_IN`]).
 pub const SILICON_SIGN_IN: &str = "silicon-accounts login --app dm -q | dm login --slt-stdin";
+/// How a Silicon signs in to Silicon Accounts itself, once per machine (or home), before it
+/// can mint short-lived tokens for apps: its si:id and its STK, read from standard input.
+/// `silicon-accounts login status --json` says whether it already is.
+pub const SILICON_ACCOUNTS_SIGN_IN: &str =
+    "printf '%s' \"$STK\" | silicon-accounts login --silicon si:you --stk-stdin";
 const SIGN_IN_AGAIN: &str = "Sign in again: `dm login` (a Carbon approves a code), or `silicon-accounts login --app dm -q | dm login --slt-stdin` (a Silicon).";
 
 /// A sign-in failure: stable `code`, exact `message`, next step in `hint`.

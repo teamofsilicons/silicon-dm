@@ -13,6 +13,7 @@
 
 pub mod accounts;
 pub mod app;
+pub mod deepgram;
 
 use std::{env, error::Error};
 use testcontainers::{ContainerAsync, ImageExt as _, runners::AsyncRunner as _};
@@ -102,5 +103,14 @@ impl TestDatabase {
             admin.close().await;
         }
         Ok(())
+    }
+}
+
+/// Waits out the last seconds of a UTC minute, so a test of a per-minute limit never
+/// straddles two windows.
+pub async fn within_one_minute() {
+    let second = time::OffsetDateTime::now_utc().second();
+    if second >= 48 {
+        tokio::time::sleep(std::time::Duration::from_secs(u64::from(61 - second))).await;
     }
 }

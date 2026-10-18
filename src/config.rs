@@ -15,6 +15,9 @@ use url::Url;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_HTTP_BODY_BYTES: usize = 3 * 1024 * 1024 * 1024;
+/// The most `DM_REPORTS_PER_HOUR` may allow (a test stack sets it high; every report is
+/// stored and, in production, emailed).
+const MAX_REPORTS_PER_HOUR: u32 = 100_000;
 
 /// Complete process settings.
 #[derive(Clone, Debug)]
@@ -39,8 +42,221 @@ pub struct Settings {
     pub worker: WorkerSettings,
     /// Optional Postmark notification transport for durable bug reports.
     pub reporting: Option<ReportingSettings>,
+    /// Bug reports one account may send in an hour (`DM_REPORTS_PER_HOUR`, default 10).
+    pub reports_per_hour: u32,
+    /// Voices, speech rendering and transcription through Deepgram.
+    pub speech: SpeechSettings,
     /// Tracing filter directive.
     pub log_filter: String,
+}
+
+/// Voices, speech (text to speech through Deepgram's managed `ElevenLabs`) and transcription
+/// (Deepgram speech to text). Every Deepgram call is made by the DM service; without
+/// `DM_DEEPGRAM_API_KEY` speech and transcription answer 503 `speech_not_configured`.
+#[derive(Clone, Debug)]
+pub struct SpeechSettings {
+    /// Deepgram key (`DM_DEEPGRAM_API_KEY`); never leaves the service, never logged.
+    pub deepgram_api_key: Option<SecretString>,
+    /// Deepgram's HTTP API origin for transcription (`DM_DEEPGRAM_URL`).
+    pub deepgram_url: Url,
+    /// Deepgram's Voice Agent endpoint for speech (`DM_DEEPGRAM_AGENT_URL`).
+    pub agent_url: Url,
+    /// The `ElevenLabs` model spoken messages are rendered with (`DM_SPEECH_MODEL`).
+    pub model: String,
+    /// The Deepgram model transcriptions use (`DM_STT_MODEL`).
+    pub stt_model: String,
+    /// The voices accounts may speak in (`DM_VOICES`).
+    pub voices: crate::domain::VoiceCatalog,
+    /// Bytes of rendered audio DM keeps before evicting the least recently used
+    /// (`DM_SPEECH_CACHE_MAX_BYTES`).
+    pub cache_max_bytes: u64,
+    /// How long unused rendered audio is kept (`DM_SPEECH_CACHE_TTL_DAYS`).
+    pub cache_ttl: Duration,
+    /// Renders one account may cause per minute (`DM_SPEECH_RENDERS_PER_MINUTE`).
+    pub renders_per_minute: u32,
+    /// Characters one account may have rendered per UTC day (`DM_SPEECH_DAILY_CHARACTERS`).
+    pub daily_characters: u64,
+    /// Largest audio upload a transcription accepts (`DM_TRANSCRIBE_MAX_BYTES`).
+    pub transcribe_max_bytes: u64,
+    /// Transcriptions one account may request per minute (`DM_TRANSCRIBE_PER_MINUTE`).
+    pub transcribe_per_minute: u32,
+}
+
+/// Deepgram's public HTTP API origin.
+pub const DEFAULT_DEEPGRAM_URL: &str = "https://api.deepgram.com";
+/// Deepgram's Voice Agent endpoint.
+pub const DEFAULT_DEEPGRAM_AGENT_URL: &str = "wss://agent.deepgram.com/v1/agent/converse";
+/// The `ElevenLabs` model DM speaks with.
+pub const DEFAULT_SPEECH_MODEL: &str = "eleven_v4";
+/// The Deepgram transcription model.
+pub const DEFAULT_STT_MODEL: &str = "nova-3";
+/// Largest accepted transcription upload Deepgram itself handles (2 GiB).
+const MAX_TRANSCRIBE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+impl SpeechSettings {
+    /// The defaults with speech switched off (no Deepgram key): what a deployment gets when
+    /// it sets nothing, and the starting point of tests.
+    ///
+    /// # Errors
+    /// Only if a default URL constant stopped parsing (the error names its variable).
+    pub fn defaults() -> Result<Self, SettingsError> {
+        Ok(Self {
+            deepgram_api_key: None,
+            deepgram_url: parse_value("DM_DEEPGRAM_URL", DEFAULT_DEEPGRAM_URL)?,
+            agent_url: parse_value("DM_DEEPGRAM_AGENT_URL", DEFAULT_DEEPGRAM_AGENT_URL)?,
+            model: DEFAULT_SPEECH_MODEL.to_owned(),
+            stt_model: DEFAULT_STT_MODEL.to_owned(),
+            voices: crate::domain::VoiceCatalog::default(),
+            cache_max_bytes: 2 * 1024 * 1024 * 1024,
+            cache_ttl: Duration::from_hours(90 * 24),
+            renders_per_minute: 30,
+            daily_characters: 200_000,
+            transcribe_max_bytes: 100 * 1024 * 1024,
+            transcribe_per_minute: 20,
+        })
+    }
+
+    /// Whether speech and transcription can run (a Deepgram key is configured).
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.deepgram_api_key.is_some()
+    }
+
+    fn from_env() -> Result<Self, SettingsError> {
+        let voices = match optional("DM_VOICES") {
+            Some(json) => crate::domain::VoiceCatalog::parse(&json)
+                .map_err(|reason| invalid("DM_VOICES", reason))?,
+            None => crate::domain::VoiceCatalog::default(),
+        };
+        let cache_ttl_days: u64 = parse_or("DM_SPEECH_CACHE_TTL_DAYS", "90")?;
+        Ok(Self {
+            deepgram_api_key: optional("DM_DEEPGRAM_API_KEY").map(SecretString::from),
+            deepgram_url: parse_or("DM_DEEPGRAM_URL", DEFAULT_DEEPGRAM_URL)?,
+            agent_url: parse_or("DM_DEEPGRAM_AGENT_URL", DEFAULT_DEEPGRAM_AGENT_URL)?,
+            model: optional("DM_SPEECH_MODEL").unwrap_or_else(|| DEFAULT_SPEECH_MODEL.to_owned()),
+            stt_model: optional("DM_STT_MODEL").unwrap_or_else(|| DEFAULT_STT_MODEL.to_owned()),
+            voices,
+            cache_max_bytes: parse_or("DM_SPEECH_CACHE_MAX_BYTES", "2147483648")?,
+            cache_ttl: Duration::from_secs(cache_ttl_days.saturating_mul(24 * 60 * 60)),
+            renders_per_minute: parse_or("DM_SPEECH_RENDERS_PER_MINUTE", "30")?,
+            daily_characters: parse_or("DM_SPEECH_DAILY_CHARACTERS", "200000")?,
+            transcribe_max_bytes: parse_or("DM_TRANSCRIBE_MAX_BYTES", "104857600")?,
+            transcribe_per_minute: parse_or("DM_TRANSCRIBE_PER_MINUTE", "20")?,
+        })
+    }
+
+    fn validate(&self, environment: RuntimeEnvironment) -> Result<(), SettingsError> {
+        validate_url("DM_DEEPGRAM_URL", &self.deepgram_url, environment)?;
+        if self.deepgram_url.path() != "/" {
+            return Err(invalid(
+                "DM_DEEPGRAM_URL",
+                "must be an origin without a path (DM calls {origin}/v1/listen)",
+            ));
+        }
+        validate_socket_url("DM_DEEPGRAM_AGENT_URL", &self.agent_url, environment)?;
+        for (name, value) in [
+            ("DM_SPEECH_MODEL", &self.model),
+            ("DM_STT_MODEL", &self.stt_model),
+        ] {
+            if !valid_model_id(value) {
+                return Err(invalid(
+                    name,
+                    "must be a model id such as eleven_v4 or nova-3 (1 to 64 lowercase letters, digits, ., _ or -)",
+                ));
+            }
+        }
+        if let Some(key) = &self.deepgram_api_key
+            && (key.expose_secret().len() > 512
+                || key
+                    .expose_secret()
+                    .chars()
+                    .any(|character| character.is_whitespace() || character.is_control()))
+        {
+            return Err(invalid(
+                "DM_DEEPGRAM_API_KEY",
+                "must be a Deepgram API key (no spaces or control characters)",
+            ));
+        }
+        if self.cache_max_bytes < 1024 * 1024 {
+            return Err(invalid(
+                "DM_SPEECH_CACHE_MAX_BYTES",
+                "must be at least 1048576 (1 MiB)",
+            ));
+        }
+        if self.cache_ttl.is_zero() || self.cache_ttl > Duration::from_hours(3_650 * 24) {
+            return Err(invalid(
+                "DM_SPEECH_CACHE_TTL_DAYS",
+                "must be 1 to 3650 days",
+            ));
+        }
+        if self.renders_per_minute == 0 {
+            return Err(invalid("DM_SPEECH_RENDERS_PER_MINUTE", "must be positive"));
+        }
+        if self.daily_characters == 0 || i64::try_from(self.daily_characters).is_err() {
+            return Err(invalid(
+                "DM_SPEECH_DAILY_CHARACTERS",
+                "must be a positive number of characters",
+            ));
+        }
+        if self.transcribe_max_bytes == 0 || self.transcribe_max_bytes > MAX_TRANSCRIBE_BYTES {
+            return Err(invalid(
+                "DM_TRANSCRIBE_MAX_BYTES",
+                "must be between 1 and 2147483648 bytes (Deepgram's own limit)",
+            ));
+        }
+        if self.transcribe_per_minute == 0 {
+            return Err(invalid("DM_TRANSCRIBE_PER_MINUTE", "must be positive"));
+        }
+        Ok(())
+    }
+}
+
+fn parse_value<T>(name: &'static str, value: &str) -> Result<T, SettingsError>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    value.parse().map_err(|error| invalid(name, error))
+}
+
+/// Whether `value` has the shape of a provider model id.
+#[must_use]
+pub fn valid_model_id(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+fn validate_socket_url(
+    name: &'static str,
+    url: &Url,
+    environment: RuntimeEnvironment,
+) -> Result<(), SettingsError> {
+    if !matches!(url.scheme(), "ws" | "wss")
+        || url.host_str().is_none()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid(
+            name,
+            "must be an absolute WebSocket URL (wss://…) without a query or fragment",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(invalid(name, "must not contain embedded credentials"));
+    }
+    let secure = url.scheme() == "wss";
+    if environment == RuntimeEnvironment::Production && !secure {
+        return Err(invalid(name, "must use wss in production"));
+    }
+    if !secure && !is_loopback(url) {
+        return Err(invalid(
+            name,
+            "must use wss; plain ws is allowed only for this machine (localhost, *.localhost or a loopback address)",
+        ));
+    }
+    Ok(())
 }
 
 /// Server-only Postmark credentials.
@@ -423,6 +639,8 @@ impl Settings {
                     })
                 })
                 .transpose()?,
+            reports_per_hour: parse_or("DM_REPORTS_PER_HOUR", "10")?,
+            speech: SpeechSettings::from_env()?,
             log_filter: parse_or("DM_LOG_FILTER", "info,silicon_dm=debug")?,
         };
         settings.validate()?;
@@ -527,7 +745,13 @@ impl Settings {
                 "is outside the supported retry timestamp range",
             ));
         }
-        Ok(())
+        if !(1..=MAX_REPORTS_PER_HOUR).contains(&self.reports_per_hour) {
+            return Err(invalid(
+                "DM_REPORTS_PER_HOUR",
+                format!("must be 1 to {MAX_REPORTS_PER_HOUR} reports"),
+            ));
+        }
+        self.speech.validate(self.environment)
     }
 
     /// `DM_TING_APP_ID` names another app than DM, and `DM_TING_URL` (when set) is an
@@ -827,6 +1051,87 @@ mod tests {
                         settings.accounts.proof_issuers.is_empty(),
                         "no issuer by default"
                     );
+                    assert!(!settings.speech.enabled(), "speech is off without a key");
+                    assert_eq!(settings.speech.model, "eleven_v4");
+                    assert_eq!(settings.speech.stt_model, "nova-3");
+                    assert_eq!(settings.speech.voices.voices().len(), 5);
+                    assert_eq!(
+                        settings.speech.agent_url.as_str(),
+                        "wss://agent.deepgram.com/v1/agent/converse"
+                    );
+                    assert_eq!(settings.speech.cache_max_bytes, 2_147_483_648);
+                    assert_eq!(settings.speech.renders_per_minute, 30);
+                    assert_eq!(settings.speech.daily_characters, 200_000);
+                    assert_eq!(settings.speech.transcribe_max_bytes, 104_857_600);
+                    assert_eq!(settings.speech.transcribe_per_minute, 20);
+                    assert_eq!(settings.reports_per_hour, 10);
+                }
+                "reports_per_hour" => {
+                    let settings = loaded.unwrap_or_else(|error| panic!("{error}"));
+                    assert_eq!(settings.reports_per_hour, 5000);
+                }
+                "no_reports" => {
+                    let error = loaded
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default();
+                    assert_eq!(
+                        error,
+                        "invalid environment variable DM_REPORTS_PER_HOUR: must be 1 to 100000 reports"
+                    );
+                }
+                "speech_options" => {
+                    let settings = loaded.unwrap_or_else(|error| panic!("{error}"));
+                    assert!(settings.speech.enabled());
+                    assert_eq!(settings.speech.voices.keys(), vec!["nova"]);
+                    assert_eq!(
+                        settings.speech.deepgram_url.as_str(),
+                        "http://127.0.0.1:4540/"
+                    );
+                    assert_eq!(
+                        settings.speech.agent_url.as_str(),
+                        "ws://127.0.0.1:4540/v1/agent/converse"
+                    );
+                    assert_eq!(
+                        settings.speech.cache_ttl,
+                        std::time::Duration::from_hours(7 * 24)
+                    );
+                    assert!(
+                        !format!("{settings:?}").contains("dg-test-key"),
+                        "the key never appears in debug output"
+                    );
+                }
+                "bad_voices" => {
+                    let error = loaded
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default();
+                    assert!(
+                        error.starts_with("invalid environment variable DM_VOICES:"),
+                        "{error}"
+                    );
+                }
+                "public_ws_agent" => {
+                    let error = loaded
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default();
+                    assert!(
+                        error.starts_with(
+                            "invalid environment variable DM_DEEPGRAM_AGENT_URL: must use wss"
+                        ),
+                        "{error}"
+                    );
+                }
+                "deepgram_url_with_path" => {
+                    let error = loaded
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default();
+                    assert!(
+                        error.starts_with("invalid environment variable DM_DEEPGRAM_URL"),
+                        "{error}"
+                    );
                 }
                 "missing_giphy" => assert!(matches!(
                     loaded,
@@ -956,11 +1261,43 @@ mod tests {
             &with("DM_ACCOUNTS_WEBHOOK_SECRET", "not-a-webhook-secret"),
         );
         run_child(TEST_NAME, "bad_data_key", &with("DM_DATA_KEY", "AAEC"));
+        run_child(
+            TEST_NAME,
+            "reports_per_hour",
+            &with("DM_REPORTS_PER_HOUR", "5000"),
+        );
+        run_child(TEST_NAME, "no_reports", &with("DM_REPORTS_PER_HOUR", "0"));
         run_child(TEST_NAME, "ting_app_is_dm", &with("DM_TING_APP_ID", "dm"));
         run_child(
             TEST_NAME,
             "bad_proof_issuers",
             &with("DM_PROOF_ISSUERS", "dm.everything=interface"),
+        );
+        let mut speech = base.clone();
+        speech.extend([
+            ("DM_DEEPGRAM_API_KEY", "dg-test-key"),
+            ("DM_DEEPGRAM_URL", "http://127.0.0.1:4540"),
+            (
+                "DM_DEEPGRAM_AGENT_URL",
+                "ws://127.0.0.1:4540/v1/agent/converse",
+            ),
+            (
+                "DM_VOICES",
+                r#"[{"key":"nova","name":"Nova","voice_id":"abc_123","description":"Calm."}]"#,
+            ),
+            ("DM_SPEECH_CACHE_TTL_DAYS", "7"),
+        ]);
+        run_child(TEST_NAME, "speech_options", &speech);
+        run_child(TEST_NAME, "bad_voices", &with("DM_VOICES", "[]"));
+        run_child(
+            TEST_NAME,
+            "public_ws_agent",
+            &with("DM_DEEPGRAM_AGENT_URL", "ws://agent.example.test/v1/agent"),
+        );
+        run_child(
+            TEST_NAME,
+            "deepgram_url_with_path",
+            &with("DM_DEEPGRAM_URL", "https://api.deepgram.com/v1"),
         );
         let mut options = base.clone();
         options.extend([

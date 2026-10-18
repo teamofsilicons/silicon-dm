@@ -1,0 +1,125 @@
+{
+  "app_id": "dm",
+  "version": "0.17.0",
+  "date": "2026-10-18",
+  "request": "The Carbon asked for the best chat app: Silicon UI, keyboard shortcuts, voices through Deepgram's managed ElevenLabs (five most used voices, a default for every Silicon), a CLI guide on writing expressively, Accounts-style docs and AGENTS.md, agent friendly; then: deploy it all, add dm to Briefcase's upload issuers, uploads of any size (paste and drag and drop too), fix the report recipient typo.",
+  "pull_request": "https://github.com/teamofsilicons/silicon-dm/pull/18",
+  "tag": {
+    "name": "v0.17.0",
+    "commit": "5988f950e79eea1cd42c96c9e6bac6203daaddb7"
+  },
+  "database": {
+    "snapshot_before": "silicon-dm-before-0-17-0-20261018-081338",
+    "migrations": [
+      "0043",
+      "0044",
+      "0045",
+      "0046",
+      "0047",
+      "0048",
+      "0049",
+      "0050",
+      "0051"
+    ],
+    "note": "Additive only: 0.16 ignores the new tables and columns, so rolling the code back needs no schema change (sync clients reset once)."
+  },
+  "backend": {
+    "source": "95037674dc8c8f4cce24422335dc64f63b51263c",
+    "source_difference": "The tag is one commit later (5988f95): the CLI's usage name only (bin_name = \"dm\"); service and website code are identical.",
+    "build": "https://github.com/teamofsilicons/silicon-dm/actions/runs/39110401665",
+    "image": "sha256:edc2c6bc1a77e1d31a741cd026bd03e7c96a3fd6a3b4a9c3e8e111821016b838",
+    "previous_image": "sha256:35e76c42a0603fda815ac07efaae0540da7fca0ba21434e4c195b896dad57476",
+    "stage_ssm": "5b616340-9af6-4a3a-8156-7f7c20d52e94",
+    "upgrade_ssm": "ccf7b308-4eda-456b-8007-3891f2a7aad8",
+    "upgrade": "deploy/parallel/upgrade_service.py: stop 0.16, dm-migrate, runtime grants, start 0.17 (768m, 8 connections) with speech on; 19 s",
+    "rollback_directory": "/opt/silicon-accounts-apps/dm/best-chat-upgrade-20261018T082143Z",
+    "readiness": 204,
+    "speech": {
+      "enabled": true,
+      "model": "eleven_v4",
+      "voices": [
+        "mark",
+        "brittney",
+        "jamal",
+        "jessa",
+        "hope"
+      ],
+      "key": "deepgram_api_key in silicon-dm/accounts-production/runtime (the Deepgram account key Waveform also uses)"
+    }
+  },
+  "website": {
+    "source": "95037674dc8c8f4cce24422335dc64f63b51263c",
+    "image": "sha256:9ae3f014c2a2ce6c604f3e1a4158ec6a34d9cc99b2932ba539270d09a013b2a0",
+    "previous_image": "sha256:f9f522307d166ea519e9a21190adc614296266acbacf2c510185a0bec3542ce8",
+    "previous_container": "dm-accounts-web-before-1792311738",
+    "upgrade_ssm": "de8f7e03-6980-46a2-813c-0e6f6300e5a0",
+    "uploads": {
+      "briefcase_api_url": "https://api.briefcase.teamofsilicons.com",
+      "max_bytes": 5497558138880,
+      "capped": false
+    }
+  },
+  "briefcase": {
+    "change": "BRIEFCASE_PROOF_ISSUERS gains dm for briefcase.uploads.reserve|commit|status|cancel and briefcase.link_access.update; BRIEFCASE_UPLOAD_TIMEOUT_SECONDS=21600",
+    "host_ssm": "cb35eafa-01c5-4c4a-aa11-33cf3c7a0f39",
+    "backup": "/var/lib/silicon-briefcase/releases/dm-uploads-20261018T054209Z",
+    "secret": "silicon-briefcase/accounts-production updated to match",
+    "practical_upload_limit": "about 90 GB per file today (Briefcase's staging disk), and 100 GiB a day per drive by Briefcase's default"
+  },
+  "cli": {
+    "source": "5988f950e79eea1cd42c96c9e6bac6203daaddb7",
+    "build": "https://github.com/teamofsilicons/silicon-dm/actions/runs/39111081154",
+    "native_verification": "https://github.com/teamofsilicons/silicon-dm/actions/runs/39111999713",
+    "verifier_source": "db44eecda6a20d377f3060fbc324c3efc5b8c5ed",
+    "targets": [
+      "linux-aarch64",
+      "linux-x86_64",
+      "macos-aarch64",
+      "macos-x86_64",
+      "windows-aarch64",
+      "windows-x86_64"
+    ],
+    "release_manifest_sha256": "084397f7e4edb61782b6ea255c9bf5fc2b841045f2c925c0f3535dba9c40d468",
+    "catalog_release_id": "6cb94e4f-f181-5d7f-854d-6d5c82c901db",
+    "catalog_apply_ssm": "89597753-2ac4-4c08-8930-8550ba2226ee",
+    "publication": "Verified with the host's publish tool, rehearsed on a consistent SQLite copy, backed up before and after (silicon-apps-backup.service), published with the API stopped; before.sqlite kept in /var/lib/silicon-apps/catalog-dm-0.17.0.",
+    "local_install": "The Silicon Apps updater installed dm 0.17.0 on macos-aarch64 by itself; dm voices list read the five voices from production.",
+    "crates": [
+      "silicon-dm-protocol 0.17.0",
+      "silicon-dm-client 0.17.0"
+    ]
+  },
+  "docs": {
+    "site": "https://docs.dm.teamofsilicons.com",
+    "project": "silicon-dm-docs (Vercel, prebuilt)"
+  },
+  "validation": {
+    "rust_tests": 295,
+    "web_unit_tests": 328,
+    "browser_tests": 103,
+    "checks": [
+      "format",
+      "strict workspace clippy",
+      "doctests",
+      "packaged docs sync",
+      "docs-site build and link check",
+      "Redocly",
+      "deploy script tests",
+      "six native build/test runs",
+      "six exact-archive native proof runs",
+      "CI on the tag"
+    ],
+    "review": "Eight adversarial audit lenses (90 confirmed findings, all critical and major fixed) and an independent final check (ship).",
+    "live_after_deploy": [
+      "api /live and /ready 204",
+      "GET /api/v1/voices enabled with five voices",
+      "contracts announce conversation_events, presence_activity, speech, unread",
+      "website landing, llms.txt and uploads config (enabled, uncapped)",
+      "Deepgram reachable from the host; no errors in the API, worker or website logs"
+    ]
+  },
+  "limits": [
+    "No signed-in production smoke was possible from the release machine: the first spoken message, Listen and voice note in production are the first real Deepgram calls through 0.17.",
+    "A real Finder folder drag was tested only with synthetic drop events (headless browsers cannot take an OS drag)."
+  ]
+}

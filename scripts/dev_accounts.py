@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run DM on this machine against a local Silicon Accounts stack (never a deployed one).
 
-    scripts/dev-accounts.sh [--build] [--fresh] [--ting]    # dev_accounts.py up: start (idempotent)
+    scripts/dev-accounts.sh [--build] [--fresh] [--ting] [--restart]  # dev_accounts.py up: start (idempotent)
     scripts/dev-accounts-stop.sh [--keep-webhook] [--drop]   # dev_accounts.py down: stop what up started
     python3 scripts/dev_accounts.py restart [--ting]         # restart dm-api (same database, secret, data key)
     python3 scripts/dev_accounts.py status                   # what runs, as JSON (never a secret)
@@ -16,7 +16,8 @@
   4. points DM's webhook at Silicon Accounts to http://127.0.0.1:<base+1>/webhook/ with DM's own app credentials
      (PUT /v1/apps/dm/webhook), remembering the setup it replaced so `down` can put it back;
   5. starts dm-api on 127.0.0.1:<base+1>; with --ting also a Ting stand-in on 127.0.0.1:<base+2>
-     (scripts/dev_ting_stub.py) and dm-api with DM_TING_URL pointing at it;
+     (scripts/dev_ting_stub.py) and dm-api with DM_TING_URL pointing at it; with --restart a running dm-api is
+     stopped before the migrations, so a rebuilt binary and its migrations start together;
   6. proves a test delivery (POST /v1/apps/dm/webhook/test) reaches dm-api and verifies; a stale signing secret
      is rotated (POST .../webhook/rotate-secret) and dm-api restarted with the new one.
 
@@ -39,6 +40,9 @@ Configuration (environment):
                           testkit's stand-in for the Silicon Interface)
   DM_DEV_TING_APP         the app at the stack that stands in for Ting with --ting (default `interface`: the stack
                           has no `ting` app); its secret comes from the stack file
+  DM_DEV_PASS_ENV         comma-separated names of more variables to hand dm-api from this script's own environment
+                          (e.g. DM_DEEPGRAM_API_KEY,DM_DEEPGRAM_URL); they win over the defaults above, and their
+                          values reach dm-api only through its environment, never a file or this script's output
   PSQL_BIN_DIR            directory with psql (default: PATH, then Homebrew's postgresql@16)
 """
 import argparse
@@ -150,6 +154,10 @@ def load_config():
         raise Failure(f"DM_DEV_DATABASE must be a plain name starting with dm_ (got {database!r}).")
     server = (env("DM_DEV_POSTGRES_URL") or "postgres://postgres@127.0.0.1:5460").rstrip("/")
     ting_app = env("DM_DEV_TING_APP") or "interface"
+    pass_env = [name.strip() for name in (env("DM_DEV_PASS_ENV") or "").split(",") if name.strip()]
+    for name in pass_env:
+        if not name.replace("_", "").isalnum() or not name[0].isalpha() or name.upper() != name:
+            raise Failure(f"DM_DEV_PASS_ENV lists {name!r}; each entry must be a variable name like DM_DEEPGRAM_URL.")
     return {
         "accounts_url": accounts_url,
         "accounts_api_url": accounts_api_url,
@@ -168,6 +176,7 @@ def load_config():
         "bin_dir": absolute(env("DM_DEV_BIN_DIR") or target / "debug"),
         "dir": directory,
         "proof_issuers": env("DM_DEV_PROOF_ISSUERS") or ",".join(f"{scope}=interface" for scope in PROOF_SCOPES),
+        "pass_env": pass_env,
     }
 
 
@@ -267,6 +276,11 @@ def service_env(config, database_url=None, ting=False):
     if ting:
         env["DM_TING_URL"] = f"http://127.0.0.1:{config['ting_port']}"
         env["DM_TING_APP_ID"] = config["ting_app"]
+    # Named variables from this script's own environment (DM_DEV_PASS_ENV): secrets such as a provider key reach
+    # dm-api this way without being written anywhere.
+    for name in config.get("pass_env") or ():
+        if name in os.environ:
+            env[name] = os.environ[name]
     return env
 
 
@@ -475,6 +489,8 @@ def up(config, args):
         raise Failure(f"Silicon Accounts at {config['accounts_api_url']} did not answer (/.well-known/jwks.json: {status}).")
     if args.build:
         build()
+    if getattr(args, "restart", False):
+        stop_process(files["api_pid"], "dm-api", "dm-api")
     prepare_database(config, args.fresh)
     previous = point_webhook(config)
     started = []
@@ -532,6 +548,7 @@ def summary(config, **extra):
         "accounts_api_url": config["accounts_api_url"],
         "webhook_url": config["webhook_url"],
         "proof_issuers": config["proof_issuers"],
+        "passed_env": [name for name in config.get("pass_env") or () if name in os.environ],
         **extra,
     }
 
@@ -548,6 +565,8 @@ def main():
     up_parser.add_argument("--build", action="store_true", help="cargo build the binaries first")
     up_parser.add_argument("--fresh", action="store_true", help="drop and recreate the database")
     up_parser.add_argument("--ting", action="store_true", help="deliver through a local Ting stand-in")
+    up_parser.add_argument("--restart", action="store_true",
+                           help="stop a running dm-api before migrating, then start it again (picks up a new build)")
     down_parser = commands.add_parser("down", help="stop what up started")
     down_parser.add_argument("--keep-webhook", action="store_true", help="leave DM's webhook pointing here")
     down_parser.add_argument("--drop", action="store_true", help="also drop the database and the runtime role")

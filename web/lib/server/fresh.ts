@@ -11,7 +11,10 @@ export type Freshness =
   | { kind: "fresh"; session: StoredSession; rotated: boolean }
   /** No sign-in, or it ended at Silicon Accounts (`clear`: the cookie holds a dead sign-in). */
   | { kind: "signed_out"; message: string; clear: boolean }
-  /** Silicon Accounts could not answer; the session may still be fine later. */
+  /**
+   * Silicon Accounts could not answer; the session may still be fine later. `message` is for the Carbon; what Accounts
+   * said (it can name an internal address) goes to the server's log only.
+   */
   | { kind: "unavailable"; status: 502 | 503; code: string; message: string };
 
 export async function freshSession(session: StoredSession | null, ahead: keyof typeof REFRESH_AHEAD, headers: Record<string, string>, now = Date.now()): Promise<Freshness> {
@@ -19,9 +22,13 @@ export async function freshSession(session: StoredSession | null, ahead: keyof t
   if (session.ae - now > REFRESH_AHEAD[ahead]) return { kind: "fresh", session, rotated: false };
   const result = await refreshSession(session, headers);
   if (result.ok) return { kind: "fresh", session: result.session, rotated: true };
-  if (result.error === "accounts_unreachable") return { kind: "unavailable", status: 502, code: "accounts_unreachable", message: result.description };
+  if (result.error === "accounts_unreachable") {
+    console.warn(`dm: renewing a sign-in failed: ${result.description}`);
+    return { kind: "unavailable", status: 502, code: "accounts_unreachable", message: "DM can't reach Silicon Accounts to renew your sign-in right now." };
+  }
   if (signInEnded(result)) return { kind: "signed_out", message: `Your sign-in ended: ${result.description}`, clear: true };
   // A token that is still valid keeps working while Silicon Accounts has a moment.
   if (session.ae > now + 5_000) return { kind: "fresh", session, rotated: false };
-  return { kind: "unavailable", status: 503, code: "refresh_failed", message: `Refreshing the sign-in failed: ${result.description}` };
+  console.warn(`dm: renewing a sign-in failed (${result.error}): ${result.description}`);
+  return { kind: "unavailable", status: 503, code: "refresh_failed", message: "Your sign-in to DM could not be renewed just now." };
 }

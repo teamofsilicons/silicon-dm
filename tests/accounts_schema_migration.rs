@@ -89,6 +89,35 @@ async fn legacy_columns(connection: &mut PgConnection, table: &str) -> Result<St
     Ok(format!("ROW({})", columns.join(",")))
 }
 
+/// A migration may read a whole table (0043's backfill reads every message): `dm-migrate`
+/// runs it without the services' statement deadline, which cancelled 0043 on a database of a
+/// million messages with nothing but "internal server error" to show for it.
+#[tokio::test]
+async fn migrations_run_without_the_request_statement_deadline() -> Result<(), BoxError> {
+    let database = TestDatabase::start().await?;
+    let settings = silicon_dm::config::DatabaseSettings {
+        url: secrecy::SecretString::from(database.url.clone()),
+        max_connections: std::num::NonZeroU32::new(2).ok_or("pool size")?,
+        min_connections: 0,
+        acquire_timeout: std::time::Duration::from_secs(10),
+        // Far shorter than the longest migration statement.
+        statement_timeout: std::time::Duration::from_millis(2),
+    };
+    let store = silicon_dm::infrastructure::postgres::PostgresStore::connect(&settings).await?;
+    store.migrate().await?;
+    let mut connection = store.pool().acquire().await?;
+    let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&mut *connection)
+        .await?;
+    assert_eq!(
+        timeout, "2ms",
+        "the pooled connection gets its deadline back"
+    );
+    drop(connection);
+    store.pool().close().await;
+    database.close().await
+}
+
 #[tokio::test]
 async fn empty_database_applies_every_migration() -> Result<(), BoxError> {
     let database = TestDatabase::start().await?;
@@ -308,6 +337,40 @@ async fn upgrade_from_0038_keeps_every_legacy_row() -> Result<(), BoxError> {
     .fetch_one(&mut connection)
     .await?;
     assert_eq!(handoffs, (before["ting_handoffs"].1.0, 0));
+
+    // 0043 gave every participant a read position from the receipts already recorded.
+    let unplaced: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dm.conversation_participants p WHERE NOT EXISTS (
+            SELECT 1 FROM dm.conversation_read_states s WHERE s.conversation_id = p.conversation_id
+              AND s.actor_kind = p.actor_kind AND s.actor_id = p.actor_id)",
+    )
+    .fetch_one(&mut connection)
+    .await?;
+    assert_eq!(unplaced, 0, "every participant has a read position");
+    let (read, sequence): (Option<i64>, i64) = sqlx::query_as(
+        "SELECT s.last_read_sequence, m.sequence FROM dm.messages m
+         JOIN dm.conversation_read_states s ON s.conversation_id = m.conversation_id
+         WHERE m.id = '01a122d0-ea9d-7f00-a45e-5785d46f2b43'
+           AND s.actor_kind = 'silicon' AND s.actor_id = 'si:cos'",
+    )
+    .fetch_one(&mut connection)
+    .await?;
+    assert_eq!(
+        read,
+        Some(sequence),
+        "the receipt from before the upgrade counts"
+    );
+    let beyond: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dm.conversation_read_states s
+         WHERE s.read_through_sequence > COALESCE((SELECT max(sequence) FROM dm.messages m
+                                                   WHERE m.conversation_id = s.conversation_id), 0)",
+    )
+    .fetch_one(&mut connection)
+    .await?;
+    assert_eq!(
+        beyond, 0,
+        "no read position lies past the conversation's last message"
+    );
     connection.close().await?;
     database.close().await
 }

@@ -6,10 +6,13 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq as _;
 use time::OffsetDateTime;
 
-use super::extract::{ApiJson, ApiPath, ApiQuery, Authenticated};
+use super::extract::{ApiJson, ApiPath, ApiQuery, Authenticated, ConversationAccess};
 use crate::{
     AppError, AppResult,
-    application::{auth::AuthContext, state::AppState},
+    application::{
+        auth::{AuthContext, Credential},
+        state::AppState,
+    },
     domain::{Activity, PageRequest},
     infrastructure::postgres::{PresenceLease, SyncEvent, sync_reset_required},
 };
@@ -28,6 +31,75 @@ pub(super) struct SyncQuery {
     reset: bool,
     /// Seconds to wait for a new event when there is none yet (0 to 30).
     wait: Option<u16>,
+    /// Extra kinds of events, comma-separated: `conversations`. Opt-in, so a client that
+    /// does not know an event kind never receives one.
+    include: Option<String>,
+}
+
+/// The event kinds a client may add with `include`.
+pub(crate) const INCLUDABLE: [&str; 1] = ["conversations"];
+
+/// Whether `include` asks for conversation events; anything it names that DM does not have
+/// is refused, so a typo is not silently a feed without them.
+fn includes_conversations(include: Option<&str>) -> AppResult<bool> {
+    let mut conversations = false;
+    for kind in include
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+    {
+        if kind == "conversations" {
+            conversations = true;
+        } else {
+            let shown: String = kind.chars().take(64).collect();
+            return Err(AppError::invalid(format!(
+                "The sync feed has no event kind \"{shown}\" to include; it can include: {}.",
+                INCLUDABLE.join(", ")
+            ))
+            .with_hint("Ask for conversation events with GET /api/v1/sync?include=conversations; message events always come.")
+            .with_details(serde_json::json!({"field": "include", "valid": INCLUDABLE})));
+        }
+    }
+    Ok(conversations)
+}
+
+/// Conversation events say which conversations the account is in, which it is invited to and
+/// what changed there: what an app acting for the account reads only with
+/// `dm.conversations.read` (the scope `GET /api/v1/conversations` needs). Message events need
+/// `dm.messages.read` alone, which the route itself requires.
+fn require_conversation_scope(state: &AppState, auth: &AuthContext) -> AppResult<()> {
+    const SCOPE: &str = "dm.conversations.read";
+    let Credential::Proof {
+        issuing_app,
+        scopes,
+    } = &auth.credential
+    else {
+        return Ok(());
+    };
+    if !scopes.contains(SCOPE) {
+        return Err(AppError::forbidden(
+            "proof_scope_missing",
+            format!(
+                "The proof from {issuing_app} does not carry the scope {SCOPE} that conversation events (include=conversations) need."
+            ),
+        )
+        .with_hint("Ask for dm.conversations.read with the proof, or read the feed without include=conversations: message events need dm.messages.read only."));
+    }
+    if !state
+        .settings
+        .accounts
+        .proof_issuers
+        .allows(SCOPE, issuing_app)
+    {
+        return Err(AppError::forbidden(
+            "proof_issuer_not_allowed",
+            format!(
+                "DM does not accept {SCOPE} proofs from {issuing_app}, which conversation events (include=conversations) need; its operator lists the apps it accepts in DM_PROOF_ISSUERS."
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -61,19 +133,29 @@ pub(super) async fn events(
     }
     .validated_limit()?;
     if query.reset && query.cursor.is_some() {
-        return Err(AppError::validation("reset cannot be combined with cursor"));
+        return Err(AppError::invalid(
+            "reset=true starts the feed again at its newest position, so it cannot be combined with a cursor.",
+        )
+        .with_hint("Send cursor to continue where the last answer left off, or reset=true to start from now (then refresh conversations), not both."));
+    }
+    let conversations = includes_conversations(query.include.as_deref())?;
+    if conversations {
+        require_conversation_scope(&state, &auth)?;
     }
     let wait = query.wait.unwrap_or(0);
     if wait > MAX_WAIT_SECONDS {
-        return Err(AppError::validation(format!(
+        return Err(AppError::invalid(format!(
             "wait must be 0 to {MAX_WAIT_SECONDS} seconds"
+        ))
+        .with_hint(format!(
+            "Use wait={MAX_WAIT_SECONDS}: an answer with no events after the wait is normal; ask again with the cursor it gives."
         )));
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(u64::from(wait));
     loop {
         // Subscribe before reading, so an event committed in between still wakes us.
         let wakeups = state.sync.subscribe();
-        let page = page(&state, &auth, &query, limit).await?;
+        let page = page(&state, &auth, &query, limit, conversations).await?;
         if !page.events.is_empty()
             || page.has_more
             || query.reset
@@ -96,6 +178,7 @@ async fn page(
     auth: &AuthContext,
     query: &SyncQuery,
     limit: u16,
+    conversations: bool,
 ) -> AppResult<SyncPage> {
     let scope = cursor_scope(auth)?;
     let key = cursor_key(state);
@@ -119,7 +202,7 @@ async fn page(
     } else {
         let scan = state
             .store
-            .sync_events(&auth.actor, after, upper, limit)
+            .sync_events(&auth.actor, after, upper, limit, conversations)
             .await?;
         (scan.events, scan.position, scan.has_more, upper)
     };
@@ -168,10 +251,15 @@ fn encode_cursor(cursor: &SyncCursor, key: &[u8; 32]) -> AppResult<String> {
 }
 
 fn decode_cursor(value: &str, key: &[u8; 32], scope: &str, now: i64) -> AppResult<SyncCursor> {
+    let invalid = || {
+        AppError::invalid(
+            "invalid synchronization cursor: it is not one DM gave out (it was changed or cut short)",
+        )
+        .with_hint("Send the cursor from the last answer exactly as it came, or start again with GET /api/v1/sync?reset=true (dm sync --reset) and refresh conversations.")
+    };
     if value.len() > 2048 {
-        return Err(AppError::validation("invalid synchronization cursor"));
+        return Err(invalid());
     }
-    let invalid = || AppError::validation("invalid synchronization cursor");
     let (body, signature) = value.split_once('.').ok_or_else(invalid)?;
     let body = URL_SAFE_NO_PAD.decode(body).map_err(|_| invalid())?;
     let signature = URL_SAFE_NO_PAD.decode(signature).map_err(|_| invalid())?;
@@ -198,6 +286,12 @@ fn decode_cursor(value: &str, key: &[u8; 32], scope: &str, now: i64) -> AppResul
 pub(super) struct PresenceInput {
     #[serde(default)]
     activity: Option<Activity>,
+    /// The conversation the activity is about (an address or UUID of a conversation the
+    /// account is in): only accounts in it see the activity. DM 0.17; older services refuse
+    /// the field, so clients send it once `GET /api/v1/contracts` announces
+    /// `features.presence_activity`.
+    #[serde(default)]
+    conversation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -211,17 +305,74 @@ pub(super) async fn renew_presence(
     ApiPath(device): ApiPath<DevicePath>,
     ApiJson(input): ApiJson<PresenceInput>,
 ) -> AppResult<Json<PresenceLease>> {
+    let conversation = match input.conversation_id.as_deref() {
+        Some(value) => Some(activity_conversation(&state, &auth, value).await?),
+        None => None,
+    };
     state
         .store
         .renew_http_presence(
             &auth,
             &device.device_id,
             input.activity,
+            conversation,
             state.settings.realtime.heartbeat_timeout,
             state.settings.realtime.activity_ttl,
         )
         .await
         .map(Json)
+}
+
+/// The conversation a device's activity is about: one the account is in. A conversation
+/// it reads only as a custodian, or is only invited to, is not where it types.
+async fn activity_conversation(
+    state: &AppState,
+    auth: &AuthContext,
+    value: &str,
+) -> AppResult<uuid::Uuid> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::invalid(
+            "conversation_id is empty: it names the conversation the activity is about.",
+        )
+        .with_hint(ACTIVITY_CONVERSATION_HINT)
+        .with_details(serde_json::json!({"field": "conversation_id"})));
+    }
+    let (id, access) = super::access::resolve_conversation_path(state, auth, value, false)
+        .await
+        .map_err(|error| named_field(error, "conversation_id", ACTIVITY_CONVERSATION_HINT))?;
+    match access {
+        ConversationAccess::Participant => Ok(id),
+        ConversationAccess::Custodian => Err(AppError::forbidden(
+            "read_only_view",
+            "You see this conversation as the custodian of a Silicon in it, not as one of its members: a custodian's view is read only, so your activity (typing, recording…) cannot be about it.",
+        )
+        .with_hint("Report activity in conversations you are in, or renew the lease without conversation_id.")
+        .with_details(serde_json::json!({"field": "conversation_id"}))),
+        ConversationAccess::Invitee => Err(super::groups::invitation_pending()
+            .with_details(serde_json::json!({"field": "conversation_id"}))),
+    }
+}
+
+const ACTIVITY_CONVERSATION_HINT: &str = "Send the address or UUID of the conversation the activity happens in, one you are in (GET /api/v1/conversations, dm conversations list), or leave conversation_id out.";
+
+/// A conversation named in a field that could not be resolved: the same code and words, the
+/// field it came from, and what to do about that field.
+pub(super) fn named_field(error: AppError, field: &str, hint: &str) -> AppError {
+    if matches!(error, AppError::NotFound) {
+        return AppError::not_found(format!(
+            "{field} names no conversation visible to you: it does not exist, or you are not in it (DM does not say which)."
+        ))
+        .with_hint(hint)
+        .with_details(serde_json::json!({"field": field}));
+    }
+    if error.hint().is_some() {
+        error
+            .with_hint(hint)
+            .with_details(serde_json::json!({"field": field}))
+    } else {
+        error.with_details(serde_json::json!({"field": field}))
+    }
 }
 
 pub(super) async fn close_presence(

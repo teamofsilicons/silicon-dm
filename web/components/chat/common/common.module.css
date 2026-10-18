@@ -1,0 +1,67 @@
+/* Small parts shared across the chat: status ticks, faces, icon actions, tooltips with keys, the unread badge. */
+
+.tick { display: inline-flex; flex: none; align-items: center; color: var(--text-muted); }
+.tick[data-state="read"] { color: var(--accent); }
+.tick[data-state="failed"] { color: var(--danger); }
+.tick[data-state="waiting"] { color: var(--text-muted); }
+
+/* Faces: the chat's own sizes on Silicon UI's avatar (sm 28 / md 36 by default). */
+.face.face[data-size="row"] { width: 42px; height: 42px; font-size: var(--text-sm); }
+.face.face[data-size="header"] { width: 34px; height: 34px; font-size: var(--text-xs); }
+.face.face[data-size="bubble"] { width: 28px; height: 28px; }
+.face.face[data-size="small"] { width: 24px; height: 24px; font-size: 10px; }
+.groupFace.groupFace { border-color: var(--border); background: var(--surface-pressed); color: var(--text-secondary); }
+
+/* Icon actions: 36 px squircles that fill on hover and keyboard focus (focus never shows as a ring). */
+.iconAction {
+  --sq-r: 12px;
+  --sq-fill: transparent;
+  display: inline-grid;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  padding: 0;
+  background: var(--sq-fill);
+  color: var(--text-secondary);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard), transform var(--duration-instant) var(--ease-standard);
+}
+.iconAction[data-size="sm"] { --sq-r: 10px; width: 30px; height: 30px; }
+.iconAction svg { width: 18px; height: 18px; }
+.iconAction[data-size="sm"] svg { width: 16px; height: 16px; }
+@media (hover: hover) and (pointer: fine) { .iconAction:hover { --sq-fill: var(--surface-muted); color: var(--foreground); } }
+/* Keyboard focus: the hover fill and an accent edge inside the button's own shape (a fill alone is 1.1:1); Silicon UI's
+   ring outside it is off, so it never meets a neighbour's edge (the composer's field, the header's hairline). */
+.iconAction:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); box-shadow: var(--focus-edge); outline: none !important; --focus-outline: transparent; }
+.iconAction:active:not([aria-disabled="true"]) { transform: scale(.95); }
+.iconAction[aria-pressed="true"] { --sq-fill: var(--accent-subtle); color: var(--accent); }
+.iconAction[aria-disabled="true"] { color: var(--text-faint); cursor: default; }
+.iconAction[data-tone="danger"]:hover, .iconAction[data-tone="danger"]:focus-visible { color: var(--danger); --focus-outline: transparent; }
+
+.tip { display: inline-flex; align-items: center; gap: var(--space-2); white-space: nowrap; }
+
+.badge {
+  --sq-r: var(--radius-pill);
+  --sq-fill: var(--accent);
+  display: inline-flex;
+  min-width: 20px;
+  height: 20px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  background: var(--sq-fill);
+  color: var(--accent-foreground);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  line-height: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .iconAction { transition: none; }
+  .iconAction:active:not([aria-disabled="true"]) { transform: none; }
+}

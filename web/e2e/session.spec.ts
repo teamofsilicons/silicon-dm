@@ -41,26 +41,25 @@ test("signing in through the hosted pages leaves only a sealed cookie in the bro
   expect((await context.cookies(BASE)).some(entry => entry.name === `${cookieBase}_signin` && entry.value)).toBe(false);
 });
 
-test("the shell: the app's sections, the account menu and the ⌘K palette", async () => {
-  const nav = page.getByRole("navigation", { name: appConfig.name, exact: true });
-  await expect(nav).toBeVisible();
-  for (const item of appConfig.nav) await expect(nav.getByRole("link", { name: item.label })).toHaveAttribute("href", item.href);
-  await expect(nav.getByRole("link", { name: appConfig.nav[0]!.label })).toHaveAttribute("aria-current", "page");
+test("the chat's frame: the conversation list, the account menu and the ⌘K palette", async () => {
+  const list = page.getByRole("navigation", { name: "Conversations", exact: true });
+  await expect(list).toBeVisible();
+  await expect(page.getByRole("searchbox", { name: "Search conversations" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
 
   await page.getByRole("button", { name: /^Account menu, / }).click();
   const menu = page.getByRole("menu");
   await expect(menu).toContainText(me);
   await expect(menu).toContainText("Carbon");
-  await expect(menu.getByRole("menuitemradio", { name: "System" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: /Settings/ })).toBeVisible();
   await page.keyboard.press("Escape");
 
-  const target = appConfig.nav[appConfig.nav.length - 1]!;
   await page.keyboard.press(process.platform === "darwin" ? "Meta+K" : "Control+K");
-  await expect(page.getByRole("dialog", { name: "Search and jump" })).toBeVisible();
-  await page.keyboard.type(target.label);
+  await expect(page.getByRole("dialog", { name: "Search conversations and actions" })).toBeVisible();
+  await page.keyboard.type("Settings");
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(new RegExp(`${target.href}$`));
-  await expect(nav.getByRole("link", { name: target.label })).toHaveAttribute("aria-current", "page");
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(page.getByRole("heading", { level: 1, name: "Settings" })).toBeVisible();
 });
 
 test("the session keeper's refresh does nothing while the token has time left", async () => {
@@ -75,7 +74,7 @@ test("the session keeper's refresh does nothing while the token has time left", 
 test("signing out revokes the sign-in, closes every door, and other tabs follow", async () => {
   const other = await context.newPage();
   await other.goto(appConfig.home);
-  await expect(other.getByRole("navigation", { name: appConfig.name, exact: true })).toBeVisible();
+  await expect(other.getByRole("navigation", { name: "Conversations", exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Account menu, / }).click();
   await page.getByRole("menuitem", { name: "Sign out" }).click();
   await expect(page).toHaveURL(/\/sign-in\?signed_out=1$/);

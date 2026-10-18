@@ -1,0 +1,20 @@
+/* The ⌘K palette's layer: a soft scrim and the palette near the top, like the family's other sites. */
+.paletteOverlay { position: fixed; inset: 0; z-index: var(--layer-overlay, 50); background: var(--overlay); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.paletteOverlay[data-state="open"] { animation: palette-fade-in var(--duration-standard) var(--ease-enter) both; }
+.paletteOverlay[data-state="closed"] { animation: palette-fade-out var(--duration-fast) var(--ease-standard) both; }
+.palettePositioner { position: fixed; inset: 0; z-index: var(--layer-dialog, 51); display: flex; justify-content: center; padding: min(14vh, 120px) var(--space-4) var(--space-4); pointer-events: none; }
+.palettePanel { width: min(100%, 640px); height: fit-content; outline: none; pointer-events: auto; }
+/* On a phone a result's description goes under its name and wraps: Silicon UI keeps both on one line and cuts the
+   description short, which at this width cuts an address or a command mid-word. */
+@media (max-width: 480px) {
+  .palettePanel [role="option"] { padding-block: 6px; }
+  .palettePanel [role="option"] > span + span { flex-direction: column; align-items: flex-start; gap: 1px; }
+  .palettePanel [role="option"] > span + span > * { max-width: 100%; overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
+}
+
+@keyframes palette-fade-in { from { opacity: 0; } }
+@keyframes palette-fade-out { to { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .paletteOverlay[data-state="open"] { animation-duration: var(--duration-instant); }
+}

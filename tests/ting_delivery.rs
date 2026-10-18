@@ -184,7 +184,7 @@ async fn with_ting_each_handoff_is_sent_once_and_never_becomes_a_receipt() -> Re
         .map(|(_, body)| body.clone())
         .unwrap_or_default();
     assert_eq!(to_bob["type"], "dm.sync.changed");
-    assert_eq!(to_bob["for"], json!({"uuid": "Bb2", "id": "c:bob"}));
+    assert_eq!(to_bob["for"], json!("Bb2"));
     assert_eq!(to_bob["key"], to_bob["data"]["delivery_id"]);
     assert_eq!(to_bob["data"]["schema_version"], 2);
     assert_eq!(to_bob["data"]["conversation_id"], "c:ada::c:bob");
@@ -239,6 +239,35 @@ async fn with_ting_each_handoff_is_sent_once_and_never_becomes_a_receipt() -> Re
         count(&app, "SELECT count(*) FROM ting_handoffs WHERE accepted_at IS NULL AND discarded_at IS NULL AND attempt_count = 1 AND next_attempt_at > clock_timestamp()").await?,
         i64::try_from(failing.sent().len())?
     );
+    let original: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT delivery_id, request_body FROM ting_handoffs WHERE accepted_at IS NULL ORDER BY delivery_id",
+    )
+    .fetch_all(app.state.store.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE ting_handoffs SET next_attempt_at = clock_timestamp() WHERE accepted_at IS NULL",
+    )
+    .execute(app.state.store.pool())
+    .await?;
+    let retried = Recording::accepting();
+    let retried_count = TingDeliveryWorker::new(app.state.clone(), Some(retried.clone()))
+        .process_once()
+        .await?;
+    assert_eq!(
+        retried_count,
+        original.len(),
+        "UUID strings must not be discarded as legacy references"
+    );
+    let persisted: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT delivery_id, request_body FROM ting_handoffs WHERE delivery_id = ANY($1) ORDER BY delivery_id",
+    )
+    .bind(original.iter().map(|(id, _)| *id).collect::<Vec<_>>())
+    .fetch_all(app.state.store.pool())
+    .await?;
+    assert_eq!(
+        persisted, original,
+        "retry preserves the exact body and idempotency key"
+    );
     app.close().await
 }
 
@@ -283,7 +312,11 @@ async fn wait_for(app: &TestApp, sql: &str, expected: i64) -> Result<(), BoxErro
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Err(format!("timed out waiting for `{sql}` = {expected}").into())
+    let enrolments: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT actor_id, last_error FROM ting_automatic_enrollments")
+            .fetch_all(app.state.store.pool())
+            .await?;
+    Err(format!("timed out waiting for `{sql}` = {expected}; enrolments: {enrolments:?}").into())
 }
 
 #[tokio::test]
@@ -293,7 +326,7 @@ async fn recipients_are_enrolled_with_their_own_proof_and_reenrolled_from_the_st
     for (proof, subscription) in [("sap_user", "sub_1"), ("sap_user_2", "sub_2")] {
         Mock::given(method("POST"))
             .and(path("/v1/subscriptions"))
-            .and(header("authorization", format!("Proof {proof}").as_str()))
+            .and(header("authorization", format!("Bearer {proof}").as_str()))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": subscription})))
             .mount(&ting)
             .await;
@@ -313,18 +346,40 @@ async fn recipients_are_enrolled_with_their_own_proof_and_reenrolled_from_the_st
         .mount(&app.accounts.server)
         .await;
 
+    let discovery = app
+        .get("/api/v1/delivery", &app.accounts.token(&ada))
+        .await?;
+    assert!(
+        discovery.1["enrolment"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("subscriptions.register")
+    );
     // Ada's first request enrols her in the background.
     expect_status(
         &app.get("/api/v1/me", &app.accounts.token(&ada)).await?,
         StatusCode::OK,
     )?;
     wait_for(&app, "SELECT count(*) FROM ting_automatic_enrollments WHERE actor_id = 'a8K' AND subscription_id = 'sub_1'", 1).await?;
+    let issuance = app
+        .accounts
+        .server
+        .received_requests()
+        .await
+        .unwrap_or_default();
+    assert!(
+        issuance.iter().any(|request| {
+            request.url.path() == "/v1/proofs/user-verification"
+                && serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| {
+                    body["receiving_app"] == "ting"
+                        && body["scopes"] == json!(["subscriptions.register"])
+                })
+        }),
+        "enrolment uses Ting's exact User verification scope"
+    );
     let subscriptions = ting.received_requests().await.unwrap_or_default();
     let body: Value = serde_json::from_slice(&subscriptions[0].body)?;
-    assert_eq!(
-        body,
-        json!({"app_id": "dm", "for": {"uuid": "a8K", "id": "c:ada"}})
-    );
+    assert_eq!(body, json!({"app_id": "dm", "for": "a8K"}));
     let (nonce, sealed): (Vec<u8>, Vec<u8>) =
         sqlx::query_as("SELECT nonce, ciphertext FROM ting_proof_grants WHERE actor_id = 'a8K'")
             .fetch_one(app.state.store.pool())
@@ -368,8 +423,134 @@ async fn recipients_are_enrolled_with_their_own_proof_and_reenrolled_from_the_st
         requests.iter().any(|request| request
             .headers
             .get("authorization")
-            .is_some_and(|value| value == "Proof sap_user_2")),
+            .is_some_and(|value| value == "Bearer sap_user_2")),
         "re-subscribed with the refreshed proof"
+    );
+    app.close().await
+}
+
+/// The worker runs inside dm-api: a pass that fails on the database (here the handoffs table
+/// is away for a moment, as in a failover) must neither stop delivery for good nor end the
+/// process. It used to return the error, which ended the API process.
+#[tokio::test]
+async fn a_pass_that_fails_on_the_database_does_not_stop_delivery() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let (ada, _, _) = people(&app).await;
+    let ada_token = app.accounts.token(&ada);
+    expect_status(
+        &app.post(
+            "/api/v1/messages",
+            &ada_token,
+            json!({"recipient_id": "c:bob", "message": "through a hiccup"}),
+        )
+        .await?,
+        StatusCode::ACCEPTED,
+    )?;
+    sqlx::query("ALTER TABLE dm.ting_handoffs RENAME TO ting_handoffs_away")
+        .execute(app.state.store.pool())
+        .await?;
+    let recording = Recording::accepting();
+    let worker = Arc::new(TingDeliveryWorker::new(
+        app.state.clone(),
+        Some(recording.clone()),
+    ));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let running = tokio::spawn({
+        let (worker, cancellation) = (worker.clone(), cancellation.clone());
+        async move { worker.run(cancellation).await }
+    });
+    // Several 50 ms passes fail meanwhile.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    if running.is_finished() {
+        return Err(format!("a failed pass stopped the worker: {:?}", running.await).into());
+    }
+    sqlx::query("ALTER TABLE dm.ting_handoffs_away RENAME TO ting_handoffs")
+        .execute(app.state.store.pool())
+        .await?;
+    let delivered = async {
+        while !recording
+            .sent()
+            .iter()
+            .any(|(_, body)| body["data"]["event"] == "message.created")
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), delivered)
+        .await
+        .map_err(|_| "the handoff was never sent once the database was back")?;
+    cancellation.cancel();
+    running.await??;
+    app.close().await
+}
+
+#[tokio::test]
+async fn new_messages_go_to_ting_before_a_burst_of_receipts() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let (ada, bob, _) = people(&app).await;
+    let ada_token = app.accounts.token(&ada);
+    let bob_token = app.accounts.token(&bob);
+    let mut last = String::new();
+    for index in 0..5 {
+        let sent = app
+            .post(
+                "/api/v1/messages",
+                &ada_token,
+                json!({"recipient_id": "c:bob", "message": format!("n{index}")}),
+            )
+            .await?;
+        last = sent.1["message-id"].as_str().unwrap_or_default().to_owned();
+    }
+    // Everything so far goes out first.
+    let recording = Recording::accepting();
+    let worker = TingDeliveryWorker::new(app.state.clone(), Some(recording.clone()));
+    while worker.process_once().await? > 0 {}
+    // Bob reads all five at once (five status handoffs to Ada), then Ada writes again.
+    let (status, _, _) = app
+        .post_envelope(
+            "/api/v1/conversations/c:ada::c:bob/receipts",
+            &bob_token,
+            &json!({"type": "receipts.read", "data": {"up_to": last}}),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    expect_status(
+        &app.post(
+            "/api/v1/messages",
+            &ada_token,
+            json!({"recipient_id": "c:bob", "message": "the next one"}),
+        )
+        .await?,
+        StatusCode::ACCEPTED,
+    )?;
+    let burst = Recording::accepting();
+    let worker = TingDeliveryWorker::new(app.state.clone(), Some(burst.clone()));
+    while worker.process_once().await? > 0 {}
+    let events: Vec<String> = burst
+        .sent()
+        .iter()
+        .map(|(_, body)| {
+            body["data"]["event"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    let first_receipt = events
+        .iter()
+        .position(|event| event == "message.read")
+        .ok_or("no receipt was sent")?;
+    assert!(
+        events[..first_receipt]
+            .iter()
+            .any(|event| event == "message.created"),
+        "the new message goes before the receipts that were queued first: {events:?}"
+    );
+    assert!(
+        events[first_receipt..]
+            .iter()
+            .all(|event| event != "message.created"),
+        "{events:?}"
     );
     app.close().await
 }

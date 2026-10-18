@@ -6,6 +6,7 @@ openapi.yaml:
   operation-4xx-response:
     - '#/paths/~1live/get/responses'
     - '#/paths/~1ready/get/responses'
-  # The retired WebSocket route only ever answers 410 delivery_moved.
+  # The retired WebSocket routes only ever answer 410 delivery_moved.
   operation-2xx-response:
     - '#/paths/~1api~1v1~1ws/get/responses'
+    - '#/paths/~1api~1v1~1ws~1shared/get/responses'

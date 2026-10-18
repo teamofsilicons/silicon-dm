@@ -16,6 +16,7 @@ use crate::{
             SendMessageCommand,
         },
         messaging::{prepare_message_content, validate_device_id},
+        speech::prepare_message_speech,
         state::AppState,
     },
     domain::{
@@ -23,7 +24,7 @@ use crate::{
         ConversationPage, Draft, DraftInput, GifPage, MAX_CONVERSATION_PARTICIPANTS, Message,
         MessageCreate, MessagePage, PageRequest, Presence, ReceiptStatus,
     },
-    infrastructure::postgres::Reviser,
+    infrastructure::postgres::{ActivityView, Reviser},
 };
 
 /// `GET /api/v1/conversations[?for=si:x]`: the caller's conversations, or (for a
@@ -42,9 +43,34 @@ pub(super) async fn list_conversations(
         Some(silicon) => looked_after(&state, &context, silicon).await?,
         None => context.actor.clone(),
     };
-    state
+    let first = page.cursor.is_none();
+    let mut listed = state
         .store
         .list_conversations(&context.actor, &subject, &page, false)
+        .await?;
+    // The first page says what is unread in all of them, so a badge or a window title need
+    // not page through the list.
+    if first {
+        listed.unread = Some(state.store.unread_total(&subject).await?);
+    }
+    Ok(Json(listed))
+}
+
+/// `GET /api/v1/conversations/{conversation}[?for=si:x]`: one conversation summary, with
+/// the unread facts of the caller (or of the Silicon a custodian names with `for`).
+pub(super) async fn get_conversation(
+    State(state): State<AppState>,
+    Authenticated(context): Authenticated,
+    ApiPath(path): ApiPath<ConversationPath>,
+    ApiQuery(query): ApiQuery<ForQuery>,
+) -> AppResult<Json<Conversation>> {
+    let subject = match &query.for_account {
+        Some(silicon) => looked_after(&state, &context, silicon).await?,
+        None => context.actor.clone(),
+    };
+    state
+        .store
+        .get_conversation_for(&context.actor, &subject, path.conversation_id)
         .await
         .map(Json)
 }
@@ -67,6 +93,9 @@ pub(super) async fn looked_after(
                 "You are not the custodian of {}; `for` only works for Silicons you look after.",
                 account.display_id()
             ),
+        )
+        .with_hint(
+            "Drop for to act as yourself. GET /api/v1/me (dm whoami) lists the Silicons you look after in custodian_of.",
         ));
     }
     Ok(account.actor())
@@ -94,32 +123,61 @@ pub(super) async fn edit_message(
     ApiJson(mut input): ApiJson<MessageCreate>,
 ) -> AppResult<Json<Message>> {
     resolve_routing(&state, &context, &mut input).await?;
+    let previous = match &input.speech {
+        Some(_) => Some(
+            state
+                .store
+                .get_message(&context.actor, path.conversation_id, path.message_id)
+                .await?,
+        ),
+        None => None,
+    };
+    let speech = prepare_message_speech(
+        &state,
+        &context.actor,
+        path.conversation_id,
+        &mut input,
+        previous
+            .as_ref()
+            .and_then(|message| message.speech.as_ref()),
+    )
+    .await?;
     state
         .store
         .revise_message(
             &context.actor,
-            Reviser::Sender,
+            Reviser::Participant,
             path.conversation_id,
             path.message_id,
             &key,
             Some(input),
+            speech,
+            None,
         )
         .await
         .map(Json)
 }
 
-/// Tombstones a message: its sender, or the custodian of the Silicon that sent it.
+/// `DELETE …/messages/{message}[?for=si:x]`: tombstones a message. Its sender may, and so
+/// may the custodian of the Silicon that sent it, whether or not the custodian is in the
+/// conversation; with `for` (a custodian's view of its Silicon) only that Silicon's messages.
 pub(super) async fn delete_message(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
     access: ConversationAccess,
     ApiPath(path): ApiPath<MessagePath>,
+    ApiQuery(query): ApiQuery<ForQuery>,
     Idempotency(key): Idempotency,
 ) -> AppResult<Json<Message>> {
     let reviser = match access {
-        ConversationAccess::Participant => Reviser::Sender,
-        ConversationAccess::Custodian => Reviser::CustodianOfSender,
+        ConversationAccess::Participant => Reviser::Participant,
+        ConversationAccess::Custodian => Reviser::Custodian,
         ConversationAccess::Invitee => return Err(AppError::NotFound),
+    };
+    let silicon = match &query.for_account {
+        Some(selector) => Some(looked_after(&state, &context, selector).await?)
+            .filter(|silicon| *silicon != context.actor),
+        None => None,
     };
     state
         .store
@@ -130,6 +188,8 @@ pub(super) async fn delete_message(
             path.message_id,
             &key,
             None,
+            None,
+            silicon.as_ref(),
         )
         .await
         .map(Json)
@@ -222,6 +282,8 @@ async fn send(
 ) -> AppResult<(StatusCode, Json<Message>)> {
     state.store.require_current(conversation_id).await?;
     resolve_routing(state, context, &mut body).await?;
+    let speech =
+        prepare_message_speech(state, &context.actor, conversation_id, &mut body, None).await?;
     let prepared = prepare_message_content(state, body)?;
     let message = state
         .store
@@ -231,6 +293,7 @@ async fn send(
             content: prepared,
             idempotency_key,
             via_app: context.via_app().map(str::to_owned),
+            speech,
         })
         .await?;
     Ok((StatusCode::ACCEPTED, Json(message)))
@@ -273,6 +336,14 @@ pub(super) async fn create_message_bundle(
     }
     bundle.validate().map_err(AppError::validation)?;
     resolve_routing(&state, &context, &mut bundle.display_message).await?;
+    let speech = prepare_message_speech(
+        &state,
+        &context.actor,
+        path.conversation_id,
+        &mut bundle.display_message,
+        None,
+    )
+    .await?;
     let display_message = prepare_message_content(&state, bundle.display_message)?;
     bundle.display_message = display_message;
     let created = state
@@ -282,6 +353,7 @@ pub(super) async fn create_message_bundle(
             creator: context.actor,
             bundle,
             idempotency_key,
+            speech,
         })
         .await?;
     Ok((StatusCode::CREATED, Json(created)))
@@ -316,6 +388,15 @@ pub(super) async fn get_draft(
         .get_draft(&owner, path.conversation_id)
         .await
         .map(Json)
+        .map_err(|error| {
+            if matches!(error, AppError::NotFound) {
+                AppError::not_found("There is no draft in this conversation.").with_hint(
+                    "PUT /api/v1/conversations/{conversation}/draft saves one (dm drafts put); sending the drafted message clears it.",
+                )
+            } else {
+                error
+            }
+        })
 }
 
 /// Creates or conditionally replaces a synchronized draft.
@@ -328,7 +409,7 @@ pub(super) async fn put_draft(
     ApiJson(input): ApiJson<DraftInput>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     require_participant_access(access)?;
-    input.validate().map_err(AppError::validation)?;
+    input.validate().map_err(crate::domain::invalid_content)?;
     let outcome = state
         .store
         .put_draft(PutDraftCommand {
@@ -347,7 +428,8 @@ pub(super) async fn put_draft(
             let mut body = serde_json::to_value(draft).map_err(AppError::internal)?;
             body["error"] = serde_json::json!({
                 "code": "draft_conflict",
-                "message": "The draft changed since the supplied version. Your save was not applied. Resolve against this draft and retry with its current version."
+                "message": "The draft changed since the supplied version. Your save was not applied. Resolve against this draft and retry with its current version.",
+                "hint": "This answer carries the current draft: merge your text into it and save again with If-Match set to its version."
             });
             (StatusCode::CONFLICT, Json(body))
         }
@@ -380,23 +462,65 @@ fn require_participant_access(access: ConversationAccess) -> AppResult<()> {
     }
 }
 
-/// Online state and activity of an account the caller shares a conversation with (or
-/// a Silicon it looks after).
+/// `GET /api/v1/presence/{account}[?conversation=…][&for=si:x]`: availability, last seen and
+/// what the account is doing, seen by the caller (or, for a custodian's `for`, by the Silicon
+/// it looks after). Activity is about one conversation and shown only to accounts in it:
+/// with `conversation`, only activity about that conversation (none when the viewer is not in
+/// it); without, activity about no conversation in particular or about one the viewer is in.
 pub(super) async fn get_presence(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
     ApiPath(path): ApiPath<PresencePath>,
+    ApiQuery(query): ApiQuery<PresenceQuery>,
 ) -> AppResult<Json<Presence>> {
-    let target = state.directory().resolve(path.actor_id.as_str()).await?;
-    let target = target.actor();
-    if !state
-        .store
-        .may_see_presence(&context.actor, &target)
-        .await?
-    {
-        return Err(AppError::NotFound);
+    let viewer = match &query.for_account {
+        Some(silicon) => looked_after(&state, &context, silicon).await?,
+        None => context.actor.clone(),
+    };
+    let account = state.directory().resolve(path.actor_id.as_str()).await?;
+    let target = account.actor();
+    if !state.store.may_see_presence(&viewer, &target).await? {
+        return Err(AppError::not_found(format!(
+            "{} shares its presence only with the accounts it has a conversation with (and a Silicon with its custodian).",
+            account.display_id()
+        ))
+        .with_hint("Presence follows conversations: once you share one, GET /api/v1/presence/{account} answers."));
     }
-    state.store.get_presence(&target).await.map(Json)
+    let view = match query.conversation.as_deref().map(str::trim) {
+        Some(value) => {
+            ActivityView::Conversation(viewer_conversation(&state, &context, &viewer, value).await?)
+        }
+        None => ActivityView::Viewer(&viewer),
+    };
+    state.store.get_presence(&target, view).await.map(Json)
+}
+
+/// The conversation `?conversation=` names, when the viewer is in it; `None` when the viewer
+/// may read it but is not in it (a custodian's view without `for`, an invitation): no activity
+/// is shown then. One the caller cannot see at all is refused, as everywhere.
+async fn viewer_conversation(
+    state: &AppState,
+    context: &AuthContext,
+    viewer: &ActorRef,
+    value: &str,
+) -> AppResult<Option<Uuid>> {
+    const HINT: &str = "Name a conversation you are in by its address or UUID (GET /api/v1/conversations, dm conversations list), or leave conversation out for availability and last seen alone.";
+    if value.is_empty() {
+        return Err(AppError::invalid(
+            "conversation is empty: it names the conversation whose activity you want to see.",
+        )
+        .with_hint(HINT)
+        .with_details(serde_json::json!({"field": "conversation"})));
+    }
+    let (id, access) = super::access::resolve_conversation_path(state, context, value, false)
+        .await
+        .map_err(|error| super::sync::named_field(error, "conversation", HINT))?;
+    let inside = if *viewer == context.actor {
+        access == ConversationAccess::Participant
+    } else {
+        state.store.conversation_access(viewer, id).await? == Some(ConversationAccess::Participant)
+    };
+    Ok(inside.then_some(id))
 }
 
 /// Returns provider-filtered trending GIFs.
@@ -463,11 +587,16 @@ pub(super) async fn send_to_recipient(
         .to_owned();
     let (conversation_id, access) =
         super::access::resolve_conversation_path(&state, &context, &recipient, true).await?;
-    if access != ConversationAccess::Participant {
-        return Err(AppError::forbidden(
-            "custodian_read_only",
-            "You can read this conversation as a custodian but only its participants send to it.",
-        ));
+    match access {
+        ConversationAccess::Participant => {}
+        // Invited, not yet a member: the same answer the conversation's own route gives.
+        ConversationAccess::Invitee => return Err(super::groups::invitation_pending()),
+        ConversationAccess::Custodian => {
+            return Err(AppError::forbidden(
+                "custodian_read_only",
+                "You can read this conversation as a custodian but only its participants send to it.",
+            ));
+        }
     }
     state
         .store
@@ -479,8 +608,10 @@ pub(super) async fn send_to_recipient(
             .ok_or_else(|| AppError::validation("message must be an object"))?
             .remove("recipient_id");
     }
-    let body: MessageCreate = serde_json::from_value(input)
-        .map_err(|_| AppError::validation("invalid message content"))?;
+    let body: MessageCreate = serde_json::from_value(input).map_err(|error| {
+        AppError::invalid(format!("invalid message content: {error}"))
+            .with_hint("Check the message against the MessageCreate schema in openapi.yaml (dm docs openapi): text in message, attachment objects in attachments, a voice note in voice (with duration_milliseconds), a GIF in gif.")
+    })?;
     send(&state, &context, conversation_id, idempotency_key, body).await
 }
 
@@ -555,13 +686,13 @@ pub(super) struct MessageListQuery {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ConversationPath {
-    conversation_id: Uuid,
+    pub(super) conversation_id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]
 pub(super) struct MessagePath {
-    conversation_id: Uuid,
-    message_id: Uuid,
+    pub(super) conversation_id: Uuid,
+    pub(super) message_id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]
@@ -573,6 +704,15 @@ pub(super) struct BundlePath {
 #[derive(Debug, Deserialize)]
 pub(super) struct PresencePath {
     actor_id: ActorId,
+}
+
+/// Unknown query fields stay ignored here, as before DM 0.17 (the route had no query).
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct PresenceQuery {
+    /// The conversation whose activity to show (an address or UUID).
+    conversation: Option<String>,
+    #[serde(rename = "for")]
+    for_account: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

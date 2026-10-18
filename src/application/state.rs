@@ -25,6 +25,8 @@ pub struct AppState {
     pub sync: super::sync_hub::SyncHub,
     /// Giphy adapter.
     pub gifs: Arc<dyn GifProvider>,
+    /// Speech and transcription (Deepgram), when configured.
+    pub speech: super::speech::SpeechService,
 }
 
 impl AppState {

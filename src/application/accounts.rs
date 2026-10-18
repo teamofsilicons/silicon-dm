@@ -331,47 +331,6 @@ impl Directory<'_> {
             .map(|stored| stored.account())
             .ok_or_else(|| AppError::account_not_found(uuid))
     }
-
-    /// Refuses `who` starting something new with the Silicon `silicon` unless `who` is in
-    /// its circle (itself, its custodian, the custodian's other Silicons) or on its
-    /// allow-list. Carbons can be reached by anyone signed in to DM.
-    ///
-    /// # Errors
-    /// `contact_not_allowed` (403) explaining who can allow it.
-    pub async fn require_may_reach(&self, who: &ActorRef, target: &Account) -> AppResult<()> {
-        if !target.is_silicon() || target.uuid == who.id.as_str() {
-            return Ok(());
-        }
-        if self
-            .state
-            .store
-            .may_reach_silicon(&target.uuid, who.id.as_str())
-            .await?
-        {
-            return Ok(());
-        }
-        let custodian = match &target.custodian {
-            Some(custodian) => self
-                .state
-                .store
-                .stored_account(custodian)
-                .await?
-                .and_then(|stored| stored.current_id)
-                .map_or_else(
-                    || "its custodian".to_owned(),
-                    |id| format!("its custodian {id}"),
-                ),
-            None => "its custodian".to_owned(),
-        };
-        Err(AppError::forbidden(
-            "contact_not_allowed",
-            format!(
-                "{} only accepts new conversations and invitations from its custodian, the custodian's other Silicons and accounts it has allowed. Ask {} (`dm allow add <your id>`) or {custodian} (DM website, Silicons) to allow you first.",
-                target.display_id(),
-                target.display_id(),
-            ),
-        ))
-    }
 }
 
 /// Where a token issued at `issued` (its `iat`, whole seconds) stands against a sign-in

@@ -20,9 +20,31 @@ pub mod models;
 pub mod relay;
 #[cfg(feature = "runtime")]
 pub mod runtime;
+pub mod speech;
 pub mod ting;
 pub use models::*;
 pub use silicon_dm_protocol::Envelope;
+
+/// The Rust examples of DM's docs and of this README, compiled as doctests
+/// (`cargo test --doc -p silicon-dm-client --all-features`), so no page shows code that stopped
+/// building. Only rustdoc's doctest collection compiles this module (`cfg(doctest)`), so the
+/// pages outside the crate are never needed to build or publish it.
+#[cfg(doctest)]
+#[allow(dead_code)]
+mod docs_examples {
+    #[doc = include_str!("../README.md")]
+    struct Readme;
+    #[doc = include_str!("../../../docs/start/building.md")]
+    struct Building;
+    #[doc = include_str!("../../../docs/start/groups.md")]
+    struct Groups;
+    #[cfg(feature = "accounts")]
+    #[doc = include_str!("../../../docs/reference/rust-client.md")]
+    struct RustClient;
+    #[cfg(feature = "runtime")]
+    #[doc = include_str!("../../../docs/reference/rust-runtime.md")]
+    struct RustRuntime;
+}
 
 use reqwest::{Client as HttpClient, Method, RequestBuilder};
 use serde::de::DeserializeOwned;
@@ -61,6 +83,10 @@ pub enum Error {
     },
     #[error("invalid DM response: {0}")]
     Decode(#[from] serde_json::Error),
+    /// The service answered successfully but not with what the route promises (for example
+    /// JSON where speech audio was expected, or audio larger than any DM renders).
+    #[error("unexpected DM response: {0}")]
+    UnexpectedResponse(String),
 }
 impl Error {
     /// Retrying a mutation requires reusing its original idempotency key.
@@ -90,6 +116,7 @@ impl Error {
             Self::Configuration(_) => "configuration_error",
             Self::Transport(_) => "transport_error",
             Self::Decode(_) => "decode_error",
+            Self::UnexpectedResponse(_) => "unexpected_response",
         }
     }
     /// What went wrong, for people.
@@ -265,6 +292,233 @@ impl Client {
         checked(self.send(request).await?).await?;
         Ok(())
     }
+    /// Sends a request whose body is already final (an explicit envelope, or raw audio), so it
+    /// is not wrapped in another envelope.
+    async fn send_exact(&self, builder: RequestBuilder) -> Result<reqwest::Response> {
+        Ok(self.http.execute(builder.build()?).await?)
+    }
+    /// A JSON body in an envelope with an explicit `type`, for routes whose type is not implied
+    /// by method and path (`receipts.read` and `receipts.delivered` share one route).
+    fn typed<T: serde::Serialize + ?Sized>(
+        builder: RequestBuilder,
+        kind: &str,
+        data: &T,
+    ) -> Result<RequestBuilder> {
+        let body = serde_json::to_vec(&Envelope::new(kind, data))?;
+        Ok(builder
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body))
+    }
+    async fn typed_json<T: DeserializeOwned, D: serde::Serialize + ?Sized>(
+        &self,
+        builder: RequestBuilder,
+        kind: &str,
+        data: &D,
+    ) -> Result<T> {
+        let response = checked(self.send_exact(Self::typed(builder, kind, data)?).await?).await?;
+        Ok(serde_json::from_slice::<Envelope<T>>(&response.bytes().await?)?.data)
+    }
+    /// Reads a WAV answer with what DM says about it.
+    async fn audio(&self, builder: RequestBuilder) -> Result<SpeechAudio> {
+        let mut response = checked(self.send_exact(builder).await?).await?;
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let content_type = header("content-type").unwrap_or_default();
+        let (voice, duration, cache, etag) = (
+            header("x-dm-voice"),
+            header("x-dm-duration-ms").and_then(|value| value.parse::<u64>().ok()),
+            header("x-dm-cache"),
+            header("etag"),
+        );
+        if !content_type.starts_with("audio/") {
+            return Err(Error::UnexpectedResponse(format!(
+                "DM answered `{content_type}` where speech audio (audio/wav) was expected"
+            )));
+        }
+        let mut wav = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if wav.len() + chunk.len() > MAX_SPEECH_AUDIO_BYTES {
+                return Err(Error::UnexpectedResponse(format!(
+                    "the speech audio is larger than {} MiB, more than DM renders",
+                    MAX_SPEECH_AUDIO_BYTES / (1024 * 1024)
+                )));
+            }
+            wav.extend_from_slice(&chunk);
+        }
+        let duration_milliseconds =
+            duration.or_else(|| speech::wav_info(&wav).map(|info| info.duration_milliseconds));
+        Ok(SpeechAudio {
+            wav,
+            content_type,
+            voice,
+            duration_milliseconds,
+            cache,
+            etag,
+        })
+    }
+}
+
+/// DM caps one render at 30 MB of audio; anything far larger is not speech from DM.
+const MAX_SPEECH_AUDIO_BYTES: usize = 64 * 1024 * 1024;
+/// A render takes 2 to 6 seconds; DM gives a long script up to 180 seconds.
+const SPEECH_TIMEOUT: Duration = Duration::from_secs(200);
+/// Up to 100 MiB of audio goes up, then the transcription comes back.
+const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// One path segment for an account id (`c:ada`, `si:scout`) or uuid. Ids use only characters
+/// that are literal in a path, so they travel readable, as conversation addresses do.
+fn account_segment(account: &str) -> Result<String> {
+    let account = account.trim();
+    if account.is_empty()
+        || account.len() > 255
+        || !account
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-.:".contains(&c))
+    {
+        return Err(Error::Configuration(format!(
+            "`{account}` is not an account: expected an id (c:ada, si:scout) or a uuid"
+        )));
+    }
+    Ok(account.to_owned())
+}
+
+impl Client {
+    /// The voices this service speaks with, and how an account's default voice is chosen.
+    /// Needs no credential.
+    pub async fn voices(&self) -> Result<VoiceCatalog> {
+        self.json(self.anonymous(Method::GET, "voices")?).await
+    }
+    /// An account's voice: its stored choice or its default (`account`: `c:`/`si:` id or uuid).
+    pub async fn voice(&self, account: &str) -> Result<AccountVoice> {
+        self.json(self.request(
+            Method::GET,
+            &format!("voices/{}", account_segment(account)?),
+        )?)
+        .await
+    }
+    /// Chooses an account's voice; `voice` is a key from [`Client::voices`]. The account
+    /// itself may, and so may the custodian of a Silicon; anyone else gets 403
+    /// `voice_change_forbidden`, an unknown key 422 `voice_not_found`.
+    pub async fn set_voice(&self, account: &str, voice: &str, key: &str) -> Result<AccountVoice> {
+        self.typed_json(
+            self.request(
+                Method::PUT,
+                &format!("voices/{}", account_segment(account)?),
+            )?
+            .header("Idempotency-Key", key),
+            "voice.set",
+            &json!({"voice": voice}),
+        )
+        .await
+    }
+    /// Returns an account to its default voice (who may: as for [`Client::set_voice`]).
+    pub async fn reset_voice(&self, account: &str) -> Result<AccountVoice> {
+        self.json(self.request(
+            Method::DELETE,
+            &format!("voices/{}", account_segment(account)?),
+        )?)
+        .await
+    }
+    /// Renders a script as WAV in a voice (`None`: the signed-in account's own). For previews
+    /// and checking how a script sounds; it counts against the account's speech limits unless
+    /// DM already has it cached.
+    pub async fn render_speech(&self, script: &str, voice: Option<&str>) -> Result<SpeechAudio> {
+        let mut data = json!({"script": script});
+        if let Some(voice) = voice {
+            data["voice"] = json!(voice);
+        }
+        self.audio(Self::typed(
+            self.request(Method::POST, "speech")?
+                .timeout(SPEECH_TIMEOUT),
+            "speech.render",
+            &data,
+        )?)
+        .await
+    }
+    /// A message's speech as WAV: a spoken message in its pinned voice, or any other message's
+    /// text read in its sender's current voice. `for_silicon`: a custodian listening in one of
+    /// its Silicons' conversations. 404 `nothing_to_speak` when there are no words, 410
+    /// `message_deleted` for a tombstone.
+    pub async fn message_speech(
+        &self,
+        conversation: impl std::fmt::Display,
+        message: impl std::fmt::Display,
+        for_silicon: Option<&str>,
+    ) -> Result<SpeechAudio> {
+        let message = message.to_string();
+        validate_message_reference(&message)?;
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
+        self.audio(
+            self.request(
+                Method::GET,
+                &format!("conversations/{conversation}/messages/{message}/speech"),
+            )?
+            .query(&for_query(for_silicon))
+            .timeout(SPEECH_TIMEOUT),
+        )
+        .await
+    }
+    /// Transcribes audio. `content_type` is one of [`speech::TRANSCRIPTION_TYPES`]; `language`
+    /// is a hint such as `en` (without one the language is detected). Over the service's size
+    /// limit: 413 `audio_too_large`; another type: 415 `unsupported_audio_type`.
+    pub async fn transcribe(
+        &self,
+        audio: Vec<u8>,
+        content_type: &str,
+        language: Option<&str>,
+    ) -> Result<Transcription> {
+        let mut builder = self
+            .request(Method::POST, "speech/transcriptions")?
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .timeout(TRANSCRIBE_TIMEOUT)
+            .body(audio);
+        if let Some(language) = language {
+            builder = builder.query(&[("language", language)]);
+        }
+        let response = checked(self.send_exact(builder).await?).await?;
+        Ok(serde_json::from_slice::<Envelope<Transcription>>(&response.bytes().await?)?.data)
+    }
+    /// Marks every message from others up to `up_to` (a message code, inclusive) read, which
+    /// implies delivered. Repeating it changes nothing. A custodian's view cannot mark read
+    /// (403 `read_only_view`).
+    pub async fn read_up_to(
+        &self,
+        conversation: impl std::fmt::Display,
+        up_to: &str,
+    ) -> Result<ReceiptsUpdate> {
+        self.receipts_up_to(conversation, up_to, ReceiptStatus::Read)
+            .await
+    }
+    /// Marks every message from others up to `up_to` (inclusive) delivered or read.
+    pub async fn receipts_up_to(
+        &self,
+        conversation: impl std::fmt::Display,
+        up_to: &str,
+        status: ReceiptStatus,
+    ) -> Result<ReceiptsUpdate> {
+        validate_message_reference(up_to)?;
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
+        let kind = match status {
+            ReceiptStatus::Read => "receipts.read",
+            ReceiptStatus::Delivered => "receipts.delivered",
+        };
+        self.typed_json(
+            self.request(
+                Method::POST,
+                &format!("conversations/{conversation}/receipts"),
+            )?,
+            kind,
+            &json!({"up_to": up_to}),
+        )
+        .await
+    }
 }
 /// `?for=si:handle`: a custodian reading or managing one of its Silicons.
 fn for_query(account: Option<&str>) -> Vec<(&'static str, &str)> {
@@ -302,7 +556,8 @@ impl Client {
         .await
     }
     /// A Silicon's allow-list: its own (`for_silicon = None`), or, for its custodian, the
-    /// list of the Silicon named by `si:` id or uuid.
+    /// list of the Silicon named by `si:` id or uuid. Kept for older clients: since DM 0.17.1
+    /// the list no longer limits who may start a conversation with the Silicon.
     pub async fn allow_list(&self, for_silicon: Option<&str>) -> Result<AllowList> {
         self.json(
             self.request(Method::GET, "allow-list")?
@@ -310,8 +565,9 @@ impl Client {
         )
         .await
     }
-    /// Allow accounts (by `c:`/`si:` id or uuid) to start conversations with the Silicon and
-    /// invite it to groups.
+    /// Put accounts (by `c:`/`si:` id or uuid) on the Silicon's allow-list. Kept for older
+    /// clients: since DM 0.17.1 anyone may start a conversation with any Silicon and invite it
+    /// to groups, so this changes nothing about who may reach it.
     pub async fn allow(
         &self,
         account_ids: &[String],
@@ -324,7 +580,8 @@ impl Client {
         )
         .await
     }
-    /// Take accounts off the Silicon's allow-list; existing conversations keep working.
+    /// Take accounts off the Silicon's allow-list. Kept for older clients: since DM 0.17.1 this
+    /// changes nothing about who may reach the Silicon.
     pub async fn disallow(
         &self,
         account_ids: &[String],
@@ -387,6 +644,22 @@ impl Client {
         self.json(
             self.request(Method::GET, "conversations")?
                 .query(page)
+                .query(&for_query(for_silicon)),
+        )
+        .await
+    }
+    /// One conversation's summary: its participants, last message, unread facts and
+    /// `draft_version`. A custodian reads one of its Silicon's with `for_silicon` (the unread
+    /// facts and draft are then that Silicon's).
+    pub async fn conversation(
+        &self,
+        conversation: impl std::fmt::Display,
+        for_silicon: Option<&str>,
+    ) -> Result<Conversation> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
+        self.json(
+            self.request(Method::GET, &format!("conversations/{conversation}"))?
                 .query(&for_query(for_silicon)),
         )
         .await
@@ -757,23 +1030,61 @@ impl Client {
         )?)
         .await
     }
-    /// Availability, activity and last-seen time of an account (`c:`/`si:` id or uuid).
+    /// Availability, activity and last-seen time of an account (`c:`/`si:` id or uuid). Its
+    /// activity here is about no conversation in particular, or about one you are in; see
+    /// [`Client::presence_in`] for one conversation's.
     pub async fn presence(&self, account: &str) -> Result<Presence> {
+        self.presence_in(account, None, None).await
+    }
+    /// An account's presence with its activity about `conversation` only (an address or
+    /// UUID; none when you are not in it), and, with `for_silicon`, as a Silicon you look
+    /// after sees it (DM 0.17, `features.presence_activity` in the contracts).
+    pub async fn presence_in(
+        &self,
+        account: &str,
+        conversation: Option<&str>,
+        for_silicon: Option<&str>,
+    ) -> Result<Presence> {
         let encoded: String = url::form_urlencoded::byte_serialize(account.as_bytes()).collect();
-        self.json(self.request(Method::GET, &format!("presence/{encoded}"))?)
-            .await
+        let mut query: Vec<(&str, &str)> = Vec::new();
+        if let Some(conversation) = conversation {
+            query.push(("conversation", conversation));
+        }
+        if let Some(silicon) = for_silicon {
+            query.push(("for", silicon));
+        }
+        let request = self.request(Method::GET, &format!("presence/{encoded}"))?;
+        self.json(if query.is_empty() {
+            request
+        } else {
+            request.query(&query)
+        })
+        .await
     }
     pub async fn renew_presence(
         &self,
         device_id: &str,
         activity: Option<Activity>,
     ) -> Result<PresenceLease> {
+        self.renew_presence_in(device_id, activity, None).await
+    }
+    /// Renews this device's lease with what it is doing and the conversation that is about
+    /// (an address or UUID of one you are in): only accounts in it see the activity. Services
+    /// before DM 0.17 refuse `conversation`; they announce it as
+    /// `features.presence_activity` in [`Client::contracts`].
+    pub async fn renew_presence_in(
+        &self,
+        device_id: &str,
+        activity: Option<Activity>,
+        conversation: Option<&str>,
+    ) -> Result<PresenceLease> {
         let path = presence_device_path(device_id)?;
-        self.json(
-            self.request(Method::PUT, &path)?
-                .json(&json!({"activity":activity})),
-        )
-        .await
+        let body = match conversation {
+            Some(conversation) => json!({"activity": activity, "conversation_id": conversation}),
+            None => json!({"activity": activity}),
+        };
+        self.json(self.request(Method::PUT, &path)?.json(&body))
+            .await
     }
     pub async fn close_presence(&self, device_id: &str) -> Result<()> {
         self.empty(self.request(Method::DELETE, &presence_device_path(device_id)?)?)
@@ -989,20 +1300,20 @@ mod tests {
     fn errors_expose_code_message_and_hint() {
         let error = Error::Api {
             status: 403,
-            code: "contact_not_allowed".into(),
-            message: "si:scout only receives new conversations from people it allows.".into(),
-            hint: Some("Ask its custodian to run dm allow add c:ada --for si:scout.".into()),
+            code: "custodian_read_only".into(),
+            message: "You can read this conversation as a custodian but only its participants send to it.".into(),
+            hint: Some("To write, message si:scout directly in a conversation you are in.".into()),
             body: Box::new(json!({})),
             request_id: None,
             retry_after: None,
         };
-        assert_eq!(error.code(), "contact_not_allowed");
-        assert!(error.is_code("contact_not_allowed"));
+        assert_eq!(error.code(), "custodian_read_only");
+        assert!(error.is_code("custodian_read_only"));
         assert_eq!(error.status(), Some(403));
         assert!(
             error
                 .hint()
-                .is_some_and(|hint| hint.contains("dm allow add"))
+                .is_some_and(|hint| hint.contains("message si:scout directly"))
         );
         assert!(!error.retryable());
         assert_eq!(

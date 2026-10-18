@@ -6,6 +6,7 @@ mod em_dash;
 mod message_length;
 mod output;
 mod receive;
+mod speech;
 mod store;
 
 use anyhow::{Context, Result, bail};
@@ -60,11 +61,7 @@ fn main() {
     }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
-        Err(error) => {
-            let code = error.exit_code();
-            let _ = error.print();
-            std::process::exit(code);
-        }
+        Err(error) => std::process::exit(argument_error(&error)),
     };
     // Discovery, docs and signed-out status run before any runtime: no network, no state.
     if let Some(code) = offline(&cli) {
@@ -90,6 +87,149 @@ fn main() {
     std::process::exit(code);
 }
 
+/// What the argument parser refused. `--help` and `--version` keep the parser's own output (on
+/// standard output, exit 0), and so does a bare command group (its help, exit 2). A mistake is
+/// the CLI's JSON error on standard error, like every other error, so a Silicon reads what to
+/// fix instead of parsing prose: `invalid_arguments` with the parser's words, its tips, the
+/// usage and where the command's help is (exit 2). Nothing is written to standard output.
+fn argument_error(error: &clap::Error) -> i32 {
+    use clap::error::ErrorKind;
+    if matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    ) {
+        let _ = error.print();
+        return error.exit_code();
+    }
+    let compact = std::env::args().any(|argument| argument == "--json");
+    output::print_value_error(&argument_error_json(error), compact);
+    error.exit_code()
+}
+
+fn argument_error_json(error: &clap::Error) -> serde_json::Value {
+    let text = error.render().to_string();
+    // The parser writes its complaint (with any listed values on indented lines), then
+    // blocks of tips, the usage and a pointer to --help, separated by blank lines.
+    let mut blocks = text
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|block| !block.is_empty());
+    let complaint = blocks
+        .next()
+        .unwrap_or("error: the arguments do not fit the command");
+    let mut complaint_lines = complaint.lines().map(str::trim);
+    let mut message = complaint_lines
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches("error:")
+        .trim()
+        .to_owned();
+    let listed: Vec<&str> = complaint_lines.filter(|line| !line.is_empty()).collect();
+    if !listed.is_empty() {
+        message = format!("{} {}", message.trim_end_matches(':'), listed.join(", "));
+        message = message.replacen(" provided ", " provided: ", 1);
+    }
+    let mut tips = Vec::new();
+    let mut usage = None;
+    for line in blocks.flat_map(str::lines).map(str::trim) {
+        if let Some(tip) = line.strip_prefix("tip:") {
+            tips.push(tip.trim().to_owned());
+        } else if let Some(found) = line.strip_prefix("Usage:") {
+            usage = Some(found.trim().to_owned());
+        }
+    }
+    let mut sentence: String = message
+        .chars()
+        .take(1)
+        .flat_map(char::to_uppercase)
+        .collect();
+    sentence.extend(message.chars().skip(1));
+    if !sentence.ends_with('.') {
+        sentence.push('.');
+    }
+    let (command, mut named) = command_path();
+    // Not every refusal prints the usage (a value out of range does not): say it anyway.
+    let usage = usage.unwrap_or_else(|| {
+        let usage = named.render_usage().to_string();
+        usage.trim().trim_start_matches("Usage:").trim().to_owned()
+    });
+    let hint = if command == "dm" {
+        "Run dm --help: it lists every command, with examples.".to_owned()
+    } else {
+        format!(
+            "Run {command} --help for what it takes, with examples; dm --help lists every command."
+        )
+    };
+    serde_json::json!({"error": {
+        "code": "invalid_arguments",
+        "message": sentence,
+        "hint": hint,
+        "details": {"kind": snake_case(&format!("{:?}", error.kind())), "command": command,
+            "usage": usage, "tips": tips},
+    }})
+}
+
+/// The command the arguments name as far as they are commands (`dm messages send`), and
+/// that command: the words after `dm` that are its subcommands, wherever flags (and the
+/// values of flags that take one, such as `--profile NAME`) sit between them.
+fn command_path() -> (String, clap::Command) {
+    use clap::CommandFactory as _;
+    let mut command = Cli::command();
+    // Hands the global flags (--profile, --json…) to every subcommand, so they are known below.
+    command.build();
+    let takes_value = |command: &clap::Command, matches: &dyn Fn(&clap::Arg) -> bool| {
+        command
+            .get_arguments()
+            .any(|arg| matches(arg) && arg.get_action().takes_values())
+    };
+    let mut path = vec!["dm".to_owned()];
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "--" {
+            break;
+        }
+        if let Some(long) = argument.strip_prefix("--") {
+            if !long.contains('=') && takes_value(&command, &|arg| arg.get_long() == Some(long)) {
+                arguments.next();
+            }
+            continue;
+        }
+        if let Some(short) = argument.strip_prefix('-') {
+            let mut letters = short.chars();
+            if let (Some(letter), None) = (letters.next(), letters.next())
+                && takes_value(&command, &|arg| arg.get_short() == Some(letter))
+            {
+                arguments.next();
+            }
+            continue;
+        }
+        let Some(subcommand) = command.find_subcommand(&argument).cloned() else {
+            break;
+        };
+        path.push(subcommand.get_name().to_owned());
+        command = subcommand;
+    }
+    (path.join(" "), command)
+}
+
+/// `UnknownArgument` → `unknown_argument`.
+fn snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (index, character) in name.chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.push(character.to_ascii_lowercase());
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
 /// Commands that never need the network or the state directory. `Some(exit code)` when handled.
 fn offline(cli: &Cli) -> Option<i32> {
     let compact = cli.json;
@@ -105,7 +245,12 @@ fn offline(cli: &Cli) -> Option<i32> {
             }
             Err(error) => {
                 output::print_error(&error, compact);
-                1
+                // An unknown topic or an empty search is an argument error, like the parser's.
+                if error.downcast_ref::<docs::DocsRefusal>().is_some() {
+                    2
+                } else {
+                    1
+                }
             }
         }),
         Command::Login(LoginArgs {
@@ -220,10 +365,10 @@ async fn run_and_report(cli: Cli) -> i32 {
         Err(error) => {
             if let Some(failed) = error.downcast_ref::<OperationFailed>() {
                 output::print_json(&failed.0, compact);
-            } else {
-                output::print_error(&error, compact);
+                return 1;
             }
-            1
+            output::print_error(&error, compact);
+            output::exit_code(&error)
         }
     }
 }
@@ -259,6 +404,23 @@ fn group_settings(settings: GroupSettingsArgs) -> Result<models::GroupSettings> 
     })
 }
 
+/// A new group's address is made from its name (`g:` and its letters a to z and digits), so
+/// a name without any is refused here, before anything is queued, in the service's words.
+/// A rename keeps the address, so updates are not checked.
+pub(crate) fn addressable(settings: models::GroupSettings) -> Result<models::GroupSettings> {
+    let name = settings.name.trim();
+    if name.is_empty() || name.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Ok(settings);
+    }
+    Err(anyhow::Error::new(runtime::store::SessionError {
+        code: "validation_error",
+        message: format!(
+            "A group's address is made from its name, so the name needs a letter or a digit (a to z, 0 to 9): \"{name}\" has none. Nothing was queued."
+        ),
+        hint: "Add one, for example --name 'Launch 🎉' (its address is g:launch). A rename keeps the address, so dm groups update can give it any name afterwards.".into(),
+    }))
+}
+
 async fn run(cli: Cli) -> Result<Outcome> {
     let config = store::load()?;
     let name = cli
@@ -266,13 +428,11 @@ async fn run(cli: Cli) -> Result<Outcome> {
         .clone()
         .unwrap_or_else(|| config.default_profile.clone());
     runtime::store::validate_profile_name(&name)?;
+    // A key given with --idempotency-key was checked by the parser (8 to 255 visible ASCII).
     let key = cli
         .idempotency_key
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    if key.len() < 8 || key.len() > 255 || !key.bytes().all(|b| b.is_ascii_graphic()) {
-        bail!("idempotency key must be 8-255 visible ASCII characters")
-    }
     let local = LocalRuntime::from_environment()?;
     match cli.command {
         Command::Login(args) => {
@@ -344,7 +504,11 @@ async fn run(cli: Cli) -> Result<Outcome> {
                 daemon::start(None).await?;
                 Ok(Outcome::ok(acknowledgement_value(
                     store::relay(&store::load()?)?
-                        .submit_value(&read_json::<Value>(&data)?)
+                        .submit_value(&read_json::<Value>(
+                            &data,
+                            "a relay request",
+                            "Send a RelayRequest: {\"type\":\"request\",\"data\":{\"request_id\":UUID,\"profile\":\"default\",\"request\":{\"operation\":…}}} (dm relay submit --help; dm docs relay lists the operations).",
+                        )?)
                         .await?,
                 )))
             }
@@ -377,6 +541,95 @@ async fn run(cli: Cli) -> Result<Outcome> {
                 .await
                 .map(Outcome::ok)
         }
+        Command::Voices {
+            command: Voices::List,
+        } => speech::list(&local, &name, &config).await.map(Outcome::ok),
+        Command::Voices {
+            command:
+                Voices::Preview {
+                    voice,
+                    script,
+                    out,
+                    force,
+                },
+        } => {
+            speech::preview(
+                &local,
+                &name,
+                &config,
+                &voice,
+                script,
+                speech::WavOutput {
+                    out,
+                    force,
+                    compact: cli.json,
+                },
+            )
+            .await
+        }
+        Command::Speech { command } => match command {
+            SpeechCommands::Render {
+                script,
+                voice,
+                out,
+                force,
+            } => {
+                speech::render(
+                    &local,
+                    &name,
+                    &config,
+                    script,
+                    voice,
+                    speech::WavOutput {
+                        out,
+                        force,
+                        compact: cli.json,
+                    },
+                )
+                .await
+            }
+            SpeechCommands::Transcribe {
+                file,
+                language,
+                content_type,
+            } => speech::transcribe_file(&local, &name, &file, language, content_type)
+                .await
+                .map(Outcome::ok),
+        },
+        Command::Messages {
+            command:
+                Messages::Listen {
+                    conversation,
+                    message,
+                    out,
+                    force,
+                    for_account,
+                },
+        } => {
+            speech::listen(
+                &local,
+                &name,
+                &conversation,
+                &message,
+                for_account.as_deref(),
+                speech::WavOutput {
+                    out,
+                    force,
+                    compact: cli.json,
+                },
+            )
+            .await
+        }
+        Command::Messages {
+            command:
+                Messages::Transcribe {
+                    conversation,
+                    message,
+                    language,
+                },
+        } => speech::transcribe_message(&local, &name, &conversation, &message, language)
+            .await
+            .map(Outcome::ok),
         Command::Sync(args) => receive::sync(&local, &name, args).await.map(Outcome::ok),
         Command::Inbox(args) => {
             receive::inbox(&local, &name, args, cli.json).await?;
@@ -395,9 +648,12 @@ async fn run(cli: Cli) -> Result<Outcome> {
     }
 }
 
+/// Where the message JSON of --data is explained.
+const MESSAGE_JSON_HINT: &str = "Send a message.create body: {\"message\":\"hi\"} plus any of attachments (links, or {\"permanent_url\",\"name\",\"content_type\",\"size\"}), voice ({\"permanent_url\",\"duration_milliseconds\",…}) with voice_transcript, gif (as dm gifs search prints it), speech, metadata and reply_to_message_id. dm messages send --help has examples; dm docs wire-format describes every field.";
+
 fn content(content: Content) -> Result<MessageCreate> {
     let mut m = if let Some(path) = content.data {
-        read_json(&path)?
+        read_json(&path, "a message", MESSAGE_JSON_HINT)?
     } else {
         MessageCreate::default()
     };
@@ -410,10 +666,37 @@ fn content(content: Content) -> Result<MessageCreate> {
     if let Some(text) = content.text {
         m.text = Some(text)
     }
-    if content.metadata.is_some() || !m.metadata.is_empty() {
-        bail!(
-            "Message metadata was removed in DM 0.8. Use message, attachments, voice_transcript and reply."
-        );
+    if let Some(script) = content.speak {
+        m.speech = Some(SpeechInput {
+            script,
+            voice: None,
+        });
+    }
+    if let Some(voice) = content.voice {
+        let Some(speech) = m.speech.as_mut() else {
+            return Err(output::Refusal::arguments(
+                "--voice chooses the voice of a spoken message, and this message is not spoken.",
+                "Add --speak SCRIPT (or speech in --data), or leave --voice out: dm messages send c:ada --speak '[warmly] Done.' --voice hope.",
+            )
+            .into());
+        };
+        speech.voice = Some(speech::voice_key(&voice));
+    }
+    if let Some(speech) = m.speech.as_mut() {
+        speech.voice = speech.voice.as_deref().map(speech::voice_key);
+        silicon_dm_client::speech::validate_script(&speech.script)?;
+    }
+    if let Some(metadata) = content.metadata {
+        let Ok(serde_json::Value::Object(metadata)) =
+            serde_json::from_str::<serde_json::Value>(&metadata)
+        else {
+            return Err(output::Refusal::arguments(
+                "--metadata takes one JSON object, such as '{\"thread\":\"release\"}'.",
+                "Quote the object for your shell; DM keeps it with the message exactly as given and never reads it.",
+            )
+            .into());
+        };
+        m.metadata.extend(metadata);
     }
     if content.reply_to.is_some() {
         m.reply_to_message_id = content.reply_to
@@ -424,10 +707,13 @@ fn content(content: Content) -> Result<MessageCreate> {
         && m.attachments.is_empty()
         && m.voice.is_none()
         && m.gif.is_none()
+        && m.speech.is_none()
     {
-        bail!(
-            "message needs --text, --attachment or --data with voice/GIF; see dm messages send --help"
+        return Err(output::Refusal::arguments(
+            "There is nothing to send: the message has no text, speech, attachment, voice note or GIF.",
+            "Add --text TEXT, --speak SCRIPT, --attachment URL, or --data FILE with a voice note or a GIF; dm messages send --help shows each.",
         )
+        .into());
     }
     Ok(m)
 }
@@ -461,7 +747,7 @@ async fn relay_command(
             Groups::Show { group } => Operation::GetGroup { group_id: group },
             Groups::Create { settings, members } => Operation::CreateGroup {
                 group: models::GroupCreate {
-                    settings: group_settings(settings)?,
+                    settings: addressable(group_settings(settings)?)?,
                     member_ids: members,
                 },
                 idempotency_key: key,
@@ -528,6 +814,13 @@ async fn relay_command(
                 page: page.page(),
                 for_account,
             },
+            Conversations::Show {
+                conversation,
+                for_account,
+            } => Operation::GetConversation {
+                conversation_id: conversation,
+                for_account,
+            },
             Conversations::Create { participants } => Operation::CreateConversation {
                 participant_ids: participants,
                 idempotency_key: key,
@@ -567,6 +860,15 @@ async fn relay_command(
                 if em_dash::replace(&actor, &mut message, dangerously_use_em_dash) {
                     eprintln!("{}", em_dash::NOTICE);
                 }
+                if let Some(spoken) = &message.speech {
+                    speech::print_notes(&spoken.script);
+                    speech::check_spoken_send(
+                        &LocalRuntime::from_environment()?,
+                        &profile.base_url,
+                        spoken.voice.as_deref(),
+                    )
+                    .await?;
+                }
                 if message_length::needs_check(&actor, &message) {
                     let session = runtime::store::session_key(name);
                     let (config, fresh) = store::fresh_profile(&session).await?;
@@ -579,22 +881,27 @@ async fn relay_command(
                     )
                     .await?;
                 }
-                Operation::SendMessage {
-                    conversation_id: conversation,
-                    message,
-                    idempotency_key: key,
-                }
+                Operation::send_message(conversation, message, key)
             }
             Messages::Edit {
                 conversation,
                 message,
                 content: input,
-            } => Operation::EditMessage {
-                conversation_id: conversation,
-                message_id: message,
-                message: content(input)?,
-                idempotency_key: key,
-            },
+            } => {
+                // Edits keep the documented exemption from the 140-character and em-dash rules;
+                // a spoken edit's cues and voice are still checked before it is queued.
+                let content = content(input)?;
+                if let Some(spoken) = &content.speech {
+                    speech::print_notes(&spoken.script);
+                    speech::check_spoken_send(
+                        &LocalRuntime::from_environment()?,
+                        &profile.base_url,
+                        spoken.voice.as_deref(),
+                    )
+                    .await?;
+                }
+                Operation::edit_message(conversation, message, content, key)
+            }
             Messages::Delete {
                 conversation,
                 message,
@@ -603,23 +910,62 @@ async fn relay_command(
                 message_id: message,
                 idempotency_key: key,
             },
+            Messages::Listen { .. } | Messages::Transcribe { .. } => {
+                bail!("dm messages listen and transcribe do not use the relay")
+            }
         },
         Command::Receipts { command } => {
-            let (conversation, message, status) = match command {
+            let (conversation, message, up_to, status) = match command {
                 Receipts::Delivered {
                     conversation,
                     message,
-                } => (conversation, message, ReceiptStatus::Delivered),
+                    up_to,
+                } => (conversation, message, up_to, ReceiptStatus::Delivered),
                 Receipts::Read {
                     conversation,
                     message,
-                } => (conversation, message, ReceiptStatus::Read),
+                    up_to,
+                } => (conversation, message, up_to, ReceiptStatus::Read),
             };
-            Operation::Receipt {
-                conversation_id: conversation,
-                message_id: message,
-                status,
-                device_id: profile.device_id.clone(),
+            match (message, up_to) {
+                (_, Some(up_to)) => Operation::ReceiptsUpTo {
+                    conversation_id: conversation,
+                    up_to,
+                    status,
+                },
+                (Some(message), None) => Operation::Receipt {
+                    conversation_id: conversation,
+                    message_id: message,
+                    status,
+                    device_id: profile.device_id.clone(),
+                },
+                (None, None) => bail!("name the message, or every message up to one with --up-to"),
+            }
+        }
+        Command::Voices { command } => {
+            // Your own voice is addressed by your permanent uuid: ids can be renamed.
+            let own = || {
+                profile
+                    .account
+                    .as_ref()
+                    .map(|account| account.uuid.clone())
+                    .context("the profile has no signed-in account")
+            };
+            match command {
+                Voices::Show { account } => Operation::GetVoice {
+                    account: account.map_or_else(own, Ok)?,
+                },
+                Voices::Set { voice, for_account } => Operation::SetVoice {
+                    account: for_account.map_or_else(own, Ok)?,
+                    voice: speech::voice_key(&voice),
+                    idempotency_key: key,
+                },
+                Voices::Reset { for_account } => Operation::ResetVoice {
+                    account: for_account.map_or_else(own, Ok)?,
+                },
+                Voices::List | Voices::Preview { .. } => {
+                    bail!("dm voices list and preview do not use the relay")
+                }
             }
         }
         Command::Drafts { command } => match command {
@@ -632,7 +978,11 @@ async fn relay_command(
                 version,
             } => Operation::PutDraft {
                 conversation_id: conversation,
-                draft: read_json(&data)?,
+                draft: read_json(
+                    &data,
+                    "a draft",
+                    "Send a DraftInput: {\"message_content\":\"text\"} plus any of attachments, voice, voice_transcript, gif, metadata and reply_to_message_id (dm drafts put --help).",
+                )?,
                 version,
             },
             Drafts::Delete { conversation } => Operation::DeleteDraft {
@@ -642,7 +992,11 @@ async fn relay_command(
         Command::Bundles { command } => match command {
             Bundles::Create { conversation, data } => Operation::CreateBundle {
                 conversation_id: conversation,
-                bundle: read_json(&data)?,
+                bundle: read_json(
+                    &data,
+                    "a bundle",
+                    "Send {\"message_ids\":[\"001\",\"002\"],\"display_message\":{\"message\":\"Checklist: two of three done\"}}: 1 to 100 codes of your own messages, and the message shown in their place (any message content). dm bundles create --help has an example.",
+                )?,
                 idempotency_key: key,
             },
             Bundles::Show {
@@ -654,9 +1008,32 @@ async fn relay_command(
             },
         },
         Command::Presence { command } => match command {
-            PresenceCommands::Get { actor_id } => Operation::GetPresence { actor_id },
-            PresenceCommands::Set { activity: value } => Operation::SetPresence {
+            PresenceCommands::Get {
+                actor_id,
+                conversation: None,
+                for_account: None,
+            } => Operation::GetPresence { actor_id },
+            PresenceCommands::Get {
+                actor_id,
+                conversation,
+                for_account,
+            } => Operation::GetScopedPresence {
+                actor_id,
+                conversation_id: conversation,
+                for_account,
+            },
+            PresenceCommands::Set {
+                activity: value,
+                conversation: None,
+            } => Operation::SetPresence {
                 activity: activity(value),
+            },
+            PresenceCommands::Set {
+                activity: value,
+                conversation: Some(conversation_id),
+            } => Operation::SetScopedPresence {
+                activity: activity(value),
+                conversation_id,
             },
         },
         Command::Gifs { command } => match command {
@@ -779,18 +1156,46 @@ async fn execute(profile: &str, request: Operation, wait: u64) -> Result<Value> 
     }
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let mut body = String::new();
-    if path == Path::new("-") {
-        std::io::stdin().read_to_string(&mut body)?;
+/// Reads the JSON of `what` (a message, a bundle, a draft…) from a --data file or standard
+/// input ('-'); `hint` says what the JSON looks like. Problems are `invalid_input` (exit 2),
+/// before anything is queued.
+fn read_json<T: DeserializeOwned>(path: &Path, what: &str, hint: &str) -> Result<T> {
+    let source = if path == Path::new("-") {
+        "standard input".to_owned()
     } else {
-        body = std::fs::read_to_string(path)
-            .with_context(|| format!("cannot read {}", path.display()))?;
+        path.display().to_string()
+    };
+    let mut body = String::new();
+    let read = if path == Path::new("-") {
+        std::io::stdin().read_to_string(&mut body).map(|_| ())
+    } else {
+        std::fs::read_to_string(path).map(|text| body = text)
+    };
+    if let Err(error) = read {
+        return Err(output::Refusal::input(
+            format!("dm cannot read {what} from {source}: {error}."),
+            "Check the path (--data FILE, or --data - with the JSON on standard input); nothing was queued.",
+        )
+        .into());
     }
-    serde_json::from_str(&body).with_context(|| format!("invalid JSON input at {}", path.display()))
+    if body.trim().is_empty() {
+        return Err(output::Refusal::input(
+            format!("{source} is empty, and dm needs {what} in JSON there."),
+            hint,
+        )
+        .into());
+    }
+    serde_json::from_str(&body).map_err(|error| {
+        output::Refusal::input(
+            format!("The JSON in {source} is not {what} DM takes: {error}."),
+            hint,
+        )
+        .into()
+    })
 }
 
-/// Reads a secret from a file, or standard input for '-' (hidden when typed on a terminal).
+/// Reads a secret from a file, or standard input for '-' (hidden when typed on a terminal),
+/// trimmed; it may be empty.
 pub fn read_secret(path: &Path, prompt: &str) -> Result<String> {
     let value = if path == Path::new("-") {
         if std::io::stdin().is_terminal() {
@@ -803,18 +1208,8 @@ pub fn read_secret(path: &Path, prompt: &str) -> Result<String> {
     } else {
         std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?
     };
-    let value = value.trim().to_owned();
-    if value.is_empty() {
-        bail!(
-            "the {} was empty",
-            if path == Path::new("-") {
-                "standard input".to_owned()
-            } else {
-                path.display().to_string()
-            }
-        )
-    }
-    Ok(value)
+    // An empty value is the caller's to explain (dm login says which step printed nothing).
+    Ok(value.trim().to_owned())
 }
 
 /// The standard-input path, for `--slt-stdin`.

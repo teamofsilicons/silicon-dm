@@ -11,26 +11,33 @@
 .labelContent { display: inline-flex; flex: none; align-items: center; }
 .labelPhase { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-related); white-space: nowrap; }
 .labelPhase svg { flex: none; }
-/* Local edit (2026-10-12): filled buttons are the calm blue (--primary), as on every redesigned Silicon site. */
 .primary { color: var(--primary-foreground); background: var(--primary); border-color: var(--primary); }
-.primary:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
 .secondary { color: var(--foreground); background: var(--surface); border-color: var(--border); }
 .ghost { color: var(--text-secondary); background: transparent; border-color: transparent; }
 .danger { color: var(--danger); background: var(--surface); border-color: var(--border); }
+/* Filled and borderless, for controls that live in a bar (a search trigger, a toolbar, a switcher). Place it on --background or
+   --surface; on a --surface-muted panel it has no fill to show. */
+.soft { color: var(--foreground); background: var(--surface-muted); border-color: transparent; }
 /* A disabled outlined button keeps its shape and fades only its label, so it still reads as a button that is off, not as plain text. */
 .secondary:disabled, .danger:disabled { opacity: 1; color: var(--text-muted); background: var(--surface-muted); border-color: var(--border); }
 .danger:disabled { color: color-mix(in oklab, var(--danger) 55%, var(--surface-muted)); }
-.ghost:disabled { opacity: 1; color: var(--text-muted); }
+.ghost:disabled, .soft:disabled { opacity: 1; color: var(--text-muted); }
 @media (hover: hover) and (pointer: fine) {
   .primary:hover:not(:disabled) { opacity: .91; box-shadow: var(--shadow-resting); }
   .secondary:hover:not(:disabled) { background: var(--surface-muted); box-shadow: var(--shadow-resting); }
   .ghost:hover:not(:disabled) { color: var(--foreground); background: var(--surface-muted); }
   .danger:hover:not(:disabled) { border-color: var(--danger); background: var(--surface-muted); }
+  .soft:hover:not(:disabled) { background: var(--surface-pressed); }
 }
 /* Color feedback on press, so touch and menu triggers (which never scale) still answer the finger. */
 .primary:active:not(:disabled) { opacity: .84; }
 .secondary:active:not(:disabled), .ghost:active:not(:disabled) { color: var(--foreground); background: var(--surface-muted); }
 .danger:active:not(:disabled) { border-color: var(--danger); background: var(--surface-muted); }
+.soft:active:not(:disabled) { background: var(--surface-pressed); }
+.xs { min-height: var(--control-height-xs); gap: var(--space-tight); padding-inline: var(--space-related); font-size: var(--text-xs); }
+/* A compact icon-only button is a square, with the icon at its usual 16px. */
+.xs[data-icon-only] { min-width: var(--control-height-xs); padding-inline: 0; }
+.xs svg { width: 16px; height: 16px; }
 .sm { min-height: var(--control-height-sm); padding-inline: var(--space-group); font-size: var(--text-sm); }
 .md { min-height: var(--control-height-md); }
 .lg { min-height: var(--control-height-lg); padding-inline: var(--space-comfort); font-size: var(--text-sm); }

@@ -20,8 +20,7 @@ use super::{
     idempotency::{IdempotencyClaim, IdempotencyResult, claim, complete, request_hash},
     map_constraint_error,
     rows::{
-        MESSAGE_PAGE_BYTE_BUDGET, message_payload_bytes, parse_actor_id, parse_actor_type,
-        parse_message_status, parse_url,
+        MESSAGE_SIZE_ESTIMATE, parse_actor_id, parse_actor_type, parse_message_status, parse_url,
     },
 };
 
@@ -51,6 +50,7 @@ struct MessageSenderRecord {
     sender_kind: String,
     sender_id: String,
     status: String,
+    sequence: i64,
 }
 
 #[derive(FromRow)]
@@ -104,14 +104,17 @@ impl PostgresStore {
             ));
         }
         let before_sequence = cursor.as_ref().and_then(Cursor::sequence);
-        // Fetch only positions before choosing a byte-bounded payload page.
-        // A lookahead row must never hydrate another maximum-size message.
-        let ids = sqlx::query_scalar::<_, Uuid>(
+        // Fetch only positions (with a size estimate) before choosing a byte-bounded payload
+        // page: a lookahead row must never hydrate another maximum-size message. The bound is
+        // an index condition in every plan (`COALESCE`, not `$2 IS NULL OR …`): a pooled
+        // statement's generic plan otherwise filtered every newer message of the conversation
+        // to reach an older page.
+        let rows = sqlx::query_as::<_, (Uuid, i64)>(sqlx::AssertSqlSafe(format!(
             r#"
-            SELECT message.id
+            SELECT message.id, {MESSAGE_SIZE_ESTIMATE} AS estimate
             FROM messages AS message
             WHERE message.conversation_id = $1
-              AND ($2::bigint IS NULL OR message.sequence < $2)
+              AND message.sequence < COALESCE($2::bigint, 9223372036854775807)
               AND (
                     $3
                     OR NOT EXISTS (
@@ -123,29 +126,18 @@ impl PostgresStore {
               )
             ORDER BY message.sequence DESC
             LIMIT $4
-            "#,
-        )
+            "#
+        )))
         .bind(conversation_id)
         .bind(before_sequence)
         .bind(include_bundled_members)
         .bind(i64::from(limit) + 1)
         .fetch_all(self.pool())
         .await?;
-        let mut items = Vec::with_capacity(usize::from(limit).min(ids.len()));
-        let mut payload_bytes: usize = 0;
-        for id in ids.iter().take(usize::from(limit)) {
-            let message = self.load_message(*id).await?;
-            let bytes = message_payload_bytes(&message)?;
-            if !items.is_empty() && payload_bytes.saturating_add(bytes) > MESSAGE_PAGE_BYTE_BUDGET {
-                break;
-            }
-            payload_bytes = payload_bytes.saturating_add(bytes);
-            items.push(message);
-            if payload_bytes >= MESSAGE_PAGE_BYTE_BUDGET {
-                break;
-            }
-        }
-        let has_next = items.len() < ids.len();
+        let items = self
+            .load_messages_within_budget(&rows[..rows.len().min(usize::from(limit))])
+            .await?;
+        let has_next = items.len() < rows.len();
         let next_cursor = if has_next {
             items
                 .last()
@@ -170,7 +162,10 @@ impl PostgresStore {
     )]
     pub async fn send_message(&self, command: SendMessageCommand) -> AppResult<Message> {
         let initiator = command.sender.clone();
-        command.content.validate().map_err(AppError::validation)?;
+        command
+            .content
+            .validate()
+            .map_err(crate::domain::invalid_content)?;
         if command
             .content
             .sender_id
@@ -239,6 +234,23 @@ impl PostgresStore {
                     command.via_app.as_deref(),
                 )
                 .await?;
+                if let Some(job) = &command.speech {
+                    // Rendering is queued with the message, so a crash never loses it; the
+                    // sender's speech limits are charged here (a replay is never charged).
+                    if let Err(limit) = super::speech::queue_speech_render_in(
+                        &mut transaction,
+                        message_id,
+                        &command.sender,
+                        job,
+                    )
+                    .await?
+                    {
+                        return Err(super::speech::limit_error(
+                            limit,
+                            limit_allowance(limit, job),
+                        ));
+                    }
+                }
                 enqueue_message_deliveries_in(
                     &mut transaction,
                     &partition,
@@ -392,7 +404,8 @@ impl PostgresStore {
             SELECT
                 sender_kind::text AS sender_kind,
                 sender_id,
-                status::text AS status
+                status::text AS status,
+                sequence
             FROM messages
             WHERE id = $1 AND conversation_id = $2 AND organization_id = $3
             FOR UPDATE
@@ -410,9 +423,10 @@ impl PostgresStore {
             id: parse_actor_id(&message.sender_id)?,
         };
         if sender == command.recipient {
-            return Err(AppError::validation(
-                "a message sender cannot acknowledge their own message",
-            ));
+            return Err(AppError::invalid(
+                "a message sender cannot acknowledge their own message: receipts are how its recipients say they have it",
+            )
+            .with_hint("Skip your own messages (their sender is you); your message's status (message_status events) says how its recipients have it. POST …/receipts with receipts.read and up_to marks only others' messages."));
         }
         let existing = sqlx::query_as::<_, ReceiptRecord>(
             r#"
@@ -435,6 +449,19 @@ impl PostgresStore {
         let receipt_id = existing
             .as_ref()
             .map_or_else(Uuid::now_v7, |record| record.id);
+        // A read the account had not made on any device yet changes its unread count: its
+        // other devices hear of it (a read event).
+        let newly_read = command.status == ReceiptStatus::Read
+            && !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM message_receipts WHERE message_id = $1
+                     AND recipient_kind = $2::text::actor_kind AND recipient_id = $3
+                     AND status = 'read')",
+            )
+            .bind(command.message_id)
+            .bind(command.recipient.actor_type.as_str())
+            .bind(command.recipient.id.as_str())
+            .fetch_one(&mut *transaction)
+            .await?;
         sqlx::query(
             r#"
             INSERT INTO message_receipts (
@@ -492,12 +519,35 @@ impl PostgresStore {
         .await
         .map_err(map_constraint_error)
         .and_then(|status| parse_message_status(&status))?;
-        if aggregate_status != previous_aggregate_status
+        let announce = aggregate_status != previous_aggregate_status
             && matches!(
                 aggregate_status,
                 MessageStatus::Delivered | MessageStatus::Read
+            );
+        // The read position before any stream, as every writer that moves it takes them.
+        if command.status == ReceiptStatus::Read {
+            super::read_states::advance_read_state_in(
+                &mut transaction,
+                command.conversation_id,
+                &command.recipient,
+                Some(message.sequence),
             )
-        {
+            .await?;
+        }
+        // The sender's stream (its message's new status) and the reader's (the read event)
+        // are locked together, in the order every writer takes streams in.
+        let mut streams: Vec<(&str, &str)> = Vec::new();
+        if announce {
+            streams.push((sender.actor_type.as_str(), sender.id.as_str()));
+        }
+        if newly_read {
+            streams.push((
+                command.recipient.actor_type.as_str(),
+                command.recipient.id.as_str(),
+            ));
+        }
+        super::read_states::lock_streams_in(&mut transaction, &streams).await?;
+        if announce {
             enqueue_message_status_delivery_in(
                 &mut transaction,
                 &partition,
@@ -506,6 +556,14 @@ impl PostgresStore {
                 receipt_id,
                 aggregate_status,
                 &sender,
+            )
+            .await?;
+        }
+        if newly_read {
+            super::read_states::record_read_event_in(
+                &mut transaction,
+                command.conversation_id,
+                &command.recipient,
             )
             .await?;
         }
@@ -611,11 +669,12 @@ pub(crate) async fn insert_message_in(
             reply_to_message_id,
             sender_address,
             recipient_address,
-            via_app
+            via_app,
+            speech
         )
         VALUES (
             $1, $2, $3, $4::text::actor_kind, $5, 1, 'sent', $6, $7,
-            3, $8, $9, $10, $11, $12, $13
+            3, $8, $9, $10, $11, $12, $13, $14
         )
         "#,
     )
@@ -637,6 +696,7 @@ pub(crate) async fn insert_message_in(
             .map(crate::domain::ActorId::as_str),
     )
     .bind(via_app)
+    .bind(content.speech.as_ref().map(sqlx::types::Json))
     .execute(&mut **transaction)
     .await
     .map_err(map_constraint_error)?;
@@ -725,6 +785,10 @@ pub(crate) async fn enqueue_message_deliveries_in(
     _sender: &ActorRef,
 ) -> AppResult<()> {
     let participants = participant_records_in(transaction, conversation_id).await?;
+    // Each of these first-revision rows also records its account (the sender aside) in
+    // message_recipients (the trigger of migration 0049): the message's aggregate status counts
+    // their receipts, however the group changes later and however long the outbox keeps these
+    // deliveries.
     for participant in participants {
         let target = ActorRef {
             actor_type: parse_actor_type(&participant.actor_kind)?,
@@ -905,7 +969,15 @@ pub(crate) async fn notify_actor_in(
     transaction: &mut Transaction<'_, Postgres>,
     actor: &ActorRef,
 ) -> AppResult<()> {
-    let payload = serde_json::json!({ "account": actor.id.as_str() }).to_string();
+    notify_account_in(transaction, actor.id.as_str()).await
+}
+
+/// [`notify_actor_in`] for an account named by its storage key.
+pub(crate) async fn notify_account_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    account: &str,
+) -> AppResult<()> {
+    let payload = serde_json::json!({ "account": account }).to_string();
     sqlx::query("SELECT pg_notify('dm_delivery', $1)")
         .bind(payload)
         .execute(&mut **transaction)
@@ -928,7 +1000,7 @@ async fn participant_records_in(
     .bind(conversation_id)
     .fetch_all(&mut **transaction)
     .await
-    .map_err(AppError::Database)
+    .map_err(AppError::database)
 }
 
 /// Requires an effective participant and returns the conversation's storage partition.
@@ -964,6 +1036,18 @@ fn validate_device_id(device_id: &str) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+/// The limit a refused speech charge ran into, for its error message.
+pub(crate) fn limit_allowance(
+    limit: super::speech::LimitExceeded,
+    job: &super::speech::SpeechRenderJob,
+) -> u64 {
+    match limit {
+        super::speech::LimitExceeded::RendersPerMinute => u64::from(job.charge.renders_per_minute),
+        super::speech::LimitExceeded::DailyCharacters => job.charge.daily_characters,
+        super::speech::LimitExceeded::TranscriptionsPerMinute => 0,
+    }
 }
 
 pub(crate) const fn receipt_status_name(status: ReceiptStatus) -> &'static str {

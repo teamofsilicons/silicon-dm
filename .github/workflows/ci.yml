@@ -83,6 +83,10 @@ jobs:
       - name: Run tests
         run: cargo test --locked --workspace --all-targets --all-features
 
+      # --all-targets leaves doctests out: these compile the Rust examples in docs/ and crates/client/README.md.
+      - name: Run doctests
+        run: cargo test --locked --workspace --doc --all-features
+
       - name: Check dm answers Silicon Apps' discovery commands in an empty home
         run: |
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("crates/cli/Cargo.toml", "rb"))["package"]["version"])')

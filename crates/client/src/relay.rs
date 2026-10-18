@@ -7,6 +7,11 @@ use uuid::Uuid;
 /// Public DM operations accepted by the local daemon, without auth secrets.
 /// Mutations include their retry key in the command so crash recovery preserves it.
 /// `for` names one of the custodian's Silicons where the service allows it.
+///
+/// A spoken message travels as `send_spoken_message` (or `edit_spoken_message`), never as
+/// `send_message` with `speech`: a relay from before DM 0.17 cannot parse those operations,
+/// so it leaves them queued for the newer relay that replaces it, instead of sending the
+/// message without its speech. [`Operation::send_message`] picks the right one.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Operation {
@@ -88,6 +93,12 @@ pub enum Operation {
         participant_ids: Vec<String>,
         idempotency_key: String,
     },
+    /// One conversation's summary (DM 0.17).
+    GetConversation {
+        conversation_id: String,
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+        for_account: Option<String>,
+    },
     ListMessages {
         conversation_id: String,
         #[serde(default)]
@@ -144,22 +155,159 @@ pub enum Operation {
     GetPresence {
         actor_id: String,
     },
+    /// [`Operation::GetPresence`] with one conversation's activity (`conversation_id`), or as
+    /// a Silicon its custodian looks after sees it (`for`): DM 0.17. A relay before it cannot
+    /// parse this operation, so it waits for the newer relay instead of answering without them.
+    GetScopedPresence {
+        actor_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<String>,
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+        for_account: Option<String>,
+    },
     /// Transient activity renews the local daemon's account-owned HTTP device lease.
     SetPresence {
         activity: Option<Activity>,
+    },
+    /// [`Operation::SetPresence`] about one conversation (DM 0.17): only accounts in it see
+    /// the activity. A relay before it cannot parse this operation, so it waits for the newer
+    /// relay instead of saying the activity about no conversation.
+    SetScopedPresence {
+        activity: Option<Activity>,
+        conversation_id: String,
     },
     TrendingGifs,
     SearchGifs {
         query: String,
     },
     RecentGifs,
+    /// A message with `speech` (DM 0.17).
+    SendSpokenMessage {
+        conversation_id: String,
+        message: MessageCreate,
+        idempotency_key: String,
+    },
+    /// An edit whose content has `speech` (DM 0.17).
+    EditSpokenMessage {
+        conversation_id: String,
+        message_id: String,
+        message: MessageCreate,
+        idempotency_key: String,
+    },
+    /// A message with a voice note, a GIF, attachment details or metadata (DM 0.17). Relays
+    /// before it flattened those parts to links and dropped metadata; they cannot read this
+    /// operation, so it waits for a newer relay instead.
+    SendRichMessage {
+        conversation_id: String,
+        message: MessageCreate,
+        idempotency_key: String,
+    },
+    /// An edit whose content has a voice note, a GIF, attachment details or metadata (DM 0.17).
+    EditRichMessage {
+        conversation_id: String,
+        message_id: String,
+        message: MessageCreate,
+        idempotency_key: String,
+    },
+    /// Marks every message from others up to `up_to` (inclusive) read or delivered.
+    ReceiptsUpTo {
+        conversation_id: String,
+        up_to: String,
+        status: ReceiptStatus,
+    },
+    ListVoices,
+    /// `account`: a `c:`/`si:` id or uuid.
+    GetVoice {
+        account: String,
+    },
+    SetVoice {
+        account: String,
+        voice: String,
+        idempotency_key: String,
+    },
+    ResetVoice {
+        account: String,
+    },
 }
 impl Operation {
+    /// The operation that sends `message`: `send_spoken_message` when it has speech,
+    /// `send_rich_message` when it has other parts of DM 0.17
+    /// ([`MessageCreate::needs_dm_0_17`]), else `send_message`.
+    pub fn send_message(
+        conversation_id: impl Into<String>,
+        message: MessageCreate,
+        idempotency_key: impl Into<String>,
+    ) -> Self {
+        let (conversation_id, idempotency_key) = (conversation_id.into(), idempotency_key.into());
+        if message.speech.is_some() {
+            Self::SendSpokenMessage {
+                conversation_id,
+                message,
+                idempotency_key,
+            }
+        } else if message.needs_dm_0_17() {
+            Self::SendRichMessage {
+                conversation_id,
+                message,
+                idempotency_key,
+            }
+        } else {
+            Self::SendMessage {
+                conversation_id,
+                message,
+                idempotency_key,
+            }
+        }
+    }
+    /// The operation that edits a message to `message`: `edit_spoken_message` when the new
+    /// content has speech, `edit_rich_message` when it has other parts of DM 0.17, else
+    /// `edit_message`.
+    pub fn edit_message(
+        conversation_id: impl Into<String>,
+        message_id: impl Into<String>,
+        message: MessageCreate,
+        idempotency_key: impl Into<String>,
+    ) -> Self {
+        let (conversation_id, message_id, idempotency_key) = (
+            conversation_id.into(),
+            message_id.into(),
+            idempotency_key.into(),
+        );
+        if message.speech.is_some() {
+            Self::EditSpokenMessage {
+                conversation_id,
+                message_id,
+                message,
+                idempotency_key,
+            }
+        } else if message.needs_dm_0_17() {
+            Self::EditRichMessage {
+                conversation_id,
+                message_id,
+                message,
+                idempotency_key,
+            }
+        } else {
+            Self::EditMessage {
+                conversation_id,
+                message_id,
+                message,
+                idempotency_key,
+            }
+        }
+    }
     /// Whether execution changes backend state (presence is transient).
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::CreateGroup { .. }
+            Self::SendSpokenMessage { .. }
+                | Self::EditSpokenMessage { .. }
+                | Self::SendRichMessage { .. }
+                | Self::EditRichMessage { .. }
+                | Self::ReceiptsUpTo { .. }
+                | Self::SetVoice { .. }
+                | Self::ResetVoice { .. }
+                | Self::CreateGroup { .. }
                 | Self::UpdateGroup { .. }
                 | Self::InviteGroupMembers { .. }
                 | Self::RemoveGroupMembers { .. }
@@ -179,16 +327,32 @@ impl Operation {
                 | Self::DeleteDraft { .. }
                 | Self::CreateBundle { .. }
                 | Self::SetPresence { .. }
+                | Self::SetScopedPresence { .. }
+        )
+    }
+    /// Whether this is a presence change: transient, so never replayed after a failure.
+    pub fn is_presence_change(&self) -> bool {
+        matches!(
+            self,
+            Self::SetPresence { .. } | Self::SetScopedPresence { .. }
         )
     }
     /// Executes a command with the caller's stable HTTP presence device identity.
     pub async fn execute_with_device(&self, client: &Client, device_id: &str) -> Result<Value> {
-        if let Self::SetPresence { activity } = self {
-            return Ok(serde_json::to_value(
+        match self {
+            Self::SetPresence { activity } => Ok(serde_json::to_value(
                 client.renew_presence(device_id, *activity).await?,
-            )?);
+            )?),
+            Self::SetScopedPresence {
+                activity,
+                conversation_id,
+            } => Ok(serde_json::to_value(
+                client
+                    .renew_presence_in(device_id, *activity, Some(conversation_id))
+                    .await?,
+            )?),
+            _ => self.execute(client).await,
         }
-        self.execute(client).await
     }
     /// Calls only the public DM client. Presence writes additionally need a device ID.
     pub async fn execute(&self, client: &Client) -> Result<Value> {
@@ -290,6 +454,14 @@ impl Operation {
                     .create_conversation(participant_ids, idempotency_key)
                     .await?,
             )?,
+            Self::GetConversation {
+                conversation_id,
+                for_account,
+            } => serde_json::to_value(
+                client
+                    .conversation(conversation_id, for_account.as_deref())
+                    .await?,
+            )?,
             Self::ListMessages {
                 conversation_id,
                 page,
@@ -369,7 +541,16 @@ impl Operation {
             Self::GetPresence { actor_id } => {
                 serde_json::to_value(client.presence(actor_id).await?)?
             }
-            Self::SetPresence { .. } => {
+            Self::GetScopedPresence {
+                actor_id,
+                conversation_id,
+                for_account,
+            } => serde_json::to_value(
+                client
+                    .presence_in(actor_id, conversation_id.as_deref(), for_account.as_deref())
+                    .await?,
+            )?,
+            Self::SetPresence { .. } | Self::SetScopedPresence { .. } => {
                 return Err(crate::Error::Configuration(
                     "presence changes require execute_with_device() or Client::renew_presence() with a stable device ID".into(),
                 ));
@@ -379,6 +560,55 @@ impl Operation {
                 serde_json::to_value(client.gifs(GifList::Search(query)).await?)?
             }
             Self::RecentGifs => serde_json::to_value(client.gifs(GifList::Recent).await?)?,
+            Self::SendSpokenMessage {
+                conversation_id,
+                message,
+                idempotency_key,
+            }
+            | Self::SendRichMessage {
+                conversation_id,
+                message,
+                idempotency_key,
+            } => serde_json::to_value(
+                client
+                    .send_message(conversation_id, message, idempotency_key)
+                    .await?,
+            )?,
+            Self::EditSpokenMessage {
+                conversation_id,
+                message_id,
+                message,
+                idempotency_key,
+            }
+            | Self::EditRichMessage {
+                conversation_id,
+                message_id,
+                message,
+                idempotency_key,
+            } => serde_json::to_value(
+                client
+                    .edit_message(conversation_id, message_id, message, idempotency_key)
+                    .await?,
+            )?,
+            Self::ReceiptsUpTo {
+                conversation_id,
+                up_to,
+                status,
+            } => serde_json::to_value(
+                client
+                    .receipts_up_to(conversation_id, up_to, *status)
+                    .await?,
+            )?,
+            Self::ListVoices => serde_json::to_value(client.voices().await?)?,
+            Self::GetVoice { account } => serde_json::to_value(client.voice(account).await?)?,
+            Self::SetVoice {
+                account,
+                voice,
+                idempotency_key,
+            } => serde_json::to_value(client.set_voice(account, voice, idempotency_key).await?)?,
+            Self::ResetVoice { account } => {
+                serde_json::to_value(client.reset_voice(account).await?)?
+            }
         })
     }
 }

@@ -103,7 +103,8 @@ async fn handler(State(requests): State<Requests>, request: Request) -> Response
                 "added_by":account("carbon","c:ada","Ada"),"added_at":"2026-10-10T10:00:00Z"}]})
         }
         "/api/v1/conversations" => json!({"items":[
-            {"id":"c:ada::si:cos","participants":[account("carbon","c:ada","Ada"),account("silicon","si:cos","K1E")],
+            {"id":"c:ada::si:cos","participants":[account("carbon","c:ada","Ada"),
+                {"type":"silicon","id":"si:cos","uuid":"K1E","custodian":account("carbon","c:ada","Ada")}],
              "visible_to_custodians":[account("carbon","c:ada","Ada")],"last_message":null,"last_message_status":null,
              "created_at":"2026-10-10T10:00:00Z","updated_at":"2026-10-10T10:00:00Z"},
             {"id":"g:design","participants":[],"group":{"name":"Design","description":"","owners":[account("carbon","c:ada","Ada")]},
@@ -128,25 +129,43 @@ async fn handler(State(requests): State<Requests>, request: Request) -> Response
                     Some("Get a reset cursor."),
                 );
             }
-            json!({"events":[],"cursor":"durable-resume-cursor","has_more":false,"upper_sequence":7})
+            if query
+                .as_deref()
+                .is_some_and(|q| q.contains("include=conversations"))
+            {
+                json!({"events":[{"event_id":"0199f2a1-5d0e-7c11-9a43-0c6f9b8e2d11","sequence":7,
+                    "type":"conversation","conversation_id":"g:design","change":"renamed"}],
+                    "cursor":"durable-resume-cursor","has_more":false,"upper_sequence":7})
+            } else {
+                json!({"events":[],"cursor":"durable-resume-cursor","has_more":false,"upper_sequence":7})
+            }
         }
+        "/api/v1/conversations/g:design" => json!({"id":"g:design","participants":[],
+            "group":{"name":"Design","description":"","owners":[account("carbon","c:ada","Ada")]},
+            "last_message":null,"unread_count":2,"last_read_message_id":"00a","draft_version":4,
+            "created_at":"2026-10-10T10:00:00Z","updated_at":"2026-10-10T10:00:00Z"}),
         path if path.starts_with("/api/v1/presence/devices/") => {
             if method == "DELETE" {
                 return StatusCode::NO_CONTENT.into_response();
             }
             json!({"presence":{"member_id":"si:cos","member_uuid":"K1E","availability":"online","activity":"typing","last_seen_at":null},
-                "lease_expires_at":"2026-10-10T10:02:00Z","activity_expires_at":"2026-10-10T10:00:10Z"})
+                "lease_expires_at":"2026-10-10T10:02:00Z","activity_expires_at":"2026-10-10T10:00:10Z",
+                "conversation_id":"c:ada::si:cos"})
+        }
+        "/api/v1/presence/c%3Aada" => {
+            json!({"member_id":"c:ada","member_uuid":"a8K","availability":"online","activity":"typing","last_seen_at":null})
         }
         "/api/v1/messages" => {
             return failure(
                 StatusCode::FORBIDDEN,
-                "contact_not_allowed",
-                Some("Ask si:other's custodian to allow you."),
+                "custodian_read_only",
+                Some("You read si:other's conversation as its custodian; write in one you are in."),
             );
         }
         "/api/v1/conversations/c:ada::si:cos/messages/000" => {
             json!({"message-id":"000","conversation_id":"c:ada::si:cos",
-            "sender":account("carbon","c:ada","Ada"),"recipient_id":"si:cos","message":null,"attachments":[],
+            "sender":account("carbon","c:ada","Ada"),"recipient_id":"deliberate@si:cos","routed_to":"deliberate@si:cos",
+            "message":null,"attachments":[],
             "created_at":"2026-10-10T10:00:00Z","deleted_at":"2026-10-10T10:01:00Z"})
         }
         "/api/v1/conversations/c:ada::si:cos/messages/001" => {
@@ -209,6 +228,16 @@ async fn custodian_allow_list_group_and_invitation_routes_use_their_contract() -
         .conversations_for(&Default::default(), Some("si:cos"))
         .await?;
     assert_eq!(conversations.items[0].visible_to_custodians[0].id, "c:ada");
+    // A Silicon names its custodian (DM 0.17); a Carbon has none.
+    let participants = &conversations.items[0].participants;
+    assert_eq!(
+        participants[1]
+            .custodian
+            .as_ref()
+            .map(|custodian| custodian.id.as_str()),
+        Some("c:ada")
+    );
+    assert!(participants[0].custodian.is_none());
     let groups = client.groups(&Default::default()).await?;
     assert_eq!(groups.items.len(), 1);
     let list = client.allow(&["c:bob".into()], Some("si:cos")).await?;
@@ -255,13 +284,36 @@ async fn sync_long_polls_and_errors_keep_code_message_and_hint() -> Result {
             limit: Some(10),
             reset: false,
             wait: Some(30),
+            include: None,
         })
         .await?;
     assert_eq!(page.cursor, "durable-resume-cursor");
     assert_eq!(
         fixture.seen()[0].query.as_deref(),
-        Some("cursor=c&limit=10&wait=30")
+        Some("cursor=c&limit=10&wait=30"),
+        "without include, nothing extra is asked for"
     );
+    let with_conversations = client
+        .sync(&SyncRequest {
+            cursor: Some("c".into()),
+            include: Some(silicon_dm_client::SYNC_INCLUDE_CONVERSATIONS.to_owned()),
+            ..SyncRequest::default()
+        })
+        .await?;
+    assert_eq!(
+        fixture.seen()[1].query.as_deref(),
+        Some("cursor=c&include=conversations")
+    );
+    let event = &with_conversations.events[0];
+    assert_eq!(event.kind, silicon_dm_client::SyncEventKind::Conversation);
+    assert_eq!(event.change.as_deref(), Some("renamed"));
+    assert_eq!(
+        event.message_id, "",
+        "a conversation event names no message"
+    );
+    let summary = client.conversation("g:design", None).await?;
+    assert_eq!(summary.draft_version, Some(4));
+    assert_eq!(summary.unread_count, Some(2));
     let reset = client
         .sync(&SyncRequest {
             cursor: Some("expired".into()),
@@ -295,7 +347,7 @@ async fn sync_long_polls_and_errors_keep_code_message_and_hint() -> Result {
         .ok_or("expected a refusal")?;
     assert_eq!(
         (refused.code(), refused.status()),
-        ("contact_not_allowed", Some(403))
+        ("custodian_read_only", Some(403))
     );
     assert!(refused.hint().is_some_and(|h| h.contains("custodian")));
     let lease = client
@@ -308,6 +360,40 @@ async fn sync_long_polls_and_errors_keep_code_message_and_hint() -> Result {
             .seen()
             .iter()
             .any(|s| s.path == "/api/v1/presence/devices/device%201")
+    );
+    // Activity about one conversation: the lease names it, and so does a read of it.
+    let scoped = client
+        .renew_presence_in("device 1", Some(Activity::Typing), Some("c:ada::si:cos"))
+        .await?;
+    assert_eq!(scoped.conversation_id.as_deref(), Some("c:ada::si:cos"));
+    let presence = client
+        .presence_in("c:ada", Some("c:ada::si:cos"), Some("si:cos"))
+        .await?;
+    assert!(matches!(presence.activity, Some(Activity::Typing)));
+    let seen = fixture.seen();
+    let renewal = seen
+        .iter()
+        .rev()
+        .find(|s| s.method == "PUT")
+        .ok_or("no renewal")?;
+    assert_eq!(renewal.body["data"]["conversation_id"], "c:ada::si:cos");
+    assert_eq!(renewal.body["data"]["activity"], "typing");
+    let unscoped = seen
+        .iter()
+        .find(|s| s.method == "PUT")
+        .ok_or("no first renewal")?;
+    assert!(
+        unscoped.body["data"].get("conversation_id").is_none(),
+        "an older service refuses the field, so it is sent only when asked: {}",
+        unscoped.body
+    );
+    let read = seen
+        .iter()
+        .find(|s| s.path == "/api/v1/presence/c%3Aada")
+        .ok_or("no presence read")?;
+    assert_eq!(
+        read.query.as_deref(),
+        Some("conversation=c%3Aada%3A%3Asi%3Acos&for=si%3Acos")
     );
     Ok(())
 }
@@ -337,7 +423,8 @@ async fn ting_references_hydrate_through_http_without_acknowledging_anything() -
         .hydrate_ting_batch(&serde_json::to_vec(&batch)?, &receiver)
         .await?;
     assert!(
-        matches!(&items[0], HydratedTingItem::Message { message, .. } if message.deleted_at.is_some())
+        matches!(&items[0], HydratedTingItem::Message { message, .. } if message.deleted_at.is_some()
+            && message.routed_to.as_deref() == Some("deliberate@si:cos"))
     );
     assert!(matches!(items[1], HydratedTingItem::Inaccessible { .. }));
     assert!(matches!(&items[2], HydratedTingItem::Failed { error, .. } if error.retryable()));

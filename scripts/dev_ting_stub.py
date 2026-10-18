@@ -4,11 +4,15 @@
 It answers the two Ting calls DM makes and checks every proof DM presents with Silicon Accounts
 (POST /v1/proofs/verify), using the credentials of the app that stands in for Ting at the local stack:
 
-  POST /v1/subscriptions   Authorization: Proof sap_...   {"app_id": "dm", "for": {"uuid", "id"}}  -> 201 {"id"}
-      needs a valid User verification proof from the issuer, for this app, with tings.subscribe, for that uuid
+  POST /v1/subscriptions   Authorization: Bearer sap_...   {"app_id": "dm", "for": "<account uuid>"}  -> 201 {"id"}
+      needs a valid User verification proof from the issuer, for this app, with subscriptions.register, for that
+      uuid. DM sends the proof as Bearer and names the account by its uuid; the stand-in also takes the older
+      forms (Authorization: Proof, "for": {"uuid", "id"}, scope tings.subscribe), so older DM builds still enrol.
   GET  /v1/ws?protocol=v1  (WebSocket) -> {"op":"ready","protocol":"v1","receiver_id"}; then each
       {"op":"send","request_id","proof_token","body"} -> {"op":"accepted",...} or {"op":"error","error":{"code"}}
       needs a valid App verification proof from the issuer, for this app, with tings.send
+
+Every call is logged with "for" as {"uuid", "id"?} whichever form DM sent.
 
 Test controls (loopback only):
   POST /control/refuse {"op": "send"|"subscribe", "code": "recipient_not_registered", "count": 1}
@@ -95,9 +99,25 @@ def summarize(token, verification):
     }
 
 
-def acceptable(proof, kind, scope):
+def acceptable(proof, kind, *scopes):
+    """A valid proof of this kind from the issuer, for this app, carrying one of these scopes."""
     return (proof["valid"] and proof["kind"] == kind and proof["issuing_app"] == SETTINGS["issuer"]
-            and proof["receiving_app"] == SETTINGS["app"] and scope in (proof["scopes"] or []))
+            and proof["receiving_app"] == SETTINGS["app"] and any(scope in (proof["scopes"] or []) for scope in scopes))
+
+
+def credential(header):
+    """The proof in `Authorization: Bearer sap_...` (what DM sends) or the older `Authorization: Proof sap_...`."""
+    for scheme in ("Bearer ", "Proof "):
+        if header.startswith(scheme):
+            return header[len(scheme):].strip()
+    return ""
+
+
+def account(target):
+    """The account a call names: DM sends its uuid as a string; older builds sent {"uuid", "id"}."""
+    if isinstance(target, str):
+        return {"uuid": target}
+    return target if isinstance(target, dict) else {}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -147,18 +167,17 @@ class Handler(BaseHTTPRequestHandler):
         return self.reply(404, {"error": {"code": "not_found"}})
 
     def subscribe(self):
-        header = self.headers.get("Authorization", "")
-        token = header[len("Proof "):].strip() if header.startswith("Proof ") else ""
+        token = credential(self.headers.get("Authorization", ""))
         body = self.body() or {}
-        target = (body.get("for") or {}) if isinstance(body, dict) else {}
+        target = account(body.get("for")) if isinstance(body, dict) else {}
         proof = summarize(token, verify(token)) if token else {"valid": False, "token_sha256": None}
         entry = {"op": "subscribe", "app_id": body.get("app_id"), "for": target, "proof": proof}
         refusal = planned_refusal("subscribe")
         if refusal:
             record({**entry, "answer": refusal})
             return self.reply(409, {"error": {"code": refusal}})
-        if not (acceptable(proof, "user_verification", "tings.subscribe") and proof["user_uuid"] == target.get("uuid")
-                and body.get("app_id") == SETTINGS["issuer"]):
+        if not (acceptable(proof, "user_verification", "subscriptions.register", "tings.subscribe")
+                and proof["user_uuid"] == target.get("uuid") and body.get("app_id") == SETTINGS["issuer"]):
             record({**entry, "answer": "invalid_proof"})
             return self.reply(401, {"error": {"code": "invalid_proof"}})
         subscription = f"sub_{uuid.uuid4().hex[:12]}"
@@ -198,7 +217,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             body = {}
         proof = summarize(token, verify(token)) if token else {"valid": False, "token_sha256": None}
-        entry = {"op": "send", "key": body.get("key"), "type": body.get("type"), "for": body.get("for"),
+        entry = {"op": "send", "key": body.get("key"), "type": body.get("type"), "for": account(body.get("for")),
                  "event": (body.get("data") or {}).get("event"), "proof": proof}
         refusal = planned_refusal("send")
         if refusal:

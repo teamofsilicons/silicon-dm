@@ -1,0 +1,54 @@
+/*
+ * The chat's dialogs: one column of fields, the primary action last on the right (full width on phones), invitations
+ * as rows divided by hairlines.
+ */
+/* The dialog scrolls when it is taller than the screen; what the keyboard brings into view stays clear of the actions.
+   It hangs from a fixed place near the top and grows downward: centred, it moved by half of every change in its
+   height, so the field being typed in jumped up to 87 px as suggestions came and went. */
+.dialog.dialog {
+  --dialog-top: clamp(16px, 10vh, 96px);
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - var(--dialog-top) - 16px);
+  margin: var(--dialog-top) auto auto;
+  scroll-padding-bottom: 96px;
+}
+.form { display: grid; min-width: 0; gap: var(--space-5); }
+.text { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.55; text-wrap: pretty; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
+/* A form's actions are the dialog's footer, edge to edge under a hairline (as the header sits over one). They stick to
+   its bottom edge, so Cancel and the primary action stay in reach when the form is taller than the screen (New group
+   on a phone, a long list of people), and settle in place at the end. The body's padding is theirs to fill. */
+.form > .actions:last-child {
+  position: sticky;
+  z-index: 1;
+  bottom: 0;
+  margin: 0 calc(-1 * var(--space-section)) calc(-1 * var(--space-section));
+  border-top: 1px solid var(--border);
+  padding: var(--space-4) var(--space-section) var(--space-section);
+  background: var(--surface-raised);
+}
+/* An id stays on one line when it fits (it moves to the next line whole), and only breaks when it cannot fit at all. */
+.mono { display: inline-block; max-width: 100%; font-family: var(--font-mono); font-size: .92em; overflow-wrap: anywhere; vertical-align: bottom; }
+
+/* One column that never grows past the dialog: a long word in a group's name or description (a link, a slug) wraps
+   instead of widening the row under its buttons. */
+.invitations { display: grid; min-width: 0; margin: 0; padding: 0; list-style: none; grid-template-columns: minmax(0, 1fr); }
+.invitation { display: grid; min-width: 0; align-items: start; gap: var(--space-1) var(--space-3); border-top: 1px solid var(--border-subtle); padding: var(--space-4) 0; grid-template-columns: auto minmax(0, 1fr) auto; }
+.invitation:first-child { border-top: 0; padding-top: var(--space-1); }
+.invitationText { display: grid; min-width: 0; gap: 2px; }
+.invitationName { font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
+/* A description can run to 4000 characters; three lines say what the group is for (the whole text is in its details). */
+.invitationDescription { display: -webkit-box; overflow: hidden; color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.45; overflow-wrap: anywhere; text-wrap: pretty; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; }
+.invitationMeta { color: var(--text-muted); font-size: var(--text-xs); line-height: 1.45; overflow-wrap: anywhere; }
+.nowrap { white-space: nowrap; }
+.invitationActions { display: flex; align-items: center; gap: var(--space-1); }
+.invitationError { grid-column: 2 / -1; }
+.quiet { color: var(--text-muted); font-size: var(--text-sm); line-height: 1.5; text-wrap: pretty; }
+
+@media (max-width: 520px) {
+  .actions > :last-child { flex: 1; }
+  .invitation { grid-template-columns: auto minmax(0, 1fr); }
+  /* Under the words: Decline's words line up with them (its padding, the hover fill, hangs into the gutter). */
+  .invitationActions { grid-column: 2; justify-content: flex-start; margin-inline-start: calc(-1 * var(--space-group)); }
+  .invitationError { grid-column: 1 / -1; }
+}

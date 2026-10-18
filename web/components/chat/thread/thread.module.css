@@ -1,0 +1,418 @@
+/*
+ * The thread, in the Writings look (spec §6.4): a column of about 760 px on warm paper; others' bubbles on the warm
+ * panel colour, yours on the accent's faint tint, ink text in both; squircles with a tighter corner where a run of one
+ * sender continues; no shadows on bubbles; hairline dividers; blue only for what is new and where you act.
+ */
+.thread { display: flex; height: 100%; min-height: 0; flex-direction: column; }
+
+/* Header ----------------------------------------------------------------------------------------------------------- */
+.header { display: flex; height: var(--topbar-height); flex: none; align-items: center; gap: var(--space-3); border-bottom: 1px solid var(--border-subtle); padding: 0 var(--space-3) 0 var(--space-5); background: var(--background); }
+.back { --sq-r: 12px; --sq-fill: transparent; display: none; width: 36px; height: 36px; flex: none; place-items: center; margin-left: -8px; background: var(--sq-fill); color: var(--text-secondary); }
+/* Keyboard focus on the header's buttons, as on every IconAction: the fill and an accent edge inside the button's own
+   shape (a fill alone is about 1.1:1 against the page; WCAG 1.4.11 asks 3:1 of a focus indicator). Silicon UI's ring
+   is off: it sat around the button, over the header's hairline. */
+.back:hover, .back:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); }
+.back:focus-visible { box-shadow: var(--focus-edge); outline: none !important; --focus-outline: transparent; }
+.headerText { display: grid; min-width: 0; flex: 1; gap: 1px; }
+.titleRow { display: flex; min-width: 0; align-items: center; gap: var(--space-2); }
+.title { min-width: 0; overflow: hidden; font-size: 1rem; font-weight: 500; letter-spacing: -.005em; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.kind { --sq-r: var(--radius-pill); --sq-fill: var(--surface-muted); flex: none; padding: 1px 8px; background: var(--sq-fill); color: var(--text-secondary); font-size: 11px; font-weight: 500; line-height: 1.5; }
+.kind[data-kind="silicon"] { --sq-fill: var(--accent-subtle); color: var(--accent-ink); }
+.status { display: flex; min-width: 0; overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; line-height: 1.35; white-space: nowrap; }
+.status > span { flex: none; }
+.status > span:last-child { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.status > span + span::before { margin: 0 .4em; color: var(--text-faint); content: "·"; }
+.status[data-online] .statusText { color: var(--success); }
+.status[data-live] .statusText { color: var(--accent-ink); }
+.statusId { font-family: var(--font-pixel); font-size: 11px; }
+/* The chip says the kind on wide screens; on a phone the line does, instead of the id. */
+.statusKind { display: none; }
+.status > .statusKind + span::before { content: none; }
+.headerActions { display: flex; flex: none; align-items: center; gap: 2px; }
+.headerMore { --sq-r: 12px; --sq-fill: transparent; display: inline-grid; width: 36px; height: 36px; place-items: center; border: 0; padding: 0; background: var(--sq-fill); color: var(--text-secondary); cursor: pointer; transition: background-color var(--duration-fast) var(--ease-standard); }
+.headerMore:hover, .headerMore:focus-visible, .headerMore[data-state="open"] { --sq-fill: var(--surface-muted); color: var(--foreground); }
+.headerMore:focus-visible { box-shadow: var(--focus-edge); outline: none !important; --focus-outline: transparent; }
+
+.banner { display: flex; flex: none; align-items: center; justify-content: center; gap: 6px; border-bottom: 1px solid var(--border-subtle); padding: var(--space-2) var(--space-5); color: var(--text-secondary); font-size: var(--text-sm); text-align: center; text-wrap: balance; }
+.banner[data-tone="offline"] { color: var(--warning); }
+.banner[data-tone="offline"] svg { flex: none; }
+.bannerShort { display: none; }
+.inlineError { flex: none; padding: var(--space-3) var(--space-5) 0; }
+/* The address a link named, in "This conversation is not here". */
+.problemAddress { font-family: var(--font-mono); font-size: .9em; overflow-wrap: anywhere; }
+.loadFailed { display: grid; min-height: 0; flex: 1; place-items: center; padding: var(--space-6) var(--space-5); }
+.loadFailed > * { width: min(100%, 520px); }
+
+/* The list ---------------------------------------------------------------------------------------------------------- */
+.listFrame { position: relative; display: flex; min-height: 0; flex: 1; flex-direction: column; }
+.scroller { position: relative; min-height: 0; flex: 1; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; scrollbar-gutter: stable; }
+/* Few messages sit at the bottom, by the composer, as in every chat. */
+.column {
+  display: flex;
+  width: min(100%, 800px);
+  min-height: 100%;
+  flex-direction: column;
+  justify-content: flex-end;
+  margin: 0 auto;
+  padding: var(--space-4) max(var(--space-5), env(safe-area-inset-right, 0px)) var(--space-5) max(var(--space-5), env(safe-area-inset-left, 0px));
+}
+/* Block flow, not a flex column: a row that changes size then lays out only what follows it, not all its siblings. */
+.log { display: flow-root; outline: none; }
+/* The thread's one Tab stop: a single quiet edge (not the kit's ring as well). */
+.log:focus-visible { outline: none !important; --focus-outline: transparent; box-shadow: inset 0 0 0 1.5px var(--accent); }
+
+.older { display: flex; min-height: 40px; align-items: center; justify-content: center; color: var(--text-muted); font-size: var(--text-xs); overflow-anchor: none; }
+.olderButton { border: 0; padding: 4px 8px; background: none; color: var(--text-secondary); font: inherit; font-size: var(--text-xs); text-decoration: underline; text-underline-offset: .2em; cursor: pointer; }
+.olderButton:hover, .olderButton:focus-visible { color: var(--foreground); outline: none !important; --focus-outline: transparent; }
+.olderButton:focus-visible { color: var(--accent-ink); text-decoration-thickness: 2px; }
+
+.beginning { display: grid; justify-items: center; gap: 2px; padding: var(--space-10) 0 var(--space-4); text-align: center; }
+.beginning[data-empty] { padding: var(--space-12) 0 var(--space-8); }
+.beginningName { margin-top: var(--space-2); font-size: 1rem; font-weight: 500; }
+.beginningMeta { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 .4em; color: var(--text-muted); font-size: var(--text-xs); }
+.beginningId { font-family: var(--font-pixel); font-size: 11px; }
+.beginningText { max-width: 46ch; margin-top: var(--space-3); color: var(--text-secondary); font-size: var(--text-sm); text-wrap: balance; }
+
+.day { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-6) 0 var(--space-2); color: var(--text-muted); font-family: var(--font-pixel); font-size: 12px; letter-spacing: .01em; }
+.day::before, .day::after { height: 1px; flex: 1; background: var(--border-subtle); content: ""; }
+.log > .day:first-child { padding-top: var(--space-2); }
+.unread { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-5) 0 var(--space-2); color: var(--accent-ink); font-size: var(--text-xs); font-weight: 500; }
+.unread::before, .unread::after { height: 1px; flex: 1; background: color-mix(in oklab, var(--accent) 45%, transparent); content: ""; }
+
+.loadingRows { display: grid; gap: var(--space-3); padding: var(--space-4) 0; }
+.loadingRow { display: flex; }
+.loadingRow[data-mine] { justify-content: flex-end; }
+.loadingRow > span { --sq-r: 16px; --sq-fill: var(--surface-muted); display: block; height: 38px; background: var(--sq-fill); animation: thread-pulse 1.4s var(--ease-standard) infinite; }
+.loadingRow:nth-child(2n) > span { animation-delay: .12s; }
+@keyframes thread-pulse { 50% { opacity: .55; } }
+
+/* A message ---------------------------------------------------------------------------------------------------------- */
+.message { position: relative; display: flex; align-items: flex-end; gap: var(--space-2); margin-top: 2px; padding: 1px var(--space-2); margin-inline: calc(var(--space-2) * -1); outline: none; contain: layout style; }
+.message[data-first] { margin-top: var(--space-3); }
+.day + .message, .unread + .message { margin-top: var(--space-2); }
+.message[data-mine] { justify-content: flex-end; }
+/* The selected message (the keyboard's, or a tapped one): a faint wash on the row and an accent edge on the bubble. */
+.message:focus-visible, .message[data-selected] { background: color-mix(in oklab, var(--accent) 6%, transparent); }
+/* The edge is the accent itself: 5.6:1 on either bubble (a softened one was 2.6:1, under the 3:1 a focus indicator needs). */
+.message:focus-visible .bubble, .message[data-selected] .bubble { --sq-stroke: var(--accent); }
+@media (prefers-reduced-motion: no-preference) {
+  .message[data-fresh] { animation: message-in var(--duration-standard) var(--ease-enter) both; }
+  .message { transition: background-color var(--duration-fast) var(--ease-standard); }
+}
+@keyframes message-in { from { opacity: 0; translate: 0 6px; } }
+
+.gutter { display: flex; width: 28px; flex: none; align-self: flex-end; margin-bottom: 21px; }
+.faceButton { display: block; border: 0; padding: 0; background: none; cursor: pointer; }
+.stack { display: flex; min-width: 0; max-width: 72%; flex-direction: column; align-items: flex-start; }
+.message[data-mine] .stack { align-items: flex-end; }
+.sender { max-width: 100%; margin: 0 0 3px; overflow: hidden; border: 0; padding: 0 12px; background: none; color: var(--text-secondary); font: inherit; font-size: var(--text-xs); font-weight: 500; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.sender:hover, .sender:focus-visible, .sender[data-hover-card="open"] { color: var(--foreground); text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: .2em; outline: none !important; --focus-outline: transparent; }
+/* An underline is a text-like control's focus: 2 px of accent ink under the whole name. */
+.sender:focus-visible { color: var(--accent-ink); text-decoration-color: currentColor; text-decoration-thickness: 2px; }
+
+.bubbleRow { position: relative; display: flex; max-width: 100%; align-items: center; }
+.bubble {
+  --sq-r: 18px;
+  position: relative;
+  --sq-fill: var(--surface-muted);
+  --sq-stroke: transparent;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--sq-stroke);
+  padding: 7px 12px 8px;
+  background: var(--sq-fill);
+  color: var(--foreground);
+  font-size: .9375rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  /* Off screen, a bubble is not drawn: it keeps its last size (or the estimate given inline) until it comes back. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px auto 44px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .bubble { transition: background-color var(--duration-standard) var(--ease-standard), border-color var(--duration-standard) var(--ease-standard); }
+}
+.message[data-mine] .bubble { --sq-fill: var(--accent-subtle); }
+/* A run of one sender reads as one voice: the corners where it continues are tighter. */
+.message:not([data-mine]):not([data-first]) .bubble { --sq-tl: .3; }
+.message:not([data-mine]):not([data-last]) .bubble { --sq-bl: .3; }
+.message[data-mine]:not([data-first]) .bubble { --sq-tr: .3; }
+.message[data-mine]:not([data-last]) .bubble { --sq-br: .3; }
+/* Only emoji: large, on the page itself. A photo, a video or a GIF alone: the picture is the bubble. */
+.message .bubble[data-kind="emoji"], .message .bubble[data-kind="media"] { --sq-fill: transparent; padding: 0; }
+.bubble[data-kind="media"] .attachments { margin: 0; }
+.message .bubble[data-kind="deleted"] { --sq-fill: transparent; --sq-stroke: var(--border); }
+.message[data-highlight] .bubble { --sq-stroke: var(--accent); --sq-fill: color-mix(in oklab, var(--accent) 12%, var(--surface)); }
+.message[data-highlight] .bubble[data-kind="media"], .message[data-highlight] .bubble[data-kind="emoji"] { padding: 4px; }
+.message[data-pending="waiting"] .bubble { opacity: .72; }
+.message[data-pending="failed"] .bubble { --sq-stroke: color-mix(in oklab, var(--danger) 55%, transparent); }
+
+.emoji { padding: 0 2px; font-size: 2.25rem; line-height: 1.2; letter-spacing: .04em; }
+.emoji[data-count="2"], .emoji[data-count="3"] { font-size: 1.875rem; }
+
+/*
+ * The toolbar of the message in use (one at a time): beside its bubble on the side away from the sender, level with
+ * its first line, with the time or (where only that fits) without it; under a message you selected when the column has
+ * no room beside it, in the thread's flow (its row makes room, so it covers nothing); over the bubble's own top edge
+ * only when nothing is drawn there. message-row.tsx measures which, before the toolbar is painted.
+ */
+.toolbar { --sq-r: 12px; --sq-fill: var(--surface-raised); --sq-stroke: var(--border); position: absolute; top: min(50%, 20px); left: calc(100% + 6px); z-index: 3; display: flex; align-items: center; border: 1px solid var(--sq-stroke); padding: 2px; background: var(--sq-fill); box-shadow: var(--shadow-resting); white-space: nowrap; translate: 0 -50%; }
+.toolbar[hidden] { display: none; }
+/* A menu, popover, card or dialog opened from a message is open: one action layer at a time (its place is kept). */
+.toolbar[data-held] { visibility: hidden; }
+.message[data-mine] .toolbar { right: calc(100% + 6px); left: auto; flex-direction: row-reverse; }
+.toolbar[data-place="above"] { top: auto; right: 0; bottom: calc(100% - 6px); left: auto; translate: none; }
+.message[data-mine] .toolbar[data-place="above"] { right: auto; left: 0; }
+.toolbar[data-place="below"] { top: calc(100% + 4px); right: 0; bottom: auto; left: auto; translate: none; }
+.message[data-mine] .toolbar[data-place="below"] { right: auto; left: 0; }
+.bubbleRow:has(> .toolbar[data-place="below"]) { margin-bottom: 40px; }
+/* The face stays level with the bubble's last line, not with the toolbar under it. */
+.message:has(> .stack > .bubbleRow > .toolbar[data-place="below"]) > .gutter { margin-bottom: 61px; }
+.toolbarTime { padding: 0 6px 0 8px; color: var(--text-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.message[data-mine] .toolbarTime { padding: 0 8px 0 6px; }
+.toolbar[data-compact] .toolbarTime { display: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .toolbar { animation: toolbar-in var(--duration-fast) var(--ease-enter) both; }
+}
+@keyframes toolbar-in { from { opacity: 0; } }
+/* A message scrolled into view by the keyboard leaves room above it for a toolbar over its top edge. */
+.message { scroll-margin-top: 44px; scroll-margin-bottom: 8px; }
+
+.meta { display: flex; min-height: 18px; align-items: center; gap: 6px; padding: 3px 6px 0; color: var(--text-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.meta[data-mine] { justify-content: flex-end; }
+.time { white-space: nowrap; }
+.metaWord { white-space: nowrap; }
+.metaButton { border: 0; padding: 0; background: none; color: var(--text-muted); font: inherit; text-decoration: underline dotted; text-underline-offset: .2em; cursor: pointer; }
+.metaButton:hover, .metaButton:focus-visible, .metaButton[data-state="open"] { color: var(--foreground); outline: none !important; --focus-outline: transparent; }
+/* The keyboard on it: a solid accent underline, 2 px (the resting one is dotted). */
+.metaButton:focus-visible { color: var(--accent-ink); text-decoration-style: solid; text-decoration-color: currentColor; text-decoration-thickness: 2px; }
+
+/*
+ * Listening to a message's words (Listen, Space, Listen mode): the bubble takes a faint tint of the accent, and a thin
+ * line along its foot fills as it plays (it waits faintly while the audio is prepared). Inside the bubble, over its
+ * bottom padding: starting and ending move nothing in the thread.
+ */
+.bubble:has(> .listenProgress) { --sq-fill: color-mix(in oklab, var(--accent) 7%, var(--surface-muted)); }
+.message[data-mine] .bubble:has(> .listenProgress) { --sq-fill: color-mix(in oklab, var(--accent) 15%, var(--surface)); }
+.listenProgress { position: absolute; right: 12px; bottom: 3px; left: 12px; height: 2px; overflow: hidden; background: color-mix(in oklab, var(--accent) 20%, transparent); pointer-events: none; }
+.listenProgress > span { display: block; height: 100%; background: var(--accent); transform-origin: left; }
+.listenProgress[data-state="loading"] > span { opacity: .3; }
+@media (prefers-reduced-motion: no-preference) {
+  .listenProgress[data-state="loading"] > span { animation: listen-wait 1.1s var(--ease-standard) infinite alternate; }
+}
+@keyframes listen-wait { from { opacity: .12; } to { opacity: .55; } }
+
+.confirm { display: flex; padding-top: var(--space-2); }
+.confirm[data-mine] { justify-content: flex-end; }
+
+.failed { display: grid; justify-items: end; gap: var(--space-2); max-width: 420px; padding-top: var(--space-1); text-align: right; }
+.failedText { color: var(--danger); font-size: var(--text-xs); line-height: 1.45; text-wrap: balance; }
+.failedText strong { font-weight: 500; }
+.failedActions { display: flex; gap: var(--space-2); }
+.failedButton { --sq-r: 10px; --sq-fill: var(--surface); --sq-stroke: var(--border); display: inline-flex; height: 28px; align-items: center; gap: 6px; border: 1px solid var(--sq-stroke); padding: 0 10px; background: var(--sq-fill); color: var(--foreground); font: inherit; font-size: var(--text-xs); font-weight: 500; cursor: pointer; }
+.failedButton:hover, .failedButton:focus-visible { --sq-fill: var(--surface-muted); --sq-stroke: var(--border-strong); }
+/* Its own edge turns accent (2 px with the inset line) with the keyboard on it, instead of Silicon UI's ring around
+   that edge (two lines). */
+.failedButton:focus-visible { --sq-stroke: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); outline: none !important; --focus-outline: transparent; }
+
+/* Someone is busy: three dots that breathe in a bubble (Silicon UI's chat thread), and who is doing what. */
+.busy { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-3); overflow-anchor: none; }
+.busy .gutter { align-self: center; margin-bottom: 0; }
+.busyBubble { --sq-r: 18px; --sq-fill: var(--surface-muted); display: inline-grid; height: 34px; flex: none; place-items: center; padding: 0 14px; background: var(--sq-fill); }
+.dots { display: inline-flex; gap: 4px; }
+.dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); opacity: .6; }
+@media (prefers-reduced-motion: no-preference) {
+  .dots i { animation: breathe 1.2s cubic-bezier(.65, 0, .35, 1) infinite; }
+  .dots i:nth-child(2) { animation-delay: .16s; }
+  .dots i:nth-child(3) { animation-delay: .32s; }
+}
+@keyframes breathe { 0%, 60%, 100% { opacity: .35; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
+.busyWords { min-width: 0; overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+
+/* Content ----------------------------------------------------------------------------------------------------------- */
+/* One column the width of the bubble: a long line or a wide card never widens it past the screen. */
+.richText { display: grid; gap: 6px; grid-template-columns: minmax(0, 1fr); }
+.paragraph { white-space: pre-wrap; text-wrap: pretty; }
+.list { display: grid; gap: 2px; margin: 0; padding-left: 1.3em; }
+.link { color: var(--accent-ink); text-decoration-thickness: from-font; text-underline-offset: .18em; overflow-wrap: anywhere; }
+.link:focus-visible { outline: none !important; --focus-outline: transparent; text-decoration-thickness: 2px; }
+.inlineCode { --sq-r: 6px; --sq-fill: color-mix(in oklab, var(--foreground) 7%, transparent); padding: 1px 5px; background: var(--sq-fill); font-family: var(--font-mono); font-size: .85em; overflow-wrap: anywhere; }
+.codeBlock { --sq-r: 12px; --sq-fill: var(--surface); --sq-stroke: var(--border); min-width: 0; overflow: hidden; margin: 2px 0; border: 1px solid var(--sq-stroke); background: var(--sq-fill); }
+.codeHead { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); border-bottom: 1px solid var(--border-subtle); padding: 2px 4px 2px 12px; color: var(--text-muted); font-size: 11px; }
+.codeLanguage { font-family: var(--font-pixel); }
+.codePre { max-height: 360px; margin: 0; overflow: auto; padding: 10px 12px; font-size: .8125rem; line-height: 1.6; white-space: pre; overscroll-behavior-x: contain; }
+.codePre:focus-visible { outline: none !important; --focus-outline: transparent; box-shadow: inset 0 0 0 1.5px var(--accent); }
+.showAll { justify-self: start; max-width: 100%; border: 0; padding: 0; background: none; color: var(--accent-ink); font: inherit; font-size: var(--text-sm); text-align: left; text-decoration: underline; text-underline-offset: .18em; white-space: normal; cursor: pointer; }
+.showAll:focus-visible { outline: none !important; --focus-outline: transparent; text-decoration-thickness: 2px; }
+.tombstone { color: var(--text-muted); font-size: var(--text-sm); font-style: italic; }
+.transcriptLine { margin-top: 4px; color: var(--text-secondary); font-size: var(--text-sm); }
+
+.quote { --sq-r: 10px; --sq-fill: color-mix(in oklab, var(--foreground) 5%, transparent); display: flex; width: 100%; min-width: 0; align-items: flex-start; gap: 8px; margin-bottom: 6px; border: 0; padding: 6px 10px; background: var(--sq-fill); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.quote:hover, .quote:focus-visible { --sq-fill: color-mix(in oklab, var(--foreground) 9%, transparent); outline: none !important; --focus-outline: transparent; }
+/* An accent edge all round inside the quote (a bar on its left alone changed a sliver of it). */
+.quote:focus-visible { box-shadow: var(--focus-edge); }
+.quoteIcon { flex: none; margin-top: 3px; color: var(--accent); }
+.quoteText { display: grid; min-width: 0; }
+.quoteWho { color: var(--accent-ink); font-size: var(--text-xs); font-weight: 500; }
+.quoteLine { overflow: hidden; color: var(--text-secondary); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
+.quoteLine[data-deleted] { font-style: italic; }
+
+.attachments { display: grid; gap: 6px; margin-top: 2px; grid-template-columns: minmax(0, 1fr); justify-items: start; }
+.richText + .attachments, .quote + .attachments { margin-top: 8px; }
+/* A lone photo: its own shape (attachments.tsx sets the shape and a width that keeps it at most 420 px tall). */
+.photo { --sq-r: 14px; position: relative; display: block; width: 320px; max-width: 100%; overflow: hidden; border: 0; padding: 0; background: var(--surface-pressed); cursor: zoom-in; }
+.photo img, .galleryItem img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* Two to four: rows that share a height (each row's shape is the sum of its photos'), each photo as wide as its shape. */
+.gallery { display: grid; width: 400px; max-width: 100%; gap: 3px; }
+.galleryRow { display: flex; min-width: 0; max-height: 280px; gap: 3px; }
+.galleryItem { --sq-r: 12px; position: relative; display: block; min-width: 0; flex: 1 1 0; overflow: hidden; border: 0; padding: 0; background: var(--surface-pressed); cursor: zoom-in; }
+.photo:focus-visible, .galleryItem:focus-visible { outline: 2px solid var(--accent) !important; outline-offset: 2px; }
+.galleryMore { position: absolute; inset: 0; display: grid; place-items: center; background: var(--media-scrim); color: var(--on-media); font-size: var(--text-lg); font-weight: 500; }
+.video { --sq-r: 14px; display: block; width: 360px; max-width: 100%; max-height: 420px; background: #1e1e1c; }
+.video:focus-visible { outline: 2px solid var(--accent) !important; outline-offset: 2px; }
+
+.fileCard { --sq-r: 12px; --sq-fill: var(--surface); --sq-stroke: var(--border); position: relative; display: flex; width: 320px; max-width: 100%; min-width: 0; align-items: center; gap: 10px; border: 1px solid var(--sq-stroke); padding: 7px 7px 7px 8px; background: var(--sq-fill); color: var(--foreground); }
+.fileCard:hover { --sq-stroke: var(--border-strong); }
+/* Under a photo, a gallery or a video, a file's card is as wide as they are (one edge down the bubble), never wider for
+   its name (contain: its own content does not widen the bubble), and never narrower than a card reads well (a tall,
+   narrow photo; on a phone, a little less, so it never runs past the bubble). */
+.attachments:has(> .photo, > .gallery, > .video) > .fileCard { width: auto; min-width: min(240px, 60vw); justify-self: stretch; contain: inline-size; }
+/* The card's edge is the focus of its link (the card's name, which opens it), in full accent; Download has its own
+   (its fill and Silicon UI's ring), so the card stays as it is then: one indicator at a time. */
+.fileCard:has(.fileOpen:focus-visible) { --sq-stroke: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.fileIcon { --sq-r: 9px; --sq-fill: var(--surface-muted); display: grid; width: 34px; height: 34px; flex: none; place-items: center; background: var(--sq-fill); color: var(--text-secondary); }
+.fileOpen { display: grid; min-width: 0; flex: 1; color: inherit; text-decoration: none; }
+/* The whole card opens the file; Download sits above that. */
+.fileOpen::after { position: absolute; inset: 0; content: ""; }
+.fileOpen:focus-visible { outline: none !important; --focus-outline: transparent; }
+.fileOpen:focus-visible .fileName { text-decoration: underline; }
+.fileName { display: flex; min-width: 0; font-size: var(--text-sm); font-weight: 500; white-space: nowrap; }
+.fileNameStart { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fileNameEnd { flex: none; }
+.fileMeta { overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.fileMeta[data-note] { overflow: visible; white-space: normal; text-wrap: pretty; }
+.fileAction { --sq-r: 10px; --sq-fill: transparent; position: relative; z-index: 1; display: grid; width: 32px; height: 32px; flex: none; place-items: center; background: var(--sq-fill); color: var(--text-secondary); }
+.fileAction:hover, .fileAction:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); }
+.audioPlay { --sq-r: 10px; --sq-fill: var(--surface-muted); position: relative; z-index: 1; display: grid; width: 34px; height: 34px; flex: none; place-items: center; border: 0; padding: 0; background: var(--sq-fill); color: var(--foreground); cursor: pointer; }
+.audioPlay:hover, .audioPlay:focus-visible, .fileCard[data-playing] .audioPlay { --sq-fill: var(--accent-subtle); color: var(--accent-ink); }
+.audioText { display: grid; min-width: 0; flex: 1; gap: 2px; }
+.audioSeek { position: relative; z-index: 1; width: 100%; height: 14px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+
+.gif { --sq-r: 14px; position: relative; overflow: hidden; width: 280px; max-width: 100%; margin: 2px 0 0; background: var(--surface-pressed); }
+.gifMedia { display: block; width: 100%; height: 100%; object-fit: cover; }
+.gifPlay { --sq-r: var(--radius-pill); --sq-fill: var(--surface-raised); position: absolute; left: 8px; bottom: 8px; display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 3px 10px 3px 8px; background: var(--sq-fill); color: var(--foreground); font: inherit; font-size: var(--text-xs); font-weight: 500; opacity: 0; pointer-events: none; cursor: pointer; }
+/* Pause shows on the message in use (and on focus); Play always shows on a still frame. */
+.gifPlay[data-shown], .message[data-active] .gifPlay, .gifPlay:focus-visible { opacity: 1; pointer-events: auto; }
+.gifPlay:focus-visible { --sq-fill: var(--surface-pressed); }
+@media (prefers-reduced-motion: no-preference) {
+  .gifPlay { transition: opacity var(--duration-fast) var(--ease-standard); }
+}
+
+.bundle { margin-top: 6px; border-top: 1px solid var(--border-subtle); padding-top: 6px; }
+.bundleToggle { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 0; background: none; color: var(--accent-ink); font: inherit; font-size: var(--text-xs); font-weight: 500; cursor: pointer; }
+.bundleToggle:focus-visible { outline: none !important; --focus-outline: transparent; text-decoration: underline; }
+.bundleChevron { transition: rotate var(--duration-fast) var(--ease-standard); rotate: -90deg; }
+.bundleChevron[data-open] { rotate: 0deg; }
+.bundleList { display: grid; gap: 6px; margin: 8px 0 2px; padding: 0; list-style: none; }
+.bundleItem { display: grid; gap: 1px; border-left: 2px solid var(--border); padding-left: 8px; }
+.bundleWhen { color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.bundleWho { color: var(--text-secondary); font-weight: 500; }
+.bundleText { color: var(--text-secondary); font-size: var(--text-sm); }
+.bundleQuiet { color: var(--text-muted); font-size: var(--text-xs); }
+
+/* Account card (inside Silicon UI's hover card) ---------------------------------------------------------------------- */
+.card { display: grid; gap: var(--space-3); }
+.cardHead { display: flex; min-width: 0; align-items: center; gap: var(--space-3); }
+.cardIdentity { display: grid; min-width: 0; gap: 1px; }
+.cardName { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.cardYou { color: var(--text-muted); font-weight: 400; }
+.cardKind { display: flex; flex-wrap: wrap; color: var(--text-muted); font-size: var(--text-xs); }
+.cardKind > span + span::before { margin: 0 .4em; color: var(--text-faint); content: "·"; }
+.cardKind [data-kind="silicon"] { color: var(--accent-ink); }
+.cardKind [data-online] { color: var(--success); }
+.cardId { --sq-r: 10px; --sq-fill: var(--surface-muted); display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--space-2); padding: 2px 2px 2px 10px; background: var(--sq-fill); }
+.cardIdValue { min-width: 0; font-family: var(--font-pixel); font-size: 12px; overflow-wrap: anywhere; }
+.cardLine { color: var(--text-secondary); font-size: var(--text-sm); }
+.cardActions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); }
+.cardHint { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; color: var(--text-muted); font-size: var(--text-xs); }
+
+/* Edit history ------------------------------------------------------------------------------------------------------- */
+.history.history { width: min(360px, calc(100vw - 32px)); }
+.historyTitle { margin-bottom: var(--space-2); font-size: var(--text-sm); font-weight: 500; }
+.historyList { display: grid; gap: var(--space-3); max-height: 300px; margin: 0; overflow-y: auto; padding: 0; list-style: none; }
+.historyItem { display: grid; gap: 2px; border-top: 1px solid var(--border-subtle); padding-top: var(--space-2); font-size: var(--text-sm); }
+.historyItem:first-child { border-top: 0; padding-top: 0; }
+.historyWhen { color: var(--text-muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.historyText { overflow-wrap: anywhere; white-space: pre-wrap; }
+/* The words as they are now come first, in ink; the earlier versions under them, a step quieter. */
+.historyItem:not([data-current]) .historyText { color: var(--text-secondary); }
+.historyQuiet { color: var(--text-muted); font-size: var(--text-sm); }
+
+/* Jump to latest ----------------------------------------------------------------------------------------------------- */
+.jump { --sq-r: var(--radius-pill); --sq-fill: var(--surface-raised); --sq-stroke: var(--border); position: absolute; bottom: var(--space-4); left: 50%; z-index: 5; display: inline-flex; height: 34px; align-items: center; gap: 6px; border: 1px solid var(--sq-stroke); padding: 0 12px 0 14px; background: var(--sq-fill); color: var(--foreground); box-shadow: var(--shadow-floating); font: inherit; font-size: var(--text-xs); font-weight: 500; white-space: nowrap; cursor: pointer; translate: -50% 0; }
+.jump:hover, .jump:focus-visible { --sq-stroke: var(--border-strong); outline: none !important; --focus-outline: transparent; }
+.jump:focus-visible { --sq-stroke: var(--accent); }
+.jumpCount { --sq-r: var(--radius-pill); --sq-fill: var(--accent); display: inline-grid; min-width: 20px; height: 20px; place-items: center; margin-right: -6px; padding: 0 6px; background: var(--sq-fill); color: var(--accent-foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* The message menu's anchor: an invisible point where the menu opens. */
+.menuAnchor { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+/* Dialogs ------------------------------------------------------------------------------------------------------------ */
+.detailsDialog.detailsDialog { width: min(720px, calc(100vw - 32px)); }
+.detailsBody { display: grid; min-width: 0; gap: var(--space-4); }
+.detailsCommands { min-width: 0; }
+.detailsLink { --sq-r: 12px; --sq-stroke: var(--border); display: flex; min-width: 0; align-items: center; gap: var(--space-3); border: 1px solid var(--sq-stroke); padding: 6px 6px 6px 12px; }
+.detailsLabel { flex: none; color: var(--text-muted); font-size: var(--text-xs); font-weight: 500; }
+/* The link wraps rather than being cut (it is the one thing here someone copies by hand). */
+.detailsValue { min-width: 0; flex: 1; font-size: .8125rem; overflow-wrap: anywhere; }
+.detailsIds { margin-top: calc(var(--space-2) * -1); color: var(--text-muted); font-size: var(--text-xs); line-height: 1.6; overflow-wrap: anywhere; }
+.detailsIds code { color: var(--text-secondary); font-family: var(--font-mono); font-size: 11.5px; }
+@media (max-width: 767px) {
+  /*
+   * The message's JSON on a phone: every key and value whole (Silicon UI's viewer cuts them at 40 % of a narrow
+   * line), a long line scrolling sideways inside the viewer only; and the viewer grows with what is open, so the dialog
+   * is the one thing that scrolls up and down (no scroll inside a scroll hiding the viewer's foot). The viewer's parts
+   * are named by their CSS module classes (json-viewer-module__…__key), the same in a build and in development.
+   */
+  .detailsJson [role="tree"] { max-height: none; }
+  .detailsJson [role="tree"] [class*="__line"] { width: max-content; min-width: 100%; }
+  .detailsJson [role="tree"] :is([class*="__key"], [class*="__value"], [class*="__summary"], [class*="__preview"]) { max-width: none; overflow: visible; text-overflow: clip; }
+}
+
+.lightbox.lightbox { width: min(1100px, calc(100vw - 32px)); }
+.lightboxFigure { display: grid; gap: var(--space-3); margin: 0; }
+.lightboxStage { --sq-r: 14px; display: grid; min-height: 200px; place-items: center; overflow: hidden; background: var(--surface-muted); }
+.lightboxImage { display: block; max-width: 100%; max-height: calc(100dvh - 260px); object-fit: contain; }
+.lightboxBar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.lightboxSteps { display: flex; align-items: center; gap: var(--space-2); }
+.lightboxHint { color: var(--text-muted); font-size: var(--text-xs); }
+.lightboxButton { --sq-r: 11px; --sq-fill: var(--surface); --sq-stroke: var(--border); display: grid; width: 36px; height: 36px; place-items: center; border: 1px solid var(--sq-stroke); background: var(--sq-fill); color: var(--foreground); cursor: pointer; }
+.lightboxButton:hover, .lightboxButton:focus-visible { --sq-fill: var(--surface-muted); --sq-stroke: var(--border-strong); }
+.lightboxButton:focus-visible { --sq-stroke: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); outline: none !important; --focus-outline: transparent; }
+.lightboxLinks { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+.lightboxLink { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-sm); }
+
+/* Phones: one pane, the back button, the kind in the status line, a little more width for bubbles. */
+@media (max-width: 767px) {
+  .header { padding: 0 var(--space-2) 0 var(--space-3); }
+  .back { display: inline-grid; }
+  .column { padding: var(--space-3) max(var(--space-3), env(safe-area-inset-right, 0px)) var(--space-4) max(var(--space-3), env(safe-area-inset-left, 0px)); }
+  .stack { max-width: 82%; }
+  .lightboxHint { display: none; }
+  /* Offline on a phone: the short sentence, the icon on its first line, read from the start (the header already says
+     it waits for the network). */
+  .banner[data-tone="offline"] { display: block; padding-inline: var(--space-4); text-align: left; }
+  .banner[data-tone="offline"] svg { display: inline-block; margin-right: 6px; vertical-align: -2px; }
+  .bannerLong { display: none; }
+  .bannerShort { display: inline; }
+}
+@media (max-width: 479px) {
+  .kind, .statusId, .statusExtra { display: none; }
+  .statusKind { display: inline; }
+  .status > .statusKind + span::before { content: "·"; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .headerMore, .bundleChevron { transition: none; }
+  .loadingRow > span { animation: none; }
+}

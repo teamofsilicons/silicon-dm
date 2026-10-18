@@ -1,6 +1,8 @@
 //! PostgreSQL and external-service adapters.
 
 pub mod accounts;
+/// Deepgram: speech (Voice Agent) and transcription.
+pub mod deepgram;
 pub mod giphy;
 pub mod postgres;
 pub mod ting;

@@ -329,6 +329,26 @@ async fn reports_and_diagnostics_are_kept_per_account() -> Result<(), BoxError> 
         )
         .await?;
     assert_eq!(limited.0, StatusCode::TOO_MANY_REQUESTS, "{}", limited.1);
+    // The refusal names the limit and when the next report fits.
+    assert_eq!(limited.1["error"]["code"], "rate_limited");
+    assert_eq!(limited.1["error"]["details"]["limit"], 10);
+    let message = limited.1["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("10 bug reports in the last hour"),
+        "{message}"
+    );
+    let hint = limited.1["error"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("minutes") && hint.contains("Retry-After"),
+        "{hint}"
+    );
+    let wait = limited.1["error"]["details"]["retry_after_seconds"]
+        .as_u64()
+        .unwrap_or_default();
+    assert!(
+        (3000..=3600).contains(&wait),
+        "the first report leaves the window in about an hour: {wait}"
+    );
 
     // DM records no telemetry: the diagnostics route older clients post to is gone.
     let telemetry = app

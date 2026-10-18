@@ -10,9 +10,9 @@ import type { StoredSession } from "../lib/server/session";
 
 export { appConfig };
 
-export const BASE = process.env.E2E_BASE_URL ?? "http://127.0.0.1:4120";
-export const ACCOUNTS = process.env.E2E_ACCOUNTS_URL ?? "http://localhost:9590";
-const MESSAGING = process.env.E2E_MESSAGING_URL ?? "http://127.0.0.1:9592";
+export const BASE = process.env.E2E_BASE_URL ?? "http://127.0.0.1:4530";
+export const ACCOUNTS = process.env.E2E_ACCOUNTS_URL ?? "http://localhost:9840";
+const MESSAGING = process.env.E2E_MESSAGING_URL ?? "http://127.0.0.1:9842";
 
 /** A fresh address per run, named after the app: the stack is shared by every app's tests. */
 export const uniqueEmail = (purpose: string) => `${appConfig.appId}-${purpose}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}@example.test`;
@@ -172,7 +172,8 @@ export function watchErrors(page: Page): string[] {
  * signs in to the kit with "Continue as", a sign-in of its own (its own tokens) without spending a code.
  */
 export type Who = "carbon" | "friend";
-const AUTH_DIR = "test-results/.auth";
+// One directory per port, so parallel runs on different ports (E2E_PORT) never overwrite each other's sign-ins.
+export const AUTH_DIR = `test-results/.auth-${process.env.E2E_PORT || 4530}`;
 export const statePath = (who: Who) => `${AUTH_DIR}/${who}.json`;
 export const accountsFile = `${AUTH_DIR}/accounts.json`;
 

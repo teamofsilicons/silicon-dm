@@ -1,0 +1,53 @@
+/*
+ * The chat's frame (spec §6.3): sidebar 312 px | thread | details 340 px on wide screens, sidebar | thread from 768 px
+ * (details in a drawer), and one pane on phones (the list or the thread; details in a bottom sheet). The frame is the
+ * window's height; the list, the thread and the panel each scroll on their own, so nothing scrolls sideways.
+ */
+:global(html):has(.app) { overflow: clip; scrollbar-gutter: auto; }
+:global(body):has(.app) { overflow: clip; }
+
+.app {
+  --sidebar: 312px;
+  --details: 340px;
+  display: grid;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  /* clip, not hidden: nothing may scroll the frame itself (scrollIntoView would move the whole app). */
+  overflow: clip;
+  background: var(--background);
+  grid-template-columns: var(--sidebar) minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.sidebar { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--border-subtle); }
+
+.main { position: relative; display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: clip; outline: none; }
+
+.details { display: flex; width: var(--details); min-height: 0; flex-direction: column; border-left: 1px solid var(--border-subtle); background: var(--background); }
+.detailsHead { display: flex; height: var(--topbar-height); flex: none; align-items: center; justify-content: space-between; gap: var(--space-3); border-bottom: 1px solid var(--border-subtle); padding: 0 var(--space-3) 0 var(--space-5); }
+.detailsTitle { font-size: var(--text-base); font-weight: 500; }
+.detailsBody { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: var(--space-2) var(--space-5) var(--space-6); }
+.detailsDrawer.detailsDrawer { width: min(380px, calc(100vw - 48px)); }
+
+.iconButton { --sq-r: 12px; --sq-fill: transparent; display: inline-grid; width: 36px; height: 36px; flex: none; place-items: center; border: 0; padding: 0; background: var(--sq-fill); color: var(--text-secondary); cursor: pointer; transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard); }
+@media (hover: hover) and (pointer: fine) { .iconButton:hover { --sq-fill: var(--surface-muted); color: var(--foreground); } }
+.iconButton:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); box-shadow: var(--focus-edge); outline: none !important; --focus-outline: transparent; }
+
+@media (max-width: 1099px) {
+  .app { grid-template-columns: var(--sidebar) minmax(0, 1fr); }
+}
+
+@media (max-width: 860px) {
+  .app { --sidebar: 280px; }
+}
+
+/* Phones: one pane. The inbox page is the list; a conversation or the settings take the whole screen. */
+@media (max-width: 767px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .sidebar { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .iconButton { transition: none; }
+}

@@ -40,11 +40,7 @@ pub(super) async fn get(
     ApiPath(path): ApiPath<GroupPath>,
 ) -> AppResult<Json<Conversation>> {
     if access == ConversationAccess::Invitee {
-        return Err(AppError::refused(
-            StatusCode::FORBIDDEN,
-            "invitation_pending",
-            "You are invited to this group but have not accepted yet: see GET /api/v1/invitations, then POST /api/v1/groups/{group}/accept.",
-        ));
+        return Err(invitation_pending());
     }
     Ok(Json(
         state
@@ -78,8 +74,12 @@ pub(super) async fn update(
     ApiJson(settings): ApiJson<GroupSettings>,
 ) -> AppResult<Json<GroupDetails>> {
     require_manager(&state, &auth, path.group_id).await?;
-    let version = version
-        .ok_or_else(|| AppError::validation("If-Match is required when updating a group"))?;
+    let version = version.ok_or_else(|| {
+        AppError::invalid(
+            "Changing a group needs an If-Match header with the version you read, so a change someone made since is not overwritten.",
+        )
+        .with_hint("Read the group (GET /api/v1/groups/{group}, dm groups show), then send If-Match: its version.")
+    })?;
     let group = state
         .store
         .update_group(&auth.actor, path.group_id, settings, version, &key)
@@ -242,6 +242,16 @@ async fn require_manager(state: &AppState, auth: &AuthContext, id: Uuid) -> AppR
     }
 }
 
+/// 403 for an invitee reaching into a group it has not joined yet: what it can do instead.
+pub(super) fn invitation_pending() -> AppError {
+    AppError::refused(
+        StatusCode::FORBIDDEN,
+        "invitation_pending",
+        "You are invited to this group but have not accepted yet, so its messages, drafts and members are not yours to read or write.",
+    )
+    .with_hint("GET /api/v1/invitations (dm groups invitations) shows the invitation; POST /api/v1/groups/{group}/accept (dm groups accept GROUP) joins, with the whole history.")
+}
+
 fn not_manager() -> AppError {
     AppError::forbidden(
         "not_group_owner",
@@ -258,8 +268,10 @@ async fn resolve(state: &AppState, ids: &[ActorId]) -> AppResult<Vec<Account>> {
     state.directory().resolve_all(ids).await
 }
 
-/// Resolves invitees and applies the reach rules: a Silicon is invited only by its
-/// circle or an account on its allow-list; a custodian's own Silicons join at once.
+/// Resolves invitees. Anyone may invite any account, Carbon or Silicon; each invitation
+/// waits for the invitee's own answer, so joining a group stays the invitee's choice. The
+/// exception is a custodian inviting its own Silicons, who join at once: putting them there
+/// is the custodian's call.
 async fn invitees(
     state: &AppState,
     auth: &AuthContext,
@@ -273,10 +285,6 @@ async fn invitees(
         if account.deleted {
             return Err(AppError::account_deleted(account.display_id()));
         }
-        state
-            .directory()
-            .require_may_reach(&auth.actor, &account)
-            .await?;
         let accepted = account.custodian.as_deref() == Some(auth.actor.id.as_str());
         invitees.push(Invitee {
             actor: account.actor(),

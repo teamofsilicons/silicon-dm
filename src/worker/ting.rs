@@ -1,8 +1,10 @@
 //! Durable DM-to-Ting handoff processing, independent of connected DM clients.
 //!
 //! With Ting configured, pending handoffs are sent with DM's App verification proof; with
-//! Ting not configured (the default until Ting accepts Silicon Accounts proofs), they are
-//! marked discarded with a reason, never deleted, and clients sync over `/api/v1/sync`.
+//! Ting not configured (an explicit polling-only deployment), they are
+//! marked discarded with a reason, and clients sync over `/api/v1/sync`. Maintenance keeps
+//! the outbox to its retention window: events and finished handoffs older than
+//! `SYNC_RETENTION` go; a handoff still waiting to be sent never does.
 
 use std::{future::pending, time::Duration};
 
@@ -15,7 +17,7 @@ use crate::{
     AppError, AppResult,
     application::state::AppState,
     infrastructure::{
-        postgres::{DISCARD_TING_NOT_CONFIGURED, TingDeliveryContext},
+        postgres::{DISCARD_TING_NOT_CONFIGURED, SYNC_RETENTION, TingDeliveryContext},
         ting::{SharedTingPublisher, TingFailure},
     },
 };
@@ -44,11 +46,12 @@ impl TingDeliveryWorker {
         }
     }
 
-    /// Runs until shutdown.
+    /// Runs until shutdown. A pass that fails on the database is logged and tried again on
+    /// the next tick; publisher failures leave handoffs retryable and never fail a DM message
+    /// or fabricate a receipt.
     ///
     /// # Errors
-    /// Returns durable-storage/configuration failures. Publisher failures leave
-    /// handoffs retryable and never fail a DM message or fabricate a receipt.
+    /// Returns a configuration failure (a setting that can never work).
     pub async fn run(&self, cancellation: CancellationToken) -> AppResult<()> {
         if self.publisher.is_none() {
             tracing::info!(
@@ -82,12 +85,11 @@ impl TingDeliveryWorker {
                     false
                 }
             };
-            if maintain {
+            let result = if maintain {
                 let Some(result) = cancellation.run_until_cancelled(self.maintain_once()).await
                 else {
                     return Ok(());
                 };
-                result?;
                 if listener.is_none() {
                     let Some(reconnected) = cancellation
                         .run_until_cancelled(self.open_delivery_listener())
@@ -97,12 +99,24 @@ impl TingDeliveryWorker {
                     };
                     listener = reconnected;
                 }
+                result
             } else {
                 let Some(result) = cancellation.run_until_cancelled(self.process_once()).await
                 else {
                     return Ok(());
                 };
-                result?;
+                result.map(|_| ())
+            };
+            match result {
+                Ok(()) => {}
+                // A setting that can never work stops the worker (and its process) at once.
+                Err(error @ AppError::Validation(_)) => return Err(error),
+                // A database hiccup (a statement timeout, a pool that is busy for a moment, a
+                // failover) must not stop delivery for good, nor take the API process that
+                // runs this worker down with it: the next tick tries again.
+                Err(error) => {
+                    tracing::warn!(code = error.code(), "Ting worker pass failed; retrying");
+                }
             }
         }
     }
@@ -131,10 +145,16 @@ impl TingDeliveryWorker {
             .execute(store.pool()).await?;
         let expired_http_leases = store.expire_http_presence_leases().await?;
         let compacted = store.compact_delivery_state().await?;
-        if expired_http_leases > 0 || compacted > 0 {
+        let before = OffsetDateTime::now_utc()
+            - time::Duration::try_from(SYNC_RETENTION).map_err(AppError::internal)?;
+        let pruned = store.prune_sync_history(before).await?;
+        if expired_http_leases > 0 || compacted > 0 || pruned.total() > 0 {
             tracing::info!(
                 expired_http_leases,
                 compacted_rows = compacted,
+                pruned_deliveries = pruned.deliveries,
+                pruned_conversation_events = pruned.conversation_events,
+                pruned_ting_handoffs = pruned.ting_handoffs,
                 "Ting worker maintenance completed"
             );
         }

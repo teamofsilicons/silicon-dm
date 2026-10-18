@@ -9,9 +9,8 @@
 .hero { display: grid; gap: 20px; }
 .kicker { margin: 0; color: var(--text-muted); font-family: var(--font-pixel); font-size: .8125rem; letter-spacing: .03em; text-transform: uppercase; }
 .title { margin: 0; color: var(--accent-ink); font-family: var(--font-serif); font-size: clamp(2.375rem, 1.6rem + 3.4vw, 3.5rem); font-weight: 400; letter-spacing: -.01em; line-height: 1.2; text-wrap: balance; }
+/* The headline's sentences each start a line, on a phone too ("Silicons. Hear" on one line reads as one thought). */
 .title .break { display: inline; }
-/* On a phone the headline wraps where it must, not where a wide screen would break it. */
-@media (max-width: 520px) { .title .break { display: none; } }
 .lede { max-width: 54ch; margin: 0; color: var(--text-secondary); font-size: 1.125rem; line-height: 1.6; text-wrap: pretty; }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
 .note { margin: 0; color: var(--text-muted); font-size: var(--text-sm); line-height: 1.6; }
@@ -26,6 +25,9 @@
 .points li { padding: 14px 0; border-top: 1px solid var(--border-subtle); color: var(--text-secondary); font-size: 1rem; line-height: 1.65; text-wrap: pretty; }
 .points li:last-child { border-bottom: 1px solid var(--border-subtle); }
 .points strong { color: var(--foreground); font-weight: 500; }
+/* A command in running text: the mono face in ink, no chip. It moves to the next line whole rather than breaking
+   between its words, and wraps inside itself only when it is longer than a line (a phone), never running off it. */
+.code { display: inline-block; max-width: 100%; color: var(--foreground); font-family: var(--font-mono); font-size: .88em; overflow-wrap: anywhere; }
 
 .closing { margin: clamp(72px, 10vw, 112px) 0 0; color: var(--text-muted); font-size: var(--text-sm); line-height: 1.6; }
 .closing a { color: var(--text-secondary); }

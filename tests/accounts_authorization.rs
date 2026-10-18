@@ -1,7 +1,6 @@
-//! Who may do what, now that there are no organizations: anyone signed in can reach a
-//! Carbon; a Silicon only hears from its circle (its custodian and the custodian's other
-//! Silicons) and accounts it allowed; a custodian reads its Silicons' conversations but never
-//! acts as them; groups have co-equal owners and invitations that must be accepted.
+//! Who may do what: anyone signed in can reach any account, Carbon or Silicon (a Silicon's
+//! allow-list no longer limits anything); a custodian reads its Silicons' conversations but
+//! never acts as them; groups have co-equal owners and invitations that must be accepted.
 #![allow(
     clippy::too_many_lines,
     reason = "each test is one scenario, read top to bottom"
@@ -59,37 +58,43 @@ async fn send(
 }
 
 #[tokio::test]
-async fn carbons_are_reachable_and_silicons_only_by_their_circle_or_allow_list()
--> Result<(), BoxError> {
+async fn anyone_signed_in_reaches_any_carbon_or_silicon() -> Result<(), BoxError> {
     let app = TestApp::start().await?;
     let p = people(&app).await;
     // Anyone signed in can message a Carbon.
     let sent = send(&app, &p.bob, "c:ada", "hello Ada").await?;
     expect_status(&sent, StatusCode::ACCEPTED)?;
     assert_eq!(sent.1["sender"]["id"], "c:bob");
-    // A Silicon outside the sender's circle refuses a first contact, and says who can allow it.
-    let refused = send(&app, &p.bob, "si:cos", "hello cos").await?;
-    assert_eq!(refused.0, StatusCode::FORBIDDEN, "{}", refused.1);
-    assert_eq!(refused.1["error"]["code"], "contact_not_allowed");
-    let message = refused.1["error"]["message"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("si:cos") && message.contains("c:ada"),
-        "{message}"
+    // And any Silicon, as a Carbon is reached: c:bob is not si:cos's custodian, not one of
+    // the custodian's Silicons and on no allow-list.
+    let first = send(&app, &p.bob, "si:cos", "hello cos").await?;
+    expect_status(&first, StatusCode::ACCEPTED)?;
+    assert_eq!(first.1["conversation_id"], "c:bob::si:cos");
+    // The custodian, the custodian's other Silicons and another Carbon's Silicon too.
+    for (from, text) in [
+        (&p.ada, "hi cos"),
+        (&p.scout, "hi sibling"),
+        (&p.eve, "hi stranger"),
+    ] {
+        expect_status(
+            &send(&app, from, "si:cos", text).await?,
+            StatusCode::ACCEPTED,
+        )?;
+    }
+    // The service says so, and which refusal code it no longer returns.
+    let contracts = app
+        .get("/api/v1/contracts", &app.accounts.token(&p.bob))
+        .await?;
+    let reach = &contracts.1["features"]["reach"];
+    assert_eq!(reach["anyone_may_start"], true, "{}", contracts.1);
+    assert_eq!(reach["retired_codes"], json!(["contact_not_allowed"]));
+    assert_eq!(reach["first_contacts_per_hour"], 100);
+    assert_eq!(
+        contracts.1["features"]["accounts"]["silicon_allow_list"],
+        "/api/v1/allow-list"
     );
-    // The custodian and the custodian's other Silicons are its circle.
-    expect_status(
-        &send(&app, &p.ada, "si:cos", "hi cos").await?,
-        StatusCode::ACCEPTED,
-    )?;
-    expect_status(
-        &send(&app, &p.scout, "si:cos", "hi sibling").await?,
-        StatusCode::ACCEPTED,
-    )?;
-    // Another Carbon's Silicon is not.
-    let refused = send(&app, &p.eve, "si:cos", "hi stranger").await?;
-    assert_eq!(refused.1["error"]["code"], "contact_not_allowed");
 
-    // si:cos allows c:bob; then c:bob can start the conversation.
+    // The allow-list routes answer as before, for older clients, but limit nothing.
     let allowed = app
         .post(
             "/api/v1/allow-list",
@@ -99,10 +104,13 @@ async fn carbons_are_reachable_and_silicons_only_by_their_circle_or_allow_list()
         .await?;
     expect_status(&allowed, StatusCode::OK)?;
     assert_eq!(allowed.1["items"][0]["account"]["id"], "c:bob");
-    expect_status(
-        &send(&app, &p.bob, "si:cos", "allowed now").await?,
-        StatusCode::ACCEPTED,
-    )?;
+    assert!(
+        allowed.1["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("no longer limits anything")),
+        "{}",
+        allowed.1
+    );
     // The custodian manages the list too; a Carbon has none; an outsider cannot touch it.
     let custodian_view = app
         .get("/api/v1/allow-list?for=si:cos", &app.accounts.token(&p.ada))
@@ -117,7 +125,6 @@ async fn carbons_are_reachable_and_silicons_only_by_their_circle_or_allow_list()
         .get("/api/v1/allow-list?for=si:cos", &app.accounts.token(&p.bob))
         .await?;
     assert_eq!(outsider.1["error"]["code"], "not_custodian");
-    // Removing c:bob does not cut the conversation that already exists.
     let removed = app
         .call(
             Method::DELETE,
@@ -129,10 +136,29 @@ async fn carbons_are_reachable_and_silicons_only_by_their_circle_or_allow_list()
         .await?;
     expect_status(&removed, StatusCode::OK)?;
     assert_eq!(removed.1["items"].as_array().map(Vec::len), Some(0));
+    // Taking c:bob off changes nothing: its conversation goes on, and it still starts new
+    // ones with si:cos (a conversation of several here) and invites it to groups.
     expect_status(
         &send(&app, &p.bob, "si:cos", "still talking").await?,
         StatusCode::ACCEPTED,
     )?;
+    let several = app
+        .post(
+            "/api/v1/conversations",
+            &app.accounts.token(&p.bob),
+            json!({"participant_ids": ["si:cos", "si:eve"]}),
+        )
+        .await?;
+    expect_status(&several, StatusCode::CREATED)?;
+    let invited = app
+        .post(
+            "/api/v1/groups",
+            &app.accounts.token(&p.bob),
+            json!({"name": "Bob and cos", "member_ids": ["si:cos"]}),
+        )
+        .await?;
+    expect_status(&invited, StatusCode::CREATED)?;
+    assert_eq!(invited.1["group"]["pending_invitations"][0]["id"], "si:cos");
 
     // Unknown ids fail with the id named; a deleted one says so.
     app.accounts.unknown_ids().await;
@@ -200,12 +226,6 @@ async fn custodians_read_their_silicons_conversations_but_never_act_as_them() ->
 {
     let app = TestApp::start().await?;
     let p = people(&app).await;
-    app.post(
-        "/api/v1/allow-list",
-        &app.accounts.token(&p.cos),
-        json!({"account_ids": ["c:bob"]}),
-    )
-    .await?;
     let from_bob = send(&app, &p.bob, "si:cos", "from bob").await?;
     expect_status(&from_bob, StatusCode::ACCEPTED)?;
     let from_cos = send(&app, &p.cos, "c:bob", "from cos").await?;
@@ -350,21 +370,14 @@ async fn groups_have_co_equal_owners_and_invitations_that_must_be_accepted() -> 
     let bob = app.accounts.token(&p.bob);
     let cos = app.accounts.token(&p.cos);
 
-    // Inviting a Silicon outside the inviter's circle is refused for the whole request.
-    let refused = app
-        .post(
-            "/api/v1/groups",
-            &ada,
-            json!({"name": "Design", "description": "reviews", "member_ids": ["c:bob", "si:eve"]}),
-        )
-        .await?;
-    assert_eq!(refused.1["error"]["code"], "contact_not_allowed");
-    // The creator owns it; its own Silicon joins at once; a Carbon is invited.
+    // The creator owns it; its own Silicon joins at once; everyone else is invited, a Silicon
+    // another Carbon looks after included: anyone may invite any Silicon, which answers for
+    // itself.
     let created = app
         .post(
             "/api/v1/groups",
             &ada,
-            json!({"name": "Design", "description": "reviews", "member_ids": ["c:bob", "si:cos"]}),
+            json!({"name": "Design", "description": "reviews", "member_ids": ["c:bob", "si:cos", "si:eve"]}),
         )
         .await?;
     expect_status(&created, StatusCode::CREATED)?;
@@ -379,7 +392,12 @@ async fn groups_have_co_equal_owners_and_invitations_that_must_be_accepted() -> 
         .map(|members| members.iter().filter_map(|m| m["id"].as_str()).collect())
         .unwrap_or_default();
     assert_eq!(members, vec!["c:ada", "si:cos"]);
-    assert_eq!(created.1["group"]["pending_invitations"][0]["id"], "c:bob");
+    let mut pending: Vec<&str> = created.1["group"]["pending_invitations"]
+        .as_array()
+        .map(|invitees| invitees.iter().filter_map(|i| i["id"].as_str()).collect())
+        .unwrap_or_default();
+    pending.sort_unstable();
+    assert_eq!(pending, vec!["c:bob", "si:eve"]);
     // Same name again: a suffix keeps ids unique.
     let again = app
         .post("/api/v1/groups", &ada, json!({"name": "Design"}))
@@ -516,6 +534,22 @@ async fn groups_have_co_equal_owners_and_invitations_that_must_be_accepted() -> 
         )
         .await?;
     assert_eq!(again.0, StatusCode::NOT_FOUND);
+    // si:eve was asked, not added: it sees its invitation, and its custodian may decline it
+    // for it.
+    let eve = app.accounts.token(&p.eve);
+    let asked = app.get("/api/v1/invitations", &eve).await?;
+    expect_status(&asked, StatusCode::OK)?;
+    assert_eq!(asked.1["items"][0]["conversation_id"], group);
+    let for_eve = app
+        .post(
+            &format!("/api/v1/groups/{group}/decline?for=si:eve"),
+            &bob,
+            json!(null),
+        )
+        .await?;
+    assert_eq!(for_eve.0, StatusCode::NO_CONTENT, "{}", for_eve.1);
+    let answered = app.get("/api/v1/invitations", &eve).await?;
+    assert_eq!(answered.1["items"], json!([]), "{}", answered.1);
     app.close().await
 }
 
@@ -532,8 +566,7 @@ async fn a_custodian_manages_the_groups_its_silicon_owns() -> Result<(), BoxErro
         .await?;
     expect_status(&created, StatusCode::CREATED)?;
     let group = created.1["id"].as_str().unwrap_or_default().to_owned();
-    // si:scout shares si:cos's custodian, so it is in the circle; the custodian is not
-    // itself an owner but manages the group for its Silicon.
+    // The custodian is not itself an owner but manages the group for its Silicon.
     let renamed = app
         .call(
             Method::PATCH,

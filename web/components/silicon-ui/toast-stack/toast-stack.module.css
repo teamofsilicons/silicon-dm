@@ -1,5 +1,5 @@
 /* The region only holds the list; it never blocks clicks outside the toasts themselves. */
-.viewport { position: fixed; z-index: 60; bottom: var(--space-section); width: min(22.5rem, calc(100% - var(--space-block))); pointer-events: none; }
+.viewport { position: fixed; z-index: var(--layer-toast); bottom: var(--space-section); width: min(22.5rem, calc(100% - var(--space-block))); pointer-events: none; }
 .bottom-right { right: var(--space-section); }
 .bottom-left { left: var(--space-section); }
 .bottom-center { right: 0; left: 0; margin-inline: auto; }
@@ -32,14 +32,14 @@
 .copy { position: relative; min-width: 0; flex: 1; font-size: var(--text-sm); letter-spacing: var(--tracking-body); line-height: 20px; }
 .title { position: relative; display: block; font-weight: 500; }
 .line { display: block; }
-.description { display: block; margin-top: 2px; color: var(--text-secondary); }
+.description { display: block; margin-top: var(--space-hair); color: var(--text-secondary); }
 
 /* Clips only while its width folds, so the focus ring stays whole at rest. */
-.actionSlot { display: flex; flex: none; justify-content: flex-end; margin-top: -4px; }
+.actionSlot { display: flex; flex: none; justify-content: flex-end; margin-top: calc(var(--space-tight) * -1); }
 .actionSlot[data-moving="true"] { overflow: hidden; }
 .action, .close { flex: none; border: 1px solid transparent; font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: scale var(--duration-spring) var(--ease-spring), background-color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard); }
 .action { height: 28px; padding: 0 var(--space-group); border-color: var(--border); border-radius: var(--radius-full); corner-shape: round; background: var(--surface); color: var(--foreground); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; }
-.close { display: grid; width: 28px; height: 28px; margin: -4px -2px 0 0; place-items: center; border-radius: var(--radius-full); corner-shape: round; background: transparent; color: var(--text-muted); }
+.close { display: grid; width: 28px; height: 28px; margin: calc(var(--space-tight) * -1) calc(var(--space-hair) * -1) 0 0; place-items: center; border-radius: var(--radius-full); corner-shape: round; background: transparent; color: var(--text-muted); }
 @media (hover: hover) and (pointer: fine) {
   .action:hover { border-color: var(--border-strong); background: var(--surface-muted); }
   .close:hover { background: var(--surface-muted); color: var(--foreground); }
@@ -49,7 +49,7 @@
 /* A narrow toast keeps its copy wide: the action drops under the copy instead of squeezing it. */
 @container (max-width: 21rem) {
   .content { flex-wrap: wrap; row-gap: var(--space-related); }
-  .actionSlot { order: 1; flex-basis: 100%; justify-content: flex-start; margin-top: 0; padding-left: calc(18px + var(--space-group)); }
+  .actionSlot { order: 1; flex-basis: 100%; justify-content: flex-start; margin-top: 0; padding-left: calc(var(--space-comfort) + var(--space-group)); }
 }
 .srOnly { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 

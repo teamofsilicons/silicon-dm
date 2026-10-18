@@ -1,8 +1,8 @@
-/** The public files built from lib/app.config.ts: robots.txt, the sitemap and the llms.txt stub. */
+/** The public files built from lib/app.config.ts: robots.txt, the sitemap, llms.txt and llms-full.txt. */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { llmsTxt, robotsTxt, sitemapXml } from "../lib/agent/files";
+import { llmsFullTxt, llmsTxt, robotsTxt, sitemapXml } from "../lib/agent/files";
 import { appConfig } from "../lib/app.config";
 import { LOGO_MARK } from "../lib/app-logo";
 import { markSvg } from "../lib/brand-svg";
@@ -28,8 +28,23 @@ test("llms.txt says what the app is, how a Silicon installs it and signs in, and
   const text = llmsTxt(ORIGIN);
   assert.ok(text.startsWith(`# ${appConfig.name}\n\n> ${appConfig.tagline}\n`));
   assert.ok(text.includes(`\`silicon-apps install ${appConfig.appId}\``));
+  // The two moves of docs/start/silicon-quickstart.md: once, Silicon Accounts with the si:id and STK; then a token for DM.
+  assert.ok(text.includes("`printf '%s' \"$STK\" | silicon-accounts login --silicon si:you --stk-stdin`"));
   assert.ok(text.includes(`\`silicon-accounts login --app ${appConfig.appId} -q | ${appConfig.cli!.command} login --slt-stdin\``));
   assert.ok(text.includes(`- [Docs](${appConfig.links.docs})`));
+  for (const word of ["AI agent", "human", "user account", "organization", " org ", "Honeycomb", "IAM"]) assert.ok(!text.includes(word), `never "${word}"`);
+  // Since DM 0.17.1 anyone signed in may start a conversation with any Silicon: nothing says a Silicon must allow you.
+  assert.ok(text.includes("Anyone signed in to DM can start a conversation with any Carbon or Silicon"));
+  for (const word of ["allow-list", "dm allow", "contact_not_allowed", "who may reach", "Silicons' reach"]) assert.ok(!llmsFullTxt(ORIGIN).includes(word), `no longer "${word}"`);
+});
+
+test("llms-full.txt adds the keyboard (every shortcut), the five voices and the API a Silicon builds on", () => {
+  const text = llmsFullTxt(ORIGIN);
+  assert.ok(text.startsWith(llmsTxt(ORIGIN).trimEnd()));
+  for (const line of ["| `⌘K` | Command palette | anywhere |", "| `N` | New conversation | anywhere |", "| `G then S` | Settings | anywhere |", "| `mark` | Mark |", "GET /api/v1/sync?cursor=…&wait=25"]) {
+    assert.ok(text.includes(line), line);
+  }
+  assert.ok(sitemapXml(ORIGIN, "2026-10-17").includes(`<loc>${ORIGIN}/llms-full.txt</loc>`));
   for (const word of ["AI agent", "human", "user account", "organization", " org ", "Honeycomb", "IAM"]) assert.ok(!text.includes(word), `never "${word}"`);
 });
 

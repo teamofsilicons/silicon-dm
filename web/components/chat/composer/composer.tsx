@@ -1,0 +1,747 @@
+"use client";
+
+/**
+ * The composer (spec §6.5): a field that grows from one line to ten with "Message <name>" in it, Enter to send and
+ * Shift+Enter for a new line (or ⌘Enter, Settings → Sending; phones use the send button and Enter for new lines),
+ * the reply and edit bars above it, ↑ in an empty field to edit your last message, ⌘↑ to select it, Esc to cancel a
+ * reply or an edit and then to leave the field. Words are a draft from the first keystroke (lib/chat/draft-store.ts)
+ * and sending goes through the outbox (lib/chat/outbox-store.ts): the message shows at once as Waiting and nothing
+ * typed is ever lost. While typing, the others see "typing…".
+ *
+ * What goes with the words sits in the tray above the field (./tray.ts, kept per conversation by ./tray-store.ts):
+ * files of any size from the + menu (Upload a file, ⌘⇧U), /upload, a paste or a drop (./drop-overlay.tsx; a dropped
+ * folder brings its files, and asks first when they are many) upload into the Carbon's Silicon Briefcase with their
+ * progress; links (Add a link, or a link or picture dragged from a web page); a GIF (./gif-picker.tsx); the microphone's
+ * voice note (the voice area, through ./voice-bridge.ts). Enter while a file still uploads sends as soon as it is done ("Sends when … is
+ * uploaded", with Cancel beside it, and Esc), even if the Carbon opens another conversation meanwhile: the wish is the tray store's, and
+ * this composer leaves its words behind when it goes. A failed upload holds the message until it is retried or
+ * removed, so nothing is left out silently. Slash commands at the start of the field (./slash.ts): /gif, /voice,
+ * /dictate, /upload, /link.
+ *
+ * A drop's files chosen one by one go in at once; only a folder's many files wait for a yes (./drop-plan.ts). What the
+ * composer says reaches screen readers through two live regions that are always on the page (the note row, and an
+ * unseen one for uploads finishing and the GIF picker's states). The empty field's words fit its width
+ * (./placeholder.ts), and its name for screen readers is always whole.
+ */
+import { forwardRef, useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
+import { ArrowUp, Check, Clock, CornerUpLeft, Pencil, Plus, X } from "lucide-react";
+import { accountName, conversationHref, sameAccount } from "@/lib/chat/address";
+import { editMessage } from "@/lib/chat/api";
+import { replaceMessage, upsertMessage, type MessagePages } from "@/lib/chat/cache";
+import { canEditHere, editContent, replyPreviewOf } from "@/lib/chat/compose";
+import { localDraftText, useDraft } from "@/lib/chat/draft-store";
+import type { DraftHint } from "@/lib/chat/drafts";
+import { chatKeys } from "@/lib/chat/keys";
+import { plainPreview } from "@/lib/chat/markdown";
+import { messageGist } from "@/lib/chat/preview";
+import { queueSend } from "@/lib/chat/outbox-store";
+import { reportActivity } from "@/lib/chat/presence";
+import { applyMessage } from "@/lib/chat/sync";
+import type { AccountRef, Gif, Message } from "@/lib/chat/types";
+import { ApiError } from "@/lib/errors";
+import { notify, notifyError } from "@/lib/notify";
+import { provideShortcuts, useShortcut, useShortcutKeys } from "@/lib/shortcuts/react";
+import { BRIEFCASE_DAILY_BYTES } from "@/lib/upload/client";
+import { readDrop, type DropSnapshot } from "@/lib/upload/drop";
+import { bytesWords } from "@/lib/upload/progress";
+import { useVoiceAvailability } from "@/lib/voice";
+import { IconAction } from "../common/icon-action";
+import { plainFailure } from "../thread/thread-model";
+import { ComposerVoice } from "../voice/voice-parts";
+import { AttachMenu } from "./attach-menu";
+import { DropOverlay } from "./drop-overlay";
+import { planDrop, type DropQuestion } from "./drop-plan";
+import { GifAnchor, GifPicker } from "./gif-picker";
+import { LinkBar } from "./link-bar";
+import { filesToAttach } from "./paste";
+import { fitPlaceholder } from "./placeholder";
+import { blockedWords, itemName, waitingWords } from "./send-latch";
+import { runSlash, slashOptions, type SlashContext } from "./slash";
+import { optionId, SlashMenu } from "./slash-menu";
+import { TRAY_MAX_ITEMS, trayFailed, trayPayload, type TrayItem } from "./tray";
+import { useBrowserOnline, useTray, type TraySender } from "./tray-store";
+import { TrayView } from "./tray-view";
+import { uploadsOffReason, useUploadsConfig } from "./uploads-config";
+import { createVoiceBridge, type ComposerVoiceBridge, type ComposerVoiceControls, type VoiceBridgeHost } from "./voice-bridge";
+import styles from "./composer.module.css";
+
+export interface ComposerHandle {
+  focus: () => void;
+  reply: (message: Message) => void;
+  edit: (message: Message) => void;
+}
+
+export interface ComposerProps {
+  address: string;
+  /** Who the message goes to, for "Message <name>". */
+  name: string;
+  /** The loaded messages (oldest first): your last one for ↑, the one a draft replies to. */
+  messages: Message[];
+  me: AccountRef;
+  /** Why nothing can be sent here (a custodian's view, a conversation kept for its history), or null. */
+  disabledReason: string | null;
+  /** What the conversation list says about this conversation's draft on the service (lib/chat/drafts.ts draftHint). */
+  draftHint?: DraftHint;
+  /** A message went into the outbox (the thread scrolls to it). */
+  onSent: () => void;
+  /** ⌘↑: select the last message. */
+  onSelectLast: () => boolean;
+  /** Esc with nothing to cancel: the keyboard leaves the field for the messages. */
+  onLeave: () => void;
+}
+
+/** The two sides of the field where the composer and voice areas put their buttons. */
+export function ComposerActions({ side, children }: { side: "start" | "end"; children: ReactNode }) {
+  return <div className={styles.actions} data-side={side}>{children}</div>;
+}
+
+const LINE_PX = 22;
+const MAX_LINES = 10;
+const NOTICE_MS = 7000;
+/** Uploads finishing within this long of each other are announced in one sentence ("3 files are uploaded."). */
+const ANNOUNCE_AFTER_MS = 900;
+
+/**
+ * Words for a screen reader, each saying one of its own: a live region reads a change inside it, never a region that
+ * appears already holding its words, so both regions the composer speaks through are always on the page and every
+ * saying is a new element in them (the same words twice are said twice).
+ */
+interface Saying {
+  id: number;
+  words: string;
+}
+
+/** The room the field has for its placeholder (inside its padding), and how its font draws a text. */
+function placeholderRoom(node: HTMLTextAreaElement): { room: number; measure: (text: string) => number } | null {
+  const context = document.createElement("canvas").getContext("2d");
+  if (!context) return null;
+  const style = getComputedStyle(node);
+  context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  if ("letterSpacing" in context && style.letterSpacing !== "normal") (context as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = style.letterSpacing;
+  // A pixel to spare: the browser's own layout rounds differently from the canvas.
+  const room = node.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 1;
+  return { room, measure: text => context.measureText(text).width };
+}
+
+/** What the composer says when files larger than Briefcase's usual day are added: before they are prepared, not after. */
+function dailyWords(files: File[]): string {
+  const limit = `${bytesWords(BRIEFCASE_DAILY_BYTES)}, the most Silicon Briefcase usually takes into one Briefcase in a day`;
+  return files.length === 1
+    ? `${files[0]!.name || "This file"} is larger than ${limit}, so it may be refused once it is prepared.`
+    : `${files.length} files are larger than ${limit}, so they may be refused once they are prepared.`;
+}
+
+/** What the + menu, a paste and a drop say during an edit: attachments go with a new message. */
+const ATTACH_AFTER_EDIT = "Finish or cancel the edit first: attachments go with a new message.";
+
+/** What a screen reader hears when uploads finish: one sentence for a burst of files, each failure with its reason. */
+function uploadedWords(uploaded: TrayItem[]): string {
+  if (!uploaded.length) return "";
+  if (uploaded.length === 1) return `${itemName(uploaded[0]!)} is uploaded.`;
+  return `${uploaded.length} files are uploaded.`;
+}
+
+/**
+ * Puts text at the caret (replacing the selection) the way typing does: execCommand keeps the field's own undo history
+ * (⌘Z takes dictated words out again) and fires the input event the field's onChange reads. Where that is not there,
+ * `fallback` sets the new value. A space goes between the words and what touches them.
+ */
+function insertIntoField(node: HTMLTextAreaElement, words: string, fallback: (value: string) => void) {
+  const start = node.selectionStart ?? node.value.length;
+  const end = node.selectionEnd ?? start;
+  const before = node.value.slice(0, start);
+  const after = node.value.slice(end);
+  const lead = before && !/\s$/.test(before) && !/^[\s.,!?;:)]/.test(words) ? " " : "";
+  const trail = after && !/^\s/.test(after) && !/\s$/.test(words) ? " " : "";
+  const insert = `${lead}${words}${trail}`;
+  node.focus({ preventScroll: true });
+  node.setSelectionRange(start, end);
+  let done = false;
+  try {
+    done = typeof document.execCommand === "function" && document.execCommand("insertText", false, insert);
+  } catch {
+    done = false;
+  }
+  if (done && node.value.slice(start, start + insert.length) === insert) return;
+  fallback(`${before}${insert}${after}`);
+  requestAnimationFrame(() => node.setSelectionRange(start + insert.length, start + insert.length));
+}
+
+export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({ address, name, messages, me, disabledReason, draftHint = "unknown", onSent, onSelectLast, onLeave }, ref) {
+  const queryClient = useQueryClient();
+  const router = useRouter();
+  const field = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const account = me.uuid ?? me.id;
+  const enabled = !disabledReason;
+  const draft = useDraft(account, address, enabled, draftHint);
+  const tray = useTray(account, address, enabled);
+  const uploads = useUploadsConfig();
+  const uploadsOff = uploadsOffReason(uploads);
+  const maxBytes = uploads?.max_bytes ?? 0;
+  const capped = uploads?.capped === true;
+  const voice = useVoiceAvailability();
+  const online = useBrowserOnline();
+  const [editing, setEditing] = useState<Message | null>(null);
+  const [editText, setEditText] = useState("");
+  const [link, setLink] = useState<{ prefill: string } | null>(null);
+  const [gif, setGif] = useState<{ query: string } | null>(null);
+  const [notice, setNotice] = useState<Saying | null>(null);
+  /** A drop of folders with many files waits for a yes (a folder's contents were never seen); `after`: said once answered. */
+  const [question, setQuestion] = useState<(DropQuestion & { after: string[] }) | null>(null);
+  const questionYes = useRef<HTMLButtonElement>(null);
+  /** Said to screen readers only: uploads that finished or failed, and the GIF picker's states. */
+  const [announcement, setAnnouncement] = useState<Saying | null>(null);
+  const sayings = useRef(0);
+  /** The empty field's words, fitted to its width (null until measured: the whole words, as the server drew them). */
+  const [fitted, setFitted] = useState<string | null>(null);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  const voiceControls = useRef<ComposerVoiceControls | null>(null);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const statuses = useRef(new Map<string, TrayItem["status"]>());
+  const finished = useRef<{ items: TrayItem[]; timer: ReturnType<typeof setTimeout> | null }>({ items: [], timer: null });
+  const listId = useId();
+  const sendKeys = useShortcutKeys("composer.send");
+
+  const text = editing ? editText : draft.text;
+  const items = tray.items;
+  const pending = tray.pending;
+  const replyTarget = useMemo(() => (draft.replyTo ? messages.find(message => message["message-id"] === draft.replyTo) ?? null : null), [draft.replyTo, messages]);
+  const slash = enabled && !editing && !slashDismissed ? slashOptions(text) : [];
+  const slashActive = Math.min(slashIndex, Math.max(0, slash.length - 1));
+  const failed = trayFailed(items);
+  const carries = items.some(item => item.status !== "failed");
+  // Something to send (words, or what the tray carries, ready or still on its way), and nothing that failed.
+  const ready = enabled && !failed && (text.trim().length > 0 || (!editing && carries));
+
+  // The field grows with its text, from one line to ten, then scrolls.
+  useLayoutEffect(() => {
+    const node = field.current;
+    if (!node) return;
+    // Empty, it is one line whatever the placeholder says (a long name would otherwise wrap it to two).
+    if (!node.value) {
+      node.style.height = `${LINE_PX + 20}px`;
+      return;
+    }
+    node.style.height = "auto";
+    node.style.height = `${Math.min(node.scrollHeight, LINE_PX * MAX_LINES + 20)}px`;
+  }, [text, disabledReason]);
+
+  const focus = useCallback(() => field.current?.focus({ preventScroll: true }), []);
+
+  const say = useCallback((words: string) => {
+    sayings.current += 1;
+    setNotice({ id: sayings.current, words });
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setNotice(null), NOTICE_MS);
+  }, []);
+  const announce = useCallback((words: string) => {
+    sayings.current += 1;
+    setAnnouncement(words ? { id: sayings.current, words } : null);
+  }, []);
+  useEffect(() => () => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    if (finished.current.timer) clearTimeout(finished.current.timer);
+  }, []);
+
+  const startEdit = useCallback((message: Message) => {
+    if (!canEditHere(message)) return;
+    setEditing(message);
+    setEditText(message.message ?? "");
+    requestAnimationFrame(() => {
+      const node = field.current;
+      if (!node) return;
+      node.focus({ preventScroll: true });
+      node.setSelectionRange(node.value.length, node.value.length);
+    });
+  }, []);
+
+  const startReply = useCallback((message: Message) => {
+    setEditing(null);
+    draft.setReplyTo(message["message-id"]);
+    requestAnimationFrame(() => field.current?.focus({ preventScroll: true }));
+  }, [draft]);
+
+  useImperativeHandle(ref, () => ({ focus, reply: startReply, edit: startEdit }), [focus, startReply, startEdit]);
+
+  const cancelEdit = () => {
+    setEditing(null);
+    setEditText("");
+  };
+
+  /** Sends the words and the tray's ready items now (the latch decided it may go). */
+  const sendNow = () => {
+    const words = draft.text.trim();
+    const replyCode = draft.replyTo;
+    const list = tray.current();
+    queueSend(address, { message: words, ...(replyCode ? { reply: { "message-id": replyCode } } : {}), ...trayPayload(list) }, replyTarget ? replyPreviewOf(replyTarget) : null);
+    draft.clear();
+    tray.clear();
+    setLink(null);
+    setNotice(null);
+    reportActivity(null);
+    onSent();
+  };
+
+  /** Enter, the send button and the microphone's sendWhenReady: now, as soon as the uploads are done, or not (and why). */
+  const requestSend = () => {
+    if (!enabled) return;
+    const decision = tray.request(draft.text);
+    if (decision === "send") sendNow();
+    else if (decision === "blocked") say(blockedWords(tray.current(), tray.canRetry));
+  };
+
+  const saveEdit = async () => {
+    const original = editing;
+    if (!original) return;
+    const words = editText.trim();
+    if (words === (original.message ?? "").trim()) {
+      cancelEdit();
+      return;
+    }
+    if (!words && !original.attachments.length && !original.voice && !original.gif) {
+      notifyError(new ApiError({ status: 0, code: "empty_edit", message: "A message needs words or an attachment.", hint: "Write something, or delete the message instead (select it and press Delete)." }), "Nothing to save");
+      return;
+    }
+    cancelEdit();
+    const key = chatKeys.messages(address);
+    // The bubble shows the new words at once; the service's answer (or the old words, if it refuses) replaces them.
+    queryClient.setQueryData<MessagePages>(key, data => upsertMessage(data, { ...original, message: words, updated_at: new Date().toISOString() }));
+    try {
+      const saved = await editMessage(address, original["message-id"], editContent(original, words), crypto.randomUUID());
+      applyMessage(queryClient, me, saved);
+    } catch (failure) {
+      queryClient.setQueryData<MessagePages>(key, data => replaceMessage(data, original));
+      notifyError(plainFailure(failure), "Your edit was not saved");
+    }
+  };
+
+  const openFilePicker = () => {
+    if (!enabled) return;
+    if (uploadsOff) {
+      say(uploadsOff);
+      return;
+    }
+    fileInput.current?.click();
+  };
+
+  /**
+   * Adds files to the tray and uploads them. What it has to say (too many for one message; files larger than
+   * Briefcase's usual day, said before they are prepared rather than after) goes into `later` when the caller says it
+   * with its own words, else it is said at once.
+   */
+  const addFiles = (list: File[], later?: string[]) => {
+    if (!enabled || !list.length) return;
+    const words: string[] = [];
+    if (uploadsOff) words.push(uploadsOff);
+    else {
+      const taken = tray.addFiles(list, { maxBytes, capped });
+      if (taken < list.length) words.push(`${list.length - taken === 1 ? "One file was" : `${list.length - taken} files were`} left out: a message carries up to ${TRAY_MAX_ITEMS} attachments. Send these first.`);
+      // Files the tray refuses for their size say so there; these it takes, and Briefcase may refuse after their preparation.
+      const huge = list.slice(0, taken).filter(file => file.size > BRIEFCASE_DAILY_BYTES && (!maxBytes || file.size <= maxBytes));
+      if (huge.length) words.push(dailyWords(huge));
+      focus();
+    }
+    if (later) later.push(...words);
+    else if (words.length) say(words.join(" "));
+  };
+
+  const addLink = (url: string) => {
+    tray.dispatch({ type: "add", item: { id: `link-${crypto.randomUUID()}`, kind: "link", url, status: "ready" } });
+    setLink(null);
+    focus();
+  };
+
+  /**
+   * A drop: files go to the tray, a folder's files too (more than a few ask first), a link or a web page's picture is
+   * attached as a link; anything that cannot go is said, so a drop is never silently nothing.
+   */
+  const takeDrop = async (snapshot: DropSnapshot) => {
+    if (!enabled) return;
+    const dropped = await readDrop(snapshot);
+    // Attachments go with a new message, so nothing joins a tray hidden behind an edit (the + menu says the same).
+    if (editing && (dropped.files.length || dropped.links.length || dropped.folders.length)) {
+      say(ATTACH_AFTER_EDIT);
+      return;
+    }
+    // Links and the files dropped one by one go in at once; a folder's many files wait for a yes (./drop-plan.ts).
+    const plan = planDrop(dropped, { room: Math.max(0, TRAY_MAX_ITEMS - tray.current().length), uploadsOff });
+    for (const url of plan.links) addLink(url);
+    const later = [...plan.sayings];
+    addFiles(plan.add, later);
+    // Asked: what else the drop has to say waits for the answer, so the question never hides it.
+    if (plan.question) setQuestion({ ...plan.question, after: later });
+    else if (later.length) say(later.join(" "));
+  };
+
+  // The question takes the keyboard when it is asked (Enter answers yes, Esc no).
+  useEffect(() => {
+    if (question) questionYes.current?.focus();
+  }, [question]);
+
+  const answerQuestion = (yes: boolean) => {
+    const asked = question;
+    setQuestion(null);
+    const later = [...(asked?.after ?? [])];
+    if (yes && asked) addFiles(asked.files, later);
+    else focus();
+    if (later.length) say(later.join(" "));
+  };
+
+  const pickGif = (chosen: Gif) => {
+    tray.dispatch({ type: "add", item: { id: `gif-${crypto.randomUUID()}`, kind: "gif", gif: chosen, status: "ready" } });
+    setGif(null);
+  };
+
+  const runSlashAt = (index: number) => {
+    const option = slash[index];
+    if (!option) return;
+    draft.setText("");
+    setSlashIndex(0);
+    const context: SlashContext = {
+      voice: voiceControls.current,
+      voiceUnavailable: voice.reason || "Voice messages and dictation are not available here.",
+      openGifPicker: query => setGif({ query }),
+      openFilePicker,
+      uploadsOff,
+      addLink,
+      openLinkBar: prefill => setLink({ prefill }),
+      say,
+    };
+    runSlash(option, context);
+  };
+
+  /* The tray changes outside renders (an upload finishing, the microphone's voice note): what changed is announced.
+     Uploads finishing together are one sentence; a failure is said at once, with its reason. */
+  const onTrayChange = () => {
+    const list = tray.current();
+    const failures: string[] = [];
+    const seen = new Set<string>();
+    for (const item of list) {
+      seen.add(item.id);
+      const before = statuses.current.get(item.id);
+      if (before === "uploading" && item.status === "ready") finished.current.items.push(item);
+      if (before === "uploading" && item.status === "failed") failures.push(`${itemName(item)} did not upload: ${"error" in item ? item.error ?? "" : ""}`);
+      statuses.current.set(item.id, item.status);
+    }
+    for (const id of [...statuses.current.keys()]) if (!seen.has(id)) statuses.current.delete(id);
+    if (failures.length) announce(failures.join(" "));
+    if (finished.current.items.length && !finished.current.timer) {
+      finished.current.timer = setTimeout(() => {
+        const done = finished.current.items;
+        finished.current = { items: [], timer: null };
+        announce(uploadedWords(done));
+      }, ANNOUNCE_AFTER_MS);
+    }
+  };
+  const insertText = (words: string) => {
+    const node = field.current;
+    if (!node || !words) return;
+    insertIntoField(node, words, value => (editing ? setEditText(value) : draft.setText(value)));
+  };
+  const latest = useRef({ onTrayChange, requestSend, sendNow, say, insertText, focus, dispatchTray: tray.dispatch, words: () => draft.text, replyCode: draft.replyTo, replyTarget });
+  useLayoutEffect(() => {
+    latest.current = { onTrayChange, requestSend, sendNow, say, insertText, focus, dispatchTray: tray.dispatch, words: () => draft.text, replyCode: draft.replyTo, replyTarget };
+  });
+  const subscribeTray = tray.subscribe;
+  useEffect(() => subscribeTray(() => latest.current.onTrayChange()), [subscribeTray]);
+
+  /* Who sends a waiting message: this composer while it is on screen; when it goes (another conversation opened), what
+     it leaves behind sends the draft's words as they are then, or says why it could not, with a way back. */
+  const { setSender, current: currentTray, clear: clearTray, canRetry } = tray;
+  const clearDraft = draft.clear;
+  useEffect(() => {
+    if (!enabled) return;
+    const live: TraySender = {
+      words: () => latest.current.words(),
+      send: () => latest.current.sendNow(),
+      blocked: list => latest.current.say(blockedWords(list, canRetry)),
+    };
+    setSender(live);
+    return () => {
+      const { replyCode, replyTarget: target } = latest.current;
+      const preview = target ? replyPreviewOf(target) : null;
+      setSender({
+        words: () => localDraftText(account, address),
+        send: () => {
+          queueSend(address, { message: localDraftText(account, address).trim(), ...(replyCode ? { reply: { "message-id": replyCode } } : {}), ...trayPayload(currentTray()) }, preview);
+          clearDraft();
+          clearTray();
+        },
+        blocked: list => {
+          const id = notify.warning(`Not sent to ${name}`, `${blockedWords(list, canRetry)} It waits in that conversation.`);
+          notify.update(id, { action: { label: "Open", onClick: () => router.push(conversationHref(address)) } });
+        },
+      });
+    };
+  }, [enabled, setSender, currentTray, clearTray, canRetry, clearDraft, account, address, name, router]);
+
+  // The microphone drives recording and dictation through this (the voice area builds against voice-bridge.ts). It
+  // stays the same object while the conversation does; every call reaches the composer as it is now.
+  const bridgeHost = useMemo<VoiceBridgeHost>(() => ({
+    dispatchTray: action => latest.current.dispatchTray(action),
+    requestSend: () => latest.current.requestSend(),
+    insertText: words => latest.current.insertText(words),
+    focusField: () => latest.current.focus(),
+    registerControls: controls => {
+      voiceControls.current = controls;
+    },
+  }), []);
+  // While an edit is open the microphone dictates into it; a voice message would go as a new message, so it waits.
+  const notesOff = editing ? "Finish or cancel the edit first: a voice message goes as a new message. Dictation types into your edit." : null;
+  // eslint-disable-next-line react-hooks/refs -- createVoiceBridge only wraps the host's functions; none of them runs (or reads a ref) until the microphone calls it.
+  const bridge = useMemo<ComposerVoiceBridge>(() => createVoiceBridge(address, disabledReason, bridgeHost, notesOff), [address, disabledReason, bridgeHost, notesOff]);
+
+  useEffect(() => {
+    provideShortcuts(["composer.upload"]);
+  }, []);
+
+  // The empty field's words fit its width (./placeholder.ts): measured before the first paint, and again when the
+  // field changes size or the font arrives.
+  useLayoutEffect(() => {
+    const node = field.current;
+    if (!node || editing || disabledReason) return;
+    let live = true;
+    const fit = () => {
+      if (!live) return;
+      const metrics = placeholderRoom(node);
+      setFitted(metrics ? fitPlaceholder("Message ", name, metrics.room, metrics.measure) : null);
+    };
+    fit();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
+    observer?.observe(node);
+    void document.fonts?.ready.then(fit);
+    return () => {
+      live = false;
+      observer?.disconnect();
+    };
+  }, [name, editing, disabledReason]);
+
+  /* Keys (lib/shortcuts): these run only while the field has the keyboard. */
+  useShortcut("composer.send", event => {
+    // On a touch screen Enter is a new line: the send button sends.
+    if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && window.matchMedia("(pointer: coarse)").matches) return false;
+    if (editing) void saveEdit();
+    else requestSend();
+  }, enabled);
+  useShortcut("composer.newline", () => false, enabled);
+  useShortcut("composer.editLast", () => {
+    if (editing || text || slash.length) return false;
+    const last = [...messages].reverse().find(message => sameAccount(message.sender, me) && canEditHere(message));
+    if (!last) return false;
+    startEdit(last);
+  }, enabled);
+  useShortcut("composer.selectLast", () => (onSelectLast() ? undefined : false));
+  /** Takes back a waiting send: the words and the tray stay, and go when the Carbon sends again. */
+  const cancelWaiting = () => {
+    if (tray.cancelPending()) say("Not sent: it waits here until you send it.");
+  };
+  useShortcut("composer.cancel", () => {
+    if (tray.pending) cancelWaiting();
+    else if (editing) cancelEdit();
+    else if (draft.replyTo) draft.setReplyTo(null);
+    else {
+      field.current?.blur();
+      onLeave();
+    }
+  });
+  useShortcut("composer.upload", () => {
+    if (editing) say(ATTACH_AFTER_EDIT);
+    else openFilePicker();
+  }, enabled);
+
+  if (disabledReason) {
+    return (
+      <div className={styles.composer} data-composer="" data-disabled="">
+        <p className={styles.disabled} role="note">{disabledReason}</p>
+        <DropOverlay blocked={disabledReason} maxBytes={maxBytes} onDrop={() => undefined} />
+      </div>
+    );
+  }
+
+  const label = editing ? "Edit your message" : `Message ${name}`;
+  const placeholder = editing ? label : fitted ?? label;
+  // What shows under the field: a question about a drop first, else a waiting send, else the last saying.
+  const shownPending = !question && pending;
+  const shownNotice = !question && !pending ? notice : null;
+  const offlineDraft = draft.save === "offline";
+  return (
+    <div className={styles.composer} data-composer="">
+      {editing ? (
+        <div className={styles.bar} data-kind="edit">
+          <Pencil size={15} strokeWidth={1.75} aria-hidden="true" />
+          <span className={styles.barText}><span className={styles.barTitle}>Editing your message</span><span className={styles.barLine}>{plainPreview(editing.message ?? "", 120)}</span></span>
+          <button type="button" className={styles.barClose} data-sq="surface" onClick={() => { cancelEdit(); focus(); }} aria-label="Cancel editing"><X size={16} strokeWidth={1.9} aria-hidden="true" /></button>
+        </div>
+      ) : draft.replyTo ? (
+        <div className={styles.bar} data-kind="reply">
+          <CornerUpLeft size={15} strokeWidth={1.75} aria-hidden="true" />
+          <span className={styles.barText}>
+            <span className={styles.barTitle}>Replying to {replyTarget ? (sameAccount(replyTarget.sender, me) ? "yourself" : accountName(replyTarget.sender)) : `message ${draft.replyTo}`}</span>
+            {/* What the message is about, as its row and its quote say it: a spoken message's caption, else its words without
+                cues; a photo, a voice note, a GIF in words. */}
+            {replyTarget ? <span className={styles.barLine}>{messageGist(replyTarget)}</span> : null}
+          </span>
+          <button type="button" className={styles.barClose} data-sq="surface" onClick={() => { draft.setReplyTo(null); focus(); }} aria-label="Cancel the reply"><X size={16} strokeWidth={1.9} aria-hidden="true" /></button>
+        </div>
+      ) : null}
+      {!editing ? (
+        <TrayView
+          items={items}
+          online={online}
+          previewOf={tray.previewOf}
+          canRetry={tray.canRetry}
+          onRemove={id => {
+            // Changing what goes with a waiting message takes the wish back: it sends when asked again.
+            tray.cancelPending();
+            tray.remove(id);
+          }}
+          onRetry={id => tray.retry(id)}
+          onEmptied={focus}
+        />
+      ) : null}
+      {link && !editing ? <LinkBar prefill={link.prefill} onAdd={addLink} onClose={() => { setLink(null); focus(); }} /> : null}
+      <GifPicker open={gif} onClose={() => setGif(null)} onPick={pickGif} onClosed={focus} onAnnounce={announce}>
+        <div className={styles.row}>
+          {slash.length ? <SlashMenu id={listId} options={slash} active={slashActive} onRun={runSlashAt} onHover={setSlashIndex} /> : null}
+          <ComposerActions side="start">
+            {editing ? (
+              <IconAction label="Add a file, a link or a GIF" icon={<Plus strokeWidth={1.75} aria-hidden="true" />} unavailable="Finish or cancel the edit first: attachments go with a new message" tooltipSide="top" />
+            ) : (
+              <AttachMenu uploadsOff={uploadsOff} onUpload={openFilePicker} onLink={() => setLink({ prefill: "" })} onGif={() => setGif({ query: "" })} />
+            )}
+          </ComposerActions>
+          <GifAnchor asChild>
+            <div className={styles.box} data-sq="surface">
+              <textarea
+                ref={field}
+                className={styles.field}
+                value={text}
+                rows={1}
+                placeholder={placeholder}
+                aria-label={label}
+                aria-keyshortcuts={sendKeys.aria}
+                aria-autocomplete={editing ? undefined : "list"}
+                aria-controls={slash.length ? listId : undefined}
+                aria-activedescendant={slash.length ? optionId(listId, slash[slashActive]!) : undefined}
+                data-composer-field=""
+                enterKeyHint="send"
+                onChange={event => {
+                  const value = event.target.value;
+                  if (editing) {
+                    setEditText(value);
+                    return;
+                  }
+                  draft.setText(value);
+                  setSlashIndex(0);
+                  if (!value.startsWith("/")) setSlashDismissed(false);
+                  reportActivity(value.trim() ? "typing" : null, address);
+                }}
+                onKeyDown={event => {
+                  if (!slash.length || event.nativeEvent.isComposing) return;
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setSlashIndex((slashActive + (event.key === "ArrowDown" ? 1 : -1) + slash.length) % slash.length);
+                  } else if ((event.key === "Tab" || event.key === "Enter") && !event.shiftKey && !event.altKey) {
+                    event.preventDefault();
+                    runSlashAt(slashActive);
+                  } else if (event.key === "Escape") {
+                    // The list closes; the text stays, and Enter now sends it as it is.
+                    event.preventDefault();
+                    setSlashDismissed(true);
+                  }
+                }}
+                onPaste={event => {
+                  const pasted = filesToAttach(event.clipboardData);
+                  if (!pasted.length) return;
+                  event.preventDefault();
+                  // Words paste into an edit as usual; files would go with a new message, so they wait for one.
+                  if (editing) say(ATTACH_AFTER_EDIT);
+                  else addFiles(pasted);
+                }}
+              />
+              <button
+                type="button"
+                className={styles.send}
+                data-sq="surface"
+                data-ready={ready ? "" : undefined}
+                data-pending={pending ? "" : undefined}
+                aria-label={editing ? "Save the edit" : pending ? "Sending when the upload finishes" : "Send"}
+                aria-disabled={!ready}
+                title={sendKeys.text ? `${editing ? "Save" : "Send"} (${sendKeys.text})` : undefined}
+                onClick={() => {
+                  if (editing) {
+                    if (ready) void saveEdit();
+                  } else if (failed) {
+                    say(blockedWords(items, tray.canRetry));
+                  } else if (ready) {
+                    requestSend();
+                  }
+                  focus();
+                }}
+              >
+                {editing ? <Check size={16} strokeWidth={2.25} aria-hidden="true" /> : pending ? <Clock size={16} strokeWidth={2.25} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={2.25} aria-hidden="true" />}
+              </button>
+            </div>
+          </GifAnchor>
+          <ComposerActions side="end">
+            <ComposerVoice bridge={bridge} />
+          </ComposerActions>
+        </div>
+      </GifPicker>
+      <input
+        ref={fileInput}
+        type="file"
+        multiple
+        hidden
+        tabIndex={-1}
+        aria-label="Upload a file"
+        data-composer-file=""
+        onChange={event => {
+          const chosen = Array.from(event.target.files ?? []);
+          event.target.value = "";
+          addFiles(chosen);
+        }}
+      />
+      {question ? (
+        <div
+          className={styles.noteRow}
+          role="group"
+          aria-label="Upload the dropped folder's files?"
+          onKeyDown={event => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopPropagation();
+            answerQuestion(false);
+          }}
+        >
+          <p className={styles.note} data-tone="pending" id={`${listId}-question`}>{question.words}</p>
+          {/* Focused when asked: a screen reader reads the question with it. */}
+          <button ref={questionYes} type="button" className={styles.noteAction} data-sq="surface" aria-describedby={`${listId}-question`} onClick={() => answerQuestion(true)}>{question.action}</button>
+          <button type="button" className={styles.noteAction} data-sq="surface" aria-keyshortcuts="Escape" onClick={() => answerQuestion(false)}>Cancel</button>
+        </div>
+      ) : null}
+      {/* What the composer says, through a live region that is always on the page: each saying is a new element in it,
+          so screen readers read it (a region that appears already holding its words is not read), the same words twice
+          included. Cancel stays outside it. */}
+      <div className={styles.noteRow} data-kind={shownPending ? "pending" : shownNotice || offlineDraft ? "notice" : "none"}>
+        <div className={styles.noteWords} role="status" aria-live="polite">
+          {shownPending ? (
+            <p className={styles.note} data-tone="pending">{waitingWords(items, online)}</p>
+          ) : shownNotice ? (
+            <p key={shownNotice.id} className={styles.note}>{shownNotice.words}</p>
+          ) : null}
+          {offlineDraft ? <p className={styles.note}>Offline: your draft is kept in this browser and saves when you are back.</p> : null}
+        </div>
+        {/* Esc does the same; a phone has no Esc, so the wish can be taken back by touch too. */}
+        {shownPending ? <button type="button" className={styles.noteAction} data-sq="surface" aria-label="Cancel sending" aria-keyshortcuts="Escape" title="Cancel sending (Esc)" onClick={cancelWaiting}>Cancel</button> : null}
+      </div>
+      <p className="sr-only" role="status" aria-live="polite">{announcement ? <span key={announcement.id}>{announcement.words}</span> : null}</p>
+      {/* During an edit the layer says why nothing can be dropped (attachments go with a new message) before the drop. */}
+      <DropOverlay blocked={editing ? ATTACH_AFTER_EDIT : null} filesOff={uploadsOff} maxBytes={maxBytes} capped={capped} onDrop={snapshot => void takeDrop(snapshot)} />
+    </div>
+  );
+});

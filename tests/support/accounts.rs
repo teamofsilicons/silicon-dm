@@ -310,7 +310,7 @@ impl FakeAccounts {
                 .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                     "proof_id": format!("prf_{token}"), "kind": if token == "sap_app" { "app_verification" } else { "user_verification" },
                     "proof_token": token, "expires_at": at, "proof_refresh_token": "sapr_refresh",
-                    "refresh_expires_at": at, "issuing_app": "dm", "receiving_app": "ting", "scopes": ["tings.send"],
+                    "refresh_expires_at": at, "issuing_app": "dm", "receiving_app": "ting", "scopes": [if token == "sap_user" { "subscriptions.register" } else { "tings.send" }],
                 })))
                 .mount(&self.server)
                 .await;

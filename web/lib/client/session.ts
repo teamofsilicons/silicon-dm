@@ -127,8 +127,11 @@ export function startSessionKeeper(initial: SessionView): void {
         schedule();
         if (view.signedIn) return;
         // Signed out in another tab: this one follows to the same page; an ended session explains itself.
-        if (reason === "signed_out") window.location.replace(new URL("/sign-in?signed_out=1", window.location.origin).href);
-        else signedOutHandler();
+        if (reason === "signed_out") {
+          // This tab's own writes (a draft saving, a send answering) must not put back what the sign-out removed.
+          runSignedOutTasks();
+          window.location.replace(new URL("/sign-in?signed_out=1", window.location.origin).href);
+        } else signedOutHandler();
       };
     }
     document.addEventListener("visibilitychange", () => {
@@ -183,6 +186,28 @@ export function sendToSignIn(reason: "session_ended", returnTo: string = here())
   window.location.assign(new URL(`/sign-in?reason=${reason}${back && back !== "/" ? `&return_to=${encodeURIComponent(back)}` : ""}`, window.location.origin).href);
 }
 
+const signingOut = new Set<() => void>();
+
+/**
+ * Runs `task` once this browser has signed out (here, or in another of its tabs), before the page leaves for the
+ * sign-in page: the chat removes the Carbon's own words from this browser (lib/chat/local-data.ts). Returns a function
+ * that stops it.
+ */
+export function whenSignedOut(task: () => void): () => void {
+  signingOut.add(task);
+  return () => signingOut.delete(task);
+}
+
+function runSignedOutTasks(): void {
+  for (const task of signingOut) {
+    try {
+      task();
+    } catch {
+      // Nothing may keep the page from leaving.
+    }
+  }
+}
+
 /**
  * Signing this browser out: waits for the server (the sign-in is revoked at Silicon Accounts and the cookie cleared),
  * tells the other tabs, then leaves with a full load, so no page stays mounted without a session.
@@ -196,7 +221,7 @@ export function useSignOut(): { signOut: () => Promise<void>; pending: boolean }
       response = await fetch("/auth/sign-out", { method: "POST", credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" } });
     } catch (error) {
       setPending(false);
-      throw new ApiError({ status: 0, code: "network_error", message: `Could not reach this site to sign out: ${error instanceof Error ? error.message : String(error)}.`, hint: "Check your connection, then try again." });
+      throw new ApiError({ status: 0, code: "network_error", message: "DM can't reach its service right now, so this browser is still signed in.", hint: "Check your connection, then sign out again.", method: "POST", path: "/auth/sign-out", cause: error });
     }
     if (!response.ok && response.status !== 401) {
       setPending(false);
@@ -204,6 +229,7 @@ export function useSignOut(): { signOut: () => Promise<void>; pending: boolean }
       throw new ApiError({ status: response.status, code: body?.error?.code ?? "sign_out_failed", message: body?.error?.message ?? `Signing out failed (HTTP ${response.status}).`, hint: body?.error?.hint ?? "Reload the page and try again." });
     }
     signedOutHandler = () => undefined;
+    runSignedOutTasks();
     set(SIGNED_OUT, "signed_out");
     window.location.replace(new URL("/sign-in?signed_out=1", window.location.origin).href);
   }, []);

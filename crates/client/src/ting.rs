@@ -3,7 +3,7 @@
 //! dispatches callbacks, or records Ting/DM delivered/read ACKs.
 //!
 //! DM's Ting items are references, not content: `{"type": "dm.sync.changed", "for":
-//! {"uuid", "id"}, "key": <delivery id>, "data": {"schema_version": 2, "event",
+//! "<account uuid>", "key": <delivery id>, "data": {"schema_version": 2, "event",
 //! "conversation_id", "message_id", "delivery_id", "delivery_sequence"}, "metadata":
 //! {"isi"?}}`. Validate them with [`validate_batch`] against the account the consumer's hook
 //! belongs to, then fetch each message through DM's HTTP API
@@ -193,7 +193,8 @@ fn validate_item(index: usize, item: &Value, receiver: &TingReceiverContext) -> 
     {
         return rejected(TingRejection::LegacyReference);
     }
-    // Inbox objects carry `for` ({uuid, id}); local webhook items may omit it.
+    // Ting inbox objects carry the immutable UUID in `for`; local hooks may omit it.
+    // Also accept the structured UUID form used by earlier adapters.
     if let Some(target) = item.get("for") {
         let matches = match target {
             Value::Object(object) => {
@@ -342,6 +343,7 @@ mod tests {
             scopes: Vec::new(),
             via_app: None,
             delivery: Delivery::default(),
+            speech: None,
         };
         (
             TingReceiverContext::for_account("dm", &me).expect("uuid"),

@@ -16,6 +16,8 @@
   --surface: var(--neutral-0);
   --surface-raised: var(--neutral-0);
   --surface-muted: var(--neutral-2);
+  /* One step stronger than --surface-muted: the hover and press of a muted fill (a soft button). */
+  --surface-pressed: var(--neutral-3);
   --foreground: var(--neutral-11);
   --text-secondary: var(--neutral-8);
   --text-muted: var(--neutral-7);
@@ -26,6 +28,12 @@
   --accent-strong: oklch(24% 0 0);
   --accent-subtle: oklch(33% 0 0 / .1);
   --accent-foreground: var(--background);
+  /* Filled primary actions (Button primary, ActionButton). Neutral by default; an app sets its brand colour here. */
+  --primary: var(--foreground);
+  --primary-foreground: var(--background);
+  /* Profile pictures (Avatar, AvatarGroup, UserMenu). Circles by default; an app can choose e.g. 30% and squircle. */
+  --avatar-radius: var(--radius-full);
+  --avatar-corner-shape: round;
   /* Selection controls (switch, checkbox, radio, slider). --control-on fills a chosen control; --control-glyph is the check or dot drawn on it;
      thumbs stay white in both states so they always read against the track. Tuned per accent below so white thumbs hold on every hue. */
   --control-on: oklch(23% 0 0);
@@ -47,6 +55,27 @@
   --shadow-resting: 0 1px 2px oklch(0% 0 0 / .035);
   --shadow-raised: 0 6px 18px oklch(0% 0 0 / .065), 0 1px 3px oklch(0% 0 0 / .035);
   --shadow-floating: 0 20px 48px oklch(0% 0 0 / .105), 0 3px 10px oklch(0% 0 0 / .045);
+  /* Layers, edges and shadows by role (component CSS uses these instead of raw colours). */
+  --scrim: oklch(10% 0 0 / .46);              /* behind a modal layer: dialog, drawer, sheet, mobile menu */
+  --scrim-soft: oklch(10% 0 0 / .16);         /* behind a non-modal panel */
+  --shade: oklch(0% 0 0 / .035);              /* a faint tint over a surface, such as a stacked card */
+  --media-scrim: oklch(0% 0 0 / .45);         /* over a photo, under text */
+  --on-media: var(--color-white);             /* text over a photo */
+  --edge-inset: inset 0 0 0 1px oklch(0% 0 0 / .08);   /* a hairline inside a swatch, thumbnail or track */
+  --shadow-hairline: 0 0 0 .5px oklch(0% 0 0 / .14);
+  --shadow-knob: 0 2px 8px oklch(0% 0 0 / .3);   /* a draggable handle that must read on any colour */
+  --shadow-thumb: 0 1px 2px oklch(0% 0 0 / .06), 0 2px 6px oklch(0% 0 0 / .04);   /* small lifted controls and cards */
+  --shadow-drop: drop-shadow(0 18px 36px oklch(0% 0 0 / .12)) drop-shadow(0 2px 6px oklch(0% 0 0 / .06));   /* filter: floating previews */
+  --shadow-showcase: 0 1px 1px rgb(20 24 40 / .04), 0 10px 30px -12px rgb(20 24 40 / .22);   /* hero product shots */
+  --shadow-showcase-lg: 0 1px 1px rgb(20 24 40 / .04), 0 24px 48px -16px rgb(20 24 40 / .16), 0 60px 120px -40px rgb(40 48 110 / .22);
+  --glow: #b9c2ff;                            /* the light line on a dark hero window */
+  /* Code highlighting roles (CodeBlock); each has contrast in both themes. */
+  --syntax-string: oklch(46% .13 150); --syntax-number: oklch(50% .14 55); --syntax-keyword: oklch(48% .15 285);
+  --syntax-type: oklch(46% .13 230); --syntax-function: oklch(43% .12 25); --syntax-property: oklch(44% .12 85);
+  /* File types (TreeView): each brand hue, mixed with the text colour in the component. */
+  --file-typescript: #3178c6; --file-stylesheet: #8b6ace; --file-markdown: #38896b; --file-json: #c48637;
+  /* Theme-independent constants, for things that must stay black or white in both themes (colour picker planes). */
+  --color-black: #000; --color-white: #fff;
   /* Brand gradient: soft lavender to warm peach. Light enough for dark text (--silicon-gradient-foreground, >12:1). */
   --silicon-gradient-from: oklch(90% .045 300);
   --silicon-gradient-to: oklch(92% .045 65);
@@ -58,8 +87,8 @@
   --silicon-gradient-line: linear-gradient(100deg, oklch(83% .06 300), oklch(86% .06 65));
   /* Text-safe stops for gradient text and small marks (>4.5:1 on the surface). */
   --silicon-gradient-ink: linear-gradient(100deg, oklch(47% .1 300), oklch(50% .09 55));
-  /* Space, by role: tight 4 · related 8 · group 12 · inset 16 · comfort 20 · section 24 · block 32 · page 48 · stage 64 · screen 80. */
-  --space-tight: 4px; --space-related: 8px; --space-group: 12px; --space-inset: 16px; --space-comfort: 20px;
+  /* Space, by role: hair 2 · tight 4 · related 8 · group 12 · inset 16 · comfort 20 · section 24 · block 32 · page 48 · stage 64 · screen 80. */
+  --space-hair: 2px; --space-tight: 4px; --space-related: 8px; --space-group: 12px; --space-inset: 16px; --space-comfort: 20px;
   --space-section: 24px; --space-block: 32px; --space-page: 48px; --space-stage: 64px; --space-screen: 80px;
   /* Radius, by role: detail for small marks and swatches, control for buttons and fields, container for cards and menus,
      overlay for dialogs and sheets, full for pills and dots. Every corner in every component reads one of these.
@@ -68,9 +97,10 @@
   --radius-detail: 2px; --radius-control: 6px; --radius-container: 8px; --radius-overlay: 12px; --radius-full: 999px;
   /* Corner shape. Squircle by default; see the corner rule after the dark theme. */
   --corner-shape: squircle;
-  --control-height-sm: 2.25rem; --control-height-md: 2.75rem; --control-height-lg: 3.125rem;
+  /* xs is for dense UI (tree rows, toolbars); 24px is the smallest target WCAG 2.5.8 allows, so the scale stops there. */
+  --control-height-xs: 1.5rem; --control-height-sm: 2.25rem; --control-height-md: 2.75rem; --control-height-lg: 3.125rem;
   --font-display: var(--font-geist, "Geist Variable"), sans-serif;
-  --font-body: var(--font-inter, "Inter Variable"), sans-serif;
+  --font-body: var(--font-hanken-grotesk, "Hanken Grotesk Variable"), sans-serif;
   --text-xs: .75rem; --text-sm: .875rem; --text-base: 1rem; --text-lg: 1.125rem;
   --text-xl: 1.375rem; --text-2xl: 1.75rem; --text-3xl: 2.25rem;
   --text-4xl: 3.25rem; --text-5xl: 4.5rem;
@@ -83,6 +113,13 @@
   /* Spring with a gentle settle (bounce .15). Pair with --duration-spring for transform transitions. */
   --ease-spring: linear(0, 0.0258, 0.09, 0.1763, 0.2732, 0.3724, 0.4683, 0.5573, 0.6376, 0.7082, 0.7689, 0.8202, 0.8628, 0.8976, 0.9256, 0.9476, 0.9648, 0.9778, 0.9875, 0.9945, 0.9994, 1.0026, 1.0047, 1.0058, 1.0062, 1.0062, 1.0059, 1.0055, 1.0049, 1.0043, 1.0036, 1.0031, 1.0025, 1.002, 1.0016, 1.0013, 1);
   --duration-instant: 120ms; --duration-fast: 160ms; --duration-standard: 240ms; --duration-considered: 480ms; --duration-spring: 580ms;
+  /* Stagger steps (the same values as motionTokens.stagger). Keep total stagger under roughly 400ms. */
+  --stagger-item: 35ms;
+  /* Stacking order, by role. Menus and listboxes sit above popovers and dialogs because they open from inside them.
+     An app's own chrome (sticky header, sidebar, toolbar) stays below --layer-overlay, so dims and every floating
+     layer cover it: use --layer-sticky, or calc(var(--layer-overlay) - 1) at most. */
+  --layer-raised: 10; --layer-sticky: 20; --layer-overlay: 50; --layer-dialog: 51;
+  --layer-popover: 60; --layer-dropdown: 70; --layer-toast: 80; --layer-tooltip: 90;
 }
 
 :root[data-theme="dark"] {
@@ -92,6 +129,7 @@
   --surface-raised: oklch(24% 0 0);
   /* Keep muted surfaces and hover states distinct from the base surface in dark mode. */
   --surface-muted: oklch(26% 0 0);
+  --surface-pressed: oklch(30% 0 0);
   --foreground: oklch(96% 0 0);
   --text-secondary: oklch(77% 0 0);
   --text-muted: oklch(64% 0 0);
@@ -117,6 +155,14 @@
   --shadow-resting: 0 1px 2px oklch(0% 0 0 / .18);
   --shadow-raised: 0 8px 22px oklch(0% 0 0 / .22);
   --shadow-floating: 0 22px 55px oklch(0% 0 0 / .34);
+  --scrim: oklch(0% 0 0 / .52);
+  --shade: oklch(0% 0 0 / .22);
+  --shadow-thumb: inset 0 1px 0 oklch(100% 0 0 / .05), 0 1px 2px oklch(0% 0 0 / .3);
+  --shadow-drop: drop-shadow(0 20px 44px oklch(0% 0 0 / .5));
+  --shadow-showcase: inset 0 1px 0 color-mix(in oklab, var(--foreground) 8%, transparent), 0 10px 30px -12px rgb(0 0 0 / .6);
+  --shadow-showcase-lg: inset 0 1px 0 color-mix(in oklab, var(--foreground) 9%, transparent), 0 24px 48px -16px rgb(0 0 0 / .6), 0 60px 140px -40px rgb(40 50 140 / .35);
+  --syntax-string: oklch(77% .15 150); --syntax-number: oklch(80% .14 75); --syntax-keyword: oklch(78% .16 285);
+  --syntax-type: oklch(79% .13 230); --syntax-function: oklch(80% .13 25); --syntax-property: oklch(79% .12 85);
   --silicon-gradient-from: oklch(38% .05 300);
   --silicon-gradient-to: oklch(40% .045 60);
   --silicon-gradient-foreground: oklch(96% .005 300);

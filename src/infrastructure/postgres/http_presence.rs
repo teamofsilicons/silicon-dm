@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 use time::OffsetDateTime;
+use uuid::Uuid;
 
-use super::{PostgresStore, directory::refresh_directory_in};
+use super::{PostgresStore, directory::refresh_directory_in, presence::ActivityView};
 use crate::{
     AppError, AppResult,
     application::{auth::AuthContext, messaging::validate_device_id},
@@ -23,6 +24,9 @@ pub struct PresenceLease {
     /// Short-lived activity deadline, absent when cleared.
     #[serde(with = "time::serde::rfc3339::option")]
     pub activity_expires_at: Option<OffsetDateTime>,
+    /// The conversation this device's activity is about (rendered as its address), or null:
+    /// no activity, or one about no conversation in particular.
+    pub conversation_id: Option<Uuid>,
 }
 
 impl PostgresStore {
@@ -46,7 +50,7 @@ impl PostgresStore {
                 .execute(&mut *transaction)
                 .await?;
             let changed = sqlx::query(
-                "UPDATE client_presence_leases SET disconnected_at=lease_expires_at,activity=NULL,activity_expires_at=NULL WHERE organization_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3 AND disconnected_at IS NULL AND lease_expires_at<=clock_timestamp()"
+                "UPDATE client_presence_leases SET disconnected_at=lease_expires_at,activity=NULL,activity_expires_at=NULL,activity_conversation_id=NULL WHERE organization_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3 AND disconnected_at IS NULL AND lease_expires_at<=clock_timestamp()"
             ).bind(&org).bind(&kind).bind(&actor).execute(&mut *transaction).await?.rows_affected();
             if changed > 0 {
                 record_actor_offline(&mut transaction, &org, &kind, &actor).await?;
@@ -57,7 +61,9 @@ impl PostgresStore {
         Ok(expired)
     }
 
-    /// Renews only the authenticated account's named device.
+    /// Renews only the authenticated account's named device, with what it is doing now and
+    /// the conversation that is about (one the caller checked the account is in); the
+    /// conversation is kept only with an activity, and cleared with it.
     ///
     /// # Errors
     /// Rejects invalid device IDs or durations and reports storage failures.
@@ -66,9 +72,11 @@ impl PostgresStore {
         auth: &AuthContext,
         device: &str,
         activity: Option<Activity>,
+        conversation: Option<Uuid>,
         lease_duration: Duration,
         activity_duration: Duration,
     ) -> AppResult<PresenceLease> {
+        let conversation = activity.and(conversation);
         validate_device_id(device)?;
         let lease_ms = duration_ms(lease_duration)?;
         let activity_ms = duration_ms(activity_duration)?.min(lease_ms);
@@ -94,13 +102,15 @@ impl PostgresStore {
             WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS now)
             INSERT INTO client_presence_leases AS previous (
                 organization_id, actor_kind, actor_id, device_id,
-                heartbeat_at, lease_expires_at, activity, activity_expires_at
+                heartbeat_at, lease_expires_at, activity, activity_expires_at,
+                activity_conversation_id
             )
             SELECT $1, $2::text::actor_kind, $3, $4, clock.now,
                    clock.now + ($5::bigint * interval '1 millisecond'),
                    $6::text::presence_activity,
                    CASE WHEN $6 IS NULL THEN NULL
-                        ELSE clock.now + ($7::bigint * interval '1 millisecond') END
+                        ELSE clock.now + ($7::bigint * interval '1 millisecond') END,
+                   $8::uuid
             FROM clock
             ON CONFLICT (organization_id, actor_kind, actor_id, device_id)
             DO UPDATE SET
@@ -108,6 +118,7 @@ impl PostgresStore {
                 lease_expires_at = EXCLUDED.lease_expires_at,
                 activity = EXCLUDED.activity,
                 activity_expires_at = EXCLUDED.activity_expires_at,
+                activity_conversation_id = EXCLUDED.activity_conversation_id,
                 disconnected_at = NULL,
                 last_seen_at = GREATEST(previous.last_seen_at,
                     CASE WHEN previous.disconnected_at IS NOT NULL THEN previous.disconnected_at
@@ -123,13 +134,17 @@ impl PostgresStore {
             .bind(lease_ms)
             .bind(activity)
             .bind(activity_ms)
+            .bind(conversation)
             .fetch_one(&mut *transaction)
             .await?;
         transaction.commit().await?;
         Ok(PresenceLease {
-            presence: self.get_presence(&auth.actor).await?,
+            presence: self
+                .get_presence(&auth.actor, ActivityView::Viewer(&auth.actor))
+                .await?,
             lease_expires_at,
             activity_expires_at,
+            conversation_id: conversation,
         })
     }
 
@@ -145,7 +160,7 @@ impl PostgresStore {
             r#"
             UPDATE client_presence_leases
             SET disconnected_at = LEAST(lease_expires_at, clock_timestamp()),
-                activity = NULL, activity_expires_at = NULL
+                activity = NULL, activity_expires_at = NULL, activity_conversation_id = NULL
             WHERE organization_id = $1 AND actor_kind = $2::text::actor_kind
               AND actor_id = $3 AND device_id = $4 AND disconnected_at IS NULL
             "#,

@@ -1,5 +1,7 @@
-//! A Silicon's allow-list: accounts outside its circle that may start conversations with
-//! it or invite it. Managed by the Silicon and by its custodian.
+//! A Silicon's allow-list, managed by the Silicon and by its custodian. It no longer limits
+//! anything: since DM 0.17.1 anyone signed in to DM may start a conversation with any
+//! Silicon or invite it to a group. The rows and their routes stay so that older CLIs and
+//! open browser tabs that read and change the list keep working (contract 4 only grows).
 
 use serde::Serialize;
 use sqlx::FromRow;
@@ -57,7 +59,7 @@ impl PostgresStore {
         Ok(rows)
     }
 
-    /// Allows `who` to reach the Silicon. Idempotent; returns whether it was new.
+    /// Puts `who` on the Silicon's allow-list. Idempotent; returns whether it was new.
     ///
     /// # Errors
     /// Database failures.
@@ -83,7 +85,6 @@ impl PostgresStore {
     }
 
     /// Removes `who` from the Silicon's allow-list. Returns whether it was there.
-    /// Conversations that already exist keep working.
     ///
     /// # Errors
     /// Database failures.

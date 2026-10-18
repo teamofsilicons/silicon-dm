@@ -79,7 +79,8 @@ export async function proxy(request: NextRequest) {
     response.headers.set("X-Frame-Options", "DENY");
     response.headers.set("X-Content-Type-Options", "nosniff");
     response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
-    response.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+    // The microphone is this site's own (voice notes and dictation ask for it when used); nothing else is.
+    response.headers.set("Permissions-Policy", "camera=(), microphone=(self), geolocation=(), payment=()");
     const https = request.nextUrl.protocol === "https:" || request.headers.get("x-forwarded-proto") === "https";
     if (env.production && https) response.headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
   }
@@ -92,8 +93,10 @@ export const config = {
   matcher: [
     {
       // Route handlers (the BFF under /api and /auth, the agent files, the icons and the social image) and static files
-      // set their own headers.
-      source: "/((?!api/|auth/|_next/static|_next/image|fonts/|favicon\\.ico|icon|apple-icon|og\\.png|robots\\.txt|sitemap\\.xml|llms\\.txt|manifest\\.webmanifest).*)",
+      // set their own headers. Uploads (POST /api/uploads, files of any size) depend on this exclusion: Next copies a
+      // request's body into memory for the paths a proxy runs on (up to experimental.proxyClientMaxBodySize), so the
+      // proxy must never run on /api/ (tests/upload-paths.test.ts checks it with Next's own matcher).
+      source: "/((?!api/|auth/|_next/static|_next/image|fonts/|favicon\\.ico|icon|apple-icon|og\\.png|robots\\.txt|sitemap\\.xml|llms\\.txt|llms-full\\.txt|manifest\\.webmanifest).*)",
     },
   ],
 };

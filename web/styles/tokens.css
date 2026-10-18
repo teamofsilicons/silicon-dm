@@ -60,6 +60,11 @@
   --control-fill: var(--control-on);
   --control-on-subtle: color-mix(in oklab, var(--control-on) 10%, transparent);
   --focus-ring: transparent;
+  /* Keyboard focus drawn inside a control's own shape (DESIGN.md, Focus and accessibility): 2 px of accent, which
+     changes the pixels it covers by 5:1 or more on the page and on every quiet fill; on a filled (accent) control, a
+     light ring just inside its edge. A rule that uses them also sets --focus-outline: transparent. */
+  --focus-edge: inset 0 0 0 2px var(--accent);
+  --focus-edge-on-fill: inset 0 0 0 2px var(--accent-strong), inset 0 0 0 3.5px var(--accent-foreground);
 
   --success: #2B7148;
   --warning: #8F560D;
@@ -105,6 +110,9 @@
   --topbar-height: 64px;
   /* The app's mark is drawn in ink, as every redesigned Silicon site draws its own (lib/app.config.ts accent is unused). */
   --app-accent: var(--foreground);
+  /* Profile photos are 30 % squircles (Silicon UI's Avatar, AvatarGroup and UserMenu read these). */
+  --avatar-radius: 30%;
+  --avatar-corner-shape: squircle;
 }
 
 :root[data-theme="dark"], [data-theme="dark"] {
@@ -143,6 +151,8 @@
   --control-fill: var(--control-on);
   --control-on-subtle: color-mix(in oklab, var(--control-on) 16%, transparent);
   --focus-ring: transparent;
+  --focus-edge: inset 0 0 0 2px var(--accent);
+  --focus-edge-on-fill: inset 0 0 0 2px var(--accent-strong), inset 0 0 0 3.5px var(--accent-foreground);
 
   --success: #7FC79A;
   --warning: #E3B55A;

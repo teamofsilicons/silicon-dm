@@ -144,3 +144,100 @@ async fn inbox_watch_streams_until_stopped() {
         let _ = child.kill().await;
     }
 }
+
+#[tokio::test]
+async fn conversation_events_come_only_to_those_who_ask() {
+    let stub = Stub::start().await;
+    let home = signed_in(&stub).await;
+    let mut with_conversation = page(&[("message", "g:launch-week", "000")], "cursor-1");
+    with_conversation["events"]
+        .as_array_mut()
+        .expect("events")
+        .insert(
+            0,
+            json!({"event_id": "00000000-0000-4000-8000-000000000009", "sequence": 1,
+                "type": "conversation", "conversation_id": "g:launch-week", "change": "invited"}),
+        );
+    stub.with(|s| s.sync_pages.push_back(with_conversation));
+    let run = home
+        .run(&["--json", "inbox", "--references-only", "--conversations"])
+        .await;
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    let lines = run.lines();
+    assert_eq!(
+        lines[1],
+        json!({"type": "conversation", "event_id": "00000000-0000-4000-8000-000000000009",
+            "sequence": 1, "conversation_id": "g:launch-week", "change": "invited"}),
+        "a conversation line names the conversation and what happened, and fetches nothing"
+    );
+    assert_eq!(lines[2]["type"], "message");
+    let calls = stub.with(|s| s.sync_calls.clone());
+    assert_eq!(
+        calls
+            .last()
+            .and_then(|call| call.get("include"))
+            .map(String::as_str),
+        Some("conversations")
+    );
+    // Without the flag nothing extra is asked for, so the output is what it always was.
+    let plain = home.run(&["--json", "sync", "--cursor", "cursor-1"]).await;
+    assert_eq!(plain.code, Some(0), "{}", plain.stderr);
+    let calls = stub.with(|s| s.sync_calls.clone());
+    assert!(
+        calls
+            .last()
+            .is_some_and(|call| !call.contains_key("include"))
+    );
+    stub.with(|s| {
+        s.sync_pages.push_back(json!({
+            "events": [{"event_id": "00000000-0000-4000-8000-000000000010", "sequence": 2,
+                "type": "conversation", "conversation_id": "g:launch-week", "change": "renamed"}],
+            "cursor": "cursor-2", "has_more": false, "upper_sequence": 2,
+        }));
+    });
+    let asked = home
+        .run(&["--json", "sync", "--cursor", "cursor-1", "--conversations"])
+        .await;
+    assert_eq!(asked.code, Some(0), "{}", asked.stderr);
+    assert_eq!(
+        asked.json()["events"][0],
+        json!({"event_id": "00000000-0000-4000-8000-000000000010", "sequence": 2,
+            "type": "conversation", "conversation_id": "g:launch-week", "change": "renamed"}),
+        "printed as the service sent it: no message_id to fetch"
+    );
+    let calls = stub.with(|s| s.sync_calls.clone());
+    assert_eq!(
+        calls
+            .last()
+            .and_then(|call| call.get("include"))
+            .map(String::as_str),
+        Some("conversations")
+    );
+}
+
+#[tokio::test]
+async fn conversations_show_reads_one_summary() {
+    let stub = Stub::start().await;
+    let home = signed_in(&stub).await;
+    let shown = home
+        .run(&["--json", "conversations", "show", "g:launch-week"])
+        .await;
+    assert_eq!(shown.code, Some(0), "{}", shown.stderr);
+    let summary = shown.json()["response"]["result"].clone();
+    assert_eq!(summary["id"], "g:launch-week", "{}", shown.stdout);
+    assert_eq!(summary["draft_version"], 3);
+    assert_eq!(summary["unread_count"], 2);
+    let viewed = home
+        .run(&[
+            "--json",
+            "conversations",
+            "show",
+            "01a14b99-16d2-7251-a302-7a08d1c051ad",
+            "--for",
+            "si:dm-cli-silicon",
+        ])
+        .await;
+    assert_eq!(viewed.code, Some(0), "{}", viewed.stderr);
+    let summary = viewed.json()["response"]["result"].clone();
+    assert_eq!(summary["id"], "01a14b99-16d2-7251-a302-7a08d1c051ad");
+}

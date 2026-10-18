@@ -68,6 +68,33 @@ impl PostgresStore {
         self.load_draft(&partition, owner, conversation_id).await
     }
 
+    /// The versions of `owner`'s drafts in a page of conversations, in one query: what
+    /// conversation summaries say as `draft_version`, so a client asks for a draft only when
+    /// there is one (a missing draft answers 404, which browsers log as an error).
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub async fn draft_versions(
+        &self,
+        owner: &ActorRef,
+        conversation_ids: &[Uuid],
+    ) -> AppResult<std::collections::HashMap<Uuid, i64>> {
+        if conversation_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            "SELECT conversation_id, version FROM drafts
+             WHERE conversation_id = ANY($1) AND actor_kind = $2::text::actor_kind AND actor_id = $3",
+        )
+        .bind(conversation_ids)
+        .bind(owner.actor_type.as_str())
+        .bind(owner.id.as_str())
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
     /// Creates or replaces a synchronized draft using exact-version compare-and-swap.
     ///
     /// # Errors
@@ -78,7 +105,10 @@ impl PostgresStore {
         reason = "draft CAS, version-token mutation, children, and returned snapshot must remain one auditable transaction"
     )]
     pub async fn put_draft(&self, command: PutDraftCommand) -> AppResult<PutDraftOutcome> {
-        command.input.validate().map_err(AppError::validation)?;
+        command
+            .input
+            .validate()
+            .map_err(crate::domain::invalid_content)?;
         let content_hash = command.input.content_digest();
         let partition = self.partition_of(command.conversation_id).await?;
         let mut transaction = self.pool().begin().await?;
@@ -157,9 +187,12 @@ impl PostgresStore {
             }
             None => {
                 transaction.rollback().await?;
-                return Err(AppError::conflict(
+                return Err(AppError::refused(
+                    http::StatusCode::CONFLICT,
+                    "conflict",
                     "draft was deleted after the supplied version was observed",
-                ));
+                )
+                .with_hint("The draft is gone (sent or deleted on another device): save again without If-Match to start a new one."));
             }
             Some(current) if command.expected_version == Some(current) => {
                 sqlx::query(

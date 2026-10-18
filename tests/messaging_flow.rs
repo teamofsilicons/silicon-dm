@@ -121,6 +121,107 @@ async fn sends_are_idempotent_and_clear_the_matching_draft() -> Result<(), BoxEr
 }
 
 #[tokio::test]
+async fn attachments_may_be_as_large_as_briefcase_stores_and_voice_notes_48_hours_long()
+-> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let p = people(&app).await;
+    let bob = app.accounts.token(&p.bob);
+    // 5 TiB is the largest file Silicon Briefcase stores; DM only keeps the declared size.
+    let largest: u64 = 5 * 1024 * 1024 * 1024 * 1024;
+    assert_eq!(largest, 5_497_558_138_880);
+    let file = json!({"permanent_url": "https://files.example/archive.tar", "name": "archive.tar",
+        "content_type": "application/x-tar", "size": largest});
+    let voice = json!({"permanent_url": "https://files.example/two-days.wav", "name": "two-days.wav",
+        "content_type": "audio/wav", "size": largest, "duration_milliseconds": 172_800_000_u64});
+    let sent = app
+        .post(
+            "/api/v1/messages",
+            &bob,
+            json!({"recipient_id": "c:ada", "message": "the archive",
+                "attachments": [file], "voice": voice}),
+        )
+        .await?;
+    expect_status(&sent, StatusCode::ACCEPTED)?;
+    assert_eq!(sent.1["attachment_details"][0]["size"], largest);
+    assert_eq!(sent.1["voice"]["size"], largest);
+    assert_eq!(sent.1["voice"]["duration_milliseconds"], 172_800_000_u64);
+    let conversation = sent.1["conversation_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    // Drafts take the same sizes, and say so in the summary's draft_version.
+    let draft = app
+        .call(
+            Method::PUT,
+            &format!("/api/v1/conversations/{conversation}/draft"),
+            Some(&bob),
+            Some(json!({"attachments": [file], "metadata": {}})),
+            &[],
+        )
+        .await?;
+    expect_status(&draft, StatusCode::OK)?;
+    assert_eq!(draft.1["attachments"][0]["size"], largest);
+    let listed = app.get("/api/v1/conversations", &bob).await?;
+    let summary = listed.1["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["id"] == conversation.as_str())
+                .cloned()
+        })
+        .unwrap_or_default();
+    assert_eq!(summary["draft_version"], draft.1["version"], "{summary}");
+    let deleted = app
+        .call(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{conversation}/draft"),
+            Some(&bob),
+            None,
+            &[],
+        )
+        .await?;
+    assert_eq!(deleted.0, StatusCode::NO_CONTENT);
+    let single = app
+        .get(&format!("/api/v1/conversations/{conversation}"), &bob)
+        .await?;
+    assert_eq!(
+        single.1["draft_version"],
+        Value::Null,
+        "a deleted draft is null"
+    );
+    // One byte more, or one millisecond more, is refused with words.
+    let mut too_big = file.clone();
+    too_big["size"] = json!(largest + 1);
+    let refused = app
+        .post(
+            "/api/v1/messages",
+            &bob,
+            json!({"recipient_id": "c:ada", "attachments": [too_big]}),
+        )
+        .await?;
+    assert_eq!(refused.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", refused.1);
+    assert!(
+        refused.1["error"]["message"]
+            .as_str()
+            .is_some_and(|words| words.contains("5 TiB")),
+        "{}",
+        refused.1
+    );
+    let mut too_long = voice.clone();
+    too_long["duration_milliseconds"] = json!(172_800_001_u64);
+    let refused = app
+        .post(
+            "/api/v1/messages",
+            &bob,
+            json!({"recipient_id": "c:ada", "voice": too_long}),
+        )
+        .await?;
+    assert_eq!(refused.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", refused.1);
+    app.close().await
+}
+
+#[tokio::test]
 async fn receipts_are_monotonic_and_drive_the_aggregate_status() -> Result<(), BoxError> {
     let app = TestApp::start().await?;
     let p = people(&app).await;
@@ -195,6 +296,7 @@ async fn isi_routing_round_trips_and_cannot_be_forged_or_rerouted() -> Result<()
     expect_status(&sent, StatusCode::ACCEPTED)?;
     assert_eq!(sent.1["sender"]["id"], "si:writer");
     assert_eq!(sent.1["recipient_id"], "deliberate@si:cos");
+    assert_eq!(sent.1["routed_to"], "deliberate@si:cos");
     let stored: (Option<String>, Option<String>) = sqlx::query_as("SELECT sender_address, recipient_address FROM messages WHERE text_content = 'ISI round trip'")
         .fetch_one(app.state.store.pool())
         .await?;
@@ -241,6 +343,10 @@ async fn isi_routing_round_trips_and_cannot_be_forged_or_rerouted() -> Result<()
         .await?;
     expect_status(&edited, StatusCode::OK)?;
     assert_eq!(edited.1["recipient_id"], "deliberate@si:cos");
+    assert_eq!(
+        edited.1["routed_to"], "deliberate@si:cos",
+        "edits keep the route"
+    );
     assert_eq!(edited.1["history"].as_array().map(Vec::len), Some(1));
     let reroute = app
         .call(
@@ -268,6 +374,10 @@ async fn isi_routing_round_trips_and_cannot_be_forged_or_rerouted() -> Result<()
         .await?;
     expect_status(&deleted, StatusCode::OK)?;
     assert!(deleted.1["deleted_at"].is_string());
+    assert_eq!(
+        deleted.1["routed_to"], "deliberate@si:cos",
+        "routing is not content: a tombstone keeps it, like recipient_id"
+    );
     let after = app
         .call(
             Method::PATCH,
@@ -278,6 +388,57 @@ async fn isi_routing_round_trips_and_cannot_be_forged_or_rerouted() -> Result<()
         )
         .await?;
     assert_eq!(after.0, StatusCode::CONFLICT);
+    // An unrouted message has no route.
+    let plain = app
+        .post(&path, &writer, json!({"message": "to cos as a whole"}))
+        .await?;
+    expect_status(&plain, StatusCode::ACCEPTED)?;
+    assert_eq!(plain.1["routed_to"], Value::Null);
+    assert_eq!(plain.1["recipient_id"], "si:cos");
+
+    // In a group, recipient_id names the group as it always has; routed_to names the route.
+    let ada = app.accounts.token(&p.ada);
+    let group = app
+        .post(
+            "/api/v1/groups",
+            &ada,
+            json!({"name": "Routes", "member_ids": ["si:writer", "si:cos"]}),
+        )
+        .await?;
+    expect_status(&group, StatusCode::CREATED)?;
+    let group = group.1["id"].as_str().unwrap_or_default().to_owned();
+    let routed = app
+        .post(
+            &format!("/api/v1/conversations/{group}/messages"),
+            &writer,
+            json!({"message": "release notes, please", "recipient_id": "release-notes@si:cos"}),
+        )
+        .await?;
+    expect_status(&routed, StatusCode::ACCEPTED)?;
+    assert_eq!(routed.1["recipient_id"], group.as_str());
+    assert_eq!(routed.1["routed_to"], "release-notes@si:cos");
+    let listed = app.get("/api/v1/conversations?limit=10", &ada).await?;
+    let summary = listed.1["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["id"] == group.as_str())
+                .cloned()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        summary["last_message"]["routed_to"], "release-notes@si:cos",
+        "{summary}"
+    );
+    let unrouted = app
+        .post(
+            &format!("/api/v1/conversations/{group}/messages"),
+            &ada,
+            json!({"message": "thanks all"}),
+        )
+        .await?;
+    assert_eq!(unrouted.1["routed_to"], Value::Null);
     app.close().await
 }
 

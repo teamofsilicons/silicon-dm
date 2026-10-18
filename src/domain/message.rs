@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::{
     ActorRef, BundleRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MAX_TEXT_CHARACTERS,
-    MAX_VOICE_DURATION_MILLISECONDS,
+    MAX_VOICE_DURATION_MILLISECONDS, Speech, speech::MAX_SCRIPT_CHARACTERS,
 };
 
 /// Durable metadata for a generic attachment.
@@ -136,6 +136,9 @@ pub struct MessageCreate {
     /// Optional GIF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gif: Option<Gif>,
+    /// Optional speech: a script DM renders in a voice. Its words become `voice_transcript`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<Speech>,
 }
 
 /// Durable aggregate message state.
@@ -216,6 +219,9 @@ pub struct Message {
     /// GIF content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gif: Option<Gif>,
+    /// Speech content, with the voice DM pinned when it accepted the message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<Speech>,
     /// Bundle membership, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle: Option<BundleRef>,
@@ -284,15 +290,30 @@ impl MessageCreate {
             && self.attachments.is_empty()
             && self.voice.is_none()
             && self.gif.is_none()
+            && self.speech.is_none()
         {
             return Err("message text must contain at least one character");
         }
         let has_content = self.text.is_some()
             || !self.attachments.is_empty()
             || self.voice.is_some()
-            || self.gif.is_some();
+            || self.gif.is_some()
+            || self.speech.is_some();
         if !has_content {
-            return Err("a message must contain text, an attachment, voice, or a GIF");
+            return Err("a message must contain text, an attachment, voice, speech, or a GIF");
+        }
+        if let Some(speech) = &self.speech {
+            if self.voice.is_some() {
+                return Err(
+                    "a message carries one recording: a voice note (voice) or speech, not both",
+                );
+            }
+            if speech.script.trim().is_empty() {
+                return Err("speech.script must contain at least one character");
+            }
+            if speech.script.chars().count() > MAX_SCRIPT_CHARACTERS {
+                return Err("speech.script exceeds 5,000 characters");
+            }
         }
         if self
             .text
@@ -301,8 +322,12 @@ impl MessageCreate {
         {
             return Err("message text exceeds 100,000,000 characters");
         }
-        if self.voice.is_none() && self.attachments.is_empty() && self.voice_transcript.is_some() {
-            return Err("voice_transcript requires a voice attachment");
+        if self.voice.is_none()
+            && self.attachments.is_empty()
+            && self.speech.is_none()
+            && self.voice_transcript.is_some()
+        {
+            return Err("voice_transcript requires a voice attachment or speech");
         }
         if self
             .voice_transcript
@@ -336,6 +361,8 @@ impl MessageCreate {
             voice_transcript: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             gif: Option<&'a Gif>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            speech: Option<SpeechRequest<'a>>,
         }
         Content {
             metadata: &self.metadata,
@@ -347,6 +374,7 @@ impl MessageCreate {
             voice: self.voice.as_ref(),
             voice_transcript: self.voice_transcript.as_deref(),
             gif: self.gif.as_ref(),
+            speech: self.speech.as_ref().map(SpeechRequest::of),
         }
     }
 
@@ -365,6 +393,7 @@ impl MessageCreate {
             self.gif.as_ref(),
             &self.metadata,
             self.reply_to_message_id,
+            self.speech.as_ref(),
         )
     }
 
@@ -381,8 +410,30 @@ impl MessageCreate {
     }
 }
 
+/// What a request asked to say: the script and the requested voice, never the voice DM
+/// pinned. Retrying a send after the sender's voice changed is still the same request.
+#[derive(Serialize)]
+struct SpeechRequest<'a> {
+    script: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voice: Option<&'a str>,
+}
+
+impl<'a> SpeechRequest<'a> {
+    fn of(speech: &'a Speech) -> Self {
+        Self {
+            script: &speech.script,
+            voice: speech.voice.as_deref(),
+        }
+    }
+}
+
 /// Hashes canonical user-visible content without cloning potentially large
 /// message or draft fields.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one argument per canonical content field, borrowed"
+)]
 pub(crate) fn content_digest(
     text: Option<&str>,
     attachments: &[Attachment],
@@ -391,6 +442,7 @@ pub(crate) fn content_digest(
     gif: Option<&Gif>,
     metadata: &serde_json::Map<String, serde_json::Value>,
     reply_to_message_id: Option<Uuid>,
+    speech: Option<&Speech>,
 ) -> blake3::Hash {
     #[derive(Serialize)]
     struct Canonical<'a> {
@@ -404,6 +456,8 @@ pub(crate) fn content_digest(
         metadata: &'a serde_json::Map<String, serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reply_to_message_id: Option<Uuid>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        speech: Option<SpeechRequest<'a>>,
     }
 
     let canonical = Canonical {
@@ -414,6 +468,7 @@ pub(crate) fn content_digest(
         gif,
         metadata,
         reply_to_message_id,
+        speech: speech.map(SpeechRequest::of),
     };
     let mut hasher = blake3::Hasher::new();
     if serde_json::to_writer(&mut hasher, &canonical).is_err() {
@@ -505,7 +560,9 @@ fn validate_attachment_metadata(
     size: Option<u64>,
 ) -> Result<(), &'static str> {
     if size.is_some_and(|size| size > MAX_ATTACHMENT_BYTES) {
-        return Err("an attachment may not exceed 5 GiB");
+        return Err(
+            "an attachment's declared size may not exceed 5 TiB (5,497,558,138,880 bytes, the largest file Silicon Briefcase stores)",
+        );
     }
     if permanent_url.scheme() != "https"
         || permanent_url.host_str().is_none()
@@ -524,6 +581,67 @@ fn validate_attachment_metadata(
         return Err("attachment content_type must contain 1 to 255 bytes");
     }
     Ok(())
+}
+
+/// A message-shape rule a request broke (one of [`MessageCreate::validate`]'s messages), as a
+/// 422 `validation_error` that also says what to send instead.
+#[must_use]
+pub fn invalid_content(rule: &'static str) -> crate::AppError {
+    let hint = match rule {
+        "message text must contain at least one character" => {
+            "Write some text, or leave message out when the message carries an attachment, a voice note, speech or a GIF."
+        }
+        "a message must contain text, an attachment, voice, speech, or a GIF" => {
+            "Add message (text), attachments, voice, speech or gif; dm messages send --help (or the MessageCreate schema in openapi.yaml) shows each."
+        }
+        "a message carries one recording: a voice note (voice) or speech, not both" => {
+            "Send the voice note and the spoken message as two messages."
+        }
+        "speech.script must contain at least one character" => {
+            "Write the words to say in speech.script, with cues such as [warmly] before them (dm docs expressive)."
+        }
+        "speech.script exceeds 5,000 characters" => {
+            "Split the script into several spoken messages."
+        }
+        "message text exceeds 100,000,000 characters"
+        | "voice transcript exceeds 100,000,000 characters" => {
+            "Send the text as a file (an attachment) instead."
+        }
+        "voice_transcript requires a voice attachment or speech"
+        | "voice_transcript requires a voice attachment" => {
+            "Send the transcript with the voice note it transcribes (voice), or put the words in message."
+        }
+        "draft text exceeds 100,000,000 characters" => {
+            "Keep the draft shorter, or attach the text as a file."
+        }
+        "voice duration must contain 1 millisecond to 48 hours" => {
+            "Send voice.duration_milliseconds: the recording's length in whole milliseconds, 1 to 172800000 (48 hours)."
+        }
+        "attachments require a credential-free HTTPS permanent URL of at most 8,192 bytes" => {
+            "Upload the file somewhere that serves it over https without a password in the link (the DM website uploads to Silicon Briefcase), then send that link."
+        }
+        "attachment name must contain 1 to 1,024 characters"
+        | "attachment content_type must contain 1 to 255 bytes" => {
+            "Leave the field out, or send a shorter one."
+        }
+        "GIF provider_id must contain 1 to 255 bytes"
+        | "GIF URL must be HTTPS and at most 8,192 bytes"
+        | "GIF preview URL must be HTTPS and at most 8,192 bytes"
+        | "GIF title may not exceed 1,000 characters" => {
+            "Send a GIF exactly as GET /api/v1/gifs/search (dm gifs search) gives it."
+        }
+        "silicon address must be ISI@si:handle with a non-empty ISI"
+        | "actor ID must be c:handle or si:handle" => {
+            "Name accounts by their id (c:ada, si:scout) or address a Silicon's intent as ISI@si:handle (release-notes@si:sol)."
+        }
+        _ if rule.starts_with("an attachment's declared size") => {
+            "Send the file's real size in bytes, or leave size out."
+        }
+        _ => {
+            "Check the message against the MessageCreate schema in openapi.yaml (dm docs openapi)."
+        }
+    };
+    crate::AppError::invalid(rule).with_hint(hint)
 }
 
 pub(crate) fn validate_gif(gif: Option<&Gif>) -> Result<(), &'static str> {
@@ -562,7 +680,7 @@ mod tests {
         let message = MessageCreate::default();
         assert_eq!(
             message.validate(),
-            Err("a message must contain text, an attachment, voice, or a GIF")
+            Err("a message must contain text, an attachment, voice, speech, or a GIF")
         );
     }
 

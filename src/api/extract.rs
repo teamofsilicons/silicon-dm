@@ -34,6 +34,17 @@ pub use crate::domain::ConversationAccess;
 /// Validated required idempotency header.
 pub struct Idempotency(pub IdempotencyKey);
 
+/// Validated optional idempotency header (routes that are idempotent by themselves).
+pub struct OptionalIdempotency(pub Option<IdempotencyKey>);
+
+/// A JSON envelope whose `type` the handler checks itself (a route that accepts several).
+pub struct ApiEnvelope<T> {
+    /// The envelope's `type`.
+    pub kind: String,
+    /// The envelope's `data`.
+    pub data: T,
+}
+
 /// Parsed optimistic-concurrency version.
 pub struct IfMatch(pub Option<i64>);
 
@@ -49,12 +60,15 @@ pub struct ApiQuery<T>(pub T);
 /// JSON input whose parser failures use the public error shape and status.
 pub struct ApiJson<T>(pub T);
 
-/// Safe, machine-readable rejection for malformed request input.
+/// Safe, machine-readable rejection for malformed request input: what was wrong with the
+/// request (the parser's own words about the client's input, never DM's internals) and
+/// where the route's shape is described.
 #[derive(Debug)]
 pub struct ApiInputRejection {
     status: StatusCode,
     code: &'static str,
-    message: &'static str,
+    message: String,
+    hint: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -65,7 +79,29 @@ struct InputErrorEnvelope {
 #[derive(Serialize)]
 struct InputErrorDetail {
     code: &'static str,
-    message: &'static str,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<&'static str>,
+}
+
+/// Where every route's request shape is described.
+const SHAPE_HINT: &str =
+    "openapi.yaml (dm docs openapi) shows this route's fields, with an example for every route.";
+
+/// The parser's words about the input, kept short (they may quote the input itself), without
+/// axum's own preface ("Failed to deserialize query string: …").
+fn detail(error: &impl std::fmt::Display) -> String {
+    let text = error.to_string();
+    let text = match text.split_once(": ") {
+        Some((preface, rest)) if preface.starts_with("Failed to ") => rest,
+        _ => text.as_str(),
+    }
+    .trim_end_matches('.');
+    let mut short: String = text.chars().take(300).collect();
+    if short.len() < text.len() {
+        short.push('…');
+    }
+    short
 }
 
 impl Deref for Authenticated {
@@ -82,14 +118,15 @@ pub(crate) fn route_requirement(method: &Method, path: &str) -> AuthRequirement 
     let operation = silicon_dm_protocol::http_type(method.as_str(), path);
     let read = *method == Method::GET;
     let proof_scope = match operation {
-        "conversations" | "group" if read => Some("dm.conversations.read"),
+        "conversations" | "conversation" | "group" if read => Some("dm.conversations.read"),
         // The sync feed only references messages the account can already read, so an app
-        // that may read them can follow new ones (Ting is off by default).
-        "messages" | "message" | "bundle" | "sync" if read => Some("dm.messages.read"),
+        // that may read them can follow new ones (Ting is off by default). Listening reads
+        // a message too; its renders are charged to the account either way.
+        "messages" | "message" | "bundle" | "sync" | "speech" if read => Some("dm.messages.read"),
         "create_conversation" | "message.create" | "message.updated" | "message.deleted" => {
             Some("dm.messages.write")
         }
-        "receipt" => Some("dm.receipts.write"),
+        "receipt" | "receipts" => Some("dm.receipts.write"),
         "draft" | "put_draft" | "delete_draft" => Some("dm.drafts.write"),
         _ => None,
     };
@@ -141,11 +178,19 @@ impl FromRequestParts<AppState> for Authenticated {
                 let (id, access) =
                     super::access::resolve_conversation_path(state, &context, &value, create)
                         .await?;
-                if access == ConversationAccess::Invitee
-                    || (access == ConversationAccess::Custodian
-                        && parts.method != Method::GET
-                        && parts.method != Method::DELETE)
+                if access == ConversationAccess::Invitee {
+                    return Err(super::groups::invitation_pending());
+                }
+                if access == ConversationAccess::Custodian
+                    && parts.method != Method::GET
+                    && parts.method != Method::DELETE
                 {
+                    if silicon_dm_protocol::http_type(parts.method.as_str(), parts.uri.path())
+                        == "receipts"
+                        && access == ConversationAccess::Custodian
+                    {
+                        return Err(super::receipts::read_only_view());
+                    }
                     return Err(custodian_read_only(&parts.method));
                 }
                 parameters.insert("conversation_id".into(), id.to_string());
@@ -196,6 +241,7 @@ fn custodian_read_only(method: &Method) -> AppError {
             "You can read this conversation because you are custodian of a Silicon in it, but you are not a participant: DM never lets a custodian {method} as its Silicon. Only tombstoning that Silicon's own messages is allowed."
         ),
     )
+    .with_hint("Read it here. To remove one of your Silicon's messages: DELETE …/messages/{message}?for=si:x. To write, use a conversation you are in (message the Silicon directly).")
 }
 
 /// The conversation access the extractor decided for this request.
@@ -223,10 +269,35 @@ impl FromRequestParts<AppState> for Idempotency {
         parts: &mut Parts,
         _state: &AppState,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        let result = required_header(&parts.headers, &IDEMPOTENCY_KEY).and_then(|value| {
+        let result = optional_single_header(&parts.headers, &IDEMPOTENCY_KEY).and_then(|value| {
+            let Some(value) = value else {
+                return Err(AppError::invalid(
+                    "This change needs an Idempotency-Key header, so that a retry cannot make it twice.",
+                )
+                .with_hint(IDEMPOTENCY_HINT));
+            };
             IdempotencyKey::from_str(value)
                 .map(Self)
-                .map_err(|error| AppError::validation(error.to_string()))
+                .map_err(|error| invalid_idempotency_key(&error))
+        });
+        std::future::ready(result)
+    }
+}
+
+impl FromRequestParts<AppState> for OptionalIdempotency {
+    type Rejection = AppError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &AppState,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        let result = optional_single_header(&parts.headers, &IDEMPOTENCY_KEY).and_then(|value| {
+            value
+                .map(|value| {
+                    IdempotencyKey::from_str(value).map_err(|error| invalid_idempotency_key(&error))
+                })
+                .transpose()
+                .map(Self)
         });
         std::future::ready(result)
     }
@@ -250,14 +321,18 @@ impl FromRequestParts<AppState> for IfMatch {
                 Some(value) => value,
                 None => raw,
             };
-            let version = unquoted.parse::<i64>().map_err(|_| {
-                AppError::validation("If-Match must contain a non-negative draft version")
-            })?;
-            if version < 0 {
-                return Err(AppError::validation(
-                    "If-Match must contain a non-negative draft version",
-                ));
-            }
+            let version = unquoted
+                .parse::<i64>()
+                .ok()
+                .filter(|version| *version >= 0)
+                .ok_or_else(|| {
+                    AppError::invalid(
+                        "If-Match must be the version you last read: a whole number such as 3 (quoted or not).",
+                    )
+                    .with_hint(
+                        "Read the draft or the group again (its version field), then send that version.",
+                    )
+                })?;
             Ok(Self(Some(version)))
         });
         std::future::ready(result)
@@ -275,12 +350,22 @@ where
         if let Some(parameters) = parts.extensions.get::<ResolvedPath>() {
             return serde_json::from_value(serde_json::json!(parameters.0))
                 .map(Self)
-                .map_err(|_| ApiInputRejection::validation("path parameters are invalid"));
+                .map_err(|error| {
+                    ApiInputRejection::validation(format!(
+                        "The path does not fit this route: {}.",
+                        detail(&error)
+                    ))
+                });
         }
         Path::<T>::from_request_parts(parts, state)
             .await
             .map(|Path(value)| Self(value))
-            .map_err(|_| ApiInputRejection::validation("path parameters are invalid"))
+            .map_err(|rejection| {
+                ApiInputRejection::validation(format!(
+                    "The path does not fit this route: {}.",
+                    detail(&rejection.body_text())
+                ))
+            })
     }
 }
 
@@ -295,7 +380,12 @@ where
         Query::<T>::from_request_parts(parts, state)
             .await
             .map(|Query(value)| Self(value))
-            .map_err(|_| ApiInputRejection::validation("query parameters are invalid"))
+            .map_err(|rejection| {
+                ApiInputRejection::validation(format!(
+                    "The query string does not fit this route: {}.",
+                    detail(&rejection.body_text())
+                ))
+            })
     }
 }
 
@@ -326,9 +416,11 @@ where
         if envelope.kind != expected
             && !(expected == "message.create" && envelope.kind == "message.created")
         {
-            return Err(ApiInputRejection::validation(
-                "request type does not match this endpoint",
-            ));
+            return Err(ApiInputRejection::validation(format!(
+                "This route takes the request type \"{expected}\", but the request's type is \"{}\".",
+                envelope.kind.chars().take(64).collect::<String>()
+            ))
+            .with_hint("Send {\"type\": …, \"data\": {…}} with the type this route names; openapi.yaml (dm docs openapi) has an example for every route."));
         }
         if let (Some(store), Some(context), Some(conversation)) = (store, context, conversation) {
             let _ = &context;
@@ -337,23 +429,58 @@ where
                 .await
                 .map_err(|_| {
                     ApiInputRejection::validation(
-                        "message reference is invalid or unavailable in this conversation",
+                        "A message this request refers to (its reply) is not in this conversation, or its code is not a message code such as 00a.",
                     )
+                    .with_hint("dm messages list CONVERSATION shows each message with its code.")
                 })?;
         }
         serde_json::from_value(envelope.data)
             .map(Self)
-            .map_err(|_| ApiInputRejection::validation("request data is invalid"))
+            .map_err(|error| invalid_data(&error))
+    }
+}
+
+fn invalid_data(error: &serde_json::Error) -> ApiInputRejection {
+    ApiInputRejection::validation(format!(
+        "The request's data does not fit this route: {}.",
+        detail(error)
+    ))
+    .with_hint(SHAPE_HINT)
+}
+
+impl<S, T> FromRequest<S> for ApiEnvelope<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = ApiInputRejection;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(envelope) =
+            Json::<silicon_dm_protocol::Envelope<serde_json::Value>>::from_request(request, state)
+                .await
+                .map_err(|rejection| ApiInputRejection::from_json(&rejection))?;
+        let data = serde_json::from_value(envelope.data).map_err(|error| invalid_data(&error))?;
+        Ok(Self {
+            kind: envelope.kind,
+            data,
+        })
     }
 }
 
 impl ApiInputRejection {
-    fn validation(message: &'static str) -> Self {
+    fn validation(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: "validation_error",
-            message,
+            message: message.into(),
+            hint: None,
         }
+    }
+
+    fn with_hint(mut self, hint: &'static str) -> Self {
+        self.hint = Some(hint);
+        self
     }
 
     fn from_json(rejection: &JsonRejection) -> Self {
@@ -362,23 +489,33 @@ impl ApiInputRejection {
             return Self {
                 status,
                 code: "unsupported_media_type",
-                message: "Content-Type must be application/json",
+                message: "The body must be JSON, sent with Content-Type: application/json.".into(),
+                hint: Some("Add the header Content-Type: application/json."),
             };
         }
         if status == StatusCode::PAYLOAD_TOO_LARGE {
             return Self {
                 status,
                 code: "payload_too_large",
-                message: "request body exceeds the configured limit",
+                message: "The body is larger than this DM service accepts (DM_MAX_HTTP_BODY_BYTES, 128 MiB by default).".into(),
+                hint: Some("Send less: attachments are links to files, never the files themselves."),
             };
         }
-        if matches!(rejection, JsonRejection::JsonDataError(_)) {
-            return Self::validation("request JSON does not match the required schema");
+        if let JsonRejection::JsonDataError(error) = rejection {
+            return Self::validation(format!(
+                "The body must be one JSON envelope, {{\"type\": …, \"data\": …}}, with nothing else: {}.",
+                detail(&error.body_text())
+            ))
+            .with_hint(SHAPE_HINT);
         }
         Self {
             status: StatusCode::BAD_REQUEST,
             code: "invalid_json",
-            message: "request body contains invalid JSON",
+            message: format!(
+                "The body is not valid JSON: {}.",
+                detail(&rejection.body_text())
+            ),
+            hint: Some("Send one JSON envelope, {\"type\": …, \"data\": {…}}."),
         }
     }
 }
@@ -389,6 +526,7 @@ impl IntoResponse for ApiInputRejection {
             error: InputErrorDetail {
                 code: self.code,
                 message: self.message,
+                hint: self.hint,
             },
         };
         (self.status, Json(body)).into_response()
@@ -427,6 +565,7 @@ fn missing_credential() -> AppError {
         "unauthorized",
         "Send `Authorization: Bearer <Silicon Accounts access token for dm>` (sign in with `dm login`, or through the DM website). Apps acting for an account send `Authorization: Proof <sap_… User verification proof>`.",
     )
+    .with_hint("Sign in first: dm login (dm accounts --json shows how), then repeat the request.")
 }
 
 pub(super) fn presented_credential(headers: &HeaderMap) -> AppResult<(Scheme, SecretString)> {
@@ -436,10 +575,14 @@ pub(super) fn presented_credential(headers: &HeaderMap) -> AppResult<(Scheme, Se
     parse_credential(authorization)
 }
 
-fn required_header<'a>(headers: &'a HeaderMap, name: &HeaderName) -> AppResult<&'a str> {
-    optional_single_header(headers, name)?.ok_or_else(|| {
-        AppError::validation(format!("required header {} is missing", name.as_str()))
-    })
+/// How to send an idempotency key (every change takes one).
+const IDEMPOTENCY_HINT: &str = "Send Idempotency-Key: one new value per change, 8 to 255 visible ASCII characters (a UUID works), and the same value on every retry of that change.";
+
+fn invalid_idempotency_key(error: &crate::domain::IdempotencyKeyError) -> AppError {
+    AppError::invalid(format!(
+        "The Idempotency-Key header is not usable: {error}."
+    ))
+    .with_hint(IDEMPOTENCY_HINT)
 }
 
 fn optional_single_header<'a>(
@@ -468,7 +611,7 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, Method};
 
     use super::{
-        IDEMPOTENCY_KEY, Scheme, parse_credential, presented_credential, required_header,
+        IDEMPOTENCY_KEY, Scheme, optional_single_header, parse_credential, presented_credential,
         route_requirement,
     };
 
@@ -501,7 +644,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.append(&IDEMPOTENCY_KEY, HeaderValue::from_static("abcdefgh"));
         headers.append(&IDEMPOTENCY_KEY, HeaderValue::from_static("ijklmnop"));
-        assert!(required_header(&headers, &IDEMPOTENCY_KEY).is_err());
+        assert!(optional_single_header(&headers, &IDEMPOTENCY_KEY).is_err());
 
         let mut duplicate_bearers = HeaderMap::new();
         duplicate_bearers.append(

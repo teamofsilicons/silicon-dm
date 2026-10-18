@@ -37,16 +37,20 @@ input, button, textarea, select { font: inherit; letter-spacing: inherit; color:
 button { -webkit-tap-highlight-color: transparent; }
 a { color: var(--accent-ink); text-decoration-thickness: from-font; text-underline-offset: .2em; }
 a:not([data-variant]):hover { color: var(--accent-strong); }
-/* Keyboard focus on a plain link: the hover ink, a full underline and a soft fill (focus never shows as a ring). :where
-   keeps it at one pseudo-class of specificity, so a component's own focus rule for its links still wins. */
+/* Keyboard focus on a plain link: the hover ink, a 2 px underline and a soft fill (focus never shows as a ring; the
+   thicker underline is what changes by 3:1, DESIGN.md). :where keeps it at one pseudo-class of specificity, so a
+   component's own focus rule for its links still wins. */
 :where(a:not([data-variant], [data-sq])):focus-visible {
   outline: none;
+  /* Silicon UI's keyboard ring (components/silicon-ui/foundation.css) wins over `outline: none`; this turns it off. */
+  --focus-outline: transparent;
   border-radius: 4px;
   background: color-mix(in oklab, var(--accent) 12%, transparent);
   box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 12%, transparent);
   color: var(--accent-strong);
   text-decoration-line: underline;
   text-decoration-color: currentColor;
+  text-decoration-thickness: 2px;
 }
 code, kbd, samp, pre { font-family: var(--font-mono); font-size: .92em; letter-spacing: 0; }
 strong, b { font-weight: 500; }
@@ -99,7 +103,11 @@ hr { height: 1px; margin: 0; border: 0; background: var(--border); }
   transform: translateY(-160%);
   transition: transform var(--duration-standard) var(--ease-enter);
 }
-.skip-link:focus-visible { transform: none; color: var(--background); }
+.skip-link:focus-visible { transform: none; color: var(--background); --focus-outline: transparent; }
+
+/* Silicon UI's code block clips what is drawn outside its source (overflow hidden), so its own ring never showed: the
+   keyboard on the source draws the accent edge inside it instead (DESIGN.md, Focus and accessibility). */
+pre[aria-label="Selectable source code"]:focus-visible { box-shadow: var(--focus-edge); --focus-outline: transparent; }
 
 /* ------------------------------------------------------------------------------------------------------------------
  * View transitions.

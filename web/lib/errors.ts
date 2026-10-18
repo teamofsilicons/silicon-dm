@@ -121,20 +121,25 @@ function retryAfterFrom(headers: Headers, details: Record<string, unknown> | und
   return Number.isFinite(at) ? Math.max(0, Math.round((at - Date.now()) / 1000)) : null;
 }
 
-const STATUS_WORDS: Record<number, string> = {
-  400: "the request was not valid",
-  401: "you are not signed in",
-  403: "this account is not allowed to do that",
-  404: "it does not exist",
-  409: "it conflicts with the current state",
-  410: "it is gone",
-  413: "the request is too large",
-  422: "the input was not accepted",
-  429: "too many requests were made",
-  500: "the service hit an internal error",
-  502: "the service could not be reached",
-  503: "the service is temporarily unavailable",
-  504: "the service took too long to answer",
+/**
+ * What a bare HTTP status means, in words for the Carbon who reads it, when the answer said nothing itself (a proxy's
+ * page, a gateway timeout): what happened (the status follows in brackets, to quote in a report), and what to do. The
+ * request itself (method and path) is never part of the words; it stays on the error's fields for logs and code.
+ */
+const STATUS_WORDS: Record<number, { message: string; hint: string }> = {
+  400: { message: "DM's service could not read this request", hint: "Reload the page and try again." },
+  401: { message: "Your sign-in to DM has ended", hint: "Sign in again." },
+  403: { message: "DM's service says this account may not do that", hint: "Reload the page and try again." },
+  404: { message: "DM's service could not find it", hint: "Reload the page: it may have been moved or deleted." },
+  409: { message: "This clashes with a change made somewhere else", hint: "Reload the page and try again." },
+  410: { message: "It is gone", hint: "Reload the page." },
+  413: { message: "That is too large for DM's service to take", hint: "Try something smaller." },
+  422: { message: "DM's service did not accept this", hint: "Check it and try again." },
+  429: { message: "Too many requests went to DM at once", hint: "Wait a moment and try again." },
+  500: { message: "DM's service ran into a problem", hint: "Try again in a moment." },
+  502: { message: "DM's service is not answering right now", hint: "Try again in a moment." },
+  503: { message: "DM's service is busy or restarting", hint: "Try again in a moment." },
+  504: { message: "DM's service took too long to answer", hint: "Try again in a moment." },
 };
 
 /** Builds the ApiError for a non-2xx response from its (already parsed, possibly null) body. */
@@ -149,12 +154,14 @@ export function errorFromResponse(response: Response, body: unknown, method: str
     const { code, message, hint, details } = body.error;
     return new ApiError({ status: response.status, code, message, hint, details, requestId, retryAfter: retryAfterFrom(response.headers, details), method, path });
   }
-  const reason = STATUS_WORDS[response.status] ?? `the server answered ${response.status}`;
+  const words = STATUS_WORDS[response.status] ?? (response.status >= 500
+    ? { message: "DM's service ran into a problem", hint: "Try again in a moment." }
+    : { message: "DM's service answered in a way this page did not expect", hint: "Reload the page and try again." });
   return new ApiError({
     status: response.status,
     code: response.status === 401 ? "signed_out" : response.status >= 500 ? "server_unavailable" : "unexpected_response",
-    message: `${method} ${path} failed: ${reason} (HTTP ${response.status}), and the answer had no error details.`,
-    hint: response.status === 401 ? "Sign in again." : response.status >= 500 ? "Wait a moment and try again." : "Reload the page and try again.",
+    message: `${words.message} (HTTP ${response.status}).`,
+    hint: words.hint,
     requestId,
     retryAfter: retryAfterFrom(response.headers, undefined),
     method,
@@ -162,9 +169,29 @@ export function errorFromResponse(response: Response, body: unknown, method: str
   });
 }
 
-/** The error for a request that never got a response. */
+/** True when this code runs in a browser that knows it has no network. */
+function browserOffline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
+
+/**
+ * The words for a request that never got an answer (offline, the service down, DNS), the same everywhere, for the
+ * Carbon who reads them: what happened and what to do, never the request ("GET /api/v1/…" means nothing to them; the
+ * method and path stay on the error's fields for logs and code). A read is asked for again by itself (the sync loop,
+ * the list, every panel), so its words say DM keeps trying; a change is not, so they say to try again.
+ */
+export function unreachableWords(method: string, offline = browserOffline()): { message: string; hint: string } {
+  const read = method === "GET" || method === "HEAD";
+  if (offline) return { message: "This browser is offline, so DM can't reach its service.", hint: read ? "DM catches up once you are back online." : "Try again once you are back online." };
+  return { message: "DM can't reach its service right now.", hint: read ? "It keeps trying; check your connection if this lasts." : "Check your connection, then try again." };
+}
+
+/**
+ * The error for a request that never got a response. `service` names where it was going ("this site" from the browser,
+ * "the service" from the website's server) in `details.unreachable`; the browser's own reason stays in `cause` (never in
+ * the words, nor in what a Server Component hands the page: it can name an internal address).
+ */
 export function networkError(error: unknown, method: string, path: string, service = "the service"): ApiError {
   if (error && typeof error === "object" && (error as { name?: unknown }).name === "AbortError") return ApiError.from(error);
-  const reason = error instanceof Error && error.message ? error.message : "the network request failed";
-  return new ApiError({ status: 0, code: "network_error", message: `Could not reach ${service} for ${method} ${path}: ${reason}.`, hint: "Check your connection, then try again.", method, path, cause: error });
+  return new ApiError({ status: 0, code: "network_error", ...unreachableWords(method), details: { unreachable: service }, method, path, cause: error });
 }

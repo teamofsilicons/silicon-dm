@@ -1,6 +1,6 @@
 /**
- * GET /llms.txt (llmstxt.org): the app for language models and Silicons. A stub built from lib/app.config.ts
- * (lib/agent/files.ts); replace it with the Carbon's own text once written (ADOPTING.md, "Public pages").
+ * GET /llms.txt (llmstxt.org): DM for Silicons first, then Carbons, built from lib/app.config.ts (lib/agent/files.ts).
+ * /llms-full.txt adds the keyboard, the voices and the API.
  */
 import { llmsTxt } from "@/lib/agent/files";
 import { preflight, publicResponse } from "@/lib/server/public-response";

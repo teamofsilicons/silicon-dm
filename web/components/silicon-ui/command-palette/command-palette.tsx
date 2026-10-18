@@ -9,7 +9,7 @@ import { motionTokens } from "../lib/motion-tokens";
 import styles from "./command-palette.module.css";
 
 export interface CommandItem { id: string; label: string; description?: string; group?: string; keywords?: string[]; icon?: ReactNode; shortcut?: string; }
-export interface CommandPaletteProps { items: CommandItem[]; placeholder?: string; onSelect?: (item: CommandItem) => void; onClose?: () => void; label?: string; /** Focus the search field on mount, for a palette that opens on demand. */ autoFocus?: boolean; }
+export interface CommandPaletteProps { items: CommandItem[]; placeholder?: string; onSelect?: (item: CommandItem) => void; onClose?: () => void; label?: string; /** Focus the search field on mount, for a palette that opens on demand. */ autoFocus?: boolean; /** Which items a query shows, best first (default: every item whose words contain it, in order). Keep it stable. */ filter?: (items: CommandItem[], query: string) => CommandItem[]; /** Hears the query as it is typed. */ onQueryChange?: (query: string) => void; /** The empty state's words, also said to screen readers. */ emptyLabel?: string; }
 
 const enter: Transition = { duration: motionTokens.duration.standard, ease: [...motionTokens.ease.enter] };
 const leave: Transition = { duration: motionTokens.duration.instant, ease: [...motionTokens.ease.standard] };
@@ -17,7 +17,13 @@ const GLIDE_ROWS = 6;
 /** Rows fade out while the rest glide into their place; when the list snaps they leave at once so nothing overlaps the new rows. */
 const rowExit: Variants = { exit: (glide: boolean) => ({ opacity: 0, transition: glide ? leave : { duration: 0 } }) };
 
-export function CommandPalette({ items, placeholder = "Search commands", onSelect, onClose, label = "Command palette", autoFocus = false }: CommandPaletteProps) {
+const containsQuery = (items: CommandItem[], query: string) => {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return items;
+  return items.filter(item => [item.label, item.description, item.group, ...(item.keywords ?? [])].filter(Boolean).join(" ").toLowerCase().includes(normalized));
+};
+
+export function CommandPalette({ items, placeholder = "Search commands", onSelect, onClose, label = "Command palette", autoFocus = false, filter = containsQuery, onQueryChange, emptyLabel = "No matching actions" }: CommandPaletteProps) {
   const inputId = useId();
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
@@ -31,11 +37,15 @@ export function CommandPalette({ items, placeholder = "Search commands", onSelec
   const highlightY = useMotionValue(0);
   const highlightHeight = useMotionValue(0);
   const highlightOpacity = useMotionValue(0);
+  // Rows are indexed in the order they are drawn (each group whole), so the arrow keys and Enter walk what is on screen.
   const filtered = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return items;
-    return items.filter(item => [item.label, item.description, item.group, ...(item.keywords ?? [])].filter(Boolean).join(" ").toLowerCase().includes(normalized));
-  }, [items, query]);
+    const groups = new Map<string, CommandItem[]>();
+    for (const item of filter(items, query)) {
+      const group = item.group ?? "Actions";
+      groups.set(group, [...(groups.get(group) ?? []), item]);
+    }
+    return [...groups.values()].flat();
+  }, [filter, items, query]);
   const groupedItems = useMemo(() => {
     const grouped = new Map<string, Array<{ item: CommandItem; index: number }>>();
     filtered.forEach((item, index) => {
@@ -105,10 +115,15 @@ export function CommandPalette({ items, placeholder = "Search commands", onSelec
     document.getElementById(`${inputId}-${activeId}`)?.scrollIntoView({ block: "nearest" });
   }, [activeId, inputId]);
 
+  // A query highlights its best match at once, so what Enter runs is always on screen (and the active descendant).
+  function search(next: string) {
+    setQuery(next);
+    setActiveIndex(next.trim() ? 0 : null);
+    onQueryChange?.(next);
+  }
   function choose(item: CommandItem) {
     onSelect?.(item);
-    setQuery("");
-    setActiveIndex(null);
+    search("");
     inputRef.current?.focus();
   }
   function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
@@ -117,12 +132,12 @@ export function CommandPalette({ items, placeholder = "Search commands", onSelec
     if (event.key === "ArrowUp") { event.preventDefault(); setActiveIndex(index => Math.max((index ?? filtered.length) - 1, 0)); }
     if (event.key === "Home") { event.preventDefault(); setActiveIndex(0); }
     if (event.key === "End") { event.preventDefault(); setActiveIndex(Math.max(filtered.length - 1, 0)); }
-    // Enter runs the highlighted result; after typing, with nothing highlighted yet, it runs the top match.
+    // Enter runs the highlighted result (after typing, the top match is highlighted).
     const target = filtered[safeActiveIndex] ?? (query ? filtered[0] : undefined);
     if (event.key === "Enter" && target) { event.preventDefault(); choose(target); }
     if (event.key === "Escape") {
       event.preventDefault();
-      if (query) { setQuery(""); setActiveIndex(null); }
+      if (query) search("");
       else onClose?.();
     }
   }
@@ -131,11 +146,11 @@ export function CommandPalette({ items, placeholder = "Search commands", onSelec
     <div className={styles.searchRow}>
       <span className={styles.searchIcon}><Search width={18} height={18} strokeWidth={1.75} aria-hidden="true"/></span>
       <label className={styles.visuallyHidden} htmlFor={inputId}>{label}</label>
-      <input ref={inputRef} id={inputId} role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls={`${inputId}-results`} aria-activedescendant={activeId ? `${inputId}-${activeId}` : undefined} value={query} onChange={event => { setQuery(event.target.value); setActiveIndex(null); }} onKeyDown={handleKeyDown} placeholder={placeholder} autoComplete="off"/>
+      <input ref={inputRef} id={inputId} role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls={`${inputId}-results`} aria-activedescendant={activeId ? `${inputId}-${activeId}` : undefined} value={query} onChange={event => search(event.target.value)} onKeyDown={handleKeyDown} placeholder={placeholder} autoComplete="off"/>
       <AnimatePresence mode="popLayout" initial={false}>
-        {query ? <motion.button key="clear" className={styles.clearButton} type="button" aria-label="Clear search" onClick={() => { setQuery(""); setActiveIndex(null); inputRef.current?.focus(); }} initial={reduced ? false : { opacity: 0, scale: .6, filter: `blur(${motionTokens.blur.subtle}px)` }} animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }} exit={reduced ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, scale: .6, filter: `blur(${motionTokens.blur.subtle}px)`, transition: leave }} transition={reduced ? { duration: 0 } : { default: motionTokens.spring.snappy, opacity: { duration: motionTokens.duration.instant } }}><X width={15} height={15} aria-hidden="true"/></motion.button> : null}
+        {query ? <motion.button key="clear" className={styles.clearButton} type="button" aria-label="Clear search" onClick={() => { search(""); inputRef.current?.focus(); }} initial={reduced ? false : { opacity: 0, scale: .6, filter: `blur(${motionTokens.blur.subtle}px)` }} animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }} exit={reduced ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, scale: .6, filter: `blur(${motionTokens.blur.subtle}px)`, transition: leave }} transition={reduced ? { duration: 0 } : { default: motionTokens.spring.snappy, opacity: { duration: motionTokens.duration.instant } }}><X width={15} height={15} aria-hidden="true"/></motion.button> : null}
       </AnimatePresence>
-      {onClose ? <button className={styles.closeButton} type="button" aria-label="Close command palette" onClick={onClose}>Esc</button> : null}
+      {onClose ? <button className={styles.closeButton} type="button" aria-label="Esc, close the palette" onClick={onClose}>Esc</button> : null}
       <kbd className={styles.commandKey}>⌘ K</kbd>
     </div>
     <motion.div className={styles.resultsFrame} initial={false} animate={{ height: listHeight }} transition={reduced ? { duration: 0 } : motionTokens.spring.smooth}>
@@ -156,10 +171,12 @@ export function CommandPalette({ items, placeholder = "Search commands", onSelec
                 }} variants={rowExit} initial={reduced ? false : { opacity: 0 }} animate={{ opacity: 1 }} exit="exit" transition={reduced ? { duration: 0 } : { default: enter, layout: motionTokens.spring.smooth }}><span className={styles.itemIcon} aria-hidden="true">{item.icon ?? <CommandIcon width={16} height={16}/>}</span><span className={styles.resultCopy}><strong>{item.label}</strong>{item.description && <small>{item.description}</small>}</span>{item.shortcut && <kbd className={styles.shortcut}>{item.shortcut}</kbd>}</motion.button>)}</AnimatePresence>
               </motion.div>)}
             </AnimatePresence>
-          </motion.div> : <motion.div key="empty" className={styles.empty} initial={reduced ? false : { opacity: 0, y: 6, filter: `blur(${motionTokens.blur.subtle}px)` }} animate={{ opacity: 1, y: 0, filter: "blur(0px)" }} exit={reduced ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, y: -4, transition: leave }} transition={enter}><span><Search width={20} height={20} aria-hidden="true"/></span><strong>No matching actions</strong><small>Try a different word or clear the search.</small></motion.div>}
+          </motion.div> : <motion.div key="empty" className={styles.empty} initial={reduced ? false : { opacity: 0, y: 6, filter: `blur(${motionTokens.blur.subtle}px)` }} animate={{ opacity: 1, y: 0, filter: "blur(0px)" }} exit={reduced ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, y: -4, transition: leave }} transition={enter}><span><Search width={20} height={20} aria-hidden="true"/></span><strong>{emptyLabel}</strong><small>Try a different word or clear the search.</small></motion.div>}
         </AnimatePresence>
       </motion.div>
     </motion.div>
+    {/* Mounted from the start, so a query that finds nothing is announced (the empty state appears without moving focus). */}
+    <span className={styles.visuallyHidden} role="status">{query.trim() && !filtered.length ? emptyLabel : ""}</span>
   </motion.div>;
 }
 

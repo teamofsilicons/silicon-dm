@@ -9,11 +9,16 @@ use uuid::Uuid;
 use crate::{
     AppResult,
     api::build_router,
-    application::{accounts::AccountRuntime, state::AppState, sync_hub::SyncHub},
+    application::{
+        accounts::AccountRuntime, speech::SpeechService, state::AppState, sync_hub::SyncHub,
+    },
     config::{MigrationSettings, Settings},
-    infrastructure::{accounts::AccountsAdapter, giphy::GiphyClient, postgres::PostgresStore},
+    infrastructure::{
+        accounts::AccountsAdapter, deepgram::DeepgramClient, giphy::GiphyClient,
+        postgres::PostgresStore,
+    },
     shutdown,
-    worker::TingDeliveryWorker,
+    worker::{SpeechWorker, TingDeliveryWorker},
 };
 
 /// Constructs one fully validated application dependency graph.
@@ -38,6 +43,15 @@ pub async fn build_app_state(settings: Settings) -> AppResult<AppState> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let identity = Arc::new(AccountsAdapter::new(&settings.accounts)?);
     let gifs = Arc::new(GiphyClient::new(&settings.providers)?);
+    let speech = SpeechService::new(
+        DeepgramClient::new(&settings.speech)?
+            .map(|client| Arc::new(client) as Arc<dyn crate::application::ports::SpeechProvider>),
+    );
+    if !speech.enabled() {
+        tracing::info!(
+            "speech is off (DM_DEEPGRAM_API_KEY is not set): speech and transcription answer 503 speech_not_configured"
+        );
+    }
     let store = PostgresStore::connect(&settings.database).await?;
     store.readiness().await?;
     Ok(AppState {
@@ -48,6 +62,7 @@ pub async fn build_app_state(settings: Settings) -> AppResult<AppState> {
         accounts: AccountRuntime::default(),
         sync: SyncHub::default(),
         gifs,
+        speech,
     })
 }
 
@@ -86,6 +101,7 @@ pub async fn run_api(settings: Settings) -> anyhow::Result<()> {
             .run(state.store.clone(), cancellation.clone()),
     );
     let reporting = tokio::spawn(crate::reporting::run(state.clone(), cancellation.clone()));
+    let speech = spawn_speech_worker(&state, &cancellation);
     let router = build_router(state);
     let server = axum::serve(listener, router)
         .with_graceful_shutdown(cancellation.clone().cancelled_owned())
@@ -135,7 +151,23 @@ pub async fn run_api(settings: Settings) -> anyhow::Result<()> {
     cancellation.cancel();
     let _ = timeout(shutdown_timeout, reporting).await;
     let _ = timeout(shutdown_timeout, sync_wakeups).await;
+    let _ = timeout(shutdown_timeout, speech).await;
     result
+}
+
+/// Starts the speech worker (pre-rendering spoken messages, cache eviction) as its own task:
+/// speech never holds up delivery, and a speech failure never stops the process.
+fn spawn_speech_worker(
+    state: &AppState,
+    cancellation: &CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let worker = SpeechWorker::new(state.clone());
+    let cancellation = cancellation.clone();
+    tokio::spawn(async move {
+        if let Err(error) = worker.run(cancellation).await {
+            tracing::error!(code = error.code(), "speech worker stopped");
+        }
+    })
 }
 
 /// Applies embedded database migrations and closes the migration pool.
@@ -161,11 +193,12 @@ pub async fn run_worker(settings: Settings) -> anyhow::Result<()> {
     let state = build_app_state(settings).await?;
     let cancellation = CancellationToken::new();
     let worker = build_ting_worker(&state, cancellation.clone());
+    let speech = spawn_speech_worker(&state, &cancellation);
     let worker_run = worker.run(cancellation.clone());
     tokio::pin!(worker_run);
     tracing::info!(instance_id = %state.instance_id, "DM delivery worker is ready");
 
-    tokio::select! {
+    let result = tokio::select! {
         result = &mut worker_run => result.map_err(anyhow::Error::from),
         () = shutdown::signal() => {
             cancellation.cancel();
@@ -176,7 +209,10 @@ pub async fn run_worker(settings: Settings) -> anyhow::Result<()> {
                 Ok(())
             }
         }
-    }
+    };
+    cancellation.cancel();
+    let _ = timeout(shutdown_timeout, speech).await;
+    result
 }
 
 fn new_instance_id() -> Arc<str> {

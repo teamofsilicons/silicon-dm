@@ -13,8 +13,9 @@ use crate::{
     AppError, AppResult,
     application::commands::CreateConversationCommand,
     domain::{
-        ActorId, ActorRef, ActorType, Conversation, ConversationAccess, ConversationPage, Cursor,
-        MAX_CONVERSATION_PARTICIPANTS, OrganizationId, PageRequest,
+        ActorId, ActorRef, ActorType, Conversation, ConversationAccess, ConversationChange,
+        ConversationPage, Cursor, MAX_CONVERSATION_PARTICIPANTS, Message, OrganizationId,
+        PageRequest,
     },
 };
 
@@ -174,19 +175,24 @@ impl PostgresStore {
         .await?)
     }
 
-    /// How many direct conversations this account started in the last hour.
+    /// Whether this account started `limit` direct conversations in the last hour, and if so
+    /// how many seconds remain until the `limit`-th newest leaves that hour (then one more
+    /// fits).
     ///
     /// # Errors
     /// Database failures.
-    pub async fn conversations_started_last_hour(&self, actor: &ActorRef) -> AppResult<i64> {
+    pub async fn first_contact_wait(&self, actor: &ActorRef, limit: i64) -> AppResult<Option<f64>> {
         Ok(sqlx::query_scalar(
-            "SELECT count(*) FROM conversations
+            "SELECT EXTRACT(EPOCH FROM created_at + interval '1 hour' - clock_timestamp())::float8
+             FROM conversations
              WHERE created_by_kind = $1::text::actor_kind AND created_by_id = $2
-               AND NOT is_group AND created_at > clock_timestamp() - interval '1 hour'",
+               AND NOT is_group AND created_at > clock_timestamp() - interval '1 hour'
+             ORDER BY created_at DESC OFFSET $3 LIMIT 1",
         )
         .bind(actor.actor_type.as_str())
         .bind(actor.id.as_str())
-        .fetch_one(self.pool())
+        .bind(limit - 1)
+        .fetch_optional(self.pool())
         .await?)
     }
 
@@ -265,20 +271,28 @@ impl PostgresStore {
     /// `conversation_superseded` (409) naming the conversation to use instead;
     /// `recipient_deleted` (409).
     pub async fn require_current(&self, conversation_id: Uuid) -> AppResult<()> {
-        let closed: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM conversations c
-                JOIN conversation_participants p ON p.conversation_id = c.id
-                JOIN accounts a ON a.uuid = p.actor_id AND a.status = 'deleted'
-                WHERE c.id = $1 AND NOT c.is_group)",
+        // A direct conversation closes when it has nobody left to talk to: in a two-party one
+        // that is the other account being deleted; a conversation of several goes on while two
+        // of its accounts remain (deleted accounts are no longer delivered to).
+        let (total, live): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE a.status IS DISTINCT FROM 'deleted')
+             FROM conversations c
+             JOIN conversation_participants p ON p.conversation_id = c.id
+             LEFT JOIN accounts a ON a.uuid = p.actor_id
+             WHERE c.id = $1 AND NOT c.is_group",
         )
         .bind(conversation_id)
         .fetch_one(self.pool())
         .await?;
-        if closed {
+        if live < total && live < 2 {
             return Err(AppError::refused(
                 http::StatusCode::CONFLICT,
                 "recipient_deleted",
-                "The other account in this conversation was deleted. Its history stays readable; it takes no new messages.",
+                if total > 2 {
+                    "Every other account in this conversation was deleted. Its history stays readable; it takes no new messages."
+                } else {
+                    "The other account in this conversation was deleted. Its history stays readable; it takes no new messages."
+                },
             ));
         }
         let superseded: Option<String> = sqlx::query_scalar(
@@ -356,6 +370,13 @@ async fn canonical_or_insert_in(
         .await
         .map_err(map_constraint_error)?;
     }
+    // Everyone in it (the creator too, for its other devices) sees the new conversation.
+    super::conversation_events::record_in(
+        transaction,
+        id,
+        &super::conversation_events::each(participants, ConversationChange::Created, &[]),
+    )
+    .await?;
     Ok(id)
 }
 
@@ -402,7 +423,9 @@ impl PostgresStore {
               AND participant.actor_id = $2
               AND conversation.superseded_by IS NULL
               AND (NOT $6 OR conversation.is_group)
-              AND ($3::timestamptz IS NULL OR (conversation.updated_at, conversation.id) < ($3, $4))
+              AND (conversation.updated_at, conversation.id)
+                  < (COALESCE($3::timestamptz, 'infinity'::timestamptz),
+                     COALESCE($4::uuid, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid))
             ORDER BY conversation.updated_at DESC, conversation.id DESC
             LIMIT $5
             "
@@ -415,7 +438,8 @@ impl PostgresStore {
         .bind(groups_only)
         .fetch_all(self.pool())
         .await?;
-        self.conversation_page(viewer, records, limit).await
+        self.conversation_page(viewer, subject, records, limit)
+            .await
     }
 
     /// One conversation, for a participant or the custodian of a Silicon in it.
@@ -425,6 +449,21 @@ impl PostgresStore {
     pub async fn get_conversation(
         &self,
         viewer: &ActorRef,
+        conversation_id: Uuid,
+    ) -> AppResult<Conversation> {
+        self.get_conversation_for(viewer, viewer, conversation_id)
+            .await
+    }
+
+    /// One conversation as `viewer` may see it, with the unread facts of `subject` (the
+    /// viewer, or a Silicon it looks after).
+    ///
+    /// # Errors
+    /// Not found when the viewer may not read it; database failures.
+    pub async fn get_conversation_for(
+        &self,
+        viewer: &ActorRef,
+        subject: &ActorRef,
         conversation_id: Uuid,
     ) -> AppResult<Conversation> {
         match self.conversation_access(viewer, conversation_id).await? {
@@ -438,7 +477,9 @@ impl PostgresStore {
         .fetch_optional(self.pool())
         .await?
         .ok_or(AppError::NotFound)?;
-        let page = self.conversation_page(viewer, vec![record], 1).await?;
+        let page = self
+            .conversation_page(viewer, subject, vec![record], 1)
+            .await?;
         page.items.into_iter().next().ok_or(AppError::NotFound)
     }
 
@@ -474,6 +515,7 @@ impl PostgresStore {
     async fn conversation_page(
         &self,
         viewer: &ActorRef,
+        subject: &ActorRef,
         mut records: Vec<ConversationRecord>,
         limit: u16,
     ) -> AppResult<ConversationPage> {
@@ -541,11 +583,30 @@ impl PostgresStore {
                 supersedes.entry(canonical).or_default().push(old);
             }
         }
+        let mut unread = self.unread_summaries(subject, &conversation_ids).await?;
+        let mut drafts = self.draft_versions(subject, &conversation_ids).await?;
+        let mut groups = self.groups_details(viewer, &conversation_ids).await?;
+        // Every row's last message in a batch (within the page's byte budget), not one by one.
+        let last_ids: Vec<Uuid> = records
+            .iter()
+            .filter_map(|record| record.last_message_id)
+            .collect();
+        let estimates = self.message_size_estimates(&last_ids).await?;
+        let mut last_messages: HashMap<Uuid, Message> = self
+            .load_messages_within_budget(&estimates)
+            .await?
+            .into_iter()
+            .map(|message| (message.id, message))
+            .collect();
         let mut items = Vec::with_capacity(records.len());
         let mut payload_bytes: usize = 0;
         for record in &records {
             let last_message = match record.last_message_id {
-                Some(id) => Some(self.load_message(id).await?),
+                // A last message the budget left out ends the page here.
+                Some(id) => match last_messages.remove(&id) {
+                    Some(message) => Some(message),
+                    None => break,
+                },
                 None => None,
             };
             let message_bytes = last_message
@@ -560,14 +621,20 @@ impl PostgresStore {
                 break;
             }
             payload_bytes = payload_bytes.saturating_add(message_bytes);
+            let summary = unread.remove(&record.id).unwrap_or_default();
             items.push(Conversation {
                 id: record.id,
                 participants: participants.remove(&record.id).unwrap_or_default(),
                 visible_to_custodians: custodians.remove(&record.id).unwrap_or_default(),
                 superseded_by: record.superseded_by,
                 supersedes: supersedes.remove(&record.id).unwrap_or_default(),
-                group: self.group_details(viewer, record.id).await?,
+                group: groups.remove(&record.id),
                 last_message,
+                unread_count: summary.unread_count,
+                last_read_message_id: summary
+                    .last_read_sequence
+                    .and_then(silicon_dm_protocol::message_code),
+                draft_version: drafts.remove(&record.id),
                 created_at: record.created_at,
                 updated_at: record.updated_at,
             });
@@ -585,7 +652,11 @@ impl PostgresStore {
         } else {
             None
         };
-        Ok(ConversationPage { items, next_cursor })
+        Ok(ConversationPage {
+            items,
+            next_cursor,
+            unread: None,
+        })
     }
 }
 
