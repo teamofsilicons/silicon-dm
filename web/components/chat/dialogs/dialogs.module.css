@@ -2,8 +2,16 @@
  * The chat's dialogs: one column of fields, the primary action last on the right (full width on phones), invitations
  * as rows divided by hairlines.
  */
-/* The dialog scrolls when it is taller than the screen; what the keyboard brings into view stays clear of the actions. */
-.dialog.dialog { width: min(560px, calc(100vw - 32px)); scroll-padding-bottom: 96px; }
+/* The dialog scrolls when it is taller than the screen; what the keyboard brings into view stays clear of the actions.
+   It hangs from a fixed place near the top and grows downward: centred, it moved by half of every change in its
+   height, so the field being typed in jumped up to 87 px as suggestions came and went. */
+.dialog.dialog {
+  --dialog-top: clamp(16px, 10vh, 96px);
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - var(--dialog-top) - 16px);
+  margin: var(--dialog-top) auto auto;
+  scroll-padding-bottom: 96px;
+}
 .form { display: grid; min-width: 0; gap: var(--space-5); }
 .text { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.55; text-wrap: pretty; }
 .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }

@@ -129,6 +129,28 @@ for (const theme of ["light", "dark"] as const) {
       await page.keyboard.press("Shift+?");
       await expect(page.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeVisible();
       await audit(page, `the keyboard shortcuts (${where})`);
+      await page.keyboard.press("Escape");
+      // The ⌘K palette, with something typed (its best match highlighted).
+      await page.getByRole("main").click({ position: { x: 8, y: 300 } });
+      await page.keyboard.press(process.platform === "darwin" ? "Meta+K" : "Control+K");
+      await expect(page.getByRole("dialog", { name: "Search conversations and actions" })).toBeVisible();
+      await page.keyboard.type("set");
+      await audit(page, `the command palette (${where})`);
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("Escape");
+      // The account menu (a bottom sheet on a phone, at the foot of the list: a phone shows the list on its own page).
+      await page.goto(appConfig.home);
+      await page.getByRole("button", { name: /^Account menu, / }).click();
+      await expect(page.getByRole("menu")).toBeVisible();
+      await audit(page, `the account menu (${where})`);
+      await page.keyboard.press("Escape");
+      // Settings → Keyboard while a shortcut's new keys are being recorded.
+      await page.goto("/settings#keyboard");
+      const recorder = page.getByRole("button", { name: /^Keys for Command palette/ });
+      await recorder.click();
+      await expect(recorder).toHaveAttribute("aria-pressed", "true");
+      await audit(page, `a shortcut being recorded (${where})`);
+      await page.keyboard.press("Escape");
       await context.close();
     });
   }
@@ -147,12 +169,16 @@ test("the keyboard reaches everything in the shell, and focus is always visible"
   await page.goto(appConfig.home);
   await page.addStyleTag({ content: "*, *::before, *::after { transition: none !important; animation: none !important; }" });
   const unseen: string[] = [];
+  const ringed: string[] = [];
   for (let step = 0; step < 14; step++) {
     await page.keyboard.press("Tab");
     const visible = await page.evaluate(() => {
       const element = document.activeElement as HTMLElement | null;
-      if (!element || element === document.body) return { name: "body", changed: true };
+      if (!element || element === document.body) return { name: "body", changed: true, ring: false };
       const name = `${element.tagName.toLowerCase()} "${(element.getAttribute("aria-label") ?? element.textContent ?? "").trim().slice(0, 40)}"`;
+      // No outline ring on top of the fill or edge a control draws (Silicon UI's ring wins over `outline: none`).
+      const own = getComputedStyle(element);
+      const ring = own.outlineStyle !== "none" && parseFloat(own.outlineWidth) > 0 && !/\/ 0\)|rgba\(0, 0, 0, 0\)|transparent/.test(own.outlineColor);
       // Arc draws focus on the control, or on what paints it: a highlight inside it, the field around it
       // (:focus-within) or the surface right after it (Add filter). Look at all of them.
       const painted = [element, element.parentElement, element.parentElement?.parentElement, element.nextElementSibling, ...Array.from(element.children).slice(0, 3)].filter((node): node is Element => !!node);
@@ -164,10 +190,12 @@ test("the keyboard reaches everything in the shell, and focus is always visible"
       element.blur();
       const rest = snapshot();
       element.focus({ preventScroll: true });
-      return { name, changed: now !== rest };
+      return { name, changed: now !== rest, ring };
     });
     if (!visible.changed) unseen.push(visible.name);
+    if (visible.ring) ringed.push(visible.name);
   }
   expect(unseen, `focus not visible on: ${unseen.join(", ")}`).toEqual([]);
+  expect(ringed, `a ring drawn over the focus look on: ${ringed.join(", ")}`).toEqual([]);
   await context.close();
 });

@@ -9,7 +9,8 @@
  * - Delivered: a message from someone else that this tab fetched (the sync loop) is delivered, batched the same way.
  * - A custodian's view never sends receipts: it is read only (the service would answer 403 `read_only_view`).
  *
- * After a read, the conversation's row takes the unread count the service answered.
+ * After a read, the conversation's row takes the unread count the service answered, here and in this browser's other
+ * tabs (lib/chat/news.ts announceRead).
  */
 import type { QueryClient } from "@tanstack/react-query";
 import { ApiError } from "@/lib/errors";
@@ -18,6 +19,7 @@ import { applyReadToSummaries, messagesOldestFirst, type ConversationPages, type
 import { compareCodes, isAfter, newerCode } from "./codes";
 import { sameAccount } from "./address";
 import { chatKeys } from "./keys";
+import { announceRead } from "./news";
 import { deviceId } from "./presence";
 import { applyMessage } from "./sync";
 import type { AccountRef, ConversationSummary } from "./types";
@@ -107,7 +109,11 @@ async function flush(key: string, entry: Pending, asked = false): Promise<void> 
       try {
         const result = await receiptsUpTo(address, upTo, kind);
         entry.sent = newerCode(entry.sent, upTo);
-        if (kind === "read") context.queryClient.setQueryData<ConversationPages>(chatKeys.conversations(), data => applyReadToSummaries(data, address, result));
+        if (kind === "read") {
+          context.queryClient.setQueryData<ConversationPages>(chatKeys.conversations(), data => applyReadToSummaries(data, address, result));
+          // This browser's other tabs take the same count at once (lib/chat/news.ts).
+          announceRead(context.me.uuid ?? context.me.id, address, result);
+        }
         return;
       } catch (error) {
         const failure = ApiError.from(error);

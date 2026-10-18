@@ -19,14 +19,13 @@ import { forwardRef, memo, useCallback, useEffect, useLayoutEffect, useMemo, use
 import { CornerUpLeft, Ellipsis, Headphones, Pause, Pencil, RotateCw, X } from "lucide-react";
 import { ConfirmMorph } from "@/components/silicon-ui/confirm-morph/confirm-morph";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/silicon-ui/popover/popover";
-import { TextShimmer } from "@/components/silicon-ui/text-shimmer/text-shimmer";
 import { accountName, isiOf } from "@/lib/chat/address";
 import { canEditHere } from "@/lib/chat/compose";
 import { clockTime, fullTime } from "@/lib/chat/format";
 import { plainPreview } from "@/lib/chat/markdown";
 import { messageMedia } from "@/lib/chat/media";
 import type { OutboxItem } from "@/lib/chat/outbox";
-import type { Message } from "@/lib/chat/types";
+import type { Message, QuotedContent } from "@/lib/chat/types";
 import { canListen, useListenState, useVoiceAvailability, warmListen } from "@/lib/voice";
 import { AccountAvatar } from "../common/avatars";
 import { IconAction } from "../common/icon-action";
@@ -49,23 +48,36 @@ export interface RowLayout {
   group: boolean;
 }
 
+/** A version's words as the history shows them (at most 600 characters). */
+const versionText = (version: QuotedContent) => plainPreview(version.message || version.voice_transcript || (version.attachments.length ? "Attachment" : ""), 600) || "No text";
+
+/**
+ * "Edited", and its history in a popover: the words as they are now first, then each earlier version, newest first, so
+ * the old and the new can be read together. It opens under the line (over the message only when there is no room
+ * below, and then the words as they are now are still its first item).
+ */
 function Edited({ message }: { message: Message }) {
   const history = message.history;
   const [open, setOpen] = useState(false);
   useLayer(open);
+  const when = message.updated_at ? ` ${fullTime(message.updated_at)}` : "";
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <button type="button" className={styles.metaButton} aria-label={`Edited${message.updated_at ? ` ${fullTime(message.updated_at)}` : ""}. Show the earlier versions`}>Edited</button>
+        <button type="button" className={styles.metaButton} aria-label={`Edited${when}. Show the earlier versions`}>Edited</button>
       </PopoverTrigger>
-      <PopoverContent className={styles.history} side="top" align="end">
-        <p className={styles.historyTitle}>Edited{message.updated_at ? ` ${fullTime(message.updated_at)}` : ""}</p>
+      <PopoverContent className={styles.history} side="bottom" align="end" aria-label="Versions of this message">
+        <p className={styles.historyTitle}>Edited{when}</p>
         {history.length ? (
-          <ol className={styles.historyList} aria-label="Earlier versions, newest first">
+          <ol className={styles.historyList} aria-label="Versions, newest first">
+            <li className={styles.historyItem} data-current="">
+              <span className={styles.historyWhen}>Now</span>
+              <span className={styles.historyText}>{versionText(message)}</span>
+            </li>
             {[...history].reverse().map((entry, index) => (
               <li key={index} className={styles.historyItem}>
                 <span className={styles.historyWhen}>{index === 0 ? "Before the last edit" : `Version ${history.length - index}`} · from {fullTime(entry.created_at)}</span>
-                <span className={styles.historyText}>{plainPreview(entry.message || entry.voice_transcript || (entry.attachments.length ? "Attachment" : ""), 600) || "No text"}</span>
+                <span className={styles.historyText}>{versionText(entry)}</span>
               </li>
             ))}
           </ol>
@@ -110,22 +122,19 @@ function Meta({ message, mine, state, full }: { message: Message; mine: boolean;
 }
 
 /**
- * While a message's words play (Listen, Space): a quiet line under it; a shimmer while its audio is prepared. A spoken
- * message or a voice note shows this in its own player instead.
+ * While a message's words play (Listen, Space, Listen mode): the bubble takes a faint tint and a thin line along its foot
+ * fills as it plays (it waits faintly while the audio is prepared). It is drawn inside the bubble, over its padding, so
+ * starting and ending never move the thread; the thread tells screen readers (conversation-view.tsx). A spoken message
+ * or a voice note shows this in its own player instead.
  */
-function ListenLine({ address, code }: { address: string; code: string }) {
+function ListenProgress({ address, code }: { address: string; code: string }) {
   const listen = useListenState(address, code);
   if (listen.state === "idle") return null;
+  const done = listen.state === "loading" ? 1 : Math.max(0, Math.min(1, listen.progress));
   return (
-    <p className={styles.listenLine} role="status">
-      {listen.state === "loading" ? <TextShimmer>Preparing audio…</TextShimmer> : (
-        <>
-          <span className={styles.listenBars} data-paused={listen.state === "paused" ? "" : undefined} aria-hidden="true"><i /><i /><i /></span>
-          {listen.state === "playing" ? "Playing" : "Paused"}
-          <span className={styles.listenTrack} aria-hidden="true"><span style={{ transform: `scaleX(${Math.max(0, Math.min(1, listen.progress))})` }} /></span>
-        </>
-      )}
-    </p>
+    <span className={styles.listenProgress} data-state={listen.state} aria-hidden="true">
+      <span style={{ transform: `scaleX(${done})` }} />
+    </span>
   );
 }
 
@@ -218,7 +227,8 @@ function Toolbar({ message, mine, name, showTime, selected }: { message: Message
     actions.openMenu(message, { x: rect.left, y: rect.bottom + 4 });
   };
   return (
-    <div ref={self} className={styles.toolbar} data-sq="surface" data-held={held ? "" : undefined} role="toolbar" aria-label={`Actions for ${name}'s message`}>
+    // aria-live="off": it comes and goes with the message in use, inside the log, which must read out only new messages.
+    <div ref={self} className={styles.toolbar} data-sq="surface" data-held={held ? "" : undefined} role="toolbar" aria-label={`Actions for ${name}'s message`} aria-live="off">
       {showTime ? <time className={styles.toolbarTime} dateTime={message.created_at} title={fullTime(message.created_at)}>{clockTime(message.created_at)}</time> : null}
       {actions.readOnly ? null : <IconAction size="sm" label="Reply" shortcut="message.reply" icon={<CornerUpLeft aria-hidden="true" />} onClick={() => actions.reply(message)} tooltipSide="top" />}
       {mine && !actions.readOnly && canEditHere(message) ? <IconAction size="sm" label="Edit" shortcut="message.edit" icon={<Pencil aria-hidden="true" />} onClick={() => actions.edit(message)} tooltipSide="top" /> : null}
@@ -247,7 +257,8 @@ const DeleteQuestion = forwardRef<HTMLDivElement, { message: Message; mine: bool
   }, [gone, actions, code]);
   if (gone) return null;
   return (
-    <div className={styles.confirm} data-mine={mine ? "" : undefined}>
+    // The question takes the keyboard (so it is heard); as an addition to the log it would be read again as news.
+    <div className={styles.confirm} data-mine={mine ? "" : undefined} aria-live="off">
       <ConfirmMorph
         ref={ref}
         label="Delete"
@@ -394,11 +405,11 @@ export const MessageRow = memo(function MessageRow({ message, first, last, group
         <div className={styles.bubbleRow}>
           <div className={styles.bubble} data-sq="surface" data-kind={shape.kind} style={{ containIntrinsicBlockSize: `auto ${shape.height}px` }}>
             <MessageContent message={message} emoji={shape.emoji} />
+            {/* A spoken message and a voice note show their playback in their own player; words played with Listen here. */}
+            {canListen(message) && !message.speech && !message.voice ? <ListenProgress address={actions.address} code={code} /> : null}
           </div>
           {active ? <Toolbar message={message} mine={mine} name={name} showTime={!(last || stateShown)} selected={use === "selected"} /> : null}
         </div>
-        {/* A spoken message and a voice note show their playback in their own player; words played with Listen here. */}
-        {canListen(message) && !message.speech && !message.voice ? <ListenLine address={actions.address} code={code} /> : null}
         {last || confirming || marked || stateShown ? <Meta message={message} mine={mine} state={state} full={last || confirming || stateShown} /> : null}
         {confirming ? <DeleteQuestion ref={confirmRef} message={message} mine={mine} deleted={deleted} onCancel={() => row.current?.focus({ preventScroll: true })} /> : null}
       </div>

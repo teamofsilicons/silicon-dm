@@ -365,10 +365,10 @@ async fn run_and_report(cli: Cli) -> i32 {
         Err(error) => {
             if let Some(failed) = error.downcast_ref::<OperationFailed>() {
                 output::print_json(&failed.0, compact);
-            } else {
-                output::print_error(&error, compact);
+                return 1;
             }
-            1
+            output::print_error(&error, compact);
+            output::exit_code(&error)
         }
     }
 }
@@ -428,13 +428,11 @@ async fn run(cli: Cli) -> Result<Outcome> {
         .clone()
         .unwrap_or_else(|| config.default_profile.clone());
     runtime::store::validate_profile_name(&name)?;
+    // A key given with --idempotency-key was checked by the parser (8 to 255 visible ASCII).
     let key = cli
         .idempotency_key
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    if key.len() < 8 || key.len() > 255 || !key.bytes().all(|b| b.is_ascii_graphic()) {
-        bail!("idempotency key must be 8-255 visible ASCII characters")
-    }
     let local = LocalRuntime::from_environment()?;
     match cli.command {
         Command::Login(args) => {
@@ -506,7 +504,11 @@ async fn run(cli: Cli) -> Result<Outcome> {
                 daemon::start(None).await?;
                 Ok(Outcome::ok(acknowledgement_value(
                     store::relay(&store::load()?)?
-                        .submit_value(&read_json::<Value>(&data)?)
+                        .submit_value(&read_json::<Value>(
+                            &data,
+                            "a relay request",
+                            "Send a RelayRequest: {\"type\":\"request\",\"data\":{\"request_id\":UUID,\"profile\":\"default\",\"request\":{\"operation\":…}}} (dm relay submit --help; dm docs relay lists the operations).",
+                        )?)
                         .await?,
                 )))
             }
@@ -646,9 +648,12 @@ async fn run(cli: Cli) -> Result<Outcome> {
     }
 }
 
+/// Where the message JSON of --data is explained.
+const MESSAGE_JSON_HINT: &str = "Send a message.create body: {\"message\":\"hi\"} plus any of attachments (links, or {\"permanent_url\",\"name\",\"content_type\",\"size\"}), voice ({\"permanent_url\",\"duration_milliseconds\",…}) with voice_transcript, gif (as dm gifs search prints it), speech, metadata and reply_to_message_id. dm messages send --help has examples; dm docs wire-format describes every field.";
+
 fn content(content: Content) -> Result<MessageCreate> {
     let mut m = if let Some(path) = content.data {
-        read_json(&path)?
+        read_json(&path, "a message", MESSAGE_JSON_HINT)?
     } else {
         MessageCreate::default()
     };
@@ -669,9 +674,11 @@ fn content(content: Content) -> Result<MessageCreate> {
     }
     if let Some(voice) = content.voice {
         let Some(speech) = m.speech.as_mut() else {
-            bail!(
-                "--voice chooses the voice of a spoken message: add --speak SCRIPT (or speech in --data); see dm messages send --help"
-            );
+            return Err(output::Refusal::arguments(
+                "--voice chooses the voice of a spoken message, and this message is not spoken.",
+                "Add --speak SCRIPT (or speech in --data), or leave --voice out: dm messages send c:ada --speak '[warmly] Done.' --voice hope.",
+            )
+            .into());
         };
         speech.voice = Some(speech::voice_key(&voice));
     }
@@ -679,10 +686,17 @@ fn content(content: Content) -> Result<MessageCreate> {
         speech.voice = speech.voice.as_deref().map(speech::voice_key);
         silicon_dm_client::speech::validate_script(&speech.script)?;
     }
-    if content.metadata.is_some() || !m.metadata.is_empty() {
-        bail!(
-            "Message metadata was removed in DM 0.8. Use message, attachments, voice_transcript and reply."
-        );
+    if let Some(metadata) = content.metadata {
+        let Ok(serde_json::Value::Object(metadata)) =
+            serde_json::from_str::<serde_json::Value>(&metadata)
+        else {
+            return Err(output::Refusal::arguments(
+                "--metadata takes one JSON object, such as '{\"thread\":\"release\"}'.",
+                "Quote the object for your shell; DM keeps it with the message exactly as given and never reads it.",
+            )
+            .into());
+        };
+        m.metadata.extend(metadata);
     }
     if content.reply_to.is_some() {
         m.reply_to_message_id = content.reply_to
@@ -695,9 +709,11 @@ fn content(content: Content) -> Result<MessageCreate> {
         && m.gif.is_none()
         && m.speech.is_none()
     {
-        bail!(
-            "message needs --text, --speak, --attachment or --data with voice/GIF; see dm messages send --help"
+        return Err(output::Refusal::arguments(
+            "There is nothing to send: the message has no text, speech, attachment, voice note or GIF.",
+            "Add --text TEXT, --speak SCRIPT, --attachment URL, or --data FILE with a voice note or a GIF; dm messages send --help shows each.",
         )
+        .into());
     }
     Ok(m)
 }
@@ -962,7 +978,11 @@ async fn relay_command(
                 version,
             } => Operation::PutDraft {
                 conversation_id: conversation,
-                draft: read_json(&data)?,
+                draft: read_json(
+                    &data,
+                    "a draft",
+                    "Send a DraftInput: {\"message_content\":\"text\"} plus any of attachments, voice, voice_transcript, gif, metadata and reply_to_message_id (dm drafts put --help).",
+                )?,
                 version,
             },
             Drafts::Delete { conversation } => Operation::DeleteDraft {
@@ -972,7 +992,11 @@ async fn relay_command(
         Command::Bundles { command } => match command {
             Bundles::Create { conversation, data } => Operation::CreateBundle {
                 conversation_id: conversation,
-                bundle: read_json(&data)?,
+                bundle: read_json(
+                    &data,
+                    "a bundle",
+                    "Send {\"message_ids\":[\"001\",\"002\"],\"display_message\":{\"message\":\"Checklist: two of three done\"}}: 1 to 100 codes of your own messages, and the message shown in their place (any message content). dm bundles create --help has an example.",
+                )?,
                 idempotency_key: key,
             },
             Bundles::Show {
@@ -1109,18 +1133,46 @@ async fn execute(profile: &str, request: Operation, wait: u64) -> Result<Value> 
     }
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let mut body = String::new();
-    if path == Path::new("-") {
-        std::io::stdin().read_to_string(&mut body)?;
+/// Reads the JSON of `what` (a message, a bundle, a draft…) from a --data file or standard
+/// input ('-'); `hint` says what the JSON looks like. Problems are `invalid_input` (exit 2),
+/// before anything is queued.
+fn read_json<T: DeserializeOwned>(path: &Path, what: &str, hint: &str) -> Result<T> {
+    let source = if path == Path::new("-") {
+        "standard input".to_owned()
     } else {
-        body = std::fs::read_to_string(path)
-            .with_context(|| format!("cannot read {}", path.display()))?;
+        path.display().to_string()
+    };
+    let mut body = String::new();
+    let read = if path == Path::new("-") {
+        std::io::stdin().read_to_string(&mut body).map(|_| ())
+    } else {
+        std::fs::read_to_string(path).map(|text| body = text)
+    };
+    if let Err(error) = read {
+        return Err(output::Refusal::input(
+            format!("dm cannot read {what} from {source}: {error}."),
+            "Check the path (--data FILE, or --data - with the JSON on standard input); nothing was queued.",
+        )
+        .into());
     }
-    serde_json::from_str(&body).with_context(|| format!("invalid JSON input at {}", path.display()))
+    if body.trim().is_empty() {
+        return Err(output::Refusal::input(
+            format!("{source} is empty, and dm needs {what} in JSON there."),
+            hint,
+        )
+        .into());
+    }
+    serde_json::from_str(&body).map_err(|error| {
+        output::Refusal::input(
+            format!("The JSON in {source} is not {what} DM takes: {error}."),
+            hint,
+        )
+        .into()
+    })
 }
 
-/// Reads a secret from a file, or standard input for '-' (hidden when typed on a terminal).
+/// Reads a secret from a file, or standard input for '-' (hidden when typed on a terminal),
+/// trimmed; it may be empty.
 pub fn read_secret(path: &Path, prompt: &str) -> Result<String> {
     let value = if path == Path::new("-") {
         if std::io::stdin().is_terminal() {
@@ -1133,18 +1185,8 @@ pub fn read_secret(path: &Path, prompt: &str) -> Result<String> {
     } else {
         std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?
     };
-    let value = value.trim().to_owned();
-    if value.is_empty() {
-        bail!(
-            "the {} was empty",
-            if path == Path::new("-") {
-                "standard input".to_owned()
-            } else {
-                path.display().to_string()
-            }
-        )
-    }
-    Ok(value)
+    // An empty value is the caller's to explain (dm login says which step printed nothing).
+    Ok(value.trim().to_owned())
 }
 
 /// The standard-input path, for `--slt-stdin`.

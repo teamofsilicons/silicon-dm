@@ -201,6 +201,38 @@ export function dropSummary(data: ConversationPages | undefined, id: string): Co
   return { ...data, pages: data.pages.map(page => ({ ...page, items: page.items.filter(item => !isRowOf(item, id)) })) };
 }
 
+/**
+ * A fresh first page of the conversation list put over the loaded pages (the safety refresh, which used to ask for
+ * every loaded page again, seven for an account with 308 conversations, every minute). Its rows replace theirs wherever
+ * they were; a row that left the first page (newer activity pushed it down) stays at its end, in order, until a later
+ * page has it again; the later pages keep what they have without the rows the fresh page took. Returns `current`
+ * itself when the fresh page says nothing new.
+ */
+export function mergeListHead(current: ConversationPages | undefined, fresh: Page<ConversationSummary>): ConversationPages {
+  if (!current || !current.pages.length) return { pages: [fresh], pageParams: [null] };
+  const first = current.pages[0]!;
+  // One page loaded: the fresh one is the list (a row it lacks went down to a page not loaded, or is gone).
+  if (current.pages.length === 1) return JSON.stringify(first) === JSON.stringify(fresh) ? current : { ...current, pages: [fresh] };
+  const ids = new Set(fresh.items.map(item => item.id));
+  const pushedDown = first.items.filter(item => !ids.has(item.id));
+  // The later pages already go on from the first page's old end, so its cursor stays.
+  const head: Page<ConversationSummary> = { ...fresh, items: [...fresh.items, ...pushedDown].sort((a, b) => time(b.updated_at) - time(a.updated_at)), next_cursor: first.next_cursor };
+  if (JSON.stringify(head.items) === JSON.stringify(first.items)) return current;
+  const rest = current.pages.slice(1).map(page => (page.items.some(item => ids.has(item.id)) ? { ...page, items: page.items.filter(item => !ids.has(item.id)) } : page));
+  return { ...current, pages: [head, ...rest] };
+}
+
+/**
+ * The newest page of a thread put over its loaded pages (a custodian's view polls only that one): new messages join,
+ * edits and deletions replace their rows. Older loaded pages are left as they are. Same object when nothing changed.
+ */
+export function mergeNewestMessages(current: MessagePages | undefined, page: Page<Message>): MessagePages | undefined {
+  let data = current;
+  // Oldest first, so each new message lands after the ones before it.
+  for (const message of [...page.items].reverse()) data = upsertMessage(data, message);
+  return data;
+}
+
 /** Every loaded conversation row, in list order, each once. */
 export function summariesOf(data: ConversationPages | undefined): ConversationSummary[] {
   const seen = new Set<string>();

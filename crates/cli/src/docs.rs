@@ -275,7 +275,8 @@ const GUIDES: &[Guide] = &[
     Guide {
         topic: "openapi",
         title: "OpenAPI contract",
-        path: "docs/openapi.yaml",
+        // At the repository's root (the package keeps its copy in docs/).
+        path: "openapi.yaml",
         format: "yaml",
         content: include_str!("../docs/openapi.yaml"),
     },
@@ -357,7 +358,10 @@ pub fn render(options: &DocsArgs) -> Result<Value> {
         );
     }
     let topic = match options.topic.as_deref() {
-        Some(name) => Some(Topic::from_str(name, false).map_err(|_| unknown_topic(name))?),
+        // `getting_started` names `getting-started`: index keys and habit use underscores.
+        Some(name) => {
+            Some(Topic::from_str(&name.replace('_', "-"), false).map_err(|_| unknown_topic(name))?)
+        }
         None => None,
     };
     if let Some(topic) = topic.filter(|topic| !matches!(topic, Topic::Index)) {
@@ -376,7 +380,7 @@ pub fn render(options: &DocsArgs) -> Result<Value> {
         "sections":{"start":"instructions: do something, step by step","learn":"the reasons: read before a judgement call","reference":"everything, listed","operations":"running and releasing DM"},
         "repository":"https://github.com/teamofsilicons/silicon-dm",
         "topics":GUIDES.iter().map(entry).collect::<Vec<_>>(),
-        "sign_in":{"carbon":"dm login","silicon":"silicon-accounts login --app dm -q | dm login --slt-stdin","status":"dm login status --json"},
+        "sign_in":{"carbon":"dm login","silicon":"silicon-accounts login --app dm -q | dm login --slt-stdin","silicon_accounts_first":silicon_dm_client::accounts::SILICON_ACCOUNTS_SIGN_IN,"status":"dm login status --json"},
         "receiving":"dm inbox --watch prints new messages as JSON lines (dm sync for one page of references). Delivered and Read receipts are explicit: dm receipts delivered|read.",
         "speaking":"dm messages send CONVERSATION --speak SCRIPT says it in your voice (dm voices list); read dm docs expressive before writing a script.",
         "help":"dm docs TOPIC; dm docs --search TEXT; dm docs --all; dm --help; dm COMMAND --help",
@@ -461,7 +465,7 @@ mod tests {
             ("ting", "docs/reference/ting.md"),
             ("realtime", "docs/reference/ting.md"),
             ("api", "docs/reference/api.md"),
-            ("openapi", "docs/openapi.yaml"),
+            ("openapi", "openapi.yaml"),
             ("wire-format", "docs/reference/wire-format.md"),
             ("contracts", "docs/reference/contracts.md"),
             ("configuration", "docs/reference/configuration.md"),

@@ -192,7 +192,13 @@ impl AppError {
     /// 401 with a precise reason (expired, wrong audience, revoked sign-in…).
     #[must_use]
     pub fn unauthenticated(code: &'static str, message: impl Into<String>) -> Self {
-        Self::refused(StatusCode::UNAUTHORIZED, code, message)
+        let refusal = Self::refused(StatusCode::UNAUTHORIZED, code, message);
+        if code == "invalid_token" {
+            // Whatever is wrong with the token, what to do is the same.
+            refusal.with_hint("Sign in to DM again (dm login; the website does it by itself) and repeat the request with the new token.")
+        } else {
+            refusal
+        }
     }
 
     /// 403 with a precise reason.
@@ -254,6 +260,39 @@ impl AppError {
     #[must_use]
     pub fn internal(error: impl Into<anyhow::Error>) -> Self {
         Self::Internal(error.into())
+    }
+
+    /// A database failure as the client sees it. A transient one (PostgreSQL broke a tie
+    /// between two changes made at once, a statement ran out of time, no connection was free
+    /// or the connection was lost) is a 503 `dependency_unavailable` to retry; anything else
+    /// stays a 500 whose details go to the server log only.
+    #[must_use]
+    pub fn database(error: sqlx::Error) -> Self {
+        let transient = match &error {
+            sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_) => {
+                Some("connection")
+            }
+            sqlx::Error::Database(database) => match database.code().as_deref() {
+                Some("40P01") => Some("deadlock"),
+                Some("40001") => Some("serialization"),
+                Some("55P03") => Some("lock_timeout"),
+                Some("57014") => Some("statement_timeout"),
+                Some("53300" | "57P01" | "57P02" | "57P03") => Some("unavailable"),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(cause) = transient else {
+            return Self::Database(error);
+        };
+        tracing::warn!(cause, error = %error, "a database operation failed for a moment");
+        Self::refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dependency_unavailable",
+            "DM's database could not finish this request just now: it was busy, or two changes made at the same moment got in each other's way.",
+        )
+        .with_hint("Retry in a moment with the same Idempotency-Key: a change that did go through is answered again, never made twice.")
+        .with_retry_after(1)
     }
 
     /// Stable machine-readable error code.
@@ -336,7 +375,7 @@ impl IntoResponse for AppError {
 
 impl From<sqlx::Error> for AppError {
     fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
+        Self::database(error)
     }
 }
 
@@ -362,6 +401,25 @@ mod tests {
             AppError::account_not_found("c:nobody").code(),
             "account_not_found"
         );
+    }
+
+    #[test]
+    fn a_database_that_fails_for_a_moment_is_a_retryable_503() {
+        for error in [sqlx::Error::PoolTimedOut, sqlx::Error::PoolClosed] {
+            let error = AppError::from(error);
+            assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(error.code(), "dependency_unavailable");
+            assert_eq!(error.retry_after(), Some(1));
+            assert!(
+                error
+                    .hint()
+                    .is_some_and(|hint| hint.contains("Idempotency-Key")),
+                "{error}"
+            );
+        }
+        let other = AppError::from(sqlx::Error::RowNotFound);
+        assert_eq!(other.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(other.code(), "internal_error");
     }
 
     #[tokio::test]

@@ -35,12 +35,14 @@ use crate::{
 
 pub use accounts::{Applied, StoredAccount, valid_public_id};
 pub use allow_list::AllowListEntry;
+pub use delivery::{Pruned, SYNC_RETENTION};
 pub use http_presence::PresenceLease;
-pub use read_states::{BulkReceiptOutcome, MAX_BULK_RECEIPTS, UnreadSummary};
+pub use read_states::{BulkReceiptOutcome, MAX_BULK_RECEIPTS, UNREAD_COUNT_CAP, UnreadSummary};
 pub use revisions::Reviser;
 pub use speech::{
     AudioMeta, ChosenVoice, LimitExceeded, MAX_RENDER_ATTEMPTS, RenderClaim, RenderOutcome,
-    RenderState, RenderStatus, SpeechCharge, SpeechRenderJob, limit_error, retry_after_seconds,
+    RenderState, RenderStatus, SpeechCharge, SpeechCharged, SpeechLease, SpeechRenderJob,
+    limit_error, retry_after_seconds,
 };
 pub(crate) use sync::sync_reset_required;
 pub use sync::{SyncEvent, SyncScan};
@@ -112,7 +114,7 @@ impl PostgresStore {
             })
             .connect(settings.url.expose_secret())
             .await
-            .map_err(AppError::Database)?;
+            .map_err(AppError::database)?;
         Ok(Self { pool })
     }
 
@@ -128,14 +130,26 @@ impl PostgresStore {
         let old_path: String = sqlx::query_scalar("SHOW search_path")
             .fetch_one(&mut *connection)
             .await?;
+        let old_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *connection)
+            .await?;
         sqlx::query("SELECT set_config('search_path', 'public', false)")
             .execute(&mut *connection)
             .await?;
-        let migration_result = MIGRATOR.run(&mut *connection).await;
-        let restore_result = sqlx::query("SELECT set_config('search_path', $1, false)")
-            .bind(old_path)
+        // A migration may backfill a large table (0043 reads every message once): it runs
+        // without the request deadline (DM_DATABASE_STATEMENT_TIMEOUT_SECONDS), which would
+        // otherwise cancel it on a large database. The services are stopped while it runs.
+        sqlx::query("SELECT set_config('statement_timeout', '0', false)")
             .execute(&mut *connection)
-            .await;
+            .await?;
+        let migration_result = MIGRATOR.run(&mut *connection).await;
+        let restore_result = sqlx::query(
+            "SELECT set_config('search_path', $1, false), set_config('statement_timeout', $2, false)",
+        )
+        .bind(old_path)
+        .bind(old_timeout)
+        .execute(&mut *connection)
+        .await;
         if restore_result.is_err() {
             connection.close_on_drop();
         }
@@ -168,7 +182,7 @@ impl PostgresStore {
             .fetch_one(&self.pool)
             .await
             .map(|_| ())
-            .map_err(AppError::Database)
+            .map_err(AppError::database)
     }
 
     /// Confirms that every embedded migration is installed with its expected
@@ -194,7 +208,7 @@ impl PostgresStore {
             .bind(migration.checksum.as_ref())
             .fetch_one(&self.pool)
             .await
-            .map_err(AppError::Database)?;
+            .map_err(AppError::database)?;
             if !installed {
                 return Err(AppError::internal(anyhow::anyhow!(
                     "database schema is not current"
@@ -205,7 +219,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map(|_| ())
-            .map_err(AppError::Database)
+            .map_err(AppError::database)
     }
 
     /// Borrows the pool for listener and graceful-shutdown integration.
@@ -225,7 +239,7 @@ fn duration_as_postgres_milliseconds(duration: Duration) -> String {
 /// naming an internal invariant.
 pub(crate) fn map_constraint_error(error: sqlx::Error) -> AppError {
     let Some(database) = error.as_database_error() else {
-        return AppError::Database(error);
+        return AppError::database(error);
     };
     match database.code().as_deref() {
         Some("23503") => AppError::not_found(
@@ -243,7 +257,7 @@ pub(crate) fn map_constraint_error(error: sqlx::Error) -> AppError {
         Some("23514" | "22001" | "22P02") => {
             broken_rule(database.constraint(), database.message())
         }
-        _ => AppError::Database(error),
+        _ => AppError::database(error),
     }
 }
 

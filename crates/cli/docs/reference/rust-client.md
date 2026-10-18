@@ -117,8 +117,8 @@ What 0.17 added (every field is optional on the wire, so the client reads older 
 
 | Model | Fields |
 | --- | --- |
-| `MessageCreate` | `speech: Option<SpeechInput>`; `SpeechInput { script, voice }` (`voice` `None`: the sender's voice) |
-| `Message` | `speech` (`{voice, voice_name, script, model, status, duration_milliseconds, peaks}`), `voice`, `gif`, `attachment_details`, `routed_to` (the routing address the sender gave, or `None`) |
+| `MessageCreate` | `speech: Option<SpeechInput>`; `SpeechInput { script, voice }` (`voice` `None`: the sender's voice). It is sent whole: attachment objects with `name`, `content_type` and `size` (a bare link stays a URL), `voice` as a voice note, `gif` as a GIF and `metadata`, each only when present, so a plain message keeps the shape every service takes. `needs_dm_0_17()` says whether it carries any of them; `Operation::send_message` then picks `send_spoken_message` or `send_rich_message`, which relays before 0.17 leave queued instead of stripping. |
+| `Message` | `speech` (`{voice, voice_name, script, model, status, duration_milliseconds, peaks}`), `voice` (`VoiceNote { url, permanent_url, name, content_type, size, duration_milliseconds }`), `gif`, `attachment_details` (`AttachmentDetails { kind: attachment\|voice\|gif, url, name, content_type, size }`), `routed_to` (the routing address the sender gave, or `None`) |
 | `Conversation` | `unread_count`, `last_read_message_id`, `draft_version` (your draft's version, `None` when there is none) |
 | `SyncRequest`, `SyncEvent` | `include` (`SYNC_INCLUDE_CONVERSATIONS`); `SyncEventKind::Conversation` events carry `change` and an empty `message_id` |
 | `Actor` | `custodian: Option<Box<Actor>>` (a Silicon's custodian) |
@@ -141,7 +141,7 @@ them too:
 | `spoken_words(script)` | The words without cues, whitespace collapsed: what becomes `voice_transcript` and what the 140-character rule counts. |
 | `script_notes(script)` | Non-blocking notes on what tends to sound wrong (`markdown`, `url`, `emoji`, `abbreviated_unit`, `stage_direction`, `long_cue`, `cue_line_break`, `span_end`, `crossed_cues`, `capitals`). |
 | `wav_info(bytes)`, `with_leading_silence(wav, ms)` | Reads a WAV header; puts silence in front of a PCM WAV (`TRANSCRIPTION_LEAD_MILLISECONDS` is 400), because transcription can drop the first word of audio that starts speaking at once. |
-| `fetch_audio(url, max_bytes)` | Downloads a voice note over https (plain http only from this machine), never with a DM credential. |
+| `fetch_audio(url, max_bytes)`, `fetch_audio_from(url, max_bytes, AudioHosts)` | Downloads a voice note over https, never with a DM credential, from public hosts only: never this machine or a private network, whether by the link, a redirect or a name resolving there (a message's links are its sender's). `AudioHosts::AlsoLocal` allows this machine and private networks (and plain http on this machine) for a DM service on this machine in local development. `is_public_address(ip)` is the check. |
 | `normalize_audio_type`, `audio_type_for_name`, `sniff_audio_type`, `TRANSCRIPTION_TYPES` | The audio types DM transcribes, from a header, a file name or the first bytes. |
 | `MAX_SCRIPT_CHARACTERS`, `MAX_CUE_CHARACTERS`, `DEFAULT_TRANSCRIBE_MAX_BYTES` | 5,000; 120; 100 MiB. |
 

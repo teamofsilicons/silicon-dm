@@ -597,3 +597,93 @@ async fn a_silicons_account_reference_names_its_custodian() -> Result<(), BoxErr
     drop(bob);
     app.close().await
 }
+
+#[tokio::test]
+async fn everyday_refusals_say_what_to_do_next() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let (ada, bob, _) = people(&app).await;
+    let ada_token = app.accounts.token(&ada);
+    let bob_token = app.accounts.token(&bob);
+    let sent = app
+        .post(
+            "/api/v1/messages",
+            &ada_token,
+            json!({"recipient_id": "c:bob", "message": "mine"}),
+        )
+        .await?;
+    let code = sent.1["message-id"].as_str().unwrap_or_default().to_owned();
+    // A receipt on your own message.
+    let own = app
+        .post(
+            &format!("/api/v1/conversations/c:ada::c:bob/messages/{code}/receipts"),
+            &ada_token,
+            json!({"status": "delivered", "device_id": "ada-phone"}),
+        )
+        .await?;
+    assert_eq!(own.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        text(&own.1["error"]["hint"]).contains("Skip your own messages"),
+        "{}",
+        own.1
+    );
+    // A cursor that was changed, a cursor with reset, a wait that is too long.
+    for (query, needle) in [
+        ("cursor=not-a-cursor", "reset=true"),
+        ("cursor=abc.def&reset=true", "not both"),
+        ("wait=31", "wait=30"),
+    ] {
+        let refused = app
+            .get(&format!("/api/v1/sync?{query}"), &bob_token)
+            .await?;
+        assert_eq!(refused.0, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+        assert!(
+            text(&refused.1["error"]["hint"]).contains(needle),
+            "{query}: {}",
+            refused.1
+        );
+    }
+    // A voice note without its length, and a transcript without its recording.
+    for (body, needle) in [
+        (
+            json!({"recipient_id": "c:bob", "voice": {"permanent_url": "https://files.example/n.webm"}}),
+            "duration_milliseconds",
+        ),
+        (
+            json!({"recipient_id": "c:bob", "message": 7}),
+            "MessageCreate",
+        ),
+        (
+            json!({"recipient_id": "c:bob", "message": "hi", "voice_transcript": "hi"}),
+            "voice note",
+        ),
+    ] {
+        let refused = app.post("/api/v1/messages", &ada_token, body).await?;
+        assert_eq!(refused.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            text(&refused.1["error"]["hint"]).contains(needle),
+            "{}",
+            refused.1
+        );
+    }
+    // Messaging yourself, and a token that is not DM's.
+    let yourself = app
+        .post(
+            "/api/v1/messages",
+            &ada_token,
+            json!({"recipient_id": "c:ada", "message": "me"}),
+        )
+        .await?;
+    assert!(
+        text(&yourself.1["error"]["hint"]).contains("draft"),
+        "{}",
+        yourself.1
+    );
+    let stranger = app.get("/api/v1/me", "not-a-token").await?;
+    assert_eq!(stranger.0, StatusCode::UNAUTHORIZED);
+    assert!(
+        text(&stranger.1["error"]["hint"]).contains("dm login"),
+        "{}",
+        stranger.1
+    );
+    app.close().await
+}

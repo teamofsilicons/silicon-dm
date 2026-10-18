@@ -60,7 +60,7 @@ def install(stage, source):
     env.write_text(''.join(key + '=' + value + '\n' for key, value in values.items()))
     env.chmod(0o600)
     run(['docker', 'load', '--input', str(stage / 'gateway.tar')])
-    run(['docker', 'run', '-d', '--restart', 'unless-stopped', '--name', NAME,
+    run(['docker', 'run', '-d', '--restart', 'unless-stopped', '--stop-timeout', '30', '--name', NAME,
          '--network', 'host', '--memory', '512m', '--pids-limit', '256', '--read-only',
          '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
          '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',

@@ -41,7 +41,7 @@ function SwapText({ text }: { text: string }) {
   </AnimatePresence>;
 }
 
-export function DialogContent({ title, description, children, className, onPointerDownOutside, onEscapeKeyDown, onOpenAutoFocus, onCloseAutoFocus, ...props }: DialogContentProps) {
+export function DialogContent({ title, description, children, className, onPointerDownOutside, onEscapeKeyDown, onOpenAutoFocus, onCloseAutoFocus, onFocus, ...props }: DialogContentProps) {
   const open = useContext(OpenContext);
   // Closing puts focus back on what opened the dialog, Trigger or not (lib/return-focus.ts).
   const returnFocus = useReturnFocus(open, onOpenAutoFocus, onCloseAutoFocus);
@@ -56,6 +56,15 @@ export function DialogContent({ title, description, children, className, onPoint
     onPointerDownOutside?.(event);
     if (open !== null && (!change.current.open || event.detail.originalEvent.timeStamp < change.current.at)) event.preventDefault();
   };
+  // Radix loops Tab from the last control to the first with focus({ preventScroll: true }): in a dialog taller than the
+  // screen, Close took focus while it was scrolled out of sight. Whatever takes focus is brought into view.
+  const revealFocus: DialogContentProps["onFocus"] = event => {
+    onFocus?.(event);
+    const target = event.target;
+    if (target === event.currentTarget || !(target instanceof HTMLElement)) return;
+    const box = target.getBoundingClientRect(), frame = event.currentTarget.getBoundingClientRect();
+    if (box.top < frame.top || box.bottom > frame.bottom) target.scrollIntoView({ block: "nearest" });
+  };
   const classes = [styles.content, className].filter(Boolean).join(" ");
   const inner = <>
     <div className={styles.header}><div><DialogPrimitive.Title className={styles.title}><SwapText text={title}/></DialogPrimitive.Title>{description ? <DialogPrimitive.Description className={styles.description}><SwapText text={description}/></DialogPrimitive.Description> : null}</div><DialogPrimitive.Close className={styles.close} aria-label="Close dialog"><X size={16} strokeWidth={1.75} aria-hidden="true"/></DialogPrimitive.Close></div>
@@ -64,13 +73,13 @@ export function DialogContent({ title, description, children, className, onPoint
   // Under a bare Radix root the open state is unknown here, so CSS keyframes keyed off data-state animate the layers instead.
   if (open === null) return <DialogPrimitive.Portal>
     <DialogPrimitive.Overlay className={`${styles.overlay} ${styles.keyframes}`}/>
-    <DialogPrimitive.Content {...props} {...escape} onPointerDownOutside={pressOutside} className={`${classes} ${styles.keyframes}`}>{inner}</DialogPrimitive.Content>
+    <DialogPrimitive.Content {...props} {...escape} onFocus={revealFocus} onPointerDownOutside={pressOutside} className={`${classes} ${styles.keyframes}`}>{inner}</DialogPrimitive.Content>
   </DialogPrimitive.Portal>;
   // The overlay fades while the dialog rises 8px and scales up on a spring. Closing is shorter and quieter, and starts from wherever the entrance is.
   return <AnimatePresence>
     {open && <DialogPrimitive.Portal key="dialog" forceMount>
       <DialogPrimitive.Overlay asChild forceMount><motion.div className={styles.overlay} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, transition: reduced ? fade : leave }} transition={reduced ? fade : { duration: motionTokens.duration.standard, ease: [...motionTokens.ease.enter] }}/></DialogPrimitive.Overlay>
-      <DialogPrimitive.Content {...props} {...escape} onPointerDownOutside={pressOutside} asChild forceMount>
+      <DialogPrimitive.Content {...props} {...escape} onFocus={revealFocus} onPointerDownOutside={pressOutside} asChild forceMount>
         <motion.div className={classes} initial={reduced ? { opacity: 0 } : { opacity: 0, y: 8, scale: .96 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={reduced ? { opacity: 0, transition: fade } : { opacity: 0, y: 4, scale: .98, transition: leave }} transition={reduced ? fade : { default: motionTokens.spring.smooth, opacity: { duration: motionTokens.duration.fast, ease: [...motionTokens.ease.enter] } }}>{inner}</motion.div>
       </DialogPrimitive.Content>
     </DialogPrimitive.Portal>}

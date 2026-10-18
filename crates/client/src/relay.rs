@@ -177,6 +177,21 @@ pub enum Operation {
         message: MessageCreate,
         idempotency_key: String,
     },
+    /// A message with a voice note, a GIF, attachment details or metadata (DM 0.17). Relays
+    /// before it flattened those parts to links and dropped metadata; they cannot read this
+    /// operation, so it waits for a newer relay instead.
+    SendRichMessage {
+        conversation_id: String,
+        message: MessageCreate,
+        idempotency_key: String,
+    },
+    /// An edit whose content has a voice note, a GIF, attachment details or metadata (DM 0.17).
+    EditRichMessage {
+        conversation_id: String,
+        message_id: String,
+        message: MessageCreate,
+        idempotency_key: String,
+    },
     /// Marks every message from others up to `up_to` (inclusive) read or delivered.
     ReceiptsUpTo {
         conversation_id: String,
@@ -198,8 +213,9 @@ pub enum Operation {
     },
 }
 impl Operation {
-    /// The operation that sends `message`: `send_spoken_message` when it has speech, else
-    /// `send_message`.
+    /// The operation that sends `message`: `send_spoken_message` when it has speech,
+    /// `send_rich_message` when it has other parts of DM 0.17
+    /// ([`MessageCreate::needs_dm_0_17`]), else `send_message`.
     pub fn send_message(
         conversation_id: impl Into<String>,
         message: MessageCreate,
@@ -208,6 +224,12 @@ impl Operation {
         let (conversation_id, idempotency_key) = (conversation_id.into(), idempotency_key.into());
         if message.speech.is_some() {
             Self::SendSpokenMessage {
+                conversation_id,
+                message,
+                idempotency_key,
+            }
+        } else if message.needs_dm_0_17() {
+            Self::SendRichMessage {
                 conversation_id,
                 message,
                 idempotency_key,
@@ -221,7 +243,8 @@ impl Operation {
         }
     }
     /// The operation that edits a message to `message`: `edit_spoken_message` when the new
-    /// content has speech, else `edit_message`.
+    /// content has speech, `edit_rich_message` when it has other parts of DM 0.17, else
+    /// `edit_message`.
     pub fn edit_message(
         conversation_id: impl Into<String>,
         message_id: impl Into<String>,
@@ -235,6 +258,13 @@ impl Operation {
         );
         if message.speech.is_some() {
             Self::EditSpokenMessage {
+                conversation_id,
+                message_id,
+                message,
+                idempotency_key,
+            }
+        } else if message.needs_dm_0_17() {
+            Self::EditRichMessage {
                 conversation_id,
                 message_id,
                 message,
@@ -255,6 +285,8 @@ impl Operation {
             self,
             Self::SendSpokenMessage { .. }
                 | Self::EditSpokenMessage { .. }
+                | Self::SendRichMessage { .. }
+                | Self::EditRichMessage { .. }
                 | Self::ReceiptsUpTo { .. }
                 | Self::SetVoice { .. }
                 | Self::ResetVoice { .. }
@@ -490,12 +522,23 @@ impl Operation {
                 conversation_id,
                 message,
                 idempotency_key,
+            }
+            | Self::SendRichMessage {
+                conversation_id,
+                message,
+                idempotency_key,
             } => serde_json::to_value(
                 client
                     .send_message(conversation_id, message, idempotency_key)
                     .await?,
             )?,
             Self::EditSpokenMessage {
+                conversation_id,
+                message_id,
+                message,
+                idempotency_key,
+            }
+            | Self::EditRichMessage {
                 conversation_id,
                 message_id,
                 message,

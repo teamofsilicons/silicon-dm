@@ -4,7 +4,9 @@
  * through with the reservation's capability alone, the exact Content-Length and never chunked, with backpressure (the
  * body is never held: the browser is at most a few megabytes ahead of Briefcase); a fresh proof token for every
  * Briefcase request and the proof revoked; the reservation cancelled whenever the upload does not finish (the browser
- * gone, a broken or stalled transfer, a refusal); the refusals before any byte is read; names, types and slots.
+ * gone, a broken or stalled transfer, a refusal, the server stopping), and a cancel Briefcase refuses never reported as
+ * done; the refusals before any byte is read, and Briefcase's in words that fit the case (a link step it will not
+ * allow, a day's allowance); names, types and slots.
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -14,7 +16,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { NextRequest } from "next/server";
 import { POST } from "../app/api/uploads/route";
 import { DELETE as cancelSave, GET as askSave } from "../app/api/uploads/saving/route";
-import { claimUploadSlot, cleanFileName, contentTypeFor, declaredFile, MAX_UPLOADS_PER_ACCOUNT, originalName, saveToBriefcase, SAVING_TIMING, sendBytes, storedName, UploadFailure, UploadProof, uploadsSettings, type EnabledUploads } from "../lib/server/briefcase";
+import { claimUploadSlot, cleanFileName, contentTypeFor, declaredFile, MAX_UPLOADS_PER_ACCOUNT, originalName, saveToBriefcase, SAVING_TIMING, sendBytes, stopUploads, storedName, UploadFailure, UploadProof, uploadsSettings, type EnabledUploads } from "../lib/server/briefcase";
 import { serverEnv } from "../lib/server/env";
 import { sealSession, type StoredSession } from "../lib/server/session";
 import { applyTestEnv } from "./env";
@@ -118,8 +120,8 @@ interface FakeOptions {
   readDelayMs?: number;
   /** Milliseconds the transfer route takes after the last byte before it answers (Briefcase storing a large file). */
   answerDelayMs?: number;
-  /** Replaces a JSON route's answer: [status, body]. */
-  answer?: (route: string, attempt: number) => [number, unknown] | null;
+  /** Replaces a JSON route's answer: [status, body, headers?]. */
+  answer?: (route: string, attempt: number) => [number, unknown, Record<string, string>?] | null;
 }
 
 const readJson = async (req: IncomingMessage) => {
@@ -128,9 +130,9 @@ const readJson = async (req: IncomingMessage) => {
   return text ? (JSON.parse(text) as Record<string, unknown>) : {};
 };
 
-const send = (res: ServerResponse, status: number, value?: unknown) => {
+const send = (res: ServerResponse, status: number, value?: unknown, headers: Record<string, string> = {}) => {
   const text = value === undefined ? "" : JSON.stringify(value);
-  res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+  res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text), ...headers });
   res.end(text);
 };
 
@@ -747,14 +749,152 @@ test("the browser leaves after its last byte, before the website answers: the sa
   assert.ok(!fake.routes.includes("commit"));
 });
 
-test("Briefcase saved the file but its link failed: said as such (never \"not saved\"), and the saved file is not cancelled", async () => {
+test("Briefcase saved the file but its link failed on the way: said as such (never \"not saved\"), the copy named, and the saved file is not cancelled", async () => {
   fake = await fakeServices({ answer: route => (route === "link-access" ? [503, { error: { code: "dependency_unavailable", message: "x" } }] : null) });
   const response = await POST(upload({ size: MB }));
   assert.equal(response.status, 503);
   const error = await errorOf(response);
   assert.equal(error.code, "briefcase_unavailable");
-  assert.match(error.message, /saved the file but did not open a link to it/);
-  assert.match(error.hint ?? "", /stays in your Briefcase under apps\/dm/);
+  assert.match(error.message, /saved the file but could not open a link to it just now/);
+  // Each attempt saves a copy of its own: the Carbon is told where this one is.
+  assert.match(error.hint ?? "", /^Try again in a moment: it uploads again, and this copy stays in your Briefcase as apps\/webkit\/\d{8}-\d{6}-[0-9a-z]{6}-Quarterly plan\.pdf\.$/);
   assert.deepEqual(fake.routes.filter(route => route === "link-access").length, 2, "tried twice, with a fresh token each time");
   assert.ok(!fake.routes.includes("cancel"), "a committed file is never cancelled");
 });
+
+/** What the website's server writes with console.warn during `work` (restored after). */
+async function warnings<T>(work: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
+  const lines: string[] = [];
+  const original = console.warn;
+  console.warn = (...parts: unknown[]) => void lines.push(parts.map(String).join(" "));
+  try {
+    return { result: await work(), lines };
+  } finally {
+    console.warn = original;
+  }
+}
+
+test("Briefcase not letting DM open links (dm without link_access.update in its issuers): said once and for all, never \"try again\", with the copy's place; the log names Briefcase's code", async () => {
+  fake = await fakeServices({ answer: route => (route === "link-access" ? [403, { error: { code: "proof_scope_missing", message: "x" } }] : null) });
+  const { result: response, lines } = await warnings(() => POST(upload({ size: MB })));
+  assert.equal(response.status, 503);
+  const error = await errorOf(response);
+  assert.equal(error.code, "briefcase_not_allowed", "the code operators look for (configuration.md), not a retryable briefcase_refused");
+  assert.match(error.message, /saved the file but does not let DM open links to files yet/);
+  assert.doesNotMatch(error.hint ?? "", /Try again/);
+  assert.match(error.hint ?? "", /^Share it from Silicon Briefcase instead \(this copy stays in your Briefcase as apps\/webkit\/\d{8}-\d{6}-[0-9a-z]{6}-Quarterly plan\.pdf\); sending it again would only save another copy\./);
+  assert.equal(fake.routes.filter(route => route === "link-access").length, 1, "a refusal is not asked twice");
+  assert.ok(!fake.routes.includes("cancel"), "the saved file stays");
+  assert.ok(lines.some(line => line === "upload failed: briefcase_not_allowed (proof_scope_missing)"), lines.join("\n"));
+  assert.ok(lines.every(line => !line.includes("Quarterly")), "the log never names the file");
+});
+
+test("Briefcase's daily allowance in words that fit: a file larger than a day's allowance is told so (waiting would not help it); otherwise today's, with when it resets", async () => {
+  const spent = { error: { code: "daily_upload_limit_exhausted", message: "The organization's daily upload allowance is spent. It resets at 00:00 UTC." } };
+  fake = await fakeServices({ answer: route => (route === "reserve" ? [429, spent, { "retry-after": "3600" }] : null) });
+  // 150 GB, refused at its reservation before any byte is read (so its digest is never computed here).
+  const huge = await POST(upload({ size: 150 * 1024 ** 3, sha256: "a".repeat(64) }));
+  assert.equal(huge.status, 429);
+  const tooBig = await errorOf(huge);
+  assert.equal(tooBig.code, "briefcase_limit");
+  assert.equal(tooBig.message, "This file is larger than 100 GB, the most Silicon Briefcase takes into one Briefcase in a day, so it was not saved.");
+  assert.doesNotMatch(`${tooBig.message} ${tooBig.hint}`, /00:00|today/i, "a day's allowance never fits it");
+  assert.match(tooBig.hint ?? "", /^Split it into parts smaller than that/);
+  assert.equal(huge.headers.get("retry-after"), null, "waiting would not help it");
+  const small = await POST(upload({ size: MB }));
+  assert.equal(small.status, 429);
+  const today = await errorOf(small);
+  assert.equal(today.code, "briefcase_limit");
+  assert.match(today.message, /^Today's upload allowance in your Silicon Briefcase has no room left for this file: what you uploaded today counts, and so do uploads not yet finished\.$/);
+  assert.match(today.hint ?? "", /^It resets at 00:00 UTC/);
+  assert.equal(small.headers.get("retry-after"), "3600");
+  await fake.close();
+  // Briefcase asking DM to slow down is Briefcase being busy, not the Carbon's allowance.
+  fake = await fakeServices({ answer: route => (route === "reserve" ? [429, { error: { code: "rate_limited", message: "x" } }, { "retry-after": "2" }] : null) });
+  const busy = await POST(upload({ size: MB }));
+  assert.equal(busy.status, 503);
+  assert.equal((await errorOf(busy)).code, "briefcase_unavailable");
+  assert.equal(busy.headers.get("retry-after"), "2");
+});
+
+test("a cancel Briefcase refuses is never reported as done: DELETE answers \"stopped\" (the reservation expires there), and the log says why", async () => {
+  Object.assign(SAVING_TIMING, { holdMs: 50 });
+  fake = await fakeServices({ answerDelayMs: 10_000, answer: route => (route === "cancel" ? [403, { error: { code: "proof_scope_missing", message: "x" } }] : null) });
+  const posted = await POST(upload({ size: MB }));
+  assert.equal(posted.status, 202);
+  const { data } = (await posted.json()) as { data: { id: string } };
+  const { result: cancelled, lines } = await warnings(() => cancelSave(saving("DELETE", data.id)));
+  assert.equal(cancelled.status, 200);
+  assert.deepEqual(((await cancelled.json()) as { data: unknown }).data, { id: data.id, state: "stopped" });
+  assert.ok(fake.routes.includes("cancel"), "it was asked");
+  assert.ok(lines.some(line => line.startsWith("upload: Silicon Briefcase did not cancel an unfinished upload (proof_scope_missing)")), lines.join("\n"));
+  const asked = await askSave(saving("GET", data.id, { wait: 0 }));
+  assert.equal(asked.status, 409);
+  assert.equal((await errorOf(asked)).code, "upload_cancelled");
+});
+
+/** The website's server takes uploads again (stopUploads leaves it stopping for good, as a process that is ending). */
+const startedAgain = () => {
+  (globalThis as unknown as Record<symbol, { stopping: boolean }>)[Symbol.for("dm.uploads.runtime")]!.stopping = false;
+};
+
+test("a server told to stop (a deploy): an upload whose bytes are on their way stops and its reservation is cancelled, and no new one starts", async () => {
+  fake = await fakeServices({ readDelayMs: 20 });
+  try {
+    const posting = POST(upload({ size: 4 * MB }));
+    while (!(fake.transfers[0]?.received ?? 0)) await sleep(5);
+    await stopUploads();
+    const response = await posting;
+    assert.equal(response.status, 503);
+    const error = await errorOf(response);
+    assert.equal(error.code, "website_restarting");
+    assert.match(error.hint ?? "", /^Send it again in a moment, from its first byte \(this website's pages do it by themselves\)\.$/);
+    assert.equal(response.headers.get("retry-after"), "10");
+    assert.deepEqual(fake.routes.filter(route => route !== "refresh"), ["issue", "reserve", "transfer", "cancel", "revoke"], "cancelled with a proof token of its own, then the proof revoked");
+    const before = fake.routes.length;
+    const refused = await POST(upload());
+    assert.equal(refused.status, 503);
+    assert.equal((await errorOf(refused)).code, "website_restarting");
+    assert.equal(fake.routes.length, before, "nothing asked of Accounts or Briefcase");
+  } finally {
+    startedAgain();
+  }
+});
+
+test("a server told to stop: a save going on after its 202 is cancelled at Briefcase before the process may exit, and its ask hears why", async () => {
+  Object.assign(SAVING_TIMING, { holdMs: 50 });
+  fake = await fakeServices({ answerDelayMs: 10_000 });
+  try {
+    const posted = await POST(upload({ size: MB }));
+    assert.equal(posted.status, 202);
+    const { data } = (await posted.json()) as { data: { id: string } };
+    const asking = askSave(saving("GET", data.id));
+    await sleep(20);
+    await stopUploads();
+    assert.ok(fake.routes.includes("cancel"), "cancelled before stopUploads resolves");
+    assert.ok(!fake.routes.includes("commit"));
+    const asked = await asking;
+    assert.equal(asked.status, 503);
+    assert.equal((await errorOf(asked)).code, "website_restarting");
+    await sleep(20);
+    assert.equal(fake.revoked.length, 1, "the proof is revoked");
+  } finally {
+    startedAgain();
+  }
+});
+
+test("a stop made by another copy of the website's code (instrumentation.ts is bundled apart from the routes) reaches the browser in its own words", async () => {
+  fake = await fakeServices();
+  // A failure of another copy's class: the same name and fields, but not an instance of this copy's UploadFailure.
+  const foreign = Object.assign(new Error("This DM website is restarting, so the file was not saved."), { name: "UploadFailure", status: 503, code: "website_restarting", hint: "Send it again in a moment, from its first byte (this website's pages do it by themselves).", retryAfter: 10 });
+  const stop = new AbortController();
+  stop.abort(foreign);
+  const settings = uploadsSettings() as EnabledUploads;
+  const proof = await UploadProof.issue(serverEnv(), "eyJ.live.sig");
+  await assert.rejects(
+    saveToBriefcase({ settings, proof, name: storedName("plan.pdf"), contentType: "application/pdf", file: { size: 10, sha256: digestOf(10) }, body: body(10).stream, signal: stop.signal, owner: OWNER, appId: "webkit" }),
+    (error: unknown) => error instanceof UploadFailure && error.code === "website_restarting" && error.status === 503 && error.retryAfter === 10,
+  );
+  assert.deepEqual(fake.routes, ["issue"], "stopped before anything was reserved");
+});
+

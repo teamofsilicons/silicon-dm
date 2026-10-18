@@ -254,10 +254,11 @@ fn messages_from_services_before_and_after_speech_read_and_render() -> Result {
     new["voice_transcript"] = json!("The build is green.");
     new["speech"] = json!({"voice":"mark","voice_name":"Mark","script":"[warmly] The build is green.",
         "model":"eleven_v4","status":"ready","duration_milliseconds":1840,"peaks":[3,40,100]});
-    new["voice"] = json!({"url":"https://files.example/note.ogg","content_type":"audio/ogg","size":4096,"duration_milliseconds":2100});
+    new["voice"] = json!({"url":"https://files.example/note.ogg","permanent_url":"https://files.example/note.ogg",
+        "name":"note.ogg","content_type":"audio/ogg","size":4096,"duration_milliseconds":2100});
     new["gif"] = json!({"provider_id":"x","url":"https://media.giphy.com/x.gif","title":"party"});
-    new["attachment_details"] = json!([{"url":"https://files.example/note.ogg","name":"note.ogg","content_type":"audio/ogg","size":4096},
-        {"url":"https://media.giphy.com/x.gif"}]);
+    new["attachment_details"] = json!([{"kind":"voice","url":"https://files.example/note.ogg","name":"note.ogg","content_type":"audio/ogg","size":4096},
+        {"kind":"gif","url":"https://media.giphy.com/x.gif"}]);
     new["metadata"] = json!({"isi":"planner"});
     let spoken: Message = serde_json::from_value(new.clone())?;
     let speech = spoken.speech.as_ref().ok_or("speech")?;
@@ -281,6 +282,13 @@ fn messages_from_services_before_and_after_speech_read_and_render() -> Result {
     assert_eq!(
         spoken.attachment_details[0].name.as_deref(),
         Some("note.ogg")
+    );
+    assert_eq!(spoken.attachment_details[0].kind.as_deref(), Some("voice"));
+    assert_eq!(spoken.attachment_details[1].kind.as_deref(), Some("gif"));
+    let voice = spoken.voice.as_ref().ok_or("a voice note")?;
+    assert_eq!(
+        (voice.permanent_url.as_deref(), voice.name.as_deref()),
+        (Some("https://files.example/note.ogg"), Some("note.ogg"))
     );
     assert_eq!(spoken.content.metadata["isi"], "planner");
     let rendered = serde_json::to_value(&spoken)?;
@@ -355,8 +363,49 @@ fn spoken_content_serializes_only_when_present_and_picks_its_relay_operation() -
         "edit_spoken_message"
     );
     assert_eq!(
-        operation(Operation::edit_message("c:ada", "00a", text, "k4"))?,
+        operation(Operation::edit_message("c:ada", "00a", text.clone(), "k4"))?,
         "edit_message"
+    );
+    // A voice note, a GIF, attachment details or metadata (DM 0.17) are written whole, and go
+    // through operations older relays cannot read, so none of them strips them.
+    let rich = MessageCreate {
+        text: Some(String::new()),
+        voice: Some(silicon_dm_client::models::VoiceAttachment {
+            attachment: silicon_dm_client::models::Attachment::link(
+                "https://files.example/n.webm".parse()?,
+            ),
+            duration_milliseconds: Some(4200),
+        }),
+        voice_transcript: Some("hi".into()),
+        ..Default::default()
+    };
+    let wire = serde_json::to_value(&rich)?;
+    assert_eq!(
+        wire["voice"],
+        json!({"permanent_url":"https://files.example/n.webm","duration_milliseconds":4200})
+    );
+    assert_eq!(wire["attachments"], json!([]), "not also a plain link");
+    let mut detailed = text.clone();
+    detailed
+        .attachments
+        .push(silicon_dm_client::models::Attachment {
+            permanent_url: "https://files.example/plan.pdf".parse()?,
+            name: Some("plan.pdf".into()),
+            content_type: Some("application/pdf".into()),
+            size: Some(12),
+        });
+    detailed.metadata.insert("thread".into(), json!("release"));
+    let wire = serde_json::to_value(&detailed)?;
+    assert_eq!(wire["attachments"][0]["name"], "plan.pdf");
+    assert_eq!(wire["metadata"], json!({"thread":"release"}));
+    assert!(serde_json::to_value(&text)?.get("metadata").is_none());
+    assert_eq!(
+        operation(Operation::send_message("c:ada", rich.clone(), "k5"))?,
+        "send_rich_message"
+    );
+    assert_eq!(
+        operation(Operation::edit_message("c:ada", "00a", detailed, "k6"))?,
+        "edit_rich_message"
     );
     // A relay request queued by this release survives a restart unchanged.
     let queued = json!({"operation":"receipts_up_to","conversation_id":"c:ada","up_to":"01f","status":"read"});

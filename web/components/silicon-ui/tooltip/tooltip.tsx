@@ -29,6 +29,22 @@ const warmth = {
   closed() { openCount = Math.max(0, openCount - 1); if (openCount) return; window.clearTimeout(coolTimer); coolTimer = window.setTimeout(() => warmth.set(false), SKIP_WINDOW); },
 };
 
+/*
+ * Focus opens a tooltip only when the keyboard put it there. A menu that closes hands focus back to its trigger, and a
+ * finger or a click on a menu item would otherwise leave the trigger's tooltip standing over the page (on a phone too,
+ * where nothing hovers it away). So the last input is remembered: a pointer press since the last key means the focus
+ * that follows is not the keyboard's. A touch screen starts as a pointer (Radix never opens one on a touch's hover).
+ */
+let lastInput: "keyboard" | "pointer" = "keyboard";
+let listening = false;
+function followInput() {
+  if (listening || typeof window === "undefined") return;
+  listening = true;
+  if (window.matchMedia("(hover: none) and (pointer: coarse)").matches) lastInput = "pointer";
+  window.addEventListener("pointerdown", () => { lastInput = "pointer"; }, true);
+  window.addEventListener("keydown", event => { if (!["Shift", "Control", "Alt", "Meta"].includes(event.key)) lastInput = "keyboard"; }, true);
+}
+
 /** String content crossfades when it changes while open, and the bubble springs to the new text size. */
 function TooltipText({ text }: { text: string }) {
   const reduced = useReducedMotion();
@@ -62,6 +78,7 @@ export function Tooltip({ content, children, side = "top" }: TooltipProps) {
   // Controlled so the instant flag lands in the same render that mounts the content (Radix reports uncontrolled changes a frame late).
   const [open, setOpen] = useState(false);
   const [instant, setInstant] = useState(false);
+  useEffect(followInput, []);
   useEffect(() => {
     if (!open) return;
     warmth.opened();
@@ -69,7 +86,8 @@ export function Tooltip({ content, children, side = "top" }: TooltipProps) {
   }, [open]);
   return <TooltipPrimitive.Provider delayDuration={DELAY} skipDelayDuration={0}>
     <TooltipPrimitive.Root open={open} delayDuration={isWarm ? 0 : DELAY} onOpenChange={next => { if (next) setInstant(warmth.get()); setOpen(next); }}>
-      <TooltipPrimitive.Trigger asChild>{children}</TooltipPrimitive.Trigger>
+      {/* A handled focus event skips Radix's own (it opens at once on any focus). */}
+      <TooltipPrimitive.Trigger asChild onFocus={event => { if (lastInput === "pointer") event.preventDefault(); }}>{children}</TooltipPrimitive.Trigger>
       <TooltipPrimitive.Portal>
         <TooltipPrimitive.Content className={styles.tooltip} data-instant={instant || undefined} side={side} sideOffset={8} collisionPadding={12}>
           {typeof content === "string" || typeof content === "number" ? <TooltipText text={String(content)}/> : content}

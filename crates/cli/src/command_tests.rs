@@ -262,6 +262,32 @@ fn every_visible_command_explains_itself_without_retired_words() {
     assert!(problems.is_empty(), "{problems:#?}");
 }
 
+/// Every command a Silicon can run says how, with an example, and what usually comes next
+/// (AGENTS.md: "give it EXAMPLES and NEXT in its help").
+#[test]
+fn every_leaf_command_has_examples_and_a_next_step() {
+    let mut root = Cli::command();
+    root.build();
+    let mut missing = Vec::new();
+    walk(&root, "dm", &mut |path, command| {
+        let leaf = command
+            .get_subcommands()
+            .all(|sub| sub.is_hide_set() || sub.get_name() == "help");
+        let generated_help = path.split(' ').any(|word| word == "help");
+        if command.is_hide_set() || generated_help || !leaf || path == "dm" {
+            return;
+        }
+        let help = command.clone().render_long_help().to_string();
+        if !help.contains("EXAMPLE") {
+            missing.push(format!("{path}: no EXAMPLES"));
+        }
+        if !help.contains("NEXT") {
+            missing.push(format!("{path}: no NEXT"));
+        }
+    });
+    assert!(missing.is_empty(), "{missing:#?}");
+}
+
 #[test]
 fn a_group_name_without_a_letter_or_digit_is_refused_before_queueing() -> Result<()> {
     let settings = |name: &str| silicon_dm_client::models::GroupSettings {

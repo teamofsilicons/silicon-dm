@@ -17,12 +17,19 @@
  *   one action layer at a time: a menu, the Edited popover or an account card puts the toolbar away (a phone's ⋯ too)
  *   photos keep their shape: one alone, two side by side sharing a height
  *   Message details in names (who, when, where) with the ids under them; nothing cut on a phone
- *   offline, nobody is said to be online
+ *   offline, nobody is said to be online (the thread's standing region says it is offline; a phone's banner is short)
  *   a message routed to an intent says so in a group; a custodian deletes the viewed Silicon's own messages, nothing else
+ *   switching conversations (a row, the open one's row, the palette, ⌥↓, a fresh load) gives the message field the
+ *     keyboard; on a phone's layout Back gives it to the row
+ *   keyboard focus on the thread's own controls changes them by 3:1 or more (WCAG 1.4.11), measured pixel by pixel
+ *   a photo that could not load comes back (by itself, or with Try again); a file under a photo is as wide as it
+ *   a conversation that is not here, or a group you are only invited to, is said in a Carbon's words
+ *   on a phone, a tapped message stays under the finger
+ *   the first message of a conversation that opened empty is read out by the log
  */
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type Browser, type BrowserContext, type Locator, type Page } from "@playwright/test";
 import { BASE, watchErrors } from "./support";
 
 const HELPER = join(process.cwd(), "..", "scripts", "chat-stack", "identities.mjs");
@@ -46,9 +53,9 @@ const photo = (label: string, fill: string) => {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="${fill}"/><text x="40" y="${Number(height) - 40}" font-family="sans-serif" font-size="48">${label}</text></svg>`;
 };
 
-async function signedIn(browser: Browser, who: string): Promise<BrowserContext> {
+async function signedIn(browser: Browser, who: string, options: Parameters<Browser["newContext"]>[0] = {}): Promise<BrowserContext> {
   const cookie = JSON.parse(helper("cookie", who)) as { name: string; value: string; httpOnly?: boolean; sameSite?: "Lax" | "Strict" | "None" };
-  const context = await browser.newContext({ baseURL: BASE, permissions: ["clipboard-read", "clipboard-write"] });
+  const context = await browser.newContext({ baseURL: BASE, permissions: ["clipboard-read", "clipboard-write"], ...options });
   await context.addCookies([{ name: cookie.name, value: cookie.value, url: BASE, httpOnly: cookie.httpOnly ?? true, secure: false, sameSite: cookie.sameSite ?? "Lax" }]);
   await context.route(/^https:\/\/img\.example\.test\//, route => {
     const name = new URL(route.request().url()).pathname.split("/").pop() ?? "photo";
@@ -110,6 +117,66 @@ const toolbars = (page: Page) =>
   );
 
 const row = (page: Page, text: string) => page.locator("article[data-message-row]", { hasText: text });
+const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * How much keyboard focus changes a control, as WCAG 1.4.11 measures a focus indicator: each pixel of the control (and
+ * 4 px around it) with the keyboard on it, against the same pixel at rest (transitions off), as a contrast ratio.
+ * `strong` counts the pixels that change by 3:1 or more (a 2 px ring all around is about twice the control's perimeter
+ * of them). `measure` is where to look when that is not the control itself (a message's bubble); `select` puts the
+ * keyboard there another way than focus() (then the rest is what it was before).
+ */
+async function focusChange(page: Page, target: Locator, options: { measure?: Locator; select?: () => Promise<void> } = {}): Promise<{ strong: number; perimeter: number; visible: boolean }> {
+  const measure = options.measure ?? target;
+  await page.addStyleTag({ content: "*, *::before, *::after { transition: none !important; animation: none !important; }" });
+  await target.scrollIntoViewIfNeeded();
+  await page.mouse.move(1, 1);
+  const box = (await measure.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  const x = Math.max(0, box.x - 4);
+  const y = Math.max(0, box.y - 4);
+  const clip = { x, y, width: Math.min(viewport.width - x, box.width + 8), height: Math.min(viewport.height - y, box.height + 8) };
+  if (!options.select) await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
+  const rest = await page.screenshot({ clip });
+  if (options.select) await options.select();
+  else {
+    // A key first, so the browser shows focus as it does for the keyboard (:focus-visible).
+    await page.keyboard.press("Shift");
+    await target.focus();
+  }
+  const visible = await target.evaluate(element => element.matches(":focus-visible"));
+  const focused = await page.screenshot({ clip });
+  const strong = await page.evaluate(async ([a, b]) => {
+    const pixels = async (base64: string) => {
+      const bitmap = await createImageBitmap(new Blob([Uint8Array.from(atob(base64), c => c.charCodeAt(0))], { type: "image/png" }));
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const context = canvas.getContext("2d")!;
+      context.drawImage(bitmap, 0, 0);
+      return context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+    };
+    const [p, q] = await Promise.all([pixels(a), pixels(b)]);
+    const channel = (value: number) => {
+      const c = value / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+    const luminance = (d: Uint8ClampedArray, i: number) => 0.2126 * channel(d[i]!) + 0.7152 * channel(d[i + 1]!) + 0.0722 * channel(d[i + 2]!);
+    let count = 0;
+    for (let i = 0; i < p.length; i += 4) {
+      const one = luminance(p, i);
+      const two = luminance(q, i);
+      if ((Math.max(one, two) + 0.05) / (Math.min(one, two) + 0.05) >= 3) count++;
+    }
+    return count;
+  }, [rest.toString("base64"), focused.toString("base64")] as const);
+  return { strong, perimeter: Math.round(2 * (box.width + box.height)), visible };
+}
+
+/** Keyboard focus on a control changes at least three quarters of its edge's length of pixels by 3:1 or more. */
+async function expectFocusSeen(page: Page, name: string, target: Locator, options?: Parameters<typeof focusChange>[2]): Promise<void> {
+  const change = await focusChange(page, target, options);
+  expect(change.visible, `${name}: the keyboard is on it (:focus-visible)`).toBe(true);
+  expect(change.strong, `${name}: pixels that change by 3:1 or more with keyboard focus (WCAG 1.4.11), against an edge of ${change.perimeter} px`).toBeGreaterThanOrEqual(change.perimeter * 0.75);
+}
 const scroller = (page: Page) => page.getByRole("log").locator("xpath=ancestor::div[contains(@class, 'scroller')]");
 const focusedLabel = (page: Page) => page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.textContent ?? "");
 
@@ -155,17 +222,24 @@ test("a message reaches the other Carbon live, turns Read when read there; typin
   await expect(card.getByRole("button", { name: "Message Bo" })).toBeVisible();
   await page.mouse.move(5, 5);
 
-  // Bo types: Ada's header and the end of her thread say so (presence is read every 15 s).
-  await friend.bringToFront();
-  const theirField = friend.getByRole("textbox", { name: /^Message / });
-  await theirField.click();
-  const typing = page.getByText("Bo is typing…").first();
-  await expect.poll(async () => {
-    await theirField.pressSequentially("a", { delay: 30 });
-    return typing.isVisible();
-  }, { timeout: 45_000, intervals: [1500] }).toBe(true);
-  await expect(page.getByRole("log").getByText("Bo is typing…")).toBeVisible();
-  await theirField.fill("");
+  // Bo types: Ada's header and the end of her thread say so (presence is read every 15 s), where the DM service says
+  // what someone does per conversation (features.presence_activity); a service that does not is never taken at its
+  // word for this conversation (lib/chat/presence.ts; e2e/foundation.spec.ts checks that case).
+  const contracts = (await (await fetch(`${DM_API}/api/v1/contracts`)).json()) as { data?: { features?: { presence_activity?: { scope?: string } } } };
+  if (contracts.data?.features?.presence_activity?.scope === "conversation") {
+    await friend.bringToFront();
+    const theirField = friend.getByRole("textbox", { name: /^Message / });
+    await theirField.click();
+    const typing = page.getByText("Bo is typing…").first();
+    await expect.poll(async () => {
+      await theirField.pressSequentially("a", { delay: 30 });
+      return typing.isVisible();
+    }, { timeout: 45_000, intervals: [1500] }).toBe(true);
+    await expect(page.getByRole("log").getByText("Bo is typing…")).toBeVisible();
+    await theirField.fill("");
+  } else {
+    test.info().annotations.push({ type: "skipped part", description: "typing: this DM service does not say what someone does per conversation" });
+  }
 
   expect(errors()).toEqual([]);
   await ada.close();
@@ -203,6 +277,11 @@ test("a reply quote and a link go to their message; older pages load above witho
   await expect(target).toBeInViewport({ timeout: 20_000 });
   await expect(target).toHaveAttribute("data-highlight", "");
   await expect(page).toHaveURL(new RegExp(`#${first["message-id"]}$`));
+  // Every row back to it is drawn now; back at the latest, only the newest stay (they come back from the cache above).
+  expect(await page.locator("article[data-message-row]").count()).toBeGreaterThan(190);
+  await page.getByRole("button", { name: /^Jump to latest/ }).click();
+  await expect(row(page, answer)).toBeInViewport();
+  await expect.poll(() => page.locator("article[data-message-row]").count(), { message: "the rows far back go once the thread is at its latest" }).toBeLessThanOrEqual(140);
 
   // A link to a message opens there.
   await page.goto(`/c/${group}#${linked!["message-id"]}`);
@@ -266,8 +345,10 @@ test("deleting asks in place, and an edit keeps its history", async ({ browser }
   const edited = row(page, final);
   const code = await edited.getAttribute("data-message-code");
   await edited.getByRole("button", { name: /^Edited/ }).click();
-  const history = page.getByRole("dialog").filter({ hasText: "Before the last edit" });
+  // The history is named, and its first item is the words as they are now, so both read together wherever it opens.
+  const history = page.getByRole("dialog", { name: "Versions of this message" });
   await expect(history).toContainText(draft);
+  await expect(history.getByRole("listitem").first()).toContainText(`Now${final}`);
   await page.keyboard.press("Escape");
   await expect(history).toHaveCount(0);
 
@@ -401,6 +482,8 @@ test("photos open in a lightbox by keyboard: Enter, → to the next, Esc back to
   await expect(lightbox).toContainText("Photo 1 of 2");
   await page.keyboard.press("ArrowRight");
   await expect(page.getByRole("dialog", { name: "b-hills.png" })).toContainText("Photo 2 of 2");
+  // The keyboard stays where it is: the dialog says which photo it shows now.
+  await expect(page.getByRole("dialog").getByRole("status")).toHaveText("Photo 2 of 2, b-hills.png");
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect.poll(() => focusedLabel(page)).toMatch(/^Open photo 1 of 2/);
@@ -497,6 +580,8 @@ test("one message's toolbar at a time, never over another: beside it, or under t
   // and the pointer resting elsewhere does not add a second.
   await row(page, second).locator("[data-sq='surface']").first().hover();
   await expect.poll(async () => (await toolbars(page)).map(bar => bar.row)).toEqual([expect.stringContaining("Then Bo again")]);
+  // It comes and goes inside the log, which reads out only new messages: the toolbar is not one.
+  await expect(page.locator("[role='toolbar']")).toHaveAttribute("aria-live", "off");
   await field.click();
   await field.press(`${MOD}+ArrowUp`);
   await expect.poll(() => focusedLabel(page)).toContain("Last from Bo");
@@ -724,8 +809,26 @@ test("offline, the header stops saying who is online and says it waits for the n
     await page.goto(`/c/${direct.id}`);
     const status = page.locator("header").filter({ has: page.getByRole("heading", { level: 1 }) }).locator("p").first();
     await expect(status).toContainText("online", { timeout: 20_000 });
+    // The thread's region for such news is there before anything happens (one added with its words is often not
+    // read), and says it.
+    const said = page.getByRole("main").getByRole("status").filter({ hasText: "You are offline." });
+    await expect(said).toHaveCount(0);
     await ada.setOffline(true);
     await expect(status).toHaveText("waiting for the network");
+    await expect(said).toHaveCount(1);
+    // On a phone: a short sentence, its icon on its first line, read from the start.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const banner = page.locator("p[data-tone='offline']");
+    await expect(banner).toHaveText("Offline: what you send goes out when you are back.", { useInnerText: true });
+    const fits = await banner.evaluate(node => {
+      const box = node.getBoundingClientRect();
+      const icon = node.querySelector("svg")!.getBoundingClientRect();
+      return { lines: Math.round((box.height - 16) / 20), iconFirstLine: icon.top - box.top < 20, left: getComputedStyle(node).textAlign };
+    });
+    expect(fits.lines, "two lines at most").toBeLessThanOrEqual(2);
+    expect(fits.iconFirstLine).toBe(true);
+    expect(fits.left).toBe("left");
+    await page.setViewportSize({ width: 1280, height: 800 });
     await ada.setOffline(false);
     await expect(status).toContainText("online", { timeout: 20_000 });
     await expect(status).not.toContainText("waiting");
@@ -791,6 +894,273 @@ test("a message routed to an intent says so in a group; a custodian deletes the 
   await expect(page.getByText("Delete for everyone?")).toHaveCount(0);
   const tombstones = (await dmApi<{ items: Array<{ "message-id": string; deleted_at: string | null }> }>("bo", "GET", `/api/v1/conversations/${encodeURIComponent(group)}/messages?limit=10`)).items.filter(item => item.deleted_at).map(item => item["message-id"]);
   expect(tombstones.sort()).toEqual([one["message-id"], three["message-id"]].sort());
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
+/* Switching conversations, then typing ---------------------------------------------------------------------------- */
+
+test("switching conversations gives the message field the keyboard; on a phone's layout Back gives it to the row", async ({ browser }) => {
+  const one = await newGroup("Switch one");
+  const two = await newGroup("Switch two");
+  const [nameOne, nameTwo] = await Promise.all([one, two].map(async id => (await dmApi<{ group: { name: string } }>("ada", "GET", `/api/v1/groups/${encodeURIComponent(id)}`)).group.name));
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  const field = (name: string) => page.getByRole("textbox", { name: `Message ${name}` });
+  const listRow = (address: string) => page.locator(`a[data-row][data-conversation="${address}"]:visible`);
+
+  // Opening a conversation (a fresh load) gives its field the keyboard: the next key is the first word.
+  await page.goto(`/c/${one}`);
+  await expect(field(nameOne!)).toBeFocused();
+  // A row of the list.
+  await listRow(two).click();
+  await expect(field(nameTwo!)).toBeFocused();
+  await page.keyboard.type("hi");
+  await expect(field(nameTwo!)).toHaveValue("hi");
+  await field(nameTwo!).fill("");
+  // The open conversation's own row.
+  await page.getByRole("heading", { level: 1 }).click();
+  await listRow(two).click();
+  await expect(field(nameTwo!)).toBeFocused();
+  // A conversation chosen in the palette.
+  await page.keyboard.press(`${MOD}+k`);
+  await page.keyboard.type(nameOne!);
+  await page.getByRole("option", { name: new RegExp(`^${escaped(nameOne!)}`) }).first().click();
+  await expect(field(nameOne!)).toBeFocused();
+  // ⌥↓ from the field: whichever conversation comes next in the list, its field has the keyboard (or it has none).
+  await page.keyboard.press("Alt+ArrowDown");
+  await expect(page).not.toHaveURL(new RegExp(`/c/${escaped(one)}$`));
+  await expect.poll(() => page.evaluate(() => {
+    const next = document.querySelector<HTMLTextAreaElement>("main textarea[data-composer-field]");
+    return !!next && (next.disabled || document.activeElement === next);
+  }), { message: "the next conversation's field has the keyboard" }).toBe(true);
+  // The details toggle keeps its name; whether it is pressed says whether the details show.
+  await page.goto(`/c/${one}`);
+  const details = page.getByRole("button", { name: "Show details" });
+  await expect(details).toHaveAttribute("aria-pressed", /true|false/);
+  const before = await details.getAttribute("aria-pressed");
+  await details.click();
+  await expect(page.getByRole("button", { name: "Show details" })).toHaveAttribute("aria-pressed", before === "true" ? "false" : "true");
+  await page.getByRole("button", { name: "Show details" }).click();
+  await expect(page.getByRole("button", { name: "Show details" })).toHaveAttribute("aria-pressed", before!);
+
+  // A phone's layout (a narrow window, with a keyboard): a row opens its conversation with the field ready, and Back
+  // puts the keyboard on that row again.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/c");
+  await listRow(one).focus();
+  await page.keyboard.press("Enter");
+  await expect(field(nameOne!)).toBeFocused();
+  await page.getByRole("link", { name: "Back to conversations" }).click();
+  await expect(listRow(one)).toBeFocused();
+
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
+/* Keyboard focus is seen ---------------------------------------------------------------------------------------- */
+
+test("keyboard focus on the thread's own controls changes them by 3:1 or more (WCAG 1.4.11)", async ({ browser }) => {
+  const group = await newGroup("Thread focus");
+  const words = `Focus ${stamp()}`;
+  await send("bo", group, {
+    message: words,
+    attachments: [
+      { permanent_url: "https://img.example.test/a-harbour.png", name: "a-harbour.png", content_type: "image/png", size: 120_400 },
+      { permanent_url: "https://img.example.test/b-hills.png", name: "b-hills.png", content_type: "image/png", size: 98_100 },
+      { permanent_url: "https://files.example.test/pricing-v3.pdf", name: "pricing-v3.pdf", content_type: "application/pdf", size: 52_000 },
+    ],
+  });
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  await page.goto(`/c/${group}`);
+  const main = page.getByRole("main");
+  const field = page.getByRole("textbox", { name: /^Message / });
+  const message = row(page, words);
+  await expect(message).toBeVisible();
+
+  await expectFocusSeen(page, "the header's More", main.getByRole("button", { name: "More for this conversation" }));
+  await expectFocusSeen(page, "a file's Download", message.getByRole("link", { name: "Download pricing-v3.pdf" }));
+  // The selected message (⌘↑ from the field): its bubble's edge.
+  await field.focus();
+  await expectFocusSeen(page, "the selected message", message, { measure: message.locator("[data-sq='surface']").first(), select: async () => { await field.focus(); await field.press(`${MOD}+ArrowUp`); } });
+  // A send the service refused (this page's request only): Retry and Discard.
+  const refusing = (url: URL) => url.pathname.endsWith(`/conversations/${encodeURIComponent(group)}/messages`);
+  await page.route(refusing, route => (route.request().method() === "POST"
+    ? route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ type: "error", data: { error: { code: "validation_error", message: "This test refused the send.", hint: "Nothing to do." } } }) })
+    : route.continue()));
+  await field.fill(`Refused ${stamp()}`);
+  await field.press("Enter");
+  const retry = main.getByRole("button", { name: "Retry" });
+  await expect(retry).toBeVisible();
+  await expectFocusSeen(page, "a failed send's Retry", retry);
+  await expectFocusSeen(page, "a failed send's Discard", main.getByRole("button", { name: "Discard" }));
+  await main.getByRole("button", { name: "Discard" }).click();
+  await page.unroute(refusing);
+  // The lightbox's steps.
+  await message.getByRole("button", { name: /^Open photo 1 of 2/ }).click();
+  const lightbox = page.getByRole("dialog", { name: "a-harbour.png" });
+  await expect(lightbox).toBeVisible();
+  // Once it has settled (it opens with a short animation).
+  await page.waitForTimeout(500);
+  await expectFocusSeen(page, "the lightbox's Previous", lightbox.getByRole("button", { name: "Previous photo" }));
+  await expectFocusSeen(page, "the lightbox's Next", lightbox.getByRole("button", { name: "Next photo" }));
+  await page.keyboard.press("Escape");
+  // A phone's Back.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectFocusSeen(page, "Back to conversations", page.getByRole("link", { name: "Back to conversations" }));
+
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
+/* What could not load comes back -------------------------------------------------------------------------------- */
+
+test("a photo that could not load comes back, by itself or with Try again; a file under a photo is as wide as it", async ({ browser }) => {
+  const group = await newGroup("Thread retries");
+  const words = `Retries ${stamp()}`;
+  const tag = stamp();
+  await send("bo", group, {
+    message: `${words} one`,
+    attachments: [
+      { permanent_url: `https://img.example.test/a-once-${tag}-1600x900.png`, name: "once.png", content_type: "image/png", size: 80_000 },
+      { permanent_url: "https://files.example.test/pricing-v3.pdf", name: "pricing-v3.pdf", content_type: "application/pdf", size: 52_000 },
+    ],
+  });
+  await send("bo", group, { message: `${words} two`, attachments: [{ permanent_url: `https://img.example.test/b-twice-${tag}.png`, name: "twice.png", content_type: "image/png", size: 80_000 }] });
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  // The first photo fails to load once, the second twice (its own retry as well); then both load.
+  let once = 1;
+  let twice = 2;
+  await page.route(new RegExp(`^https://img\\.example\\.test/.*-${tag}`), route => {
+    const url = route.request().url();
+    if (url.includes("-once-") && once > 0) {
+      once--;
+      return route.abort("failed");
+    }
+    if (url.includes("-twice-") && twice > 0) {
+      twice--;
+      return route.abort("failed");
+    }
+    return route.fallback();
+  });
+  await page.goto(`/c/${group}`);
+  const first = row(page, `${words} one`);
+  const second = row(page, `${words} two`);
+  // A card says what happened, with Try again; a few seconds later the photo is asked for again by itself.
+  await expect(first.getByText("The photo could not be shown here.")).toBeVisible();
+  await expect(first.getByRole("button", { name: "Try showing once.png again" })).toBeVisible();
+  await expect(first.getByRole("button", { name: /^Open the photo/ })).toBeVisible({ timeout: 15_000 });
+  // The file under it is as wide as the photo: one edge down the bubble.
+  await expect.poll(() => first.evaluate(node => {
+    const photo = node.querySelector("button[aria-label^='Open the photo']")!.getBoundingClientRect();
+    const card = node.querySelector("a[download]")!.parentElement!.getBoundingClientRect();
+    return Math.round(Math.abs(photo.right - card.right) + Math.abs(photo.left - card.left));
+  }), { message: "the file's card lines up with the photo" }).toBeLessThanOrEqual(1);
+  // The one that fails again stays a card until Try again.
+  await expect.poll(() => twice, { timeout: 15_000 }).toBe(0);
+  await expect(second.getByText("The photo could not be shown here.")).toBeVisible();
+  await second.getByRole("button", { name: "Try showing twice.png again" }).click();
+  await expect(second.getByRole("button", { name: /^Open the photo/ })).toBeVisible();
+
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
+/* A link that leads nowhere ------------------------------------------------------------------------------------- */
+
+test("a conversation that is not here, or a group only invited to, is said in a Carbon's words", async ({ browser }) => {
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  const missing = `c:dmc-ada::si:nobody-${stamp()}`;
+  await page.goto(`/c/${missing}`);
+  await expect(page.getByRole("heading", { name: "This conversation is not here" })).toBeVisible();
+  const main = page.getByRole("main");
+  await expect(main).toContainText(`There is no conversation ${missing} that you are in: the link may be wrong, or you may have left it. Your conversations are in the list.`);
+  // The service's hint is for the CLI and HTTP clients: never here.
+  await expect(main).not.toContainText(/dm conversations|dm groups|GET \/api|DM does not say/);
+  await expect(page.getByRole("link", { name: "Back to your conversations" })).toBeVisible();
+  await page.goto(`/c/g:nothing-here-${stamp()}`);
+  await expect(page.getByRole("heading", { name: "This group is not here" })).toBeVisible();
+  await expect(page.getByRole("main")).not.toContainText(/dm groups|GET \/api/);
+
+  // Bo, invited to Ada's group but not in it yet: the way in is his invitations.
+  const group = await dmApi<{ id: string }>("ada", "POST", "/api/v1/groups", { type: "create_group", data: { name: `Invited ${stamp()}`, member_ids: ["c:dmc-bo"] } });
+  const bo = await signedIn(browser, "bo");
+  const friend = await bo.newPage();
+  const friendErrors = threadErrors(friend);
+  await friend.goto(`/c/${group.id}`);
+  await expect(friend.getByRole("heading", { name: "You are invited to this group" })).toBeVisible();
+  await expect(friend.getByRole("main")).toContainText("Accept the invitation to read its messages and write in it.");
+  await friend.getByRole("button", { name: "Open your invitations" }).click();
+  await expect(friend.getByRole("dialog", { name: /Invitations/ })).toBeVisible();
+  await dmApi("bo", "POST", `/api/v1/groups/${encodeURIComponent(group.id)}/decline`).catch(() => undefined);
+
+  expect(errors()).toEqual([]);
+  expect(friendErrors()).toEqual([]);
+  await ada.close();
+  await bo.close();
+});
+
+/* A tap on a phone ---------------------------------------------------------------------------------------------- */
+
+test("on a phone, a tapped message stays under the finger: what follows makes room for its toolbar", async ({ browser }) => {
+  const group = await newGroup("Thread taps");
+  const mark = stamp();
+  let last: Sent | null = null;
+  for (let index = 1; index <= 8; index++) last = await send(index % 2 ? "bo" : "ada", group, { message: `Tap ${index} ${mark}: long enough to fill most of the column on a phone, so its toolbar opens under it.` });
+  // Ada has read them all: the thread opens at its bottom.
+  await dmApi("ada", "POST", `/api/v1/conversations/${encodeURIComponent(group)}/receipts`, { type: "receipts.read", data: { up_to: last!["message-id"] } });
+  const ada = await signedIn(browser, "ada", { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  await page.goto(`/c/${group}`);
+  // A touch screen: nothing raises the on-screen keyboard by itself.
+  await expect(row(page, `Tap 8 ${mark}`)).toBeVisible();
+  expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe("TEXTAREA");
+  const bubble = row(page, `Tap 7 ${mark}`).locator("[data-sq='surface']").first();
+  const next = row(page, `Tap 8 ${mark}`).locator("[data-sq='surface']").first();
+  const before = (await bubble.boundingBox())!;
+  const nextBefore = (await next.boundingBox())!;
+  await page.touchscreen.tap(before.x + 20, before.y + before.height / 2);
+  await expect.poll(async () => (await toolbars(page)).map(bar => bar.place)).toEqual(["below"]);
+  await page.waitForTimeout(300);
+  const after = (await bubble.boundingBox())!;
+  expect(Math.abs(after.y - before.y), "the tapped message does not move").toBeLessThanOrEqual(1);
+  expect((await next.boundingBox())!.y - nextBefore.y, "the message after it makes room").toBeGreaterThan(20);
+
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
+/* The first message of an empty conversation is news ------------------------------------------------------------ */
+
+test("the log reads out the first message of a conversation that opened empty", async ({ browser }) => {
+  const group = await newGroup("Thread first words");
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  await page.goto(`/c/${group}`);
+  await expect(page.getByText(/^This is the beginning of Thread first words/)).toBeVisible();
+  // How the log is set to speak at the moment each message is added to it.
+  await page.evaluate(() => {
+    const log = document.querySelector("[role='log']")!;
+    const seen: string[] = [];
+    (window as unknown as { __live: string[] }).__live = seen;
+    new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) if (node instanceof HTMLElement && node.matches("article[data-message-code]")) seen.push(log.getAttribute("aria-live") ?? "");
+    }).observe(log, { childList: true });
+  });
+  const words = `First words ${stamp()}`;
+  await send("bo", group, { message: words });
+  await expect(row(page, words)).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __live: string[] }).__live)).toEqual(["polite"]);
+
   expect(errors()).toEqual([]);
   await ada.close();
 });

@@ -65,8 +65,12 @@ export interface DroppedFolder {
 }
 
 export interface Dropped {
-  /** The files, in the order dropped (a folder's files by their path). */
+  /** The files, in the order dropped (a folder's files by their path): `loose` and `inFolders` together. */
   files: File[];
+  /** Files dropped as files (each one chosen by the Carbon), and a web page's picture taken from its data: address. */
+  loose: File[];
+  /** The files found inside dropped folders (never seen one by one: the composer asks before adding many). */
+  inFolders: File[];
   folders: DroppedFolder[];
   /** https addresses to attach as links. */
   links: string[];
@@ -223,6 +227,8 @@ export interface ReadOptions {
 export async function readDrop(snapshot: DropSnapshot, options: ReadOptions = {}): Promise<Dropped> {
   const limit = options.limit ?? 10_000;
   const files = [...snapshot.files];
+  const loose = [...snapshot.files];
+  const inFolders: File[] = [];
   const folders: DroppedFolder[] = [];
   const problems: string[] = [];
   for (const folder of snapshot.folders) {
@@ -236,6 +242,7 @@ export async function readDrop(snapshot: DropSnapshot, options: ReadOptions = {}
     }
     folders.push({ name: folder.name, files: found.length, hidden: counts.hidden, ...(counts.empty ? { empty: counts.empty } : {}), ...(counts.unreadable ? { unreadable: counts.unreadable } : {}), truncated: counts.truncated });
     files.push(...found);
+    inFolders.push(...found);
   }
   const links: string[] = [];
   if (!snapshot.files.length && !snapshot.folders.length) {
@@ -243,7 +250,10 @@ export async function readDrop(snapshot: DropSnapshot, options: ReadOptions = {}
     for (const address of addresses) {
       if (/^data:/i.test(address)) {
         const picture = pictureFromDataUrl(address, options.now);
-        if (picture) files.push(picture);
+        if (picture) {
+          files.push(picture);
+          loose.push(picture);
+        }
         else problems.push("The dragged picture could not be taken from its page. Save it, then drop the file.");
         break;
       }
@@ -265,7 +275,7 @@ export async function readDrop(snapshot: DropSnapshot, options: ReadOptions = {}
       );
     }
   }
-  return { files, folders, links, problems };
+  return { files, loose, inFolders, folders, links, problems };
 }
 
 /** "Photos", "Photos and Scans", "3 folders": how a question names the dropped folders. */
@@ -275,8 +285,12 @@ export function foldersWords(folders: Pick<DroppedFolder, "name">[]): string {
   return `${folders.length} folders`;
 }
 
-/** "One empty file was left out.", "3 empty files and one file this browser could not read were left out.": what a folder walk skipped. */
-export function leftOutWords(folders: Pick<DroppedFolder, "empty" | "unreadable">[]): string | null {
+/**
+ * "One empty file was left out.", "3 empty files and one file this browser could not read were left out.": what a
+ * folder walk skipped. `inline` gives the words for inside a sentence ("one empty file left out"), as the composer's
+ * question about a folder's files says them.
+ */
+export function leftOutWords(folders: Pick<DroppedFolder, "empty" | "unreadable">[], form: "sentence" | "inline" = "sentence"): string | null {
   const empty = folders.reduce((sum, folder) => sum + (folder.empty ?? 0), 0);
   const unreadable = folders.reduce((sum, folder) => sum + (folder.unreadable ?? 0), 0);
   const parts = [
@@ -285,5 +299,6 @@ export function leftOutWords(folders: Pick<DroppedFolder, "empty" | "unreadable"
   ];
   if (!parts.length) return null;
   const words = parts.join(" and ");
+  if (form === "inline") return `${words} left out`;
   return `${words[0]!.toUpperCase()}${words.slice(1)} ${empty + unreadable === 1 ? "was" : "were"} left out.`;
 }

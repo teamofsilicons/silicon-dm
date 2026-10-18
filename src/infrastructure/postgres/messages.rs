@@ -20,8 +20,7 @@ use super::{
     idempotency::{IdempotencyClaim, IdempotencyResult, claim, complete, request_hash},
     map_constraint_error,
     rows::{
-        MESSAGE_PAGE_BYTE_BUDGET, message_payload_bytes, parse_actor_id, parse_actor_type,
-        parse_message_status, parse_url,
+        MESSAGE_SIZE_ESTIMATE, parse_actor_id, parse_actor_type, parse_message_status, parse_url,
     },
 };
 
@@ -105,14 +104,17 @@ impl PostgresStore {
             ));
         }
         let before_sequence = cursor.as_ref().and_then(Cursor::sequence);
-        // Fetch only positions before choosing a byte-bounded payload page.
-        // A lookahead row must never hydrate another maximum-size message.
-        let ids = sqlx::query_scalar::<_, Uuid>(
+        // Fetch only positions (with a size estimate) before choosing a byte-bounded payload
+        // page: a lookahead row must never hydrate another maximum-size message. The bound is
+        // an index condition in every plan (`COALESCE`, not `$2 IS NULL OR …`): a pooled
+        // statement's generic plan otherwise filtered every newer message of the conversation
+        // to reach an older page.
+        let rows = sqlx::query_as::<_, (Uuid, i64)>(sqlx::AssertSqlSafe(format!(
             r#"
-            SELECT message.id
+            SELECT message.id, {MESSAGE_SIZE_ESTIMATE} AS estimate
             FROM messages AS message
             WHERE message.conversation_id = $1
-              AND ($2::bigint IS NULL OR message.sequence < $2)
+              AND message.sequence < COALESCE($2::bigint, 9223372036854775807)
               AND (
                     $3
                     OR NOT EXISTS (
@@ -124,29 +126,18 @@ impl PostgresStore {
               )
             ORDER BY message.sequence DESC
             LIMIT $4
-            "#,
-        )
+            "#
+        )))
         .bind(conversation_id)
         .bind(before_sequence)
         .bind(include_bundled_members)
         .bind(i64::from(limit) + 1)
         .fetch_all(self.pool())
         .await?;
-        let mut items = Vec::with_capacity(usize::from(limit).min(ids.len()));
-        let mut payload_bytes: usize = 0;
-        for id in ids.iter().take(usize::from(limit)) {
-            let message = self.load_message(*id).await?;
-            let bytes = message_payload_bytes(&message)?;
-            if !items.is_empty() && payload_bytes.saturating_add(bytes) > MESSAGE_PAGE_BYTE_BUDGET {
-                break;
-            }
-            payload_bytes = payload_bytes.saturating_add(bytes);
-            items.push(message);
-            if payload_bytes >= MESSAGE_PAGE_BYTE_BUDGET {
-                break;
-            }
-        }
-        let has_next = items.len() < ids.len();
+        let items = self
+            .load_messages_within_budget(&rows[..rows.len().min(usize::from(limit))])
+            .await?;
+        let has_next = items.len() < rows.len();
         let next_cursor = if has_next {
             items
                 .last()
@@ -171,7 +162,10 @@ impl PostgresStore {
     )]
     pub async fn send_message(&self, command: SendMessageCommand) -> AppResult<Message> {
         let initiator = command.sender.clone();
-        command.content.validate().map_err(AppError::validation)?;
+        command
+            .content
+            .validate()
+            .map_err(crate::domain::invalid_content)?;
         if command
             .content
             .sender_id
@@ -429,9 +423,10 @@ impl PostgresStore {
             id: parse_actor_id(&message.sender_id)?,
         };
         if sender == command.recipient {
-            return Err(AppError::validation(
-                "a message sender cannot acknowledge their own message",
-            ));
+            return Err(AppError::invalid(
+                "a message sender cannot acknowledge their own message: receipts are how its recipients say they have it",
+            )
+            .with_hint("Skip your own messages (their sender is you); your message's status (message_status events) says how its recipients have it. POST …/receipts with receipts.read and up_to marks only others' messages."));
         }
         let existing = sqlx::query_as::<_, ReceiptRecord>(
             r#"
@@ -755,6 +750,10 @@ pub(crate) async fn enqueue_message_deliveries_in(
     _sender: &ActorRef,
 ) -> AppResult<()> {
     let participants = participant_records_in(transaction, conversation_id).await?;
+    // Each of these first-revision rows also records its account (the sender aside) in
+    // message_recipients (the trigger of migration 0049): the message's aggregate status counts
+    // their receipts, however the group changes later and however long the outbox keeps these
+    // deliveries.
     for participant in participants {
         let target = ActorRef {
             actor_type: parse_actor_type(&participant.actor_kind)?,
@@ -966,7 +965,7 @@ async fn participant_records_in(
     .bind(conversation_id)
     .fetch_all(&mut **transaction)
     .await
-    .map_err(AppError::Database)
+    .map_err(AppError::database)
 }
 
 /// Requires an effective participant and returns the conversation's storage partition.

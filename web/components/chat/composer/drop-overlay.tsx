@@ -15,6 +15,7 @@
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { createPortal } from "react-dom";
 import { FileDropzone } from "@/components/silicon-ui/file-dropzone/file-dropzone";
+import { BRIEFCASE_DAILY_BYTES } from "@/lib/upload/client";
 import { snapshotDrop, type DropSnapshot } from "@/lib/upload/drop";
 import { bytesWords } from "@/lib/upload/progress";
 import { TRAY_MAX_ITEMS } from "./tray";
@@ -38,7 +39,10 @@ export interface DropOverlayProps {
   blocked: string | null;
   /** Why files cannot be uploaded here (links still can), or null. */
   filesOff?: string | null;
-  /** The largest file this website takes, and whether it is the website's own limit (else Briefcase's 5 TiB). */
+  /**
+   * The largest file this website takes, and whether it is the website's own limit (else Briefcase's 5 TiB). The note
+   * names the lower of it and what Briefcase usually takes into one Briefcase in a day (100 GB): the limit a Carbon meets.
+   */
   maxBytes: number;
   capped?: boolean;
   /** What was dropped, taken while the drop lasted (the composer reads folders and links from it). */
@@ -147,7 +151,7 @@ export function DropOverlay({ blocked, filesOff = null, maxBytes, capped = false
           <FileDropzone
             label={kind === "files" ? "Drop files to send them" : "Drop the link to attach it"}
             description={kind === "files" ? "They upload to your Silicon Briefcase." : "It goes with your message as a link."}
-            note={kind === "files" ? (capped && maxBytes ? `Up to ${bytesWords(maxBytes)} each, folders too` : "Any size, folders too") : "https links only"}
+            note={kind === "files" ? (capped && maxBytes && maxBytes < BRIEFCASE_DAILY_BYTES ? `Up to ${bytesWords(maxBytes)} each, folders too` : `Up to ${bytesWords(BRIEFCASE_DAILY_BYTES)} a day, folders too`) : "https links only"}
             dropLabel={kind === "files" ? "Drop to add them to your message" : "Drop to add it to your message"}
             multiple
             maxFiles={TRAY_MAX_ITEMS}

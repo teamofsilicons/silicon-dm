@@ -19,6 +19,7 @@ import { ConversationAvatar } from "../common/avatars";
 import { IconAction } from "../common/icon-action";
 import { useDetails } from "../shell/details";
 import { ListenModeToggle } from "../voice/voice-parts";
+import { returnKeyboardToRow } from "./open-focus";
 import { activityStatus, busyWords, peopleWords, type Busy } from "./thread-model";
 import styles from "./thread.module.css";
 
@@ -71,7 +72,8 @@ export function ThreadHeader({ address, view, title, kind, conversation, others,
   const cli = view ? `dm messages list ${shellQuote(address)}` : `dm messages send ${shellQuote(address)} --text 'hello'`;
   return (
     <header className={styles.header}>
-      <Link href={inboxHref(view)} className={styles.back} data-sq="surface" aria-label="Back to conversations">
+      {/* The list it goes back to puts the keyboard on this conversation's row (open-focus.ts). */}
+      <Link href={inboxHref(view)} className={styles.back} data-sq="surface" aria-label="Back to conversations" onClick={() => returnKeyboardToRow(address)}>
         <ArrowLeft size={20} strokeWidth={1.75} aria-hidden="true" />
       </Link>
       <ConversationAvatar group={conversation?.group} others={others} size="header" presence={single ? presence.get(single.id) : undefined} decorative />
@@ -89,8 +91,11 @@ export function ThreadHeader({ address, view, title, kind, conversation, others,
         <span className="sr-only" role="status">{status.live ? `${title}: ${status.text}` : ""}</span>
       </div>
       <div className={styles.headerActions}>
-        <ListenModeToggle address={address} />
-        <IconAction label={details.open ? "Hide details" : "Show details"} shortcut="details.toggle" icon={<Info strokeWidth={1.75} aria-hidden="true" />} pressed={details.open} onClick={details.toggle} />
+        {/* Listen mode speaks Silicons' messages: offered only where a Silicon takes part (a group's members are known
+            once it loads; a direct conversation's other is in its address). */}
+        <ListenModeToggle address={address} silicons={conversation || kind !== "group" ? others.some(account => account.type === "silicon") : null} />
+        {/* A toggle keeps one name; whether it is pressed says if the details show (ARIA's toggle button). */}
+        <IconAction label="Show details" shortcut="details.toggle" icon={<Info strokeWidth={1.75} aria-hidden="true" />} pressed={details.open} onClick={details.toggle} />
         <DropdownMenuRoot>
           <Tooltip content="More" side="bottom">
             <DropdownMenuTrigger asChild>

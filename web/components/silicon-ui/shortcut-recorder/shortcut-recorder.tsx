@@ -365,7 +365,7 @@ export function ShortcutRecorder({
         aria-pressed={recording}
         onClick={event => { if (recording) { if (event.detail !== 0) { stop(); setAnnouncement("Recording canceled"); } return; } start(); }}
         onKeyDown={onKeyDown} onKeyUp={onKeyUp} onBlur={() => { if (recording) { stop(); setNudge(null); } }}>
-        <span className={styles.srOnly}>{recording ? "Recording" : shown ? spoken(shown) : placeholder}</span>
+        <span className={styles.srOnly}>{recording ? (tokens.length ? `Recording ${tokens.map(token => token.spoken).join(" ")}` : "Press keys, recording") : shown ? spoken(shown) : placeholder}</span>
         <span className={styles.row} aria-hidden="true">
           {recording && <span className={styles.dot} data-reduced={reduced || undefined} />}
           <AnimatePresence initial={false} mode="popLayout">

@@ -9,9 +9,16 @@
  * - Activity is reported at most once every 3 s and cleared 5 s after the last report (spec §6.5), so a burst of
  *   keystrokes is one request and a pause clears "typing…" for the others.
  * - Others' presence is polled every 15 s for the open conversation only (useParticipantsPresence).
+ * - Activity is about one conversation. A service that announces it (lib/chat/features.ts, `presence_activity`) hears
+ *   which conversation this tab's activity is about (the one on screen, setPresenceConversation) and answers someone's
+ *   activity in the open conversation only. Without it, an account's activity is the same in all of its conversations:
+ *   "Ada is typing…" showed in Cy's thread while Ada wrote to Bo. Then nobody's activity is shown (online and last
+ *   seen still are), rather than one that may be about another conversation.
  */
 import { useQueries } from "@tanstack/react-query";
+import { useSyncExternalStore } from "react";
 import { closePresence, getPresence, renewPresence } from "./api";
+import { scopedActivityOffered, useScopedActivity } from "./features";
 import { chatKeys } from "./keys";
 import { readText, writeText } from "./storage";
 import type { Activity, Presence } from "./types";
@@ -41,11 +48,33 @@ let running = 0;
 
 const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
 
+/** The conversation on screen in this tab (null on the inbox, the settings and in a custodian's view). */
+let onScreen: string | null = null;
+const screenListeners = new Set<() => void>();
+
+/** The chat shell says which conversation is on screen: what this tab is doing is about that one. */
+export function setPresenceConversation(address: string | null): void {
+  if (onScreen === address) return;
+  onScreen = address;
+  for (const listener of screenListeners) listener();
+}
+
+function useOnScreen(): string | null {
+  return useSyncExternalStore(
+    listener => {
+      screenListeners.add(listener);
+      return () => screenListeners.delete(listener);
+    },
+    () => onScreen,
+    () => null,
+  );
+}
+
 function renew() {
   if (!visible()) return;
   lastSentAt = Date.now();
   lastSentActivity = activity;
-  void renewPresence(deviceId(), activity).catch(() => undefined);
+  void renewPresence(deviceId(), activity, activity && scopedActivityOffered() ? onScreen : null).catch(() => undefined);
 }
 
 /** Starts this tab's lease (once, however many callers) and returns a stop function. */
@@ -94,12 +123,26 @@ export function reportActivity(next: Activity | null): void {
   renew();
 }
 
-/** The presence of these accounts, polled every 15 s while `enabled` (the open conversation's other members). */
+/**
+ * What may be shown of someone's presence in the open conversation: everything, when the service said its activity is
+ * about this conversation; otherwise all but the activity (it may be about another one).
+ */
+export function presenceHere(presence: Presence, scoped: boolean): Presence {
+  return scoped || !presence.activity ? presence : { ...presence, activity: null };
+}
+
+/**
+ * The presence of these accounts, polled every 15 s while `enabled` (the open conversation's other members); with
+ * `enabled` false, what was last heard (the sidebar's row for the open conversation reads it so).
+ */
 export function useParticipantsPresence(accountIds: string[], enabled: boolean): Map<string, Presence> {
+  const scoped = useScopedActivity();
+  const conversation = useOnScreen();
+  const scope = scoped ? conversation : null;
   const results = useQueries({
     queries: accountIds.map(id => ({
-      queryKey: chatKeys.presence(id),
-      queryFn: ({ signal }: { signal: AbortSignal }) => getPresence(id, signal),
+      queryKey: chatKeys.presence(id, scope),
+      queryFn: async ({ signal }: { signal: AbortSignal }) => presenceHere(await getPresence(id, signal, scope), !!scope),
       enabled,
       refetchInterval: POLL_MS,
       refetchIntervalInBackground: false,

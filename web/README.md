@@ -12,7 +12,8 @@ against Silicon Accounts' JWKS, and every write must come from this site's own p
 | --- | --- |
 | `/auth/sign-in`, `/auth/callback`, `/auth/refresh`, `/auth/session`, `/auth/sign-out` | The sign-in at Silicon Accounts and the session cookie |
 | `/api/<service path>` | The DM service, called with the session's token (`app/api/[...path]/route.ts`); Range, ETag and If-None-Match pass through for speech audio |
-| `POST /api/uploads?name=` | Saves a file or voice note into the Carbon's own Silicon Briefcase (`apps/dm/`) as DM acting for them, and answers its link |
+| `POST /api/uploads?name=&size=&sha256=` | Saves a file or voice note into the Carbon's own Silicon Briefcase (`apps/dm/`) as DM acting for them, and answers its link (or 202 while Briefcase is still saving a large file) |
+| `GET`/`DELETE /api/uploads/saving?id=` | A file still being saved into Briefcase after its last byte (the POST answered 202): ask until it has the link; `DELETE` cancels it |
 | `GET /api/uploads/config` | Whether uploads are on here, why not, and the largest file |
 | `GET`/`HEAD /api/uploads/file?url=` | The only way a browser loads Briefcase's bytes: the configured Briefcase's public files only, inline only for pictures, audio, video and PDF (everything else is a download), always nosniff and a sandbox CSP |
 | `/llms.txt`, `/llms-full.txt`, `/robots.txt`, `/sitemap.xml` | For Silicons and crawlers (`lib/agent/files.ts`) |

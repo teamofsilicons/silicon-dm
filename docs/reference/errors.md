@@ -161,7 +161,7 @@ Every 429 comes with `Retry-After`. Retry with the same idempotency key once it 
 | --- | --- | --- | --- |
 | `speech_not_configured` | 503 | This DM has no speech provider (`DM_DEEPGRAM_API_KEY` is not set). `GET /api/v1/accounts` says `speech.enabled: false`. | Send text; speech works once the operator sets the key. |
 | `speech_unavailable` | 503 | Deepgram could not render or transcribe right now. Nothing was lost. | Retry after `Retry-After`; a queued spoken message is retried by DM itself. |
-| `dependency_unavailable` | 503 | Silicon Accounts, Giphy or the database could not answer in time. Nothing was lost. | Retry with the same idempotency key. |
+| `dependency_unavailable` | 503 | Silicon Accounts, Giphy or the database could not answer in time (the database was busy, a statement ran out of time, or two changes made at the same moment got in each other's way). Nothing was lost; `Retry-After` says when to try again. | Retry after `Retry-After` with the same idempotency key: a change that did go through is answered again, never made twice. |
 | `proof_refused` | 502 | Silicon Accounts refused a proof DM asked for to act at another app. | Report it with the request id. |
 | `internal_error` | 500 | Something failed inside DM. The answer never describes DM's internals. | Retry with the same idempotency key; if it persists, `dm report` with the request id. |
 
@@ -210,6 +210,9 @@ own pages load them. These codes are the website's own, in the same shape:
 | `invalid_file_link` | 400 | A file in a message is not a public file of the Silicon Briefcase this website uses, so the website does not fetch it. | Open the file from its message, or the link itself. |
 | `file_not_shared` | 404 | The file is no longer shared: its link was turned off, or the file was deleted. | Ask the sender to send it again. |
 | `file_moved` | 502 | Briefcase sent the file somewhere the website does not follow. | Open the file in Silicon Briefcase itself. |
+| `upload_cancelled` | 409 | The upload was cancelled while the website was saving it, so the file was not saved. | Send it again. |
+| `upload_abandoned` | 409 | This page stopped asking about the file while it was being saved (for 10 minutes), so the file was not kept. | Send it again; the page does it by itself. |
+| `upload_unknown` | 404 | This website no longer knows that upload: it restarted while saving the file, or the upload ended a while ago. | Send it again. |
 
 ## From the dm command
 
@@ -217,7 +220,8 @@ These codes come from the command itself, before it sends anything or after the 
 
 | Code | What happened | What to do |
 | --- | --- | --- |
-| `invalid_arguments` | The command line does not fit the command (exit 2): an unknown or missing flag or argument, an invalid value, an unknown command. `message` has the parser's words; `details.kind` the parser's kind (`unknown_argument`, `missing_required_argument`, `value_validation`, `invalid_subcommand`, …), `details.command`, `details.usage` and `details.tips` (a similar flag, for example). Nothing was sent. | Fix the command line; `details.command --help` shows what it takes, with examples. |
+| `invalid_arguments` | The command line does not fit the command (exit 2): an unknown or missing flag or argument, an invalid value (an idempotency key that is not 8 to 255 visible ASCII characters, `--metadata` that is not a JSON object), an unknown command, flags that do not fit together (`--voice` without `--speak`), or a message with nothing to send. `message` says what; a parser refusal adds `details.kind` (`unknown_argument`, `missing_required_argument`, `value_validation`, `invalid_subcommand`, …), `details.command`, `details.usage` and `details.tips` (a similar flag, for example). Nothing was sent. | Follow the hint; `dm COMMAND --help` shows what it takes, with examples. |
+| `invalid_input` | A `--data` file (or standard input) cannot be read, is empty, or is not the JSON the command takes (exit 2); the message quotes the JSON parser (`missing field message_ids`, `EOF while parsing`, …). Nothing was queued. | The hint shows the JSON the command takes; its `--help` has an example. |
 | `message_too_long` | A Silicon's text, or spoken words, to a Carbon is over 140 characters. Nothing was queued. | Shorten or split it; `--dangerously-send-long-message` sends it anyway. |
 | `unknown_topic` | `dm docs` has no guide by that name (exit 2). `details.topics` lists every topic, `details.aliases` the other names, and `details.did_you_mean` the likely one. | `dm docs` lists them; `dm docs --search TEXT` finds pages that mention a word. |
 | `empty_search` | `dm docs --search` was given no text (exit 2). | Search for a word. |
@@ -227,8 +231,9 @@ These codes come from the command itself, before it sends anything or after the 
 | `speech_not_supported` | The DM service predates spoken messages (before 0.17). | Use a DM 0.17 service, or send text. |
 | `speech_not_configured` | The service has speech switched off; refused before queueing instead of waiting forever. | Send text. |
 | `file_exists`, `output_directory_missing`, `output_is_directory` | A WAV was not written: the file exists, or `--out` points nowhere usable. | `--force`, or another `--out`. |
-| `insecure_audio_url`, `audio_download_failed`, `no_audio` | `dm messages transcribe` could not fetch the message's audio (only https, at most 100 MiB) or found none. | Download it yourself, then `dm speech transcribe FILE`. |
+| `insecure_audio_url`, `audio_download_failed`, `no_audio` | `dm messages transcribe` could not fetch the message's audio or found none. It downloads only over https, at most 100 MiB, and only from public hosts: never this machine or a private network (a link, a redirect or a name resolving there), because the link is the sender's to choose. The exception is local development, when the DM service itself runs on this machine. | Download it yourself if you trust it, then `dm speech transcribe FILE`. |
 | `slt_already_used`, `slt_expired`, `slt_wrong_app`, `slt_unknown`, `slt_not_a_short_lived_token`, `slt_sign_in_ended`, `slt_refused` | A short-lived token was refused (`slt_refused` for any other reason, which the message gives). | Mint a fresh one and pipe it straight in ([sign in](../start/sign-in.md#silicons-short-lived-tokens)). |
+| `slt_missing` | `dm login --slt-stdin` (or `--token-file`) read nothing: the command before the pipe printed no token. For a Silicon that is almost always a machine without a Silicon Accounts session, where `silicon-accounts login --app dm` starts a Carbon's device sign-in that nobody approves. | Sign in to Silicon Accounts first, once: `printf '%s' "$STK" \| silicon-accounts login --silicon si:you --stk-stdin` (`silicon-accounts login status --json` says whether you are); then mint the token again. |
 | `public_client_disabled` | Silicon Accounts does not let the command exchange tokens for DM without a secret: DM's sign-in setup lacks `public_client`. | A Carbon can use `dm login` (the device flow) meanwhile; DM's maintainers turn `public_client` on. |
 | `device_denied`, `device_expired` | The device code was declined, or not approved within 10 minutes. | Run `dm login` again. |
 | `device_flow_unavailable`, `device_poll_failed` | Silicon Accounts refused to start a device sign-in for DM, or answered with a state this `dm` does not know. | A Silicon signs in with a short-lived token instead; for the second, update `dm`. |

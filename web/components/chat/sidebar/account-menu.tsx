@@ -11,9 +11,9 @@ import { UserMenu } from "@/components/silicon-ui/user-menu/user-menu";
 import { appConfig } from "@/lib/app.config";
 import { useSignOut } from "@/lib/client/session";
 import { kindNoun } from "@/lib/format";
-import { notifyError } from "@/lib/notify";
-import { chordCaps, chordsOf } from "@/lib/shortcuts/keys";
+import { formatBinding } from "@/lib/shortcuts/keys";
 import { useShortcuts } from "@/lib/shortcuts/react";
+import { askToSignOut } from "../dialogs/sign-out-dialog";
 import { openDialog } from "../dialogs/store";
 import { useChat } from "../shell/chat-context";
 import styles from "./sidebar.module.css";
@@ -23,10 +23,11 @@ export function AccountMenu() {
   const { signOut } = useSignOut();
   const router = useRouter();
   const { shortcuts, platform } = useShortcuts();
+  // The keys as the cheatsheet and the palette write them ("G then S", "⌘K"), as one cap: the menu draws each cap it
+  // is given side by side, and a sequence split into caps read "G S".
   const keysOf = (id: string) => {
     const binding = shortcuts.find(entry => entry.id === id)?.bindings[0];
-    if (!binding) return undefined;
-    return chordsOf(binding, platform).map(chord => chordCaps(chord, platform).map(cap => cap.label).join(platform === "mac" ? "" : "+"));
+    return binding ? [formatBinding(binding, platform).text] : undefined;
   };
   return (
     <UserMenu
@@ -35,13 +36,8 @@ export function AccountMenu() {
       showName
       className={styles.account}
       align="start"
-      onSignOut={async () => {
-        try {
-          await signOut();
-        } catch (failure) {
-          notifyError(failure, "Could not sign out");
-        }
-      }}
+      // Messages not sent yet are said first (dialogs/sign-out-dialog.tsx): signing out removes them from this browser.
+      onSignOut={() => askToSignOut(signOut)}
       items={[
         { label: "Settings", icon: <Settings2 size={16} strokeWidth={1.75} />, keys: keysOf("go.settings"), onSelect: () => router.push("/settings") },
         { label: "Keyboard shortcuts", icon: <Keyboard size={16} strokeWidth={1.75} />, keys: keysOf("shortcuts.open"), onSelect: () => openDialog("shortcuts") },

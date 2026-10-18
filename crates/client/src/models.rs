@@ -248,19 +248,41 @@ impl<'de> Deserialize<'de> for MessageCreate {
         MessageCreateWire::deserialize(value).map_err(serde::de::Error::custom)
     }
 }
+impl MessageCreate {
+    /// Whether the message carries anything only DM 0.17 and later services take: speech, a
+    /// voice note, a GIF, an attachment's name, type or size, or metadata. Such a message is
+    /// sent through the relay as an operation older relays do not know, so a relay that would
+    /// strip those parts leaves it queued for a newer one instead of sending it wrong.
+    pub fn needs_dm_0_17(&self) -> bool {
+        self.speech.is_some()
+            || self.voice.is_some()
+            || self.gif.is_some()
+            || !self.metadata.is_empty()
+            || self.attachments.iter().any(|attachment| {
+                attachment.name.is_some()
+                    || attachment.content_type.is_some()
+                    || attachment.size.is_some()
+            })
+    }
+}
 impl Serialize for MessageCreate {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut attachments = self
+        // A plain link stays a URL string, the shape every DM service takes; an attachment
+        // with its name, type or size is an attachment object (DM 0.17).
+        let attachments = self
             .attachments
             .iter()
-            .map(|a| a.permanent_url.to_string())
+            .map(|attachment| {
+                if attachment.name.is_none()
+                    && attachment.content_type.is_none()
+                    && attachment.size.is_none()
+                {
+                    Value::String(attachment.permanent_url.to_string())
+                } else {
+                    serde_json::to_value(attachment).unwrap_or(Value::Null)
+                }
+            })
             .collect::<Vec<_>>();
-        if let Some(voice) = &self.voice {
-            attachments.push(voice.attachment.permanent_url.to_string());
-        }
-        if let Some(gif) = &self.gif {
-            attachments.push(gif.url.to_string());
-        }
         let mut value = serde_json::json!({"message":self.text.as_deref().unwrap_or(""),"attachments":attachments,"voice_transcript":self.voice_transcript,"reply":self.reply_to_message_id.as_ref().map(|id|serde_json::json!({"message-id":id}))});
         if let Some(id) = &self.sender_id {
             value["sender_id"] = Value::String(id.clone());
@@ -268,8 +290,18 @@ impl Serialize for MessageCreate {
         if let Some(id) = &self.recipient_id {
             value["recipient_id"] = Value::String(id.clone());
         }
-        // Only spoken messages carry the field, so every other message keeps the exact shape
-        // earlier services accept.
+        // The parts of DM 0.17 appear only on messages that have them, so every other message
+        // keeps the exact shape earlier services accept (an earlier service refuses the
+        // unknown field rather than dropping it).
+        if let Some(voice) = &self.voice {
+            value["voice"] = serde_json::to_value(voice).unwrap_or(Value::Null);
+        }
+        if let Some(gif) = &self.gif {
+            value["gif"] = serde_json::to_value(gif).unwrap_or(Value::Null);
+        }
+        if !self.metadata.is_empty() {
+            value["metadata"] = Value::Object(self.metadata.clone());
+        }
         if let Some(speech) = &self.speech {
             let mut spoken = serde_json::json!({"script": speech.script});
             if let Some(voice) = &speech.voice {
@@ -306,6 +338,11 @@ pub struct Speech {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VoiceNote {
     pub url: String,
+    /// The same link as `url`, under the name a voice note is sent with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permanent_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -317,6 +354,10 @@ pub struct VoiceNote {
 /// What DM knows about one of a message's `attachments` (same order as the URLs).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttachmentDetails {
+    /// `attachment`, `voice` (the voice note) or `gif`; `None` from a service that does not
+    /// say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,

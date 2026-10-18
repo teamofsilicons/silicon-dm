@@ -133,7 +133,10 @@ pub(super) async fn events(
     }
     .validated_limit()?;
     if query.reset && query.cursor.is_some() {
-        return Err(AppError::validation("reset cannot be combined with cursor"));
+        return Err(AppError::invalid(
+            "reset=true starts the feed again at its newest position, so it cannot be combined with a cursor.",
+        )
+        .with_hint("Send cursor to continue where the last answer left off, or reset=true to start from now (then refresh conversations), not both."));
     }
     let conversations = includes_conversations(query.include.as_deref())?;
     if conversations {
@@ -141,8 +144,11 @@ pub(super) async fn events(
     }
     let wait = query.wait.unwrap_or(0);
     if wait > MAX_WAIT_SECONDS {
-        return Err(AppError::validation(format!(
+        return Err(AppError::invalid(format!(
             "wait must be 0 to {MAX_WAIT_SECONDS} seconds"
+        ))
+        .with_hint(format!(
+            "Use wait={MAX_WAIT_SECONDS}: an answer with no events after the wait is normal; ask again with the cursor it gives."
         )));
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(u64::from(wait));
@@ -245,10 +251,15 @@ fn encode_cursor(cursor: &SyncCursor, key: &[u8; 32]) -> AppResult<String> {
 }
 
 fn decode_cursor(value: &str, key: &[u8; 32], scope: &str, now: i64) -> AppResult<SyncCursor> {
+    let invalid = || {
+        AppError::invalid(
+            "invalid synchronization cursor: it is not one DM gave out (it was changed or cut short)",
+        )
+        .with_hint("Send the cursor from the last answer exactly as it came, or start again with GET /api/v1/sync?reset=true (dm sync --reset) and refresh conversations.")
+    };
     if value.len() > 2048 {
-        return Err(AppError::validation("invalid synchronization cursor"));
+        return Err(invalid());
     }
-    let invalid = || AppError::validation("invalid synchronization cursor");
     let (body, signature) = value.split_once('.').ok_or_else(invalid)?;
     let body = URL_SAFE_NO_PAD.decode(body).map_err(|_| invalid())?;
     let signature = URL_SAFE_NO_PAD.decode(signature).map_err(|_| invalid())?;

@@ -88,7 +88,8 @@
     },
     "components/silicon-ui/command-palette/command-palette.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/command-palette.json",
-      "sha256": "2a4bd0804f3be91c9bf3f900c6dc0e2f0c889ff5f37863cfcbc81fe7931f7dca"
+      "sha256": "299bedd969b856bbe848dd30a9f4c2c87396876d3e12c9d44efe2002389274ab",
+      "local_edit": "A `filter` prop (how a query chooses and orders the items; the substring match by default), `onQueryChange` and `emptyLabel`. Rows are indexed in the order they are drawn, each group whole, so the arrow keys and Enter walk what is on screen (an item registered after another group was drawn in its group but reached out of order). A query highlights its best match at once (aria-selected and aria-activedescendant on it), so what Enter runs is on screen and announced. The close button's name starts with its visible word (\"Esc, close the palette\", WCAG 2.5.3), and an always-mounted status says when nothing matches (WCAG 4.1.3)."
     },
     "components/silicon-ui/confirm-morph/confirm-morph.module.css": {
       "registry": "https://ui.teamofsilicons.com/r/confirm-morph.json",
@@ -120,7 +121,8 @@
     },
     "components/silicon-ui/dialog/dialog.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/dialog.json",
-      "sha256": "eb5766835becdf7ba16181168b26428d1ad049a2fbbb94408661d9f3cd91a579"
+      "sha256": "77416df3b32989ef1055a4b1fdeb315f19a8849f74429f0e46205fc0de1f52b6",
+      "local_edit": "Whatever takes focus in the content is scrolled into view when it is outside the content's box: Radix FocusScope loops Tab with focus({ preventScroll: true }), so in a dialog taller than the screen, Tab from the last control left focus on Close, scrolled out of sight."
     },
     "components/silicon-ui/drawer/drawer.module.css": {
       "registry": "https://ui.teamofsilicons.com/r/drawer.json",
@@ -132,7 +134,8 @@
     },
     "components/silicon-ui/dropdown-menu/dropdown-menu.module.css": {
       "registry": "https://ui.teamofsilicons.com/r/dropdown-menu.json",
-      "sha256": "9021134f22b3e5c415b7f2ef714db80d9ea938225c8a451bdb0ce1011efffa3f"
+      "sha256": "6a1afa139f9132c5d34f1217a61442dcbac2ee6efa45ef829fcd539cd93a1aa7",
+      "local_edit": "Item shortcut hints are hidden on touch screens ((hover: none) and (pointer: coarse)): there are no keys to press there, as the user menu's sheet already hides its own."
     },
     "components/silicon-ui/dropdown-menu/dropdown-menu.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/dropdown-menu.json",
@@ -207,8 +210,8 @@
     },
     "components/silicon-ui/json-viewer/json-viewer.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/json-viewer.json",
-      "sha256": "d93296822adaa8e13a1997527073dc4007f152de7d921fa2f87cdfa8a34ade68",
-      "local_edit": "A tree item's accessible name starts with its visible words in order (the key, the closed preview's keys, the count) and adds the type after them (was \"key, type, count\"); a space (not drawn: the row is flex) keeps the key, and \"Show N more\", words of their own in the row's text. axe label-content-name-mismatch (WCAG 2.5.3) passes in the message details dialog."
+      "sha256": "10ad5c6aba3c737cab65b7c9fd63d375afaf9e5497c6591ab38a0677d09d57f0",
+      "local_edit": "A tree item's accessible name starts with its visible words in order (the key, the closed preview's keys, the count) and adds the type after them (was \"key, type, count\"); a space (not drawn: the row is flex) keeps the key, and \"Show N more\", words of their own in the row's text. axe label-content-name-mismatch (WCAG 2.5.3) passes in the message details dialog. Also: The LayoutGroup's id is stable (`json-viewer-<rootName>`), not useId: motion keeps every layoutId stack it has seen with its last lead, so a new id per mount kept every closed viewer, its dialog and its listeners in memory (about 0.55 MB and 744 nodes per open of Message details)."
     },
     "components/silicon-ui/lib/escape.ts": {
       "registry": "https://ui.teamofsilicons.com/r/dialog.json",
@@ -300,7 +303,8 @@
     },
     "components/silicon-ui/segmented-control/segmented-control.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/segmented-control.json",
-      "sha256": "e28a248e559538d831f57534095f7583f451bc4b6e38af24122e45c3da98c6c8"
+      "sha256": "0d8e70fdbd26b6d30107f1da609c802621d0998e296fab3f6e0e227d19270a1f",
+      "local_edit": "The LayoutGroup's id is stable (`segmented-<label>`), not useId: motion keeps every layoutId stack it has seen with its last element, so each unmounted control stayed in memory."
     },
     "components/silicon-ui/select/select.module.css": {
       "registry": "https://ui.teamofsilicons.com/r/select.json",
@@ -316,8 +320,8 @@
     },
     "components/silicon-ui/shortcut-recorder/shortcut-recorder.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/shortcut-recorder.json",
-      "sha256": "a17a83ae895be3cc3e3ad22945ccf9932423a2c2a30cdb80d6ae59c9dc19913b",
-      "local_edit": "Escape's spoken name is \"Esc\" (was \"Escape\"), so a recorder button whose cap reads \"esc\" keeps its visible text in its accessible name (WCAG 2.5.3; axe label-content-name-mismatch)."
+      "sha256": "6aafd4e6e8502a4d0ab784f3a0ecf254bd8859d44be6ea1585512fe283ca2694",
+      "local_edit": "Escape's spoken name is \"Esc\" (was \"Escape\"), so a recorder button whose cap reads \"esc\" keeps its visible text in its accessible name (WCAG 2.5.3; axe label-content-name-mismatch). Also: While recording, the button's hidden name keeps its visible words (\"Press keys, recording\", or the keys pressed so far); it said \"Recording\" (axe label-content-name-mismatch, WCAG 2.5.3)."
     },
     "components/silicon-ui/skeleton/skeleton.module.css": {
       "registry": "https://ui.teamofsilicons.com/r/skeleton.json",
@@ -389,15 +393,18 @@
     },
     "components/silicon-ui/tooltip/tooltip.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/tooltip.json",
-      "sha256": "25ad5ea2b707da617e055f0c2fd9bcf8776775ad658e67f3e9176f3030855f9b"
+      "sha256": "e13a27894d860efa37fb7c1dc824ba61be990ac892ccdba6a8989a4259d91aea",
+      "local_edit": "Focus opens a tooltip only when the keyboard put it there (a key was the last input): a menu that closes hands focus back to its trigger, and after a click or a tap on a menu item the trigger's tooltip stayed over the page until something else took focus, on phones too. A touch screen starts as a pointer."
     },
     "components/silicon-ui/user-menu/user-menu.module.css": {
       "registry": "https://ui.teamofsilicons.com/r/user-menu.json",
-      "sha256": "70a1de8941d0f98abf6a1e7d444ec8777182fb62392c2c70cd3cd87f92a97137"
+      "sha256": "601993e933b0982f0e33f47abe3be73ef6939b9555ef74bed0aecd4378a9b4fa",
+      "local_edit": "An item's keys are drawn in the muted text colour without the extra 80 % opacity, which took them to 3.7:1 on the menu (axe color-contrast, WCAG 1.4.3 asks 4.5:1)."
     },
     "components/silicon-ui/user-menu/user-menu.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/user-menu.json",
-      "sha256": "bbd5d21ea0d6675fc5eb724e47b67924a88629d1483a2a71b92eb949870066eb"
+      "sha256": "de757b7e13533bc950dfdcb161fb89da90a3b4e0e0497a1ca930ce9757f272d6",
+      "local_edit": "The trigger's accessible name carries the initials only when they are drawn (no photo): read out with a photo shown, they were words nowhere on screen. The bottom sheet no longer sets aria-modal on its role=menu surface (axe aria-allowed-attr; browsers ignore it there)."
     }
   }
 }

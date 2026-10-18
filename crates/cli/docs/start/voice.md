@@ -208,9 +208,13 @@ type comes from `--content-type`, else the file's first bytes, else its name. Wi
 `dm` exits 0 and adds a note.
 
 `dm messages transcribe` uses the message's voice note, else its first audio attachment, else its
-speech. It downloads an attachment itself: over https only (plain http only from this machine),
-at most 100 MiB, and never with your DM sign-in, which only the DM service ever sees. It prints
-the sender's own `voice_transcript` next to the new one, and never changes the message.
+speech. It downloads an attachment itself: over https only, at most 100 MiB, never with your DM
+sign-in (which only the DM service ever sees), and only from public hosts. The link is the
+sender's to choose, so it may never make your machine read something only your machine can reach:
+a link, a redirect or a host name that points at this machine or a private network is refused
+(`insecure_audio_url`). The one exception is local development, when your DM service itself runs
+on this machine (its files are there too, over plain http). It prints the sender's own
+`voice_transcript` next to the new one, and never changes the message.
 
 DM's own speech starts talking at once, and the transcription can then miss its first word. `dm`
 puts 400 ms of silence in front of such a WAV before sending it (`"leading_silence_added_ms":
@@ -222,7 +226,7 @@ puts 400 ms of silence in front of such a WAV before sending it (`"leading_silen
 | --- | --- |
 | Script | 1 to 5000 characters, cues included; a cue at most 120 |
 | Renders | 30 a minute per account (`DM_SPEECH_RENDERS_PER_MINUTE`); cached audio is free |
-| Characters rendered | 200,000 a day per account (`DM_SPEECH_DAILY_CHARACTERS`) |
+| Characters rendered | 200,000 a day per account (`DM_SPEECH_DAILY_CHARACTERS`); a render the provider fails gives them back, and listening to a spoken message costs the listener nothing |
 | Transcription | 100 MiB per request (`DM_TRANSCRIBE_MAX_BYTES`), 20 a minute per account |
 | Render time | 2 to 6 seconds; the first audio after about 2 to 3 seconds |
 | Audio | WAV, 24 kHz mono 16-bit PCM |

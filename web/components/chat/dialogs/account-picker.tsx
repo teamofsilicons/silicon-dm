@@ -96,6 +96,8 @@ export const AccountPicker = forwardRef<AccountPickerHandle, AccountPickerProps>
   }, [offer, text, listSize, showRecent, browsing, chosen, excluded]);
 
   const expanded = !disabled && options.length > 0 && (!!text.trim() || browsing);
+  // Text that is neither someone listed nor an id (an id already chosen or left out says so when it is added).
+  const nobody = !disabled && !!text.trim() && !options.length && !typedAccount(text).ok;
   const activeIndex = expanded ? Math.min(active, options.length - 1) : -1;
   const optionId = (index: number) => `${inputId}-option-${index}`;
   const say = (message: string) => setNotice(previous => (previous === message ? `${message} ` : message));
@@ -314,6 +316,9 @@ export const AccountPicker = forwardRef<AccountPickerHandle, AccountPickerProps>
           </div>
         ))}
       </div>
+      {/* Always there (empty, it takes no room), so the words are heard when they come: a query that matches no one
+          says so, and how to name someone who is not in the list yet. */}
+      <p className={styles.listEmpty} aria-live="polite">{nobody ? `No one you talk to matches “${text.trim()}”. Type an id such as c:ada for a Carbon or si:scout for a Silicon.` : ""}</p>
       <span className="sr-only" aria-live="polite">{notice}</span>
     </div>
   );

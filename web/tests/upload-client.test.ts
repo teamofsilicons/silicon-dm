@@ -2,7 +2,7 @@
  * The browser's side of an upload (lib/upload/client.ts) when the website answers 202: the file's last byte went and
  * Briefcase is still storing it, so the page asks GET /api/uploads/saving until it has the link. XMLHttpRequest, fetch
  * and the window are fakes here; what is checked is what the page asks, in what order, and what it does when a save is
- * cancelled, abandoned or the page goes away.
+ * cancelled, abandoned or the page goes away, and when the website restarts (a deploy) while it has the file.
  */
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
@@ -19,8 +19,8 @@ interface Sent {
 /** What each POST answers, in order: [status, body]. */
 let posts: Array<[number, unknown]> = [];
 const sent: Sent[] = [];
-/** What each GET /api/uploads/saving answers, in order; a function may wait (an ask that waits on the server). */
-let asks: Array<(signal?: AbortSignal | null) => Promise<[number, unknown]>> = [];
+/** What each GET /api/uploads/saving answers, in order ([status, body, headers?]); a function may wait (an ask that waits on the server). */
+let asks: Array<(signal?: AbortSignal | null) => Promise<[number, unknown, Record<string, string>?]>> = [];
 const fetched: Array<{ url: string; method: string; keepalive: boolean }> = [];
 const listeners = new Map<string, Set<Listener>>();
 
@@ -59,7 +59,7 @@ class FakeXhr {
   }
 }
 
-const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const json = (status: number, body: unknown, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
 /** One window for the whole file, as a page has: what the module listens for once (pagehide) stays registered. */
 const fakeWindow = {
@@ -84,8 +84,8 @@ beforeEach(() => {
     if (method === "DELETE") return json(200, { type: "upload.cancel", data: { state: "cancelled" } });
     const next = asks.shift();
     if (!next) return json(404, { error: { code: "upload_unknown", message: "unknown", hint: "send again" } });
-    const [status, body] = await next(init.signal);
-    return json(status, body);
+    const [status, body, headers] = await next(init.signal);
+    return json(status, body, headers);
   };
 });
 
@@ -184,4 +184,31 @@ test("a gateway's 502 while the website saves (a restart, a blink) is asked agai
   const uploaded = await uploadFile(file(), { name: "plan.pdf" });
   assert.deepEqual(uploaded, saved.data);
   assert.equal(fetched.filter(call => call.method === "GET").length, 2);
+});
+
+test("a website that restarts while it saves the file (a deploy) lets it go: the ask hears website_restarting, and the file goes again after the wait asked for", async () => {
+  posts = [[202, stillSaving("3f2b1c4d-0000-4000-8000-000000000008")], [200, saved]];
+  asks = [async () => [503, { error: { code: "website_restarting", message: "This DM website is restarting, so the file was not saved.", hint: "Send it again in a moment, from its first byte (this website's pages do it by themselves)." } }, { "retry-after": "1" }]];
+  let restarts = 0;
+  const started = Date.now();
+  const uploaded = await uploadFile(file(), { name: "plan.pdf", onRestart: () => (restarts += 1) });
+  assert.deepEqual(uploaded, saved.data);
+  assert.equal(sent.length, 2, "the file went twice");
+  assert.equal(restarts, 1, "the tray is told it starts again");
+  assert.ok(Date.now() - started >= 950, `waited ${Date.now() - started} ms (Retry-After: 1)`);
+});
+
+test("a gateway answering for the website (it is down for a moment, or a connection was cut on the way in): the file goes again by itself, not as a failure", async () => {
+  posts = [[502, null], [200, saved]];
+  const started = Date.now();
+  const uploaded = await uploadFile(file(), { name: "plan.pdf" });
+  assert.deepEqual(uploaded, saved.data);
+  assert.equal(sent.length, 2);
+  assert.ok(Date.now() - started >= 1_900, `waited ${Date.now() - started} ms before sending again`);
+});
+
+test("the website's own refusal in its words is never sent again by itself", async () => {
+  posts = [[503, { error: { code: "briefcase_not_allowed", message: "Silicon Briefcase does not accept files from DM yet.", hint: "Send a link instead." } }]];
+  await assert.rejects(uploadFile(file(), { name: "plan.pdf" }), (error: unknown) => (error as { code?: string }).code === "briefcase_not_allowed");
+  assert.equal(sent.length, 1);
 });

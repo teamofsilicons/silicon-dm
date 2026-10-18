@@ -115,7 +115,8 @@ async fn spoken_messages_are_checked_here_then_sent_through_the_relay() {
             "messages", "send", "c:ada", "--text", "hi", "--voice", "mark",
         ])
         .await;
-    assert_eq!(voice_alone.code, Some(1));
+    assert_eq!(voice_alone.code, Some(2), "an argument mistake");
+    assert_eq!(voice_alone.error()["error"]["code"], "invalid_arguments");
     assert!(
         voice_alone.stderr.contains("--speak"),
         "{}",
@@ -565,4 +566,199 @@ async fn receipts_up_to_a_message_mark_everything_in_one_request() {
         .run(&["receipts", "read", "c:ada", "00a", "--up-to", "01f"])
         .await;
     assert_eq!(both.code, Some(2), "{}", both.stderr);
+}
+
+/// What --data says reaches the DM service as the 0.17 message: a GIF as a GIF, a voice note
+/// as a voice note, attachments with their name, type and size, and metadata as given.
+/// Earlier, dm turned the GIF and the voice note into plain links, dropped the details and
+/// refused metadata. Such a message goes through an operation older relays cannot read, so
+/// none of them can strip it on the way.
+#[tokio::test]
+async fn data_with_gifs_voice_notes_details_and_metadata_arrives_whole() {
+    let stub = Stub::start().await;
+    let home = signed_in(&stub, "slt_ok").await;
+    let directory = tempfile::tempdir().expect("tempdir");
+    let cases = [
+        json!({"message":"gif","gif":{"provider_id":"3o7abKhOpu0NwenH3O",
+            "url":"https://media.giphy.com/media/3o7abKhOpu0NwenH3O/giphy.gif","title":"x"}}),
+        json!({"message":"","voice":{"permanent_url":"https://files.example/n.webm",
+            "content_type":"audio/webm","duration_milliseconds":4200},"voice_transcript":"hi"}),
+        json!({"message":"the plan","attachments":[{"permanent_url":"https://files.example/plan.pdf",
+            "name":"plan.pdf","content_type":"application/pdf","size":12345},
+            "https://files.example/plain-link"]}),
+        json!({"message":"m","metadata":{"thread":"release","a":1}}),
+    ];
+    for (index, case) in cases.iter().enumerate() {
+        let file = directory.path().join(format!("message-{index}.json"));
+        std::fs::write(&file, case.to_string()).expect("write");
+        let sent = home
+            .run(&[
+                "--json",
+                "messages",
+                "send",
+                "c:ada",
+                "--data",
+                file.to_str().expect("utf-8"),
+                "--wait",
+            ])
+            .await;
+        assert_eq!(sent.code, Some(0), "{case}: {}", sent.stderr);
+        assert_eq!(
+            sent.json()["response"]["request"]["data"]["request"]["operation"],
+            "send_rich_message",
+            "{case}"
+        );
+        let body = stub.with(|s| s.sent.last().cloned()).expect("a send");
+        let data = &body["data"];
+        for field in ["gif", "voice", "metadata"] {
+            if case.get(field).is_some() {
+                assert_eq!(data[field], case[field], "{field} arrives as given");
+            } else {
+                assert!(data.get(field).is_none(), "{field} is not invented: {data}");
+            }
+        }
+        if case.get("gif").is_some() || case.get("voice").is_some() {
+            assert_eq!(
+                data["attachments"],
+                json!([]),
+                "a GIF or voice note is not also a plain link"
+            );
+        }
+    }
+    let details = stub
+        .with(|s| {
+            s.sent
+                .iter()
+                .find(|b| b["data"]["message"] == "the plan")
+                .cloned()
+        })
+        .expect("the attachment message");
+    assert_eq!(
+        details["data"]["attachments"],
+        json!([{"permanent_url":"https://files.example/plan.pdf","name":"plan.pdf",
+            "content_type":"application/pdf","size":12345}, "https://files.example/plain-link"])
+    );
+    // --metadata takes one JSON object.
+    let flag = home
+        .run(&[
+            "--json",
+            "messages",
+            "send",
+            "c:ada",
+            "--text",
+            "x",
+            "--metadata",
+            "{\"k\":\"v\"}",
+            "--wait",
+        ])
+        .await;
+    assert_eq!(flag.code, Some(0), "{}", flag.stderr);
+    let body = stub.with(|s| s.sent.last().cloned()).expect("a send");
+    assert_eq!(body["data"]["metadata"], json!({"k":"v"}));
+    let not_an_object = home
+        .run(&[
+            "messages",
+            "send",
+            "c:ada",
+            "--text",
+            "x",
+            "--metadata",
+            "[1]",
+        ])
+        .await;
+    assert_eq!(not_an_object.code, Some(2));
+    assert_eq!(not_an_object.error()["error"]["code"], "invalid_arguments");
+    // A plain message keeps the shape every service takes.
+    let plain = home
+        .run(&[
+            "--json", "messages", "send", "c:ada", "--text", "plain", "--wait",
+        ])
+        .await;
+    assert_eq!(plain.code, Some(0), "{}", plain.stderr);
+    assert_eq!(
+        plain.json()["response"]["request"]["data"]["request"]["operation"],
+        "send_message"
+    );
+    let body = stub.with(|s| s.sent.last().cloned()).expect("a send");
+    assert!(body["data"].get("metadata").is_none() && body["data"].get("gif").is_none());
+}
+
+/// Mistakes in what dm is given are coded, say what to do, and are argument errors (exit 2);
+/// nothing is queued.
+#[tokio::test]
+async fn input_mistakes_are_coded_with_a_hint_and_exit_2() {
+    let stub = Stub::start().await;
+    let home = signed_in(&stub, "slt_ok").await;
+    let before = stub.with(|s| s.sent.len());
+    let directory = tempfile::tempdir().expect("tempdir");
+    let broken = directory.path().join("broken.json");
+    std::fs::write(&broken, "{\"message\":").expect("write");
+    let bundle = directory.path().join("bundle.json");
+    std::fs::write(&bundle, "{}").expect("write");
+    let missing = directory.path().join("nope.json");
+    for (args, code, needle) in [
+        (
+            vec![
+                "messages",
+                "send",
+                "c:ada",
+                "--data",
+                broken.to_str().expect("utf-8"),
+            ],
+            "invalid_input",
+            "message.create",
+        ),
+        (
+            vec![
+                "messages",
+                "send",
+                "c:ada",
+                "--data",
+                missing.to_str().expect("utf-8"),
+            ],
+            "invalid_input",
+            "--data",
+        ),
+        (
+            vec![
+                "bundles",
+                "create",
+                "c:ada",
+                "--data",
+                bundle.to_str().expect("utf-8"),
+            ],
+            "invalid_input",
+            "message_ids",
+        ),
+        (
+            vec!["messages", "send", "c:ada"],
+            "invalid_arguments",
+            "--text",
+        ),
+        (
+            vec![
+                "--idempotency-key",
+                "short",
+                "messages",
+                "send",
+                "c:ada",
+                "--text",
+                "x",
+            ],
+            "invalid_arguments",
+            "--help",
+        ),
+    ] {
+        let run = home.run(&args).await;
+        assert_eq!(run.code, Some(2), "{args:?}: {}", run.stderr);
+        let error = run.error();
+        assert_eq!(error["error"]["code"], code, "{args:?}: {error}");
+        assert!(
+            error["error"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains(needle)),
+            "{args:?}: {error}"
+        );
+    }
+    assert_eq!(stub.with(|s| s.sent.len()), before, "nothing was sent");
 }

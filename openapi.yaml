@@ -279,7 +279,10 @@ paths:
         returned cursor (it is bound to the account) and continue while `has_more` is true.
         With `wait`, an empty page is held open up to that many seconds and returns as soon as
         something new arrives. A 409 `sync_reset_required` means: get a reset cursor, refresh
-        conversations and messages, then continue from that cursor. With
+        conversations and messages, then continue from that cursor. The feed keeps 30 days of
+        events (a cursor lasts a day); a page without a cursor starts at the oldest kept. Your
+        own messages are on your feed too, and `message_status` events are about messages you
+        sent. With
         `include=conversations` the page also carries conversation events (`type:
         conversation`): a conversation that appeared for, changed for or left the account.
         Without it they are skipped like events the account cannot see, and the cursor moves
@@ -438,9 +441,10 @@ paths:
         `receipts.read` implies delivered. Records the same receipts, aggregate statuses,
         `message_status` events and Ting handoffs as one receipt per message, in one
         transaction, and leaves messages that already have that state alone, so repeating the
-        call changes nothing (`updated: 0`). Deleted messages are skipped. At most 5,000
-        messages are marked per call; `unread_count` says what is left. A custodian's view is
-        read only (403 `read_only_view`). Generic clients may send type `receipts` with
+        call changes nothing (`updated: 0`). Deleted messages are skipped, and only messages
+        above what the account already marked are looked at. At most 5,000 messages are marked
+        per call, the newest first; while `unread_count` says more are left, repeat the call. A
+        custodian's view is read only (403 `read_only_view`). Generic clients may send type `receipts` with
         `data.status`. Proofs need scope `dm.receipts.write`.
       security: [{bearerAuth: []}, {proofAuth: []}]
       requestBody:
@@ -1084,6 +1088,7 @@ paths:
       responses:
         '200': {$ref: '#/components/responses/GifList'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Error'}
   /api/v1/gifs/search:
     get:
       operationId: searchGifs
@@ -1098,6 +1103,7 @@ paths:
         '200': {$ref: '#/components/responses/GifList'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /api/v1/gifs/recent:
     get:
       operationId: listRecentGifs
@@ -1112,10 +1118,13 @@ paths:
       tags: [Speech]
       summary: A script as audio (previews, voice samples, `dm speech render`).
       description: >-
-        Renders `script` in `voice` (default: your own voice) with the same rules, cache and
-        limits as spoken messages. 422 `invalid_speech_script`, `voice_not_found` or
-        `speech_rejected`; 429 `speech_rate_limited` / `speech_budget_exceeded`; 503
-        `speech_not_configured` / `speech_unavailable`. Needs the account's own DM sign-in.
+        Renders `script` in `voice` (default: your own voice) with the same rules and limits as
+        spoken messages. The audio is cached for you alone: `x-dm-cache: hit` only ever finds what
+        you rendered before, never another account's message. 422 `invalid_speech_script`,
+        `voice_not_found` or `speech_rejected`; 429 `speech_rate_limited` /
+        `speech_budget_exceeded`; 503 `speech_not_configured` / `speech_unavailable` (the
+        provider, or this DM process rendering as much as it allows; `Retry-After`). Needs the
+        account's own DM sign-in.
       requestBody:
         required: true
         content:
@@ -1667,15 +1676,21 @@ components:
             and may use any name.
         description: {type: string, maxLength: 4000, default: ''}
     GroupCreate:
-      allOf:
-        - {$ref: '#/components/schemas/GroupSettings'}
-        - type: object
-          properties:
-            member_ids:
-              type: array
-              maxItems: 100
-              items: {$ref: '#/components/schemas/AccountSelector'}
-              default: []
+      # The settings' properties written out, not an allOf of GroupSettings: its
+      # additionalProperties false would refuse member_ids (a validator judges each part of an
+      # allOf on its own), and PATCH keeps GroupSettings as strict as the service is.
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {$ref: '#/components/schemas/GroupSettings/properties/name'}
+        description: {type: string, maxLength: 4000, default: ''}
+        member_ids:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/AccountSelector'}
+          default: []
+          description: Accounts to invite; a custodian's own Silicons join at once.
     GroupDetails:
       type: object
       required: [name, description, version, owners, members, pending_invitations]
@@ -1753,10 +1768,13 @@ components:
     UnreadCount:
       type: integer
       minimum: 0
+      maximum: 1000
       description: >-
         Messages from others the listed account (you, or the Silicon named with `?for=`) has
         not read: not deleted, not a bundle member (its display message counts), and no read
-        receipt by the account on any device.
+        receipt by the account on any device. Counted up to 1,000: 1,000 means a thousand or
+        more (show "999+"). A group the account joined counts only what was said after it
+        joined.
     LastReadMessageId:
       anyOf:
         - {$ref: '#/components/schemas/MessageCode'}

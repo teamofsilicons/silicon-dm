@@ -21,8 +21,10 @@
  * Offline, an upload waits for the connection instead of failing (what the website promises for everything you send:
  * it waits and goes out when you are back). A connection lost on the way stops the transfer at once (the browser's
  * `offline`), waits, and sends the file again from its first byte (Briefcase takes a file in one piece; its digest is
- * remembered, so it is not prepared twice), with `onRestart()` and `onProgress(0, size)` so the tray can say so; a
- * failure while the browser still believes it is online is reported as it is (the Carbon can retry it). Cancelling
+ * remembered, so it is not prepared twice), with `onRestart()` and `onProgress(0, size)` so the tray can say so. A
+ * website that restarts while it has the file (a deploy: it answers `website_restarting`, a save it had is unknown to
+ * the next one, or a gateway answers for it meanwhile) gets the file again the same way, after the wait it asks for.
+ * Any other failure while the browser still believes it is online is reported as it is (the Carbon can retry it). Cancelling
  * (`signal`) stops the preparation or the transfer at once; the website's server then cancels Briefcase's reservation.
  */
 import { ApiError } from "@/lib/errors";
@@ -51,6 +53,14 @@ export interface UploadsConfig {
 /** The largest file Silicon Briefcase takes (5 TiB). */
 export const BRIEFCASE_MAX_BYTES = 5 * 1024 ** 4;
 
+/**
+ * What Silicon Briefcase takes into one Briefcase in a UTC day unless its operators gave that one more (100 GiB; the
+ * website's lib/server/briefcase.ts BRIEFCASE_DAILY_UPLOAD_BYTES). A larger file is refused once it is prepared, on any
+ * day, so the composer says so when one is added; this website cannot see a Briefcase's own allowance, so it never
+ * refuses one for it.
+ */
+export const BRIEFCASE_DAILY_BYTES = 100 * 1024 ** 3;
+
 export interface UploadOptions {
   /** The file name to keep (a voice note gets one such as `voice-note-2026-10-17-1532.webm`). */
   name: string;
@@ -69,8 +79,10 @@ export interface UploadOptions {
 
 const UPLOADS = "/api/uploads";
 const SAVING = `${UPLOADS}/saving`;
-/** How many times a transfer cut by a lost connection starts again once the connection is back. */
+/** How many times a transfer cut by a lost connection (or a website restarting) starts again. */
 const RESENDS_AFTER_OFFLINE = 5;
+/** The longest wait before sending a file again to a website that is restarting. */
+const RESEND_WAIT_MAX_MS = 15_000;
 /** How long one ask about a file being saved waits on the server (it answers sooner when the file is saved). */
 const SAVING_WAIT_SECONDS = 25;
 /** Asks about a save that may fail on the way (the connection blinked) before the upload fails. */
@@ -135,6 +147,11 @@ type ErrorBody = { error?: { code?: string; message?: string; hint?: string; det
 /** A refusal from the website, in its own words; an answer without them (a proxy in between, a crash) in plain ones. */
 function refusal(status: number, body: ErrorBody, retryAfterHeader: string | null, method: string, path: string): ApiError {
   const retryAfter = Number(retryAfterHeader);
+  if (!body?.error && status >= 502 && status <= 504) {
+    // A gateway in front answered for the website: it is restarting (a deploy), or a connection was cut on the way in.
+    // Nothing reached Briefcase from this request that a new one would not replace, so the file goes again by itself.
+    return new ApiError({ status, code: "network_error", message: `This website could not be reached (something in between answered HTTP ${status}).`, hint: "Try again in a moment (the file starts again from its first byte); if it keeps failing, check the connection.", retryAfter: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null, method, path });
+  }
   return new ApiError({
     status,
     code: body?.error?.code ?? "upload_failed",
@@ -296,8 +313,24 @@ async function untilSaved(id: string, signal?: AbortSignal): Promise<UploadedFil
   }
 }
 
-/** The bytes were lost on the way to Briefcase, so the file goes again from its first byte (the tray says so). */
-const sendAgain = (error: unknown) => (ApiError.is(error, "network_error") && !browserOnline()) || ApiError.is(error, "upload_abandoned", "upload_unknown");
+/** A gateway answered for the website instead of the website itself (refusal above). */
+const gatewayAnswered = (error: unknown) => ApiError.is(error, "network_error") && error.status >= 502 && error.status <= 504;
+
+/**
+ * The bytes were lost on the way to Briefcase, or the website restarted (a deploy) and let the file go, so it goes again
+ * from its first byte (the tray says so).
+ */
+const sendAgain = (error: unknown) => (ApiError.is(error, "network_error") && !browserOnline()) || gatewayAnswered(error) || ApiError.is(error, "upload_abandoned", "upload_unknown", "website_restarting");
+
+/**
+ * How long to wait before sending again: a website that is restarting is given the time it asked for (Retry-After),
+ * else a little longer each time; anything else goes at once (offline, it waits for the connection first).
+ */
+function resendWait(error: unknown, attempt: number): number {
+  if (!ApiError.is(error, "website_restarting") && !gatewayAnswered(error)) return 0;
+  const asked = ApiError.from(error).retryAfter;
+  return Math.min(RESEND_WAIT_MAX_MS, asked ? asked * 1000 : 2_000 * 2 ** attempt);
+}
 
 export async function uploadFile(file: Blob, options: UploadOptions): Promise<UploadedFile> {
   const contentType = options.contentType || file.type || "application/octet-stream";
@@ -321,9 +354,13 @@ export async function uploadFile(file: Blob, options: UploadOptions): Promise<Up
       if ("saving" in sent) options.onSaving?.();
       uploaded = "saving" in sent ? await untilSaved(sent.saving, options.signal) : sent;
     } catch (error) {
-      // The connection went away on the way (or the website lost the save it was making): wait for the connection,
-      // then send the file again.
-      if (sendAgain(error) && attempt < RESENDS_AFTER_OFFLINE) continue;
+      // The connection went away on the way (or the website lost the save it was making, or restarted): wait for the
+      // connection (and a restarting website), then send the file again.
+      if (sendAgain(error) && attempt < RESENDS_AFTER_OFFLINE) {
+        const wait = resendWait(error, attempt);
+        if (wait) await pause(wait, options.signal);
+        continue;
+      }
       throw error;
     }
   }

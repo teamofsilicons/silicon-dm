@@ -15,7 +15,8 @@ import { exchangeCode, revokeSession } from "@/lib/server/tokens";
 
 export const dynamic = "force-dynamic";
 
-const ERROR_CODE = /^[a-z_]{1,48}$/;
+/** What may be passed on to /sign-in as `error`: a code's shape, never a property every object has (`__proto__`). */
+const ERROR_CODE = /^[a-z][a-z_]{0,47}$/;
 
 function failed(publicUrl: string, code: string, pending: PendingSignIn[], state: string | null, returnTo?: string) {
   const target = new URL("/sign-in", publicUrl);

@@ -105,7 +105,10 @@ impl PostgresStore {
         reason = "draft CAS, version-token mutation, children, and returned snapshot must remain one auditable transaction"
     )]
     pub async fn put_draft(&self, command: PutDraftCommand) -> AppResult<PutDraftOutcome> {
-        command.input.validate().map_err(AppError::validation)?;
+        command
+            .input
+            .validate()
+            .map_err(crate::domain::invalid_content)?;
         let content_hash = command.input.content_digest();
         let partition = self.partition_of(command.conversation_id).await?;
         let mut transaction = self.pool().begin().await?;
@@ -184,9 +187,12 @@ impl PostgresStore {
             }
             None => {
                 transaction.rollback().await?;
-                return Err(AppError::conflict(
+                return Err(AppError::refused(
+                    http::StatusCode::CONFLICT,
+                    "conflict",
                     "draft was deleted after the supplied version was observed",
-                ));
+                )
+                .with_hint("The draft is gone (sent or deleted on another device): save again without If-Match to start a new one."));
             }
             Some(current) if command.expected_version == Some(current) => {
                 sqlx::query(

@@ -24,6 +24,7 @@ import { useSignOut } from "@/lib/client/session";
 import { ApiError } from "@/lib/errors";
 import { notify, notifyError } from "@/lib/notify";
 import { usePlatform } from "@/lib/shortcuts/react";
+import { useMediaQuery } from "../shell/use-layout-mode";
 import { AccountAvatar } from "../common/avatars";
 import { listWords } from "../details/silicon-facts";
 import { useShowWhenSet } from "../dialogs/show-when-set";
@@ -39,17 +40,23 @@ export function SendingSection() {
   const settings = useChatSettings();
   const platform = usePlatform();
   const mod = platform === "mac" ? "⌘" : "Ctrl";
+  // On a touch screen Enter always starts a new line and the send button sends (composer.tsx): the choice here is
+  // for a keyboard attached to it, and ⌘/Ctrl+Enter is the one that sends from there.
+  const touch = useMediaQuery("(pointer: coarse)");
   return (
-    <RadioCards
-      aria-label="How a message is sent"
-      layout="list"
-      value={settings.sendWith}
-      onValueChange={value => updateChatSettings({ sendWith: value === "mod-enter" ? "mod-enter" : "enter" })}
-      options={[
-        { value: "enter", label: "Enter sends", description: "Shift+Enter starts a new line. Quick for short messages." },
-        { value: "mod-enter", label: `${mod}+Enter sends`, description: "Enter starts a new line. Calm for long messages." },
-      ]}
-    />
+    <div className={styles.rows}>
+      {touch ? <p className={styles.sectionNote}>On this touch screen Enter starts a new line and the send button sends. With a keyboard attached, {mod}+Enter can send too.</p> : null}
+      <RadioCards
+        aria-label="How a message is sent"
+        layout="list"
+        value={settings.sendWith}
+        onValueChange={value => updateChatSettings({ sendWith: value === "mod-enter" ? "mod-enter" : "enter" })}
+        options={[
+          { value: "enter", label: "Enter sends", description: touch ? "With a mouse and keyboard; Shift+Enter starts a new line there." : "Shift+Enter starts a new line. Quick for short messages." },
+          { value: "mod-enter", label: `${mod}+Enter sends`, description: touch ? `Enter starts a new line; ${mod}+Enter sends from an attached keyboard.` : "Enter starts a new line. Calm for long messages." },
+        ]}
+      />
+    </div>
   );
 }
 

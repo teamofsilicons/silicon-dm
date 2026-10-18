@@ -1,5 +1,7 @@
 //! Bounded authoritative actor event references, independent of Ting delivery ACKs.
 
+use std::collections::HashSet;
+
 use serde::Serialize;
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -43,10 +45,9 @@ struct SyncRow {
     id: Uuid,
     sequence: i64,
     kind: String,
-    conversation_id: Option<String>,
+    conversation_id: Option<Uuid>,
     message_sequence: Option<i64>,
     change: Option<String>,
-    authorized: bool,
 }
 
 impl PostgresStore {
@@ -88,18 +89,10 @@ impl PostgresStore {
         }
         let mut rows = sqlx::query_as::<_, SyncRow>(
             r#"
-            SELECT id, sequence, kind, conversation_id, message_sequence, change, authorized
+            SELECT id, sequence, kind, conversation_id, message_sequence, change
             FROM (
-                (SELECT d.id, d.sequence, d.delivery_kind::text AS kind,
-                        d.conversation_id::text AS conversation_id,
-                        message.sequence AS message_sequence, NULL::text AS change,
-                        (d.delivery_kind IN ('message', 'message_status')
-                         AND EXISTS (
-                             SELECT 1 FROM effective_conversation_participants participant
-                             WHERE participant.conversation_id = d.conversation_id
-                               AND participant.actor_kind = d.target_kind
-                               AND participant.actor_id = d.target_id
-                         )) AS authorized
+                (SELECT d.id, d.sequence, d.delivery_kind::text AS kind, d.conversation_id,
+                        message.sequence AS message_sequence, NULL::text AS change
                  FROM actor_deliveries d
                  LEFT JOIN messages message ON message.id = d.message_id
                  WHERE d.target_kind = $1::text::actor_kind
@@ -107,8 +100,8 @@ impl PostgresStore {
                  ORDER BY d.sequence
                  LIMIT $5)
                 UNION ALL
-                (SELECT e.id, e.sequence, 'conversation', e.conversation_id::text,
-                        NULL::bigint, e.change, $6
+                (SELECT e.id, e.sequence, 'conversation', e.conversation_id,
+                        NULL::bigint, e.change
                  FROM conversation_events e
                  WHERE e.target_kind = $1::text::actor_kind
                    AND e.target_id = $2 AND e.sequence > $3 AND e.sequence <= $4
@@ -124,11 +117,11 @@ impl PostgresStore {
         .bind(after)
         .bind(upper)
         .bind(i64::from(limit) + 1)
-        .bind(conversations)
         .fetch_all(self.pool())
         .await?;
         let has_more = rows.len() > usize::from(limit);
         rows.truncate(usize::from(limit));
+        let readable = self.readable_conversations(actor, &rows).await?;
         let mut position = after;
         let mut events = Vec::new();
         for row in rows {
@@ -136,10 +129,20 @@ impl PostgresStore {
                 return Err(sync_reset_required());
             }
             position = row.sequence;
-            if row.authorized {
-                let conversation_id = row.conversation_id.ok_or_else(|| {
-                    AppError::internal(anyhow::anyhow!("sync event lost its conversation"))
-                })?;
+            let authorized = match row.kind.as_str() {
+                "conversation" => conversations,
+                "message" | "message_status" => row
+                    .conversation_id
+                    .is_some_and(|conversation| readable.contains(&conversation)),
+                _ => false,
+            };
+            if authorized {
+                let conversation_id = row
+                    .conversation_id
+                    .ok_or_else(|| {
+                        AppError::internal(anyhow::anyhow!("sync event lost its conversation"))
+                    })?
+                    .to_string();
                 let message_id = if row.kind == "conversation" {
                     None
                 } else {
@@ -169,6 +172,41 @@ impl PostgresStore {
             position,
             has_more,
         })
+    }
+}
+
+impl PostgresStore {
+    /// The conversations of a page's message events that the account is still in (a message
+    /// event is the account's to see only then). One keyed query for the page's few
+    /// conversations: checked row by row inside the scan, the planner hashed every participant
+    /// of the whole service for each page.
+    async fn readable_conversations(
+        &self,
+        actor: &ActorRef,
+        rows: &[SyncRow],
+    ) -> AppResult<HashSet<Uuid>> {
+        let conversations: Vec<Uuid> = rows
+            .iter()
+            .filter(|row| matches!(row.kind.as_str(), "message" | "message_status"))
+            .filter_map(|row| row.conversation_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if conversations.is_empty() {
+            return Ok(HashSet::new());
+        }
+        Ok(sqlx::query_scalar::<_, Uuid>(
+            "SELECT conversation_id FROM effective_conversation_participants
+             WHERE conversation_id = ANY($1) AND actor_kind = $2::text::actor_kind
+               AND actor_id = $3",
+        )
+        .bind(&conversations)
+        .bind(actor.actor_type.as_str())
+        .bind(actor.id.as_str())
+        .fetch_all(self.pool())
+        .await?
+        .into_iter()
+        .collect())
     }
 }
 

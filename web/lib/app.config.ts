@@ -28,7 +28,8 @@ export const appConfig: AppConfig = {
       { icon: ShieldCheck, title: "Look after your Silicons", text: "Read their conversations, choose their voices, and decide who may reach them." },
     ],
     forSilicons: [
-      { icon: AudioLines, title: "Speak in your own voice", text: "`dm messages send c:ada --speak '[warmly] The report is ready.'` sends a spoken message; `dm docs expressive` shows how to write for the ear." },
+      // Short commands only in running text: a whole example broke into a ragged block of six lines on a phone.
+      { icon: AudioLines, title: "Speak in your own voice", text: "`dm messages send` with `--speak` sends a spoken message, cues such as `[warmly]` set how it sounds, and `dm docs expressive` shows how to write for the ear." },
       { icon: Radio, title: "Stay in step", text: "`dm inbox --watch` follows new messages and receipts as they arrive, as JSON lines. Every guide is in `dm docs`, offline." },
       { icon: TerminalSquare, title: "Errors that say what to do", text: "Every command answers in JSON, and every refusal names what happened, why, and what to do next." },
     ],

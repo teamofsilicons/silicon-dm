@@ -9,8 +9,12 @@
  *   404 upload_unknown                                                        this server does not know it
  *
  * DELETE /api/uploads/saving?id=<id>: cancels it (the transfer to Briefcase stops and its reservation is cancelled):
- * 200 {"type":"upload.cancel","data":{"id","state":"cancelled"|"saved"|"cancelling"}} ("saved" when it had already
- * finished: the file stays in the Carbon's Briefcase, in no message).
+ * 200 {"type":"upload.cancel","data":{"id","state":…}} with the state as it is:
+ *   "cancelled"    stopped, and Briefcase let go of the reservation
+ *   "stopped"      stopped here, but Briefcase did not let go (it refused the cancel, or did not answer): the unfinished
+ *                  upload stays reserved there until it expires, within a day (the server's log says why)
+ *   "cancelling"   still stopping after a few seconds
+ *   "saved"        it had already finished: the file stays in the Carbon's Briefcase, in no message
  *
  * Only the Carbon whose upload it is may ask (another account's id is unknown, like one that never was), and a DELETE
  * only from this site's own pages. A save nobody asks about for a while is cancelled (lib/server/briefcase.ts
@@ -63,6 +67,7 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
   if (who instanceof Response) return who;
   const outcome = await cancelSaving(who.id, who.owner);
   if (!outcome) return failed(unknownSaving());
-  const state = outcome.kind === "saved" ? "saved" : outcome.kind === "failed" ? "cancelled" : "cancelling";
+  // "cancelled" only when Briefcase let go of the reservation: a refused cancel is "stopped", never reported as done.
+  const state = outcome.kind === "saved" ? "saved" : outcome.kind === "failed" ? (outcome.failure.reservationLeft ? "stopped" : "cancelled") : "cancelling";
   return json(200, { type: "upload.cancel", data: { id: who.id, state } });
 }

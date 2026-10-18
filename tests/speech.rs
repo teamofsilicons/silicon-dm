@@ -849,3 +849,256 @@ async fn without_a_speech_provider_speech_is_refused_clearly() -> Result<(), Box
     assert_eq!(render_queue(&app).await?, 0);
     app.close().await
 }
+
+/// The cache never answers one account with another's audio: a message's rendering is kept
+/// for its conversation, a preview for the account that asked. Before, any signed-in account
+/// could ask `POST /api/v1/speech` for a guessed script and learn from a fast `hit` that a
+/// message in a conversation it cannot read said exactly that.
+#[tokio::test]
+async fn the_cache_tells_nobody_what_another_conversation_said() -> Result<(), BoxError> {
+    let deepgram = FakeDeepgram::start().await;
+    let app = TestApp::start_with_speech(&deepgram, |_| {}).await?;
+    let p = people(&app).await;
+    let ada = app.accounts.token(&p.ada);
+    let bob = app.accounts.token(&p.bob);
+    let scout = app.accounts.token(&p.scout);
+    let secret = "[sighs] Your one-time code is 4821, do not share it.";
+    let sent = app
+        .post(
+            "/api/v1/messages",
+            &scout,
+            json!({"recipient_id": "c:ada", "speech": {"script": secret, "voice": "hope"}}),
+        )
+        .await?;
+    expect_status(&sent, StatusCode::ACCEPTED)?;
+    assert_eq!(render_queue(&app).await?, 1);
+    let guess = json!({"type": "speech.render", "data": {"script": secret, "voice": "hope"}});
+    let (status, headers, _) = app.post_envelope("/api/v1/speech", &bob, &guess).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers["x-dm-cache"], "miss",
+        "Bob is not in that conversation, and finds nothing of it"
+    );
+    let (_, headers, _) = app.post_envelope("/api/v1/speech", &bob, &guess).await?;
+    assert_eq!(headers["x-dm-cache"], "hit", "his own rendering is his");
+    let (_, headers, _) = app.post_envelope("/api/v1/speech", &ada, &guess).await?;
+    assert_eq!(
+        headers["x-dm-cache"], "miss",
+        "a preview is the caller's own, even for someone in the conversation"
+    );
+    // Listening to the message is the conversation's audio, rendered once.
+    let (status, headers, _) = app
+        .get_raw(
+            &format!(
+                "/api/v1/conversations/c:ada::si:scout/messages/{}/speech",
+                code(&sent.1)
+            ),
+            &ada,
+            &[],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-dm-cache"], "hit");
+    // A text message someone listened to is no oracle either.
+    let text = app
+        .post(
+            "/api/v1/messages",
+            &scout,
+            json!({"recipient_id": "c:ada", "message": "The offer is 120000, keep it quiet."}),
+        )
+        .await?;
+    let (status, _, _) = app
+        .get_raw(
+            &format!(
+                "/api/v1/conversations/c:ada::si:scout/messages/{}/speech",
+                code(&text.1)
+            ),
+            &ada,
+            &[],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let voice = default_voice("Sc0");
+    let (_, headers, _) = app
+        .post_envelope(
+            "/api/v1/speech",
+            &bob,
+            &json!({"type": "speech.render", "data": {"script": "The offer is 120000, keep it quiet.", "voice": voice}}),
+        )
+        .await?;
+    assert_eq!(headers["x-dm-cache"], "miss");
+    app.close().await
+}
+
+/// A spoken message being rendered elsewhere (by the worker of another process) is waited
+/// for, not rendered a second time, and the listener is never charged for it: the sender
+/// paid when it sent the message.
+#[tokio::test]
+async fn a_render_under_way_in_another_process_is_waited_for() -> Result<(), BoxError> {
+    let deepgram = FakeDeepgram::start().await;
+    let app = TestApp::start_with_speech(&deepgram, |_| {}).await?;
+    let p = people(&app).await;
+    let ada = app.accounts.token(&p.ada);
+    let scout = app.accounts.token(&p.scout);
+    let sent = app
+        .post(
+            "/api/v1/messages",
+            &scout,
+            json!({"recipient_id": "c:ada", "speech": {"script": "Rendered elsewhere, once."}}),
+        )
+        .await?;
+    expect_status(&sent, StatusCode::ACCEPTED)?;
+    // Another process's worker holds the rendering's lease.
+    sqlx::query(
+        "UPDATE speech_renders SET lease_id = gen_random_uuid(),
+            lease_expires_at = clock_timestamp() + interval '1 minute'",
+    )
+    .execute(app.state.store.pool())
+    .await?;
+    let path = format!(
+        "/api/v1/conversations/c:ada::si:scout/messages/{}/speech",
+        code(&sent.1)
+    );
+    let listener = {
+        let request = axum::http::Request::builder()
+            .uri(&path)
+            .header("authorization", format!("Bearer {ada}"))
+            .body(axum::body::Body::empty())?;
+        let router = app.router.clone();
+        tokio::spawn(async move { tower::ServiceExt::oneshot(router, request).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    assert!(
+        deepgram.sessions().is_empty(),
+        "the listener did not render it"
+    );
+    // That worker finishes: its lease ends and the rendering lands.
+    sqlx::query("UPDATE speech_renders SET lease_id = NULL, lease_expires_at = NULL")
+        .execute(app.state.store.pool())
+        .await?;
+    assert_eq!(render_queue(&app).await?, 1);
+    let response = listener.await??;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-dm-cache"], "hit");
+    assert_eq!(deepgram.sessions().len(), 1, "rendered once");
+    let charged: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(amount), 0)::bigint FROM speech_usage WHERE account_uuid = $1",
+    )
+    .bind(&p.ada.uuid)
+    .fetch_one(app.state.store.pool())
+    .await?;
+    assert_eq!(charged, 0, "the listener pays nothing");
+    app.close().await
+}
+
+/// A render the provider fails gives the day's characters back: the budget counts what was
+/// rendered. (The attempt still counts towards the per-minute limit, which paces retries.)
+#[tokio::test]
+async fn renders_the_provider_fails_cost_no_characters() -> Result<(), BoxError> {
+    let deepgram = FakeDeepgram::start().await;
+    let app = TestApp::start_with_speech(&deepgram, |_| {}).await?;
+    let p = people(&app).await;
+    let ada = app.accounts.token(&p.ada);
+    within_one_minute().await;
+    deepgram.set_agent_mode(AgentMode::ProviderError);
+    let script = "This one will not render.";
+    let (status, _, body) = app
+        .post_envelope(
+            "/api/v1/speech",
+            &ada,
+            &json!({"type": "speech.render", "data": {"script": script, "voice": "mark"}}),
+        )
+        .await?;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        data_of(&body)
+    );
+    let meters: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT meter, amount FROM speech_usage WHERE account_uuid = $1 ORDER BY meter",
+    )
+    .bind(&p.ada.uuid)
+    .fetch_all(app.state.store.pool())
+    .await?;
+    assert_eq!(
+        meters,
+        [("characters".to_owned(), 0), ("renders".to_owned(), 1)],
+        "{meters:?}"
+    );
+    deepgram.set_agent_mode(AgentMode::Speak);
+    let (status, _, _) = app
+        .post_envelope(
+            "/api/v1/speech",
+            &ada,
+            &json!({"type": "speech.render", "data": {"script": script, "voice": "mark"}}),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let characters: i64 = sqlx::query_scalar(
+        "SELECT amount FROM speech_usage WHERE account_uuid = $1 AND meter = 'characters'",
+    )
+    .bind(&p.ada.uuid)
+    .fetch_one(app.state.store.pool())
+    .await?;
+    assert_eq!(characters, i64::try_from(script.chars().count())?);
+    app.close().await
+}
+
+/// Audio is streamed from the cache a window at a time (a listener never holds a whole long
+/// WAV in memory), byte for byte the rendering, whole or by range.
+#[tokio::test]
+async fn long_audio_streams_whole_and_by_range() -> Result<(), BoxError> {
+    let deepgram = FakeDeepgram::start().await;
+    let app = TestApp::start_with_speech(&deepgram, |_| {}).await?;
+    let p = people(&app).await;
+    let ada = app.accounts.token(&p.ada);
+    let words: Vec<String> = (0..400).map(|index| format!("word{index}")).collect();
+    let script = format!("{}.", words.join(" "));
+    let (status, headers, whole) = app
+        .post_envelope(
+            "/api/v1/speech",
+            &ada,
+            &json!({"type": "speech.render", "data": {"script": script, "voice": "mark"}}),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        whole.len() > 600 * 1024,
+        "longer than a few windows: {}",
+        whole.len()
+    );
+    assert_eq!(headers["content-length"], whole.len().to_string().as_str());
+    assert_eq!(&whole[..4], b"RIFF");
+    let (_, again_headers, again) = app
+        .post_envelope(
+            "/api/v1/speech",
+            &ada,
+            &json!({"type": "speech.render", "data": {"script": script, "voice": "mark"}}),
+        )
+        .await?;
+    assert_eq!(again_headers["x-dm-cache"], "hit");
+    assert_eq!(again, whole, "the cached bytes are the rendered bytes");
+    // A message's audio by range, across a window boundary.
+    let scout = app.accounts.token(&p.scout);
+    let sent = app
+        .post(
+            "/api/v1/messages",
+            &scout,
+            json!({"recipient_id": "c:ada", "speech": {"script": script}}),
+        )
+        .await?;
+    assert_eq!(render_queue(&app).await?, 1);
+    let path = format!(
+        "/api/v1/conversations/c:ada::si:scout/messages/{}/speech",
+        code(&sent.1)
+    );
+    let (_, _, full) = app.get_raw(&path, &ada, &[]).await?;
+    let (status, headers, part) = app
+        .get_raw(&path, &ada, &[("range", "bytes=262100-262200")])
+        .await?;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(headers["content-length"], "101");
+    assert_eq!(&part[..], &full[262_100..=262_200]);
+    app.close().await
+}

@@ -11,11 +11,17 @@
  * the tab's focus), and none when the conversation list already says what the service has (`draft_version`, see
  * drafts.ts draftCheck): a draft that is not there answers 404, which the browser logs as an error. That answer is
  * "no draft", never a failure. Returning to the tab looks again at most every 30 seconds.
+ *
+ * Tabs of one browser share the stored drafts: each follows the others' writes (the `storage` event, and a fresh read
+ * when a composer mounts or the tab comes back), so a message sent in one tab leaves the others' fields too, and a tab
+ * that was open all along never answers a long draft typed elsewhere with one stale keystroke (drafts.ts adoptStored).
+ * A message sent while its draft's save is on its way would leave that save as the service's draft (the words came
+ * back on every device): its draft is deleted once that save has answered.
  */
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { ApiError } from "@/lib/errors";
 import { deleteDraft, getDraft, putDraft } from "./api";
-import { draftCheck, editDraft, hasContent, mergeDraft, savedDraft, type DraftHint, type LocalDraft, type ServerDraft } from "./drafts";
+import { adoptStored, draftCheck, editDraft, hasContent, mergeDraft, savedDraft, type DraftHint, type LocalDraft, type ServerDraft } from "./drafts";
 import { readJson, writeJson } from "./storage";
 import type { Draft } from "./types";
 
@@ -39,6 +45,8 @@ interface Entry {
   lookedAt: number;
   /** What the conversation list says about the service's draft (drafts.ts DraftHint). */
   hint: DraftHint;
+  /** Counts the times the draft was sent or discarded: a save's late answer for an older one leaves the new one alone. */
+  cleared: number;
   listeners: Set<() => void>;
   snapshot: { draft: LocalDraft | null; save: DraftSaveState };
 }
@@ -47,24 +55,77 @@ const entries = new Map<string, Entry>();
 /** Everything that shows drafts of any conversation (the rows' previews). */
 const anyListeners = new Set<() => void>();
 
+const KEY_PREFIX = "dm:draft:v1:";
+
 function entryFor(account: string, address: string): Entry {
   const key = keyFor(account, address);
   let entry = entries.get(key);
   if (!entry) {
     const draft = readJson<LocalDraft | null>(key, null);
-    entry = { draft, save: "idle", timer: null, saving: null, loaded: false, looking: null, lookedAt: 0, hint: "unknown", listeners: new Set(), snapshot: { draft, save: "idle" } };
+    entry = { draft, save: "idle", timer: null, saving: null, loaded: false, looking: null, lookedAt: 0, hint: "unknown", cleared: 0, listeners: new Set(), snapshot: { draft, save: "idle" } };
     entries.set(key, entry);
+    followOtherTabs();
   }
   return entry;
 }
+
+function notify(entry: Entry) {
+  for (const listener of entry.listeners) listener();
+  for (const listener of anyListeners) listener();
+}
+
+/** What a draft looks like in storage: one with words, or an emptied one the service still has (to be deleted). */
+const storedForm = (draft: LocalDraft | null) => (draft && hasContent(draft) ? draft : draft && draft.version > 0 ? draft : null);
 
 function commit(account: string, address: string, entry: Entry, draft: LocalDraft | null, save: DraftSaveState = entry.save) {
   entry.draft = draft && (hasContent(draft) || draft.version > 0 || draft.dirty) ? draft : null;
   entry.save = save;
   entry.snapshot = { draft: entry.draft, save };
-  writeJson(keyFor(account, address), entry.draft && hasContent(entry.draft) ? entry.draft : entry.draft && entry.draft.version > 0 ? entry.draft : null);
-  for (const listener of entry.listeners) listener();
-  for (const listener of anyListeners) listener();
+  writeJson(keyFor(account, address), storedForm(entry.draft));
+  notify(entry);
+}
+
+/** Takes another tab's word for a draft (drafts.ts adoptStored), in memory only: storage already says it. */
+function adopt(entry: Entry, stored: LocalDraft | null) {
+  const next = adoptStored(entry.draft, stored);
+  if (next === entry.draft) return;
+  entry.draft = next;
+  entry.snapshot = { draft: next, save: entry.save };
+  notify(entry);
+}
+
+/** Reads one conversation's stored draft again (a composer mounting, the tab coming back: a write may have been missed). */
+function readStored(account: string, address: string, entry: Entry) {
+  adopt(entry, readJson<LocalDraft | null>(keyFor(account, address), null));
+}
+
+let following = false;
+
+/** Follows the drafts other tabs of this browser write (the storage event never fires in the tab that wrote). */
+function followOtherTabs() {
+  if (following || typeof window === "undefined") return;
+  following = true;
+  window.addEventListener("storage", event => {
+    if (event.key === null) {
+      // Storage was cleared (sign-out elsewhere, site data removed): every draft here is gone too, unless unsaved.
+      for (const entry of entries.values()) adopt(entry, null);
+      return;
+    }
+    if (!event.key.startsWith(KEY_PREFIX)) return;
+    const entry = entries.get(event.key);
+    if (!entry) {
+      // Not open here: the rows' previews read storage.
+      for (const listener of anyListeners) listener();
+      return;
+    }
+    let stored: LocalDraft | null = null;
+    try {
+      stored = event.newValue ? (JSON.parse(event.newValue) as LocalDraft) : null;
+    } catch {
+      stored = null;
+    }
+    adopt(entry, stored);
+  });
 }
 
 const fromServer = (draft: Draft): ServerDraft => ({ text: draft.message_content ?? "", replyTo: draft.reply_to_message_id ?? null, version: draft.version, updatedAt: Date.parse(draft.updated_at) || 0 });
@@ -86,21 +147,29 @@ async function save(account: string, address: string, entry: Entry): Promise<voi
       const draft = entry.draft;
       if (!draft || !draft.dirty) return;
       const sent = { text: draft.text, replyTo: draft.replyTo };
+      // Sent or discarded while this was on its way: the answer is about that draft, not what is typed now (clearDraft
+      // deletes the service's copy once this has answered).
+      const generation = entry.cleared;
+      const stale = () => entry.cleared !== generation;
       commit(account, address, entry, draft, "saving");
       try {
         if (!hasContent(draft)) {
           if (draft.version > 0) await deleteDraft(address);
+          if (stale()) return;
           commit(account, address, entry, entry.draft ? savedDraft({ ...entry.draft, version: 0 }, sent, 0) : null, "saved");
           return;
         }
         const result = await putDraft(address, { message_content: draft.text, reply_to_message_id: draft.replyTo }, draft.version);
+        if (stale()) return;
         commit(account, address, entry, entry.draft ? savedDraft(entry.draft, sent, result.version) : null, "saved");
         return;
       } catch (error) {
+        if (stale()) return;
         const failure = ApiError.from(error);
         if (failure.status === 409) {
           // Another device saved first (or removed it): save this text again against what the service has now.
           const server = await fetchServer(address).catch(() => null);
+          if (stale()) return;
           if (entry.draft) commit(account, address, entry, { ...entry.draft, version: server?.version ?? 0, dirty: true }, "saving");
           continue;
         }
@@ -111,12 +180,14 @@ async function save(account: string, address: string, entry: Entry): Promise<voi
       }
     }
   };
-  entry.saving = run().finally(() => {
-    entry.saving = null;
+  const saving: Promise<void> = run().finally(() => {
+    // A send meanwhile may have put a delete behind this save (clearDraft): that one is the save under way now.
+    if (entry.saving === saving) entry.saving = null;
     // Typing during the save left more to save.
-    if (entry.draft?.dirty && !entry.timer) schedule(account, address, entry);
+    if (entry.draft?.dirty && !entry.timer && !entry.saving) schedule(account, address, entry);
   });
-  return entry.saving;
+  entry.saving = saving;
+  return saving;
 }
 
 function schedule(account: string, address: string, entry: Entry) {
@@ -173,22 +244,41 @@ export interface DraftHandle {
   clear: () => void;
 }
 
-/* What the hook's callbacks do, kept outside the component: the entries are shared, mutable module state. */
+/* What the hook's callbacks do, kept outside the component: the entries are shared, mutable module state. The composer
+   goes through useDraft; these two are exported for tests/draft-tabs.test.ts. */
 
-function changeDraft(account: string, address: string, change: Partial<Pick<LocalDraft, "text" | "replyTo">>) {
+export function changeDraft(account: string, address: string, change: Partial<Pick<LocalDraft, "text" | "replyTo">>) {
   const entry = entryFor(account, address);
   commit(account, address, entry, editDraft(entry.draft, change, Date.now()), entry.save);
   schedule(account, address, entry);
 }
 
-function clearDraft(account: string, address: string, remote: boolean) {
+export function clearDraft(account: string, address: string, remote: boolean) {
   const entry = entryFor(account, address);
   if (entry.timer) clearTimeout(entry.timer);
   entry.timer = null;
   const hadServerDraft = (entry.draft?.version ?? 0) > 0;
+  const onItsWay = entry.saving;
+  entry.cleared += 1;
   commit(account, address, entry, null, "idle");
+  if (!remote) return;
+  if (onItsWay) {
+    // A save on its way lands after this: the service would keep the words just sent as its draft (its clear on send
+    // matches only the words saved before the send, and the message is sent trimmed). Delete it once that save has
+    // answered; a new draft typed meanwhile is saved after this, never before it.
+    const deleting: Promise<void> = onItsWay
+      .catch(() => undefined)
+      .then(() => deleteDraft(address))
+      .then(() => undefined, () => undefined)
+      .finally(() => {
+        if (entry.saving === deleting) entry.saving = null;
+        if (entry.draft?.dirty && !entry.timer && !entry.saving) schedule(account, address, entry);
+      });
+    entry.saving = deleting;
+    return;
+  }
   // The service also clears a draft whose content was just sent; deleting is idempotent either way.
-  if (remote && hadServerDraft) void deleteDraft(address).catch(() => undefined);
+  if (hadServerDraft) void deleteDraft(address).catch(() => undefined);
 }
 
 /**
@@ -206,12 +296,18 @@ export function lookForDraft(account: string, address: string, hint: DraftHint):
 /** Starts following one conversation's draft (and the service's), until the returned function is called. */
 function followDraft(account: string, address: string): () => void {
   const entry = entryFor(account, address);
+  // Another tab may have written while this one was away (a page kept in the back-forward cache misses the events).
+  readStored(account, address, entry);
   const onFocus = () => {
+    if (document.visibilityState === "hidden") return;
+    readStored(account, address, entry);
     if (!entry.draft?.dirty && Date.now() - entry.lookedAt >= LOOK_AGAIN_AFTER_MS) void refresh(account, address, entry);
   };
   window.addEventListener("focus", onFocus);
+  document.addEventListener("visibilitychange", onFocus);
   return () => {
     window.removeEventListener("focus", onFocus);
+    document.removeEventListener("visibilitychange", onFocus);
     // Leaving the conversation saves what was typed right away.
     if (entry.timer) {
       clearTimeout(entry.timer);

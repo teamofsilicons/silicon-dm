@@ -676,6 +676,24 @@ pub async fn listen(
     Ok(finish(summary, target.is_stdout(), output.compact))
 }
 
+/// Where a message's audio may be downloaded from: public hosts only, unless this profile's
+/// DM service runs on this machine (local development, whose files are on this machine too).
+/// The links are the sender's, and must not make dm read what only this machine can reach.
+fn audio_hosts(profile: &str) -> Result<speech::AudioHosts> {
+    let config = crate::store::load()?;
+    let base_url = silicon_dm_client::runtime::store::profile(&config, profile)?
+        .base_url
+        .clone();
+    let local = url::Url::parse(&base_url)
+        .ok()
+        .is_some_and(|url| silicon_dm_client::is_loopback(&url));
+    Ok(if local {
+        speech::AudioHosts::AlsoLocal
+    } else {
+        speech::AudioHosts::Public
+    })
+}
+
 /// `dm messages transcribe`: the voice note, else the first audio attachment, else the speech.
 pub async fn transcribe_message(
     local: &LocalRuntime,
@@ -729,7 +747,12 @@ pub async fn transcribe_message(
         });
     let (source, url, bytes, kind) = match audio_link {
         Some((source, url)) => {
-            let fetched = speech::fetch_audio(&url, speech::DEFAULT_TRANSCRIBE_MAX_BYTES).await?;
+            let fetched = speech::fetch_audio_from(
+                &url,
+                speech::DEFAULT_TRANSCRIBE_MAX_BYTES,
+                audio_hosts(profile)?,
+            )
+            .await?;
             (
                 source,
                 Some(speech::display_url(&fetched.url)),

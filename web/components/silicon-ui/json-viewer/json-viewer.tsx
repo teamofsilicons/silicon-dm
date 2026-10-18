@@ -471,7 +471,8 @@ export const JsonViewer = forwardRef<HTMLDivElement, JsonViewerProps>(function J
       <button type="button" className={styles.tool} aria-label="Collapse all" title="Collapse all" onClick={collapseAll}><ChevronsDownUp size={15} strokeWidth={1.75} aria-hidden="true" /></button>
     </div> : null}
 
-    <LayoutGroup id={uid}>
+    {/* A stable group (not useId): motion keeps every layoutId stack it has seen, with its last element, so a new id per mount kept each closed viewer and its dialog (about 0.5 MB an open). */}
+    <LayoutGroup id={`json-viewer-${rootName}`}>
       <motion.div ref={treeRef} layoutScroll id={`${uid}-tree`} role="tree" aria-label={label} className={styles.tree} onKeyDown={onTreeKeyDown}>
         <AnimatePresence initial={false}>
           {rows.map(row => {

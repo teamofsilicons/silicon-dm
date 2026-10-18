@@ -58,7 +58,10 @@ async fn sdk_http_send_and_response_preserve_content_headers_and_metadata() -> R
         .send_message(Uuid::nil(), &content, "stable-message-key")
         .await?;
     assert_eq!(result.content.text, content.text);
-    assert!(result.content.metadata.is_empty());
+    assert_eq!(
+        result.content.metadata, content.metadata,
+        "metadata is sent and kept exactly, envelope-like keys included"
+    );
     assert_eq!(result.content.recipient_id, content.recipient_id);
     assert_eq!(result.content.attachments.len(), 1);
     server.abort();

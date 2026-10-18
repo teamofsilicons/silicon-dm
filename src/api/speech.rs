@@ -36,10 +36,13 @@ use crate::{
     },
     domain::{
         Account, ActorRef, ActorType,
-        speech::{DEFAULT_VOICE_RULE, validate_script},
+        speech::{DEFAULT_VOICE_RULE, SpeechScope, cache_key, validate_script},
     },
-    infrastructure::postgres::limit_error,
+    infrastructure::postgres::{RenderStatus, limit_error},
 };
+
+/// Longest `POST /api/v1/speech` waits for room to render before it is told to retry.
+const REQUEST_RENDER_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The media types a transcription accepts (aliases clients commonly send map onto them).
 const ACCEPTED_AUDIO: [&str; 8] = [
@@ -217,15 +220,28 @@ pub(super) async fn message_speech(
         && message
             .speech
             .as_ref()
-            .and_then(crate::domain::Speech::cache_key)
+            .and_then(|speech| speech.cache_key(message.conversation_id))
             == Some(rendered.cache_key)
     {
-        // Listening rendered (or found) the message's own speech: a pending or failed
-        // pre-render is ready now.
-        state
-            .store
-            .complete_speech_render(message.id, &rendered.cache_key, &rendered.meta)
-            .await?;
+        // Listening found (or rendered) the message's own speech: a pending or failed
+        // pre-render is ready now. Best effort: the audio is there either way.
+        let completed = async {
+            if state
+                .store
+                .speech_render_status(message.id, &rendered.cache_key)
+                .await?
+                .is_some_and(|status| status != RenderStatus::Ready)
+            {
+                state
+                    .store
+                    .complete_speech_render(message.id, &rendered.cache_key, &rendered.meta)
+                    .await?;
+            }
+            Ok::<_, AppError>(())
+        };
+        if let Err(error) = completed.await {
+            tracing::warn!(code = error.code(), "marking a spoken message ready failed");
+        }
     }
     audio_response(&state, &headers, &rendered, source.voice_key(), true).await
 }
@@ -266,12 +282,22 @@ pub(super) async fn render_speech(
                 .voice
         }
     };
+    let model = &state.settings.speech.model;
+    // The caller's own rendering: a hit only ever finds what this account rendered before.
+    let key = cache_key(
+        SpeechScope::Account(context.actor.id.as_str()),
+        model,
+        &voice.voice_id,
+        &input.script,
+    );
     let rendered = render(
         &state,
         Some(&context.actor),
+        key,
         &input.script,
         &voice.voice_id,
-        &state.settings.speech.model,
+        model,
+        Some(REQUEST_RENDER_WAIT),
     )
     .await?;
     audio_response(&state, &HeaderMap::new(), &rendered, &voice.key, false).await
@@ -391,25 +417,8 @@ async fn audio_response(
                 return Ok(response);
             }
         };
-        let bytes = match &rendered.wav {
-            Some(wav) => {
-                let start = usize::try_from(start).map_err(AppError::internal)?;
-                let end = start + usize::try_from(length).map_err(AppError::internal)?;
-                wav.get(start..end).map(<[u8]>::to_vec).ok_or_else(|| {
-                    AppError::internal(anyhow::anyhow!("range outside the rendering"))
-                })?
-            }
-            None => state
-                .store
-                .speech_audio_bytes(&rendered.cache_key, start, length)
-                .await?
-                .ok_or_else(|| {
-                    crate::infrastructure::deepgram::unavailable(
-                        "The audio was evicted from the cache while it was being read",
-                    )
-                })?,
-        };
-        let mut response = (status, Body::from(bytes)).into_response();
+        let body = audio_body(state, rendered, start, length).await?;
+        let mut response = (status, body).into_response();
         response
             .headers_mut()
             .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
@@ -447,6 +456,80 @@ async fn audio_response(
 
 fn header_value(value: &str) -> AppResult<HeaderValue> {
     HeaderValue::from_str(value).map_err(AppError::internal)
+}
+
+/// Bytes of a WAV read from the cache at a time: a listener holds one window in memory, never
+/// the whole file (a 5,000-character script is a 15 MB WAV).
+const AUDIO_WINDOW_BYTES: u64 = 256 * 1024;
+
+/// `length` bytes of a cached rendering from `start`, streamed window by window from the
+/// cache. The first window is read before the answer starts, so a rendering evicted a moment
+/// ago is a clean 503; every window is read by the rendering's `ETag`, so an answer never mixes
+/// two renderings (it is cut short instead). The response holds a place among the listeners
+/// this process streams to at once until its last byte is sent.
+async fn audio_body(
+    state: &AppState,
+    rendered: &Rendered,
+    start: u64,
+    length: u64,
+) -> AppResult<Body> {
+    let room = state.speech.stream_room()?;
+    let store = state.store.clone();
+    let key = rendered.cache_key;
+    let etag = rendered.meta.etag.clone();
+    let evicted = || {
+        crate::infrastructure::deepgram::unavailable(
+            "The audio was evicted from the cache while it was being read",
+        )
+    };
+    let first = store
+        .speech_audio_window(&key, &etag, start, length.min(AUDIO_WINDOW_BYTES))
+        .await?
+        .ok_or_else(evicted)?;
+    let sent = u64::try_from(first.len()).map_err(AppError::internal)?;
+    let rest = futures::stream::unfold(
+        (store, room, start + sent, length - sent.min(length)),
+        move |(store, room, offset, remaining)| {
+            let etag = etag.clone();
+            async move {
+                if remaining == 0 {
+                    return None;
+                }
+                let window = remaining.min(AUDIO_WINDOW_BYTES);
+                let chunk = match store.speech_audio_window(&key, &etag, offset, window).await {
+                    Ok(Some(chunk)) if !chunk.is_empty() => chunk,
+                    // Evicted or replaced mid-answer, or the database failed: stop here
+                    // (the client sees a short body against Content-Length and asks again).
+                    Ok(_) => {
+                        return Some((
+                            Err(io::Error::other("the audio left the cache")),
+                            (store, room, offset, 0),
+                        ));
+                    }
+                    Err(_) => {
+                        return Some((
+                            Err(io::Error::other("the audio could not be read")),
+                            (store, room, offset, 0),
+                        ));
+                    }
+                };
+                let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+                Some((
+                    Ok(bytes::Bytes::from(chunk)),
+                    (
+                        store,
+                        room,
+                        offset.saturating_add(read),
+                        remaining.saturating_sub(read),
+                    ),
+                ))
+            }
+        },
+    );
+    let stream =
+        futures::stream::once(async move { Ok::<_, io::Error>(bytes::Bytes::from(first)) })
+            .chain(rest);
+    Ok(Body::from_stream(stream))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -525,9 +608,10 @@ pub(super) async fn transcribe(
     if let Some(language) = &language
         && !valid_language(language)
     {
-        return Err(AppError::validation(format!(
-            "language `{language}` is not a language tag such as en, pt-BR or zh-Hant; omit it to detect the language"
-        )));
+        return Err(AppError::invalid(format!(
+            "language `{language}` is not a language tag such as en, pt-BR or zh-Hant"
+        ))
+        .with_hint("Send a BCP 47 tag such as en or pt-BR, or leave language out to have the language detected."));
     }
     let cap = state.settings.speech.transcribe_max_bytes;
     let too_large = || {

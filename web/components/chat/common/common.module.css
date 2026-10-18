@@ -33,11 +33,11 @@
 .iconAction svg { width: 18px; height: 18px; }
 .iconAction[data-size="sm"] svg { width: 16px; height: 16px; }
 @media (hover: hover) and (pointer: fine) { .iconAction:hover { --sq-fill: var(--surface-muted); color: var(--foreground); } }
-.iconAction:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); outline: none !important; }
+.iconAction:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); outline: none !important; --focus-outline: transparent; }
 .iconAction:active:not([aria-disabled="true"]) { transform: scale(.95); }
 .iconAction[aria-pressed="true"] { --sq-fill: var(--accent-subtle); color: var(--accent); }
 .iconAction[aria-disabled="true"] { color: var(--text-faint); cursor: default; }
-.iconAction[data-tone="danger"]:hover, .iconAction[data-tone="danger"]:focus-visible { color: var(--danger); }
+.iconAction[data-tone="danger"]:hover, .iconAction[data-tone="danger"]:focus-visible { color: var(--danger); --focus-outline: transparent; }
 
 .tip { display: inline-flex; align-items: center; gap: var(--space-2); white-space: nowrap; }
 

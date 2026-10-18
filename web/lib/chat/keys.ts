@@ -14,7 +14,8 @@ export const chatKeys = {
   messages: (address: string, view?: string | null) => ["dm", "messages", address, viewKey(view)] as const,
   bundle: (address: string, bundle: string, view?: string | null) => ["dm", "bundle", address, bundle, viewKey(view)] as const,
   draft: (address: string) => ["dm", "draft", address] as const,
-  presence: (account: string) => ["dm", "presence", account] as const,
+  /** An account's presence; its activity is about `conversation` when the service says activity per conversation. */
+  presence: (account: string, conversation?: string | null) => ["dm", "presence", account, conversation ?? ""] as const,
   invitations: (view?: string | null) => ["dm", "invitations", viewKey(view)] as const,
   group: (id: string, view?: string | null) => ["dm", "group", id, viewKey(view)] as const,
   allowList: (silicon: string) => ["dm", "allow-list", silicon] as const,

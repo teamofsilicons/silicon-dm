@@ -78,8 +78,9 @@ function Bundle({ message }: { message: Message }) {
         <ChevronDown size={14} strokeWidth={2} aria-hidden="true" className={styles.bundleChevron} data-open={open ? "" : undefined} />
         {count ? `${count} ${count === 1 ? "message" : "messages"} bundled` : "Bundled messages"}
       </button>
+      {/* Opened by the reader, inside the log: not news to read out (aria-live off; a failure still alerts). */}
       {open ? (
-        <ol className={styles.bundleList} id={listId}>
+        <ol className={styles.bundleList} id={listId} aria-live="off">
           {detail.isPending ? <li className={styles.bundleQuiet}>Loading the bundled messages…</li> : null}
           {detail.error ? <li className={styles.bundleQuiet} role="alert">The bundled messages could not be loaded. Press the toggle to try again.</li> : null}
           {originals.map(original => (

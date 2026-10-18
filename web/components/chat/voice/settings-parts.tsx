@@ -31,7 +31,6 @@ import styles from "./voice.module.css";
 
 const SPEED_OPTIONS = SPEEDS.map(speed => ({ value: String(speed), label: `${speed}×` }));
 
-/** "Default voice", or who chose it and when. */
 /** "The default voice", or who chose it ("Chosen by you") and when ("on Oct 18, 2026, 01:36", or null). */
 function choiceWords(data: AccountVoice, me: AccountRef): { who: string; when: string | null } {
   if (!data.chosen) return { who: "The default voice", when: null };
@@ -56,10 +55,9 @@ function AccountVoiceGroup({ account, title, note }: { account: AccountRef; titl
           <AccountAvatar account={account} size="small" decorative />
           <span className={styles.whoText}>
             <h3 className={styles.whoName} id={`voice-${account.id}`}>{title}</h3>
-            {/* On a phone the time gives way (it stays in the title), so the line ends at a word. */}
+            {/* Where the time does not fit it gives way (it stays in the title), so the line ends at a word. */}
             <span className={styles.whoMeta} title={meta}>
-              {account.id}
-              {chosen ? ` · ${chosen.who}` : null}
+              <span className={styles.whoMain}>{account.id}{chosen ? ` · ${chosen.who}` : null}</span>
               {chosen?.when ? <span className={styles.whoWhen}>{` ${chosen.when}`}</span> : null}
             </span>
           </span>

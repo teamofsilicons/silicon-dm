@@ -217,21 +217,25 @@ export function VoicePlayer({ track, noun, peaks, durationMs, preparing = false,
         </div>
       )}
       <div ref={meta} className={styles.meta}>
+        {/* What went wrong is said by a region that is always here (one added with its words is often not read); the
+            words on screen are for the eyes. */}
+        <span className="sr-only" role="status">{error ? `${error.message} ${error.hint ?? ""}`.trim() : ""}</span>
         {chip ? <span ref={chipSlot} className={styles.chipSlot}>{chip}</span> : null}
         {time && !showFailed ? <span ref={timeText} className={styles.time}>{time}</span> : null}
         {error ? (
-          <span className={styles.errorNote} role="status">
+          <span className={styles.errorNote} aria-hidden="true">
             {error.message} {error.hint}
           </span>
         ) : null}
+        {/* The speed comes and goes with playing, inside the thread's log, which must read out only new messages: off. */}
         {active && !loading ? (
           narrow ? (
             // Its name starts with what it shows ("1×"), then says what a press does.
-            <button type="button" className={styles.speedStep} data-sq="surface" aria-label={`${state.rate}× playback speed. Press for ${nextSpeed}×`} onClick={() => setRate(nextSpeed)}>
+            <button type="button" className={styles.speedStep} data-sq="surface" aria-label={`${state.rate}× playback speed. Press for ${nextSpeed}×`} aria-live="off" onClick={() => setRate(nextSpeed)}>
               {state.rate}×
             </button>
           ) : (
-            <span className={styles.speed}>
+            <span className={styles.speed} aria-live="off">
               <SegmentedControl size="xs" label="Playback speed" options={SPEED_OPTIONS} value={String(state.rate)} onValueChange={value => setRate(Number(value) as PlaybackSpeed)} />
             </span>
           )

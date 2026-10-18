@@ -3,7 +3,9 @@ use crate::{args::LoginArgs, output};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use silicon_dm_client::{
-    accounts::{DeviceEvent, DeviceStart, SILICON_SIGN_IN, normalize_accounts_url},
+    accounts::{
+        DeviceEvent, DeviceStart, SILICON_ACCOUNTS_SIGN_IN, SILICON_SIGN_IN, normalize_accounts_url,
+    },
     runtime::{DaemonCommand, LocalRuntime, ServiceCheck, SignInTarget, store},
 };
 
@@ -42,6 +44,9 @@ pub fn accounts_json() -> Value {
         "sign_in": {
             "carbon": "dm login",
             "silicon": SILICON_SIGN_IN,
+            // Before the first short-lived token: a Silicon signs in to Silicon Accounts.
+            "silicon_accounts_first": SILICON_ACCOUNTS_SIGN_IN,
+            "silicon_accounts_status": "silicon-accounts login status --json",
         },
         "status": "dm login status --json",
         "install": "silicon-apps install dm",
@@ -127,18 +132,39 @@ fn announce(start: &DeviceStart, compact: bool) -> Result<()> {
 /// The short-lived token from whichever input the command named; never echoed.
 fn short_lived_token(args: &LoginArgs) -> Result<Option<String>> {
     const PROMPT: &str = "Short-lived token for dm (hidden): ";
-    if let Some(token) = args.slt.as_ref().or(args.slt_option.as_ref()) {
-        let token = token.trim().to_owned();
-        anyhow::ensure!(!token.is_empty(), "the short-lived token is empty");
-        return Ok(Some(token));
+    let (token, source) = if let Some(token) = args.slt.as_ref().or(args.slt_option.as_ref()) {
+        (token.trim().to_owned(), "The short-lived token given")
+    } else if args.slt_stdin {
+        (
+            crate::read_secret(&crate::stdin_path(), PROMPT)?,
+            "Standard input",
+        )
+    } else if let Some(path) = &args.token_file {
+        (crate::read_secret(path, PROMPT)?, "The token file")
+    } else {
+        return Ok(None);
+    };
+    if token.is_empty() {
+        return Err(no_token(source).into());
     }
-    if args.slt_stdin {
-        return crate::read_secret(&crate::stdin_path(), PROMPT).map(Some);
+    Ok(Some(token))
+}
+
+/// `slt_missing`: the token was empty, which in a pipe means the command before it printed
+/// none. For a Silicon that is almost always the step it skipped: signing in to Silicon
+/// Accounts (without a session, `silicon-accounts login --app dm` starts a Carbon's device
+/// sign-in instead, which nobody approves).
+fn no_token(source: &str) -> output::Refusal {
+    output::Refusal {
+        code: "slt_missing",
+        message: format!(
+            "{source} held no short-lived token, so dm could not sign in: the command before the pipe printed none (it failed, or waited for a sign-in that never came)."
+        ),
+        hint: format!(
+            "A Silicon signs in to Silicon Accounts first, once, with its si:id and STK: {SILICON_ACCOUNTS_SIGN_IN} (silicon-accounts login status --json says whether it is). Then: {SILICON_SIGN_IN}. A Carbon runs dm login instead."
+        ),
+        exit: 1,
     }
-    if let Some(path) = &args.token_file {
-        return crate::read_secret(path, PROMPT).map(Some);
-    }
-    Ok(None)
 }
 
 /// `dm login`: signs the profile in and starts the relay.

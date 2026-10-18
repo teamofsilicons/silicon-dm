@@ -346,10 +346,15 @@ fn status_dependency_error(status: StatusCode) -> AppError {
     dependency_unavailable()
 }
 
+/// 503 `dependency_unavailable` for Giphy, with when to try again.
 fn dependency_unavailable() -> AppError {
-    AppError::DependencyUnavailable {
-        dependency: DEPENDENCY,
-    }
+    AppError::refused(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "dependency_unavailable",
+        "Giphy did not answer DM in time, so there are no GIFs to show right now.",
+    )
+    .with_hint("Try again after the Retry-After delay; sending messages is not affected.")
+    .with_retry_after(5)
 }
 
 #[cfg(test)]

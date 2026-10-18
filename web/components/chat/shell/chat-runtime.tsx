@@ -3,22 +3,25 @@
 /**
  * What runs for as long as the chat is open, once per tab: the sync loop (new messages and receipts), this tab's
  * presence lease, the outbox (sends that survive reloads), delivered and read receipts, the unread count in the tab's
- * title, browser notifications when they are on, and the conversation news that keeps the list complete (another tab's
- * new conversation, an invitation answered on another device). Renders nothing.
+ * title, browser notifications when they are on, the conversation news that keeps the list complete (another tab's
+ * new conversation or read, an invitation answered on another device), the list's safety refresh, and what this
+ * browser keeps of the Carbon's words (another account's leftovers go; signing out removes them). Renders nothing.
  */
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
+import { whenSignedOut } from "@/lib/client/session";
 import { conversationTitle, inboxHref, sameAccount } from "@/lib/chat/address";
 import { summariesOf, totalUnread, type ConversationPages } from "@/lib/chat/cache";
-import { useConversations, useInvitations } from "@/lib/chat/hooks";
+import { useConversations, useInvitations, useListSafetyNet } from "@/lib/chat/hooks";
 import { chatKeys } from "@/lib/chat/keys";
+import { forgetChatData, forgetOtherAccounts } from "@/lib/chat/local-data";
 import { listenForConversationNews } from "@/lib/chat/news";
-import { maybeNotify } from "@/lib/chat/notifications";
+import { maybeNotify, setScreenConversation, trackScreen } from "@/lib/chat/notifications";
 import { attachOutbox } from "@/lib/chat/outbox-store";
-import { startPresence } from "@/lib/chat/presence";
+import { setPresenceConversation, startPresence } from "@/lib/chat/presence";
 import { attachReceipts, noteDelivered } from "@/lib/chat/receipts";
-import { refreshConversationsSoon, startSync, type GoneConversation } from "@/lib/chat/sync";
+import { refreshConversationsSoon, startSync, wakeSync, type GoneConversation } from "@/lib/chat/sync";
 import { useUnreadTitle } from "@/lib/chat/title";
 import { notify } from "@/lib/notify";
 import type { Message } from "@/lib/chat/types";
@@ -39,9 +42,23 @@ export function ChatRuntime() {
     latest.current = { openAddress, router, view };
   });
 
+  // What another account left in this browser goes before anything reads it; signing out removes this one's too.
+  useEffect(() => forgetOtherAccounts(accountKey), [accountKey]);
+  useEffect(() => whenSignedOut(forgetChatData), []);
   useEffect(() => attachOutbox({ queryClient, me: account }), [queryClient, accountKey]); // eslint-disable-line react-hooks/exhaustive-deps -- the account's key identifies it
   useEffect(() => attachReceipts({ queryClient, me: account }), [queryClient, accountKey]); // eslint-disable-line react-hooks/exhaustive-deps -- as above
   useEffect(() => startPresence(), []);
+  // What this tab is doing (typing, recording) is about the conversation on screen; a custodian's view is not yours.
+  const screenAddress = view ? null : openAddress;
+  useEffect(() => setPresenceConversation(screenAddress), [screenAddress]);
+  // Which conversation this tab shows, for the other tabs' notifications.
+  useEffect(() => trackScreen(accountKey), [accountKey]);
+  useEffect(() => setScreenConversation(screenAddress), [screenAddress]);
+  // Anything that reached the service means it is back: a sync loop waiting out its backoff tries again now.
+  useEffect(() => queryClient.getQueryCache().subscribe(event => {
+    if (event.type === "updated" && event.action.type === "success") wakeSync();
+  }), [queryClient]);
+  useListSafetyNet(view);
   useEffect(() => {
     const onIncoming = (message: Message, info: { fresh: boolean }) => {
       if (sameAccount(message.sender, account) || message.deleted_at) return;

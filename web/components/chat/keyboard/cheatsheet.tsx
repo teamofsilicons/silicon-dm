@@ -6,7 +6,7 @@
  * microphone) is shown off, with the reason.
  */
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/silicon-ui/dialog/dialog";
 import { formatBinding } from "@/lib/shortcuts/keys";
@@ -16,13 +16,43 @@ import { closeDialog } from "../dialogs/store";
 import { Keys } from "./keys";
 import styles from "./keyboard.module.css";
 
+/**
+ * The sheet's order: the voice keys before the long composer and message groups, so DM's own keys are in the first
+ * screen (the registry's order, which Settings → Keyboard and the docs follow, puts them last).
+ */
+const SHEET_ORDER: typeof SHORTCUT_GROUPS = ["General", "Conversations", "Voice", "Composer", "Messages"];
+
+/** Whether more of the sheet is below what shows: its bottom edge fades then. */
+function useMoreBelow(open: boolean, content: unknown) {
+  const [node, setNode] = useState<HTMLDivElement | null>(null);
+  const update = useCallback(() => {
+    if (!node) return;
+    const more = node.scrollTop + node.clientHeight < node.scrollHeight - 2;
+    if (more) node.setAttribute("data-more", "");
+    else node.removeAttribute("data-more");
+  }, [node]);
+  useEffect(() => {
+    if (!node || !open) return;
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    node.addEventListener("scroll", update, { passive: true });
+    return () => {
+      observer.disconnect();
+      node.removeEventListener("scroll", update);
+    };
+  }, [node, open, update]);
+  useEffect(update, [content, update]);
+  return setNode;
+}
+
 export function Cheatsheet({ open }: { open: boolean }) {
   const { shortcuts, platform } = useShortcuts();
   useShortcutAvailability();
   const [query, setQuery] = useState("");
   const groups = useMemo(() => {
     const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    return SHORTCUT_GROUPS.map(group => ({
+    return SHEET_ORDER.filter(group => SHORTCUT_GROUPS.includes(group)).map(group => ({
       group,
       items: shortcuts.filter(shortcut => {
         if (shortcut.group !== group) return false;
@@ -33,6 +63,7 @@ export function Cheatsheet({ open }: { open: boolean }) {
       }),
     })).filter(entry => entry.items.length);
   }, [shortcuts, platform, query]);
+  const sheet = useMoreBelow(open, groups);
 
   return (
     <Dialog open={open} onOpenChange={next => { if (!next) { closeDialog("shortcuts"); setQuery(""); } }}>
@@ -42,7 +73,7 @@ export function Cheatsheet({ open }: { open: boolean }) {
           <Search size={16} strokeWidth={1.75} aria-hidden="true" />
           <input id="cheatsheet-search" type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Find a shortcut" aria-label="Find a shortcut" autoComplete="off" spellCheck={false} />
         </div>
-        <div className={styles.sheet} tabIndex={0} role="region" aria-label="Every shortcut">
+        <div ref={sheet} className={styles.sheet} tabIndex={0} role="region" aria-label="Every shortcut">
           {groups.map(({ group, items }) => (
             <section key={group} className={styles.group} aria-labelledby={`cheatsheet-${group}`}>
               <h3 id={`cheatsheet-${group}`} className={styles.groupTitle}>{group}</h3>
@@ -72,6 +103,8 @@ export function Cheatsheet({ open }: { open: boolean }) {
           ))}
           {groups.length ? null : <p className={styles.nothing}>No shortcut matches “{query.trim()}”.</p>}
         </div>
+        {/* Mounted from the start, so a search that finds nothing is heard (the words above appear without focus moving). */}
+        <span className="sr-only" role="status">{query.trim() && !groups.length ? `No shortcut matches ${query.trim()}` : ""}</span>
         <p className={styles.footnote}>
           Change any of them in <Link href="/settings#keyboard" onClick={() => closeDialog("shortcuts")}>Settings → Keyboard</Link>.
         </p>

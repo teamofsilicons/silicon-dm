@@ -8,7 +8,9 @@ import { Keys } from "../keyboard/keys";
 import { ConversationsPane } from "../sidebar/conversations-pane";
 import { useShortcutKeys } from "@/lib/shortcuts/react";
 import { useTitle } from "@/lib/chat/title";
+import { useHydrated } from "@/lib/chat/hydrated";
 import { useChat } from "./chat-context";
+import { useLayoutMode } from "./use-layout-mode";
 import styles from "./inbox.module.css";
 
 function Hint({ id, children }: { id: string; children: string }) {
@@ -25,10 +27,14 @@ function Hint({ id, children }: { id: string; children: string }) {
 export function InboxView() {
   const { view, viewed, readOnly } = useChat();
   useTitle(view ? `${viewed?.display_name ?? view} · DM` : "Messages · DM");
+  // The page's own list only where it shows (a phone): beside the sidebar it would be a second, hidden copy of every
+  // row, rendered on every update. The server and the first render keep it, so a phone paints the list at once.
+  const hydrated = useHydrated();
+  const narrow = useLayoutMode() === "narrow";
   return (
     <>
       <div className={styles.phone}>
-        <ConversationsPane variant="page" />
+        {!hydrated || narrow ? <ConversationsPane variant="page" /> : null}
       </div>
       <div className={styles.wide}>
         <div className={styles.note}>

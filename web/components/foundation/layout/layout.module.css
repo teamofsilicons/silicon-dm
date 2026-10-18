@@ -23,7 +23,7 @@
 .description { max-width: 62ch; margin: 0; color: var(--text-secondary); font-size: var(--text-base); line-height: var(--leading-body); text-wrap: pretty; }
 .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-3); }
 .back { display: inline-flex; width: fit-content; align-items: center; gap: var(--space-1); margin-bottom: var(--space-1); color: var(--text-secondary); font-size: var(--text-sm); text-decoration: none; transition: color var(--duration-fast) var(--ease-standard); }
-.back:hover, .back:focus-visible { color: var(--foreground); }
+.back:hover, .back:focus-visible { color: var(--foreground); --focus-outline: transparent; }
 @media (max-width: 640px) {
   .header { grid-template-columns: minmax(0, 1fr); align-items: start; }
   .actions { justify-content: flex-start; }

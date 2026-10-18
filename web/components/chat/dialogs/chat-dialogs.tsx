@@ -5,6 +5,7 @@ import { Cheatsheet } from "../keyboard/cheatsheet";
 import { InvitationsDialog } from "./invitations-dialog";
 import { NewConversationDialog } from "./new-conversation-dialog";
 import { NewGroupDialog } from "./new-group-dialog";
+import { SignOutDialog } from "./sign-out-dialog";
 import { useOpenDialog } from "./store";
 
 export function ChatDialogs() {
@@ -15,6 +16,7 @@ export function ChatDialogs() {
       <NewGroupDialog open={open === "new-group"} />
       <InvitationsDialog open={open === "invitations"} />
       <Cheatsheet open={open === "shortcuts"} />
+      <SignOutDialog open={open === "sign-out"} />
     </>
   );
 }

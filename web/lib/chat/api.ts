@@ -186,9 +186,12 @@ export const listInvitations = (options: { view?: string | null; signal?: AbortS
 
 /* Presence ---------------------------------------------------------------------------------------------------------- */
 
-/** Renews this device's presence lease, with what it is doing right now (or null). */
-export const renewPresence = (deviceId: string, activity: Activity | null) =>
-  dm<PresenceLease>(`/api/v1/presence/devices/${seg(deviceId)}`, { method: "PUT", body: { type: "renew_presence", data: { activity } } });
+/**
+ * Renews this device's presence lease, with what it is doing right now (or null), and where: `conversation` only for a
+ * service that announces activity per conversation (lib/chat/features.ts; an older one refuses the unknown field).
+ */
+export const renewPresence = (deviceId: string, activity: Activity | null, conversation?: string | null) =>
+  dm<PresenceLease>(`/api/v1/presence/devices/${seg(deviceId)}`, { method: "PUT", body: { type: "renew_presence", data: { activity, ...(conversation ? { conversation_id: conversation } : {}) } } });
 
 /**
  * Closes this device's lease. `keepalive` lets it finish while the page unloads (pagehide); such a request cannot
@@ -201,7 +204,9 @@ export function closePresence(deviceId: string, keepalive = false): Promise<unkn
   return dm<null>(`/api/v1/presence/devices/${seg(deviceId)}`, { method: "DELETE" });
 }
 
-export const getPresence = (account: string, signal?: AbortSignal) => dm<Presence>(`/api/v1/presence/${seg(account)}`, { signal });
+/** An account's presence; with `conversation` (a service with activity per conversation), its activity there only. */
+export const getPresence = (account: string, signal?: AbortSignal, conversation?: string | null) =>
+  dm<Presence>(`/api/v1/presence/${seg(account)}`, { signal, query: conversation ? { conversation } : undefined });
 
 /* Sync -------------------------------------------------------------------------------------------------------------- */
 
@@ -217,6 +222,8 @@ export interface Contracts {
   features?: {
     /** Conversation events in the sync feed: `sync_query` is what to add to it (`include=conversations`). */
     conversation_events?: { sync_query?: string; event_type?: string; changes?: string[]; minimum_client?: string } | null;
+    /** Activity said per conversation: renew_presence takes `conversation_id`, GET presence `?conversation=`. */
+    presence_activity?: { scope?: string; renew_field?: string; query?: string } | null;
   } & Record<string, unknown>;
 }
 

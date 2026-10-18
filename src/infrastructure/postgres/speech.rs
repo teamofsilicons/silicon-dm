@@ -4,7 +4,7 @@
 //! again from a message's script and pinned voice, so the worker evicts rows by size and age
 //! without losing anything, and no uploaded file ever lands there.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use sqlx::{FromRow, Postgres, Transaction};
 use time::OffsetDateTime;
@@ -160,6 +160,15 @@ pub struct RenderClaim {
 }
 
 #[derive(FromRow)]
+struct RenderJobRecord {
+    message_id: Uuid,
+    cache_key: Vec<u8>,
+    status: String,
+    duration_ms: Option<i32>,
+    peaks: Option<Vec<i16>>,
+}
+
+#[derive(FromRow)]
 struct RenderClaimRecord {
     message_id: Uuid,
     cache_key: Vec<u8>,
@@ -185,6 +194,26 @@ pub enum RenderOutcome {
         /// Stable failure code.
         error: &'static str,
     },
+}
+
+/// What a listener got when it asked for a spoken message's rendering lease.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpeechLease {
+    /// The lease is the listener's: it renders now, and the worker leaves it alone.
+    Taken(Uuid),
+    /// Someone renders it now (a worker in some process, or another listener).
+    Busy,
+    /// The message version has no rendering record (the listener renders it without one).
+    NoJob,
+}
+
+/// A charge that went through: what to give back if the render then fails.
+#[derive(Clone, Copy, Debug)]
+pub struct SpeechCharged {
+    /// Characters charged.
+    pub characters: u64,
+    /// The UTC day they were charged to.
+    pub day: OffsetDateTime,
 }
 
 /// Which limit a charge exceeded.
@@ -351,22 +380,26 @@ impl PostgresStore {
         record.meta().map(Some)
     }
 
-    /// `length` bytes of a cached WAV from `start` (only those bytes are read).
+    /// `length` bytes of the cached WAV `etag` from `start` (only those bytes are read; the
+    /// column is stored uncompressed). `None` when the rendering was evicted or replaced, so
+    /// one response never mixes two renderings.
     ///
     /// # Errors
     /// Database failures.
-    pub async fn speech_audio_bytes(
+    pub async fn speech_audio_window(
         &self,
         cache_key: &[u8; 32],
+        etag: &str,
         start: u64,
         length: u64,
     ) -> AppResult<Option<Vec<u8>>> {
         let start = i64::try_from(start).map_err(AppError::internal)?;
         let length = i64::try_from(length).map_err(AppError::internal)?;
         Ok(sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT substring(wav FROM $2::bigint::integer + 1 FOR $3::bigint::integer) FROM speech_audio WHERE cache_key = $1",
+            "SELECT substring(wav FROM $3::bigint::integer + 1 FOR $4::bigint::integer) FROM speech_audio WHERE cache_key = $1 AND etag = $2",
         )
         .bind(cache_key.as_slice())
+        .bind(etag)
         .bind(start)
         .bind(length)
         .fetch_optional(self.pool())
@@ -444,50 +477,186 @@ impl PostgresStore {
         Ok(expired.saturating_add(over_budget))
     }
 
-    /// Where the rendering of one spoken message version stands: its render job, or (for a
-    /// version that has none) the cache.
+    /// Where the renderings of spoken message versions stand, for a whole response at once:
+    /// each version's render job, or (for a version that has none) the cache.
     ///
     /// # Errors
     /// Database failures.
-    pub async fn speech_render_state(
+    pub async fn speech_render_states(
+        &self,
+        versions: &[(Uuid, [u8; 32])],
+    ) -> AppResult<HashMap<(Uuid, [u8; 32]), RenderState>> {
+        let mut states = HashMap::new();
+        if versions.is_empty() {
+            return Ok(states);
+        }
+        let messages: Vec<Uuid> = versions.iter().map(|(message, _)| *message).collect();
+        let keys: Vec<Vec<u8>> = versions.iter().map(|(_, key)| key.to_vec()).collect();
+        let jobs: Vec<RenderJobRecord> = sqlx::query_as(
+            "SELECT r.message_id, r.cache_key, r.status, r.duration_ms, r.peaks
+             FROM speech_renders r
+             JOIN unnest($1::uuid[], $2::bytea[]) AS version(message_id, cache_key)
+               ON r.message_id = version.message_id AND r.cache_key = version.cache_key",
+        )
+        .bind(&messages)
+        .bind(&keys)
+        .fetch_all(self.pool())
+        .await?;
+        for RenderJobRecord {
+            message_id: message,
+            cache_key: key,
+            status,
+            duration_ms: duration,
+            peaks,
+        } in jobs
+        {
+            let key: [u8; 32] = key
+                .try_into()
+                .map_err(|_| super::rows::data_error("speech cache key", "not 32 bytes"))?;
+            states.insert(
+                (message, key),
+                RenderState {
+                    status: RenderStatus::parse(&status)?,
+                    duration_milliseconds: duration
+                        .map(u32::try_from)
+                        .transpose()
+                        .map_err(AppError::internal)?,
+                    peaks,
+                },
+            );
+        }
+        let unrecorded: Vec<Vec<u8>> = versions
+            .iter()
+            .filter(|version| !states.contains_key(*version))
+            .map(|(_, key)| key.to_vec())
+            .collect();
+        let cached: HashMap<Vec<u8>, (i32, Vec<i16>)> = if unrecorded.is_empty() {
+            HashMap::new()
+        } else {
+            sqlx::query_as::<_, (Vec<u8>, i32, Vec<i16>)>(
+                "SELECT cache_key, duration_ms, peaks FROM speech_audio WHERE cache_key = ANY($1)",
+            )
+            .bind(&unrecorded)
+            .fetch_all(self.pool())
+            .await?
+            .into_iter()
+            .map(|(key, duration, peaks)| (key, (duration, peaks)))
+            .collect()
+        };
+        for version in versions {
+            if states.contains_key(version) {
+                continue;
+            }
+            let state = match cached.get(version.1.as_slice()) {
+                Some((duration, peaks)) => RenderState {
+                    status: RenderStatus::Ready,
+                    duration_milliseconds: Some(
+                        u32::try_from(*duration).map_err(AppError::internal)?,
+                    ),
+                    peaks: Some(peaks.clone()),
+                },
+                None => RenderState {
+                    status: RenderStatus::Pending,
+                    duration_milliseconds: None,
+                    peaks: None,
+                },
+            };
+            states.insert(*version, state);
+        }
+        Ok(states)
+    }
+
+    /// The status of one spoken message version's render job, if it has one.
+    ///
+    /// # Errors
+    /// Database failures.
+    pub async fn speech_render_status(
         &self,
         message_id: Uuid,
         cache_key: &[u8; 32],
-    ) -> AppResult<RenderState> {
-        let job: Option<(String, Option<i32>, Option<Vec<i16>>)> = sqlx::query_as(
-            "SELECT status, duration_ms, peaks FROM speech_renders WHERE message_id = $1 AND cache_key = $2",
+    ) -> AppResult<Option<RenderStatus>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM speech_renders WHERE message_id = $1 AND cache_key = $2",
         )
         .bind(message_id)
         .bind(cache_key.as_slice())
         .fetch_optional(self.pool())
-        .await?;
-        if let Some((status, duration, peaks)) = job {
-            return Ok(RenderState {
-                status: RenderStatus::parse(&status)?,
-                duration_milliseconds: duration
-                    .map(u32::try_from)
-                    .transpose()
-                    .map_err(AppError::internal)?,
-                peaks,
-            });
+        .await?
+        .as_deref()
+        .map(RenderStatus::parse)
+        .transpose()
+    }
+
+    /// A listener asks for the lease on a spoken message version's rendering, so that it alone
+    /// renders it now: the worker (in any process) and other listeners wait for it instead of
+    /// rendering the same speech a second time. With `leave_due_to_worker`, a render that is
+    /// due now is left to the worker that is about to take it (the listener waits for it).
+    ///
+    /// # Errors
+    /// Database failures.
+    pub async fn lease_speech_render(
+        &self,
+        message_id: Uuid,
+        cache_key: &[u8; 32],
+        lease: Duration,
+        leave_due_to_worker: bool,
+    ) -> AppResult<SpeechLease> {
+        let lease_id = Uuid::now_v7();
+        let lease_milliseconds = i64::try_from(lease.as_millis()).unwrap_or(i64::MAX);
+        let taken: Option<Uuid> = sqlx::query_scalar(
+            "UPDATE speech_renders SET lease_id = $3,
+                lease_expires_at = clock_timestamp() + ($4::bigint * interval '1 millisecond')
+             WHERE message_id = $1 AND cache_key = $2
+               AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
+               AND NOT ($5 AND status = 'pending' AND next_attempt_at <= clock_timestamp())
+             RETURNING lease_id",
+        )
+        .bind(message_id)
+        .bind(cache_key.as_slice())
+        .bind(lease_id)
+        .bind(lease_milliseconds)
+        .bind(leave_due_to_worker)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(map_constraint_error)?;
+        if let Some(lease_id) = taken {
+            return Ok(SpeechLease::Taken(lease_id));
         }
-        let cached: Option<(i32, Vec<i16>)> =
-            sqlx::query_as("SELECT duration_ms, peaks FROM speech_audio WHERE cache_key = $1")
-                .bind(cache_key.as_slice())
-                .fetch_optional(self.pool())
-                .await?;
-        Ok(match cached {
-            Some((duration, peaks)) => RenderState {
-                status: RenderStatus::Ready,
-                duration_milliseconds: Some(u32::try_from(duration).map_err(AppError::internal)?),
-                peaks: Some(peaks),
-            },
-            None => RenderState {
-                status: RenderStatus::Pending,
-                duration_milliseconds: None,
-                peaks: None,
-            },
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM speech_renders WHERE message_id = $1 AND cache_key = $2)",
+        )
+        .bind(message_id)
+        .bind(cache_key.as_slice())
+        .fetch_one(self.pool())
+        .await?;
+        Ok(if exists {
+            SpeechLease::Busy
+        } else {
+            SpeechLease::NoJob
         })
+    }
+
+    /// Gives back a listener's lease (whatever its render did).
+    ///
+    /// # Errors
+    /// Database failures.
+    pub async fn release_speech_lease(
+        &self,
+        message_id: Uuid,
+        cache_key: &[u8; 32],
+        lease_id: Uuid,
+    ) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE speech_renders SET lease_id = NULL, lease_expires_at = NULL
+             WHERE message_id = $1 AND cache_key = $2 AND lease_id = $3",
+        )
+        .bind(message_id)
+        .bind(cache_key.as_slice())
+        .bind(lease_id)
+        .execute(self.pool())
+        .await
+        .map_err(map_constraint_error)?;
+        Ok(())
     }
 
     /// Whether a spoken message version's pre-render is under way: pending and either leased
@@ -665,13 +834,37 @@ impl PostgresStore {
         &self,
         account: &ActorRef,
         charge: SpeechCharge,
-    ) -> AppResult<Result<(), LimitExceeded>> {
+    ) -> AppResult<Result<SpeechCharged, LimitExceeded>> {
         let mut tx = self.pool().begin().await?;
         let outcome = charge_speech_in(&mut tx, account, charge).await?;
         if outcome.is_ok() {
             tx.commit().await.map_err(map_constraint_error)?;
         }
         Ok(outcome)
+    }
+
+    /// Gives an account back the characters of a render the provider failed: the day's
+    /// budget counts rendered characters, and nothing was rendered.
+    ///
+    /// # Errors
+    /// Database failures.
+    pub async fn refund_speech_characters(
+        &self,
+        account: &ActorRef,
+        charged: &SpeechCharged,
+    ) -> AppResult<()> {
+        let characters = i64::try_from(charged.characters).map_err(AppError::internal)?;
+        sqlx::query(
+            "UPDATE speech_usage SET amount = GREATEST(amount - $3, 0)
+             WHERE account_uuid = $1 AND meter = 'characters' AND window_start = $2",
+        )
+        .bind(account.id.as_str())
+        .bind(charged.day)
+        .bind(characters)
+        .execute(self.pool())
+        .await
+        .map_err(map_constraint_error)?;
+        Ok(())
     }
 
     /// Charges one transcription.
@@ -693,25 +886,20 @@ impl PostgresStore {
             u64::from(per_minute),
         )
         .await?;
-        if !within {
+        if within.is_none() {
             return Ok(Err(LimitExceeded::TranscriptionsPerMinute));
         }
         tx.commit().await.map_err(map_constraint_error)?;
         Ok(Ok(()))
     }
 
-    /// Subscribes to render wakeups when the pool can spare a listener connection (polling
-    /// stays authoritative).
+    /// Subscribes to render wakeups on a connection of its own (polling stays
+    /// authoritative).
     ///
     /// # Errors
     /// Listener failures.
     pub async fn subscribe_speech_wakeups(&self) -> AppResult<Option<sqlx::postgres::PgListener>> {
-        if self.pool().options().get_max_connections() < 2 {
-            return Ok(None);
-        }
-        let mut listener = sqlx::postgres::PgListener::connect_with(self.pool()).await?;
-        listener.listen(SPEECH_NOTIFICATION_CHANNEL).await?;
-        Ok(Some(listener))
+        self.dedicated_listener(SPEECH_NOTIFICATION_CHANNEL).await
     }
 
     /// Removes usage windows that no limit looks at any more.
@@ -740,11 +928,11 @@ pub(crate) async fn charge_speech_in(
     tx: &mut Transaction<'_, Postgres>,
     account: &ActorRef,
     charge: SpeechCharge,
-) -> AppResult<Result<(), LimitExceeded>> {
+) -> AppResult<Result<SpeechCharged, LimitExceeded>> {
     sqlx::query("SAVEPOINT speech_charge")
         .execute(&mut **tx)
         .await?;
-    if !meter_in(
+    if meter_in(
         tx,
         account,
         "renders",
@@ -753,13 +941,14 @@ pub(crate) async fn charge_speech_in(
         u64::from(charge.renders_per_minute),
     )
     .await?
+    .is_none()
     {
         sqlx::query("ROLLBACK TO SAVEPOINT speech_charge")
             .execute(&mut **tx)
             .await?;
         return Ok(Err(LimitExceeded::RendersPerMinute));
     }
-    if !meter_in(
+    let Some(day) = meter_in(
         tx,
         account,
         "characters",
@@ -768,18 +957,23 @@ pub(crate) async fn charge_speech_in(
         charge.daily_characters,
     )
     .await?
-    {
+    else {
         sqlx::query("ROLLBACK TO SAVEPOINT speech_charge")
             .execute(&mut **tx)
             .await?;
         return Ok(Err(LimitExceeded::DailyCharacters));
-    }
+    };
     sqlx::query("RELEASE SAVEPOINT speech_charge")
         .execute(&mut **tx)
         .await?;
-    Ok(Ok(()))
+    Ok(Ok(SpeechCharged {
+        characters: charge.characters,
+        day,
+    }))
 }
 
+/// Adds `amount` to a meter's current window when that stays within `limit`; returns the
+/// window charged, or `None` (nothing charged) when it would not.
 async fn meter_in(
     tx: &mut Transaction<'_, Postgres>,
     account: &ActorRef,
@@ -787,21 +981,21 @@ async fn meter_in(
     window: Window,
     amount: u64,
     limit: u64,
-) -> AppResult<bool> {
+) -> AppResult<Option<OffsetDateTime>> {
     let amount = i64::try_from(amount).map_err(AppError::internal)?;
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let window = match window {
         Window::Minute => "minute",
         Window::Day => "day",
     };
-    let charged: Option<i64> = sqlx::query_scalar(
+    let charged: Option<OffsetDateTime> = sqlx::query_scalar(
         "INSERT INTO speech_usage (account_uuid, meter, window_start, amount)
          SELECT $1, $2, date_trunc($3, clock_timestamp(), 'UTC'), $4
          WHERE $4 <= $5
          ON CONFLICT (account_uuid, meter, window_start) DO UPDATE
             SET amount = speech_usage.amount + EXCLUDED.amount
             WHERE speech_usage.amount + EXCLUDED.amount <= $5
-         RETURNING amount",
+         RETURNING window_start",
     )
     .bind(account.id.as_str())
     .bind(meter)
@@ -811,7 +1005,7 @@ async fn meter_in(
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_constraint_error)?;
-    Ok(charged.is_some())
+    Ok(charged)
 }
 
 /// Seconds until the window of `limit` resets.
@@ -967,8 +1161,10 @@ pub(crate) async fn announce_message_update_in(
     if deleted {
         return Ok(());
     }
+    // Revision 1 is the send; retention may have let the older deliveries go, so an
+    // announcement is never below revision 2.
     let revision: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(max(delivery_revision), 0) + 1 FROM actor_deliveries
+        "SELECT COALESCE(max(delivery_revision), 1) + 1 FROM actor_deliveries
          WHERE message_id = $1 AND delivery_kind = 'message'",
     )
     .bind(message_id)

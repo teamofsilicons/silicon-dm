@@ -1,6 +1,8 @@
 //! Groups: co-equal owners, invitations that must be accepted, members leaving, and a
 //! group never left without an owner. Membership is the accepted invitation; the
 //! conversation roster keeps an immutable anchor row per account that ever joined.
+use std::collections::HashMap;
+
 use serde::Serialize;
 use sqlx::{FromRow, Postgres, Transaction};
 use time::OffsetDateTime;
@@ -70,6 +72,13 @@ struct MemberRow {
     actor_id: String,
 }
 
+#[derive(FromRow)]
+struct GroupMemberRow {
+    conversation_id: Uuid,
+    actor_kind: String,
+    actor_id: String,
+}
+
 fn reference(kind: &str, id: &str) -> ActorRef {
     ActorRef {
         actor_type: if kind == "silicon" {
@@ -113,53 +122,104 @@ impl PostgresStore {
         viewer: &ActorRef,
         id: Uuid,
     ) -> AppResult<Option<GroupDetails>> {
-        let Some((name, description, version)): Option<(String, String, i64)> = sqlx::query_as(
-            "SELECT name, description, version FROM groups WHERE conversation_id = $1",
+        Ok(self.groups_details(viewer, &[id]).await?.remove(&id))
+    }
+
+    /// [`Self::group_details`] for a page of conversations at once (five queries for the
+    /// page, not up to five per row); conversations that are not groups are left out.
+    ///
+    /// # Errors
+    /// Database failures.
+    pub async fn groups_details(
+        &self,
+        viewer: &ActorRef,
+        ids: &[Uuid],
+    ) -> AppResult<HashMap<Uuid, GroupDetails>> {
+        let mut details = HashMap::new();
+        if ids.is_empty() {
+            return Ok(details);
+        }
+        let groups: Vec<(Uuid, String, String, i64)> = sqlx::query_as(
+            "SELECT conversation_id, name, description, version FROM groups
+             WHERE conversation_id = ANY($1)",
         )
-        .bind(id)
-        .fetch_optional(self.pool())
-        .await?
-        else {
-            return Ok(None);
-        };
+        .bind(ids)
+        .fetch_all(self.pool())
+        .await?;
+        if groups.is_empty() {
+            return Ok(details);
+        }
+        let ids: Vec<Uuid> = groups.iter().map(|(id, ..)| *id).collect();
         let rows = |sql: &'static str| {
-            sqlx::query_as::<_, MemberRow>(sql)
-                .bind(id)
+            sqlx::query_as::<_, GroupMemberRow>(sql)
+                .bind(&ids)
                 .fetch_all(self.pool())
         };
         let owners = rows(
-            "SELECT o.actor_kind::text AS actor_kind, o.actor_id FROM group_owners o
-             WHERE o.conversation_id = $1
+            "SELECT o.conversation_id, o.actor_kind::text AS actor_kind, o.actor_id FROM group_owners o
+             WHERE o.conversation_id = ANY($1)
                AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.uuid = o.actor_id AND a.status = 'deleted')
-             ORDER BY o.added_at, o.actor_id",
+             ORDER BY o.conversation_id, o.added_at, o.actor_id",
         )
         .await?;
         let members = rows(
-            "SELECT DISTINCT e.actor_kind::text AS actor_kind, e.actor_id FROM eligible_group_members e
-             WHERE e.conversation_id = $1 ORDER BY 1, 2",
+            "SELECT DISTINCT e.conversation_id, e.actor_kind::text AS actor_kind, e.actor_id
+             FROM eligible_group_members e
+             WHERE e.conversation_id = ANY($1) ORDER BY 1, 2, 3",
         )
         .await?;
-        let pending = if self.manages_group(viewer, id).await? {
-            rows(
-                "SELECT i.actor_kind::text AS actor_kind, i.actor_id FROM group_invitations i
-                 WHERE i.conversation_id = $1 AND i.status = 'pending' ORDER BY i.invited_at, i.actor_id",
-            )
-            .await?
-        } else {
+        let managed: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT o.conversation_id FROM group_owners o
+             WHERE o.conversation_id = ANY($1) AND (
+                    (o.actor_kind = $2::text::actor_kind AND o.actor_id = $3)
+                    OR (o.actor_kind = 'silicon' AND $2 = 'carbon' AND EXISTS (
+                        SELECT 1 FROM accounts a WHERE a.uuid = o.actor_id AND a.custodian_uuid = $3)))
+               AND NOT EXISTS (SELECT 1 FROM accounts gone WHERE gone.uuid = o.actor_id AND gone.status = 'deleted')",
+        )
+        .bind(&ids)
+        .bind(viewer.actor_type.as_str())
+        .bind(viewer.id.as_str())
+        .fetch_all(self.pool())
+        .await?;
+        let pending = if managed.is_empty() {
             Vec::new()
+        } else {
+            sqlx::query_as::<_, GroupMemberRow>(
+                "SELECT i.conversation_id, i.actor_kind::text AS actor_kind, i.actor_id
+                 FROM group_invitations i
+                 WHERE i.conversation_id = ANY($1) AND i.status = 'pending'
+                 ORDER BY i.conversation_id, i.invited_at, i.actor_id",
+            )
+            .bind(&managed)
+            .fetch_all(self.pool())
+            .await?
         };
-        let to_refs = |rows: Vec<MemberRow>| {
-            rows.iter()
-                .map(|row| reference(&row.actor_kind, &row.actor_id))
-                .collect::<Vec<_>>()
+        let group_by = |rows: Vec<GroupMemberRow>| {
+            let mut grouped: HashMap<Uuid, Vec<ActorRef>> = HashMap::new();
+            for row in rows {
+                grouped
+                    .entry(row.conversation_id)
+                    .or_default()
+                    .push(reference(&row.actor_kind, &row.actor_id));
+            }
+            grouped
         };
-        Ok(Some(GroupDetails {
-            settings: GroupSettings { name, description },
-            version,
-            owners: to_refs(owners),
-            members: to_refs(members),
-            pending_invitations: to_refs(pending),
-        }))
+        let mut owners = group_by(owners);
+        let mut members = group_by(members);
+        let mut pending = group_by(pending);
+        for (id, name, description, version) in groups {
+            details.insert(
+                id,
+                GroupDetails {
+                    settings: GroupSettings { name, description },
+                    version,
+                    owners: owners.remove(&id).unwrap_or_default(),
+                    members: members.remove(&id).unwrap_or_default(),
+                    pending_invitations: pending.remove(&id).unwrap_or_default(),
+                },
+            );
+        }
+        Ok(details)
     }
 
     /// Creates a group in the @accounts partition with the creator as first owner. Every
@@ -263,9 +323,12 @@ impl PostgresStore {
                 .bind(id).bind(&settings.name).bind(&settings.description).bind(version)
                 .execute(&mut *tx).await?;
             if changed.rows_affected() != 1 {
-                return Err(AppError::conflict(
+                return Err(AppError::refused(
+                    http::StatusCode::CONFLICT,
+                    "conflict",
                     "group version changed; fetch the group and retry with its current version",
-                ));
+                )
+                .with_hint("GET /api/v1/groups/{group} for its version, then PATCH again with If-Match set to it."));
             }
             // Members and pending invitees both see the name and the description.
             let mut readers = group_members_in(&mut tx, id).await?;
@@ -418,6 +481,10 @@ impl PostgresStore {
                 "invitation_not_found",
                 "There is no pending invitation to this group for this account (it may have been accepted, declined or cancelled already).",
             ));
+        }
+        if accept {
+            // Joining reads the whole history, but none of it is new to the joiner.
+            super::read_states::start_reading_at_newest_in(&mut tx, id, invitee).await?;
         }
         bump(&mut tx, id).await?;
         finish_group(&mut tx, id).await?;
@@ -628,8 +695,13 @@ async fn lock_group(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> AppResult<O
         .map_err(|error| super::rows::data_error("group partition", error))?;
     refresh_directory_in(tx, &partition, &[]).await?;
     refresh_directory_in(tx, &OrganizationId::accounts(), &[]).await?;
+    // NO KEY UPDATE: group changes still queue behind each other and behind sends (whose
+    // UPDATE of the conversation takes the same lock), but not behind the foreign-key checks
+    // (KEY SHARE) of writers that already hold an account's stream: a speech announcement or
+    // a receipt inserting a Ting handoff, which references the conversation. FOR UPDATE
+    // conflicted with those and deadlocked against the change's own conversation events.
     sqlx::query(
-        "SELECT 1 FROM conversations c JOIN groups g ON g.conversation_id=c.id WHERE c.id=$1 FOR UPDATE OF c,g",
+        "SELECT 1 FROM conversations c JOIN groups g ON g.conversation_id=c.id WHERE c.id=$1 FOR NO KEY UPDATE OF c,g",
     )
     .bind(id)
     .fetch_optional(&mut **tx)
@@ -667,6 +739,14 @@ async fn invite_in(
         } else {
             "pending"
         };
+        let member_before: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM group_invitations WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3 AND status='accepted')",
+        )
+        .bind(id)
+        .bind(invitee.actor.actor_type.as_str())
+        .bind(invitee.actor.id.as_str())
+        .fetch_one(&mut **tx)
+        .await?;
         sqlx::query(
             "INSERT INTO group_invitations(conversation_id,organization_id,actor_kind,actor_id,status,invited_by_kind,invited_by_id,invited_at,accepted_at)
              VALUES($1,$2,$3::text::actor_kind,$4,$5,$6::text::actor_kind,$7,clock_timestamp(),CASE WHEN $5='accepted' THEN clock_timestamp() END)
@@ -684,6 +764,11 @@ async fn invite_in(
         .execute(&mut **tx)
         .await
         .map_err(map_constraint_error)?;
+        if invitee.accepted && !member_before {
+            // Joined at once (the creator, or a Silicon its custodian added): what was said
+            // before is history, not unread.
+            super::read_states::start_reading_at_newest_in(tx, id, &invitee.actor).await?;
+        }
     }
     Ok(())
 }

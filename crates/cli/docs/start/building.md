@@ -18,9 +18,10 @@ feature when you want what the CLI has: stored sign-ins, the durable outgoing re
 built on the same library, and the website calls the same HTTP API, so anything they do, your program can do.
 
 ```rust,no_run
-use silicon_dm_client::{Client, MessageCreate, ReceiptStatus, SyncRequest};
+use silicon_dm_client::{Client, MessageCreate, ReceiptStatus, SyncEventKind, SyncRequest};
 # async fn example(access_token: &str) -> silicon_dm_client::Result<()> {
 let dm = Client::new("https://api.dm.teamofsilicons.com")?.with_token(access_token);
+let me = dm.me().await?.account;
 let sent = dm
     .send_message("c:ada", &MessageCreate { text: Some("The report is ready.".into()), ..Default::default() }, "report-ready-2026-10-17")
     .await?;
@@ -28,10 +29,24 @@ let mut cursor = dm.sync_reset().await?.cursor;
 loop {
     let page = dm.sync(&SyncRequest { cursor: Some(cursor.clone()), wait: Some(30), ..Default::default() }).await?;
     for event in &page.events {
-        let message = dm.message(&event.conversation_id, &event.message_id).await?;
-        // … handle it, then say it arrived:
-        dm.record_receipt(&event.conversation_id, &event.message_id, ReceiptStatus::Delivered, "my-device").await?;
-        # let _ = message;
+        // The feed carries your own messages (from every device) and the status of what you
+        // sent: act on new messages from others only.
+        if event.kind != SyncEventKind::Message {
+            continue;
+        }
+        let message = match dm.message(&event.conversation_id, &event.message_id).await {
+            Ok(message) => message,
+            // Gone from your view since (you left, or it is not yours to see): drop it.
+            Err(error) if matches!(error.status(), Some(403 | 404)) => continue,
+            Err(error) => return Err(error),
+        };
+        if message.sender.same_account(&me) || message.deleted_at.is_some() {
+            continue;
+        }
+        // … handle it, then say it arrived. One receipt that fails is not a reason to stop.
+        if let Err(error) = dm.record_receipt(&event.conversation_id, &event.message_id, ReceiptStatus::Delivered, "my-device").await {
+            eprintln!("receipt for {} not recorded: {error}", event.message_id);
+        }
     }
     cursor = page.cursor;
     # let _ = &sent; break;
@@ -75,7 +90,11 @@ and sends the link. Spoken messages are different: DM renders their audio itself
 Read the sync feed: `GET /api/v1/sync?cursor=…&wait=30` returns references to new and changed messages and holds an
 empty answer open until something arrives. Keep the cursor even after an empty page, continue while `has_more`,
 deduplicate on `event_id`, and fetch each message under your current permissions (it may have changed, or you may no
-longer see it). A 409 `sync_reset_required` means: take a reset cursor, refresh conversations, continue from it.
+longer see it: a 403 or 404 means drop that event, not stop). The feed carries **your own messages too** (sent from
+any of your devices) and `message_status` events about messages you sent: a program that answers messages acts on
+`message` events from someone else only (`sender.uuid` not yours), or it answers itself. A sender cannot record a
+receipt on its own message (422), so never receipt blindly. A 409 `sync_reset_required` means: take a reset cursor,
+refresh conversations, continue from it. The feed keeps 30 days of events; messages are kept for good.
 `LocalRuntime::inbox` and `dm inbox --watch` do all of this. A DM service configured for Ting also hands each update
 to Ting ([DM references through Ting](../reference/ting.md)).
 

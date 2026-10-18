@@ -15,6 +15,7 @@ import { shortcutOffReason, useShortcutAvailability, useShortcuts } from "@/lib/
 import { scopeWords, SHORTCUT_GROUPS, shortcutDefinition } from "@/lib/shortcuts/registry";
 import { resetAllShortcuts, setShortcutKeys, useShortcutOverrides } from "@/lib/shortcuts/store";
 import { Keys } from "../keyboard/keys";
+import { useMediaQuery } from "../shell/use-layout-mode";
 import styles from "./settings.module.css";
 
 export function KeyboardSection() {
@@ -23,6 +24,7 @@ export function KeyboardSection() {
   useShortcutAvailability();
   const [query, setQuery] = useState("");
   const changed = Object.keys(overrides).length;
+  const touch = useMediaQuery("(pointer: coarse)");
   const label = (id: string) => shortcuts.find(entry => entry.id === id)?.label ?? id;
 
   const groups = useMemo(() => {
@@ -44,6 +46,7 @@ export function KeyboardSection() {
 
   return (
     <div className={styles.stack}>
+      {touch ? <p className={styles.sectionNote}>These work with a keyboard attached to this device.</p> : null}
       <p className={styles.text}>
         Choose a shortcut&apos;s keys and press the new ones. Plain keys such as N work outside text fields only; a sequence such as G then S
         can be replaced by a combination. Changes stay in this browser.
@@ -124,8 +127,10 @@ export function KeyboardSection() {
           </ul>
         </section>
       )) : (
-        <p className={styles.quiet} role="status">No shortcut matches “{query.trim()}”. Try what it does (reply, voice) or its keys (⌘K).</p>
+        <p className={styles.quiet}>No shortcut matches “{query.trim()}”. Try what it does (reply, voice) or its keys (⌘K).</p>
       )}
+      {/* Mounted from the start, so the words are heard when a search finds nothing (WCAG 4.1.3). */}
+      <span className="sr-only" role="status">{groups.length ? "" : `No shortcut matches ${query.trim()}`}</span>
       <div className={styles.keyFooter}>
         <p className={styles.quiet}>{changed ? `${changed} ${changed === 1 ? "shortcut has" : "shortcuts have"} your own keys.` : "Every shortcut has its default keys."}</p>
         {changed ? <Button variant="secondary" size="sm" onClick={resetAllShortcuts}>Restore every default</Button> : null}

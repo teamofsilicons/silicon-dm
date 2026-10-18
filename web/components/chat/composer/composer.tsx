@@ -17,8 +17,13 @@
  * this composer leaves its words behind when it goes. A failed upload holds the message until it is retried or
  * removed, so nothing is left out silently. Slash commands at the start of the field (./slash.ts): /gif, /voice,
  * /dictate, /upload, /link.
+ *
+ * A drop's files chosen one by one go in at once; only a folder's many files wait for a yes (./drop-plan.ts). What the
+ * composer says reaches screen readers through two live regions that are always on the page (the note row, and an
+ * unseen one for uploads finishing and the GIF picker's states). The empty field's words fit its width
+ * (./placeholder.ts), and its name for screen readers is always whole.
  */
-import { forwardRef, useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowUp, Check, Clock, CornerUpLeft, Pencil, Plus, X } from "lucide-react";
@@ -38,20 +43,24 @@ import type { AccountRef, Gif, Message } from "@/lib/chat/types";
 import { ApiError } from "@/lib/errors";
 import { notify, notifyError } from "@/lib/notify";
 import { provideShortcuts, useShortcut, useShortcutKeys } from "@/lib/shortcuts/react";
-import { foldersWords, leftOutWords, readDrop, type DropSnapshot } from "@/lib/upload/drop";
+import { BRIEFCASE_DAILY_BYTES } from "@/lib/upload/client";
+import { readDrop, type DropSnapshot } from "@/lib/upload/drop";
+import { bytesWords } from "@/lib/upload/progress";
 import { useVoiceAvailability } from "@/lib/voice";
 import { IconAction } from "../common/icon-action";
 import { plainFailure } from "../thread/thread-model";
 import { ComposerVoice } from "../voice/voice-parts";
 import { AttachMenu } from "./attach-menu";
 import { DropOverlay } from "./drop-overlay";
+import { planDrop, type DropQuestion } from "./drop-plan";
 import { GifAnchor, GifPicker } from "./gif-picker";
 import { LinkBar } from "./link-bar";
 import { filesToAttach } from "./paste";
+import { fitPlaceholder } from "./placeholder";
 import { blockedWords, itemName, waitingWords } from "./send-latch";
 import { runSlash, slashOptions, type SlashContext } from "./slash";
 import { optionId, SlashMenu } from "./slash-menu";
-import { ASK_ABOVE_FILES, TRAY_MAX_ITEMS, trayFailed, trayPayload, type TrayItem } from "./tray";
+import { TRAY_MAX_ITEMS, trayFailed, trayPayload, type TrayItem } from "./tray";
 import { useBrowserOnline, useTray, type TraySender } from "./tray-store";
 import { TrayView } from "./tray-view";
 import { uploadsOffReason, useUploadsConfig } from "./uploads-config";
@@ -93,27 +102,35 @@ const MAX_LINES = 10;
 const NOTICE_MS = 7000;
 /** Uploads finishing within this long of each other are announced in one sentence ("3 files are uploaded."). */
 const ANNOUNCE_AFTER_MS = 900;
-const NARROW = "(max-width: 767px)";
 
-/** A phone-width screen (the empty field's words are shortened there). */
-function useNarrow(): boolean {
-  return useSyncExternalStore(
-    listener => {
-      const query = window.matchMedia(NARROW);
-      query.addEventListener("change", listener);
-      return () => query.removeEventListener("change", listener);
-    },
-    () => window.matchMedia(NARROW).matches,
-    () => false,
-  );
+/**
+ * Words for a screen reader, each saying one of its own: a live region reads a change inside it, never a region that
+ * appears already holding its words, so both regions the composer speaks through are always on the page and every
+ * saying is a new element in them (the same words twice are said twice).
+ */
+interface Saying {
+  id: number;
+  words: string;
 }
 
-/** "Composer look 0005" → "Composer look…": a long name cut at a word with an ellipsis, so the empty field reads whole. */
-export function shortName(name: string, max = 14): string {
-  if ([...name].length <= max) return name;
-  const head = name.slice(0, max + 1);
-  const space = head.lastIndexOf(" ");
-  return `${(space >= 4 ? head.slice(0, space) : name.slice(0, max)).trimEnd()}…`;
+/** The room the field has for its placeholder (inside its padding), and how its font draws a text. */
+function placeholderRoom(node: HTMLTextAreaElement): { room: number; measure: (text: string) => number } | null {
+  const context = document.createElement("canvas").getContext("2d");
+  if (!context) return null;
+  const style = getComputedStyle(node);
+  context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  if ("letterSpacing" in context && style.letterSpacing !== "normal") (context as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = style.letterSpacing;
+  // A pixel to spare: the browser's own layout rounds differently from the canvas.
+  const room = node.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 1;
+  return { room, measure: text => context.measureText(text).width };
+}
+
+/** What the composer says when files larger than Briefcase's usual day are added: before they are prepared, not after. */
+function dailyWords(files: File[]): string {
+  const limit = `${bytesWords(BRIEFCASE_DAILY_BYTES)}, the most Silicon Briefcase usually takes into one Briefcase in a day`;
+  return files.length === 1
+    ? `${files[0]!.name || "This file"} is larger than ${limit}, so it may be refused once it is prepared.`
+    : `${files.length} files are larger than ${limit}, so they may be refused once they are prepared.`;
 }
 
 /** What the + menu, a paste and a drop say during an edit: attachments go with a new message. */
@@ -171,11 +188,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [editText, setEditText] = useState("");
   const [link, setLink] = useState<{ prefill: string } | null>(null);
   const [gif, setGif] = useState<{ query: string } | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  /** A drop of folders with many files waits for a yes (a folder's contents were never seen). */
-  const [question, setQuestion] = useState<{ words: string; action: string; files: File[] } | null>(null);
+  const [notice, setNotice] = useState<Saying | null>(null);
+  /** A drop of folders with many files waits for a yes (a folder's contents were never seen); `after`: said once answered. */
+  const [question, setQuestion] = useState<(DropQuestion & { after: string[] }) | null>(null);
   const questionYes = useRef<HTMLButtonElement>(null);
-  const [announcement, setAnnouncement] = useState("");
+  /** Said to screen readers only: uploads that finished or failed, and the GIF picker's states. */
+  const [announcement, setAnnouncement] = useState<Saying | null>(null);
+  const sayings = useRef(0);
+  /** The empty field's words, fitted to its width (null until measured: the whole words, as the server drew them). */
+  const [fitted, setFitted] = useState<string | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const voiceControls = useRef<ComposerVoiceControls | null>(null);
@@ -184,7 +205,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const finished = useRef<{ items: TrayItem[]; timer: ReturnType<typeof setTimeout> | null }>({ items: [], timer: null });
   const listId = useId();
   const sendKeys = useShortcutKeys("composer.send");
-  const narrow = useNarrow();
 
   const text = editing ? editText : draft.text;
   const items = tray.items;
@@ -213,9 +233,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const focus = useCallback(() => field.current?.focus({ preventScroll: true }), []);
 
   const say = useCallback((words: string) => {
-    setNotice(words);
+    sayings.current += 1;
+    setNotice({ id: sayings.current, words });
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
     noticeTimer.current = setTimeout(() => setNotice(null), NOTICE_MS);
+  }, []);
+  const announce = useCallback((words: string) => {
+    sayings.current += 1;
+    setAnnouncement(words ? { id: sayings.current, words } : null);
   }, []);
   useEffect(() => () => {
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
@@ -303,15 +328,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     fileInput.current?.click();
   };
 
-  const addFiles = (list: File[]) => {
+  /**
+   * Adds files to the tray and uploads them. What it has to say (too many for one message; files larger than
+   * Briefcase's usual day, said before they are prepared rather than after) goes into `later` when the caller says it
+   * with its own words, else it is said at once.
+   */
+  const addFiles = (list: File[], later?: string[]) => {
     if (!enabled || !list.length) return;
-    if (uploadsOff) {
-      say(uploadsOff);
-      return;
+    const words: string[] = [];
+    if (uploadsOff) words.push(uploadsOff);
+    else {
+      const taken = tray.addFiles(list, { maxBytes, capped });
+      if (taken < list.length) words.push(`${list.length - taken === 1 ? "One file was" : `${list.length - taken} files were`} left out: a message carries up to ${TRAY_MAX_ITEMS} attachments. Send these first.`);
+      // Files the tray refuses for their size say so there; these it takes, and Briefcase may refuse after their preparation.
+      const huge = list.slice(0, taken).filter(file => file.size > BRIEFCASE_DAILY_BYTES && (!maxBytes || file.size <= maxBytes));
+      if (huge.length) words.push(dailyWords(huge));
+      focus();
     }
-    const taken = tray.addFiles(list, { maxBytes, capped });
-    if (taken < list.length) say(`${list.length - taken === 1 ? "One file was" : `${list.length - taken} files were`} left out: a message carries up to ${TRAY_MAX_ITEMS} attachments. Send these first.`);
-    focus();
+    if (later) later.push(...words);
+    else if (words.length) say(words.join(" "));
   };
 
   const addLink = (url: string) => {
@@ -327,42 +362,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const takeDrop = async (snapshot: DropSnapshot) => {
     if (!enabled) return;
     const dropped = await readDrop(snapshot);
-    const sayings = [...dropped.problems];
-    const { files, links } = dropped;
     // Attachments go with a new message, so nothing joins a tray hidden behind an edit (the + menu says the same).
-    if (editing && (files.length || links.length || dropped.folders.length)) {
+    if (editing && (dropped.files.length || dropped.links.length || dropped.folders.length)) {
       say(ATTACH_AFTER_EDIT);
       return;
     }
-    const empty = dropped.folders.filter(folder => folder.files === 0);
-    if (empty.length) sayings.push(`${foldersWords(empty)} ${empty.length === 1 ? "has" : "have"} no files to send${empty.some(folder => folder.hidden || folder.empty) ? " (hidden and empty files are left out)" : ""}.`);
-    const left = leftOutWords(dropped.folders.filter(folder => folder.files > 0));
-    if (left) sayings.push(left);
-    if (files.length && uploadsOff) {
-      sayings.push(uploadsOff);
-      files.length = 0;
-    }
-    for (const url of links) addLink(url);
-    const fromFolders = dropped.folders.reduce((sum, folder) => sum + folder.files, 0);
-    if (fromFolders > 0 && files.length > ASK_ABOVE_FILES) {
-      const full = dropped.folders.filter(folder => folder.files > 0);
-      const room = Math.max(0, TRAY_MAX_ITEMS - tray.current().length);
-      const count = Math.min(room, files.length);
-      const many = dropped.folders.some(folder => folder.truncated) ? `more than ${files.length.toLocaleString("en-US")}` : files.length.toLocaleString("en-US");
-      if (!count) sayings.push(`This message already carries ${TRAY_MAX_ITEMS} attachments, the most it takes. Send it first.`);
-      else {
-        setQuestion({
-          words: count < files.length
-            ? `${foldersWords(full)} ${full.length === 1 ? "has" : "have"} ${many} files, and a message carries up to ${TRAY_MAX_ITEMS} attachments. Upload the first ${count}?`
-            : `${foldersWords(full)} ${full.length === 1 ? "has" : "have"} ${many} files. Upload all of them?`,
-          action: `Upload ${count} files`,
-          files: files.slice(0, count),
-        });
-      }
-    } else if (files.length) {
-      addFiles(files);
-    }
-    if (sayings.length) say(sayings.join(" "));
+    // Links and the files dropped one by one go in at once; a folder's many files wait for a yes (./drop-plan.ts).
+    const plan = planDrop(dropped, { room: Math.max(0, TRAY_MAX_ITEMS - tray.current().length), uploadsOff });
+    for (const url of plan.links) addLink(url);
+    const later = [...plan.sayings];
+    addFiles(plan.add, later);
+    // Asked: what else the drop has to say waits for the answer, so the question never hides it.
+    if (plan.question) setQuestion({ ...plan.question, after: later });
+    else if (later.length) say(later.join(" "));
   };
 
   // The question takes the keyboard when it is asked (Enter answers yes, Esc no).
@@ -373,8 +385,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const answerQuestion = (yes: boolean) => {
     const asked = question;
     setQuestion(null);
-    if (yes && asked) addFiles(asked.files);
+    const later = [...(asked?.after ?? [])];
+    if (yes && asked) addFiles(asked.files, later);
     else focus();
+    if (later.length) say(later.join(" "));
   };
 
   const pickGif = (chosen: Gif) => {
@@ -414,12 +428,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       statuses.current.set(item.id, item.status);
     }
     for (const id of [...statuses.current.keys()]) if (!seen.has(id)) statuses.current.delete(id);
-    if (failures.length) setAnnouncement(failures.join(" "));
+    if (failures.length) announce(failures.join(" "));
     if (finished.current.items.length && !finished.current.timer) {
       finished.current.timer = setTimeout(() => {
         const done = finished.current.items;
         finished.current = { items: [], timer: null };
-        setAnnouncement(uploadedWords(done));
+        announce(uploadedWords(done));
       }, ANNOUNCE_AFTER_MS);
     }
   };
@@ -485,6 +499,27 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     provideShortcuts(["composer.upload"]);
   }, []);
 
+  // The empty field's words fit its width (./placeholder.ts): measured before the first paint, and again when the
+  // field changes size or the font arrives.
+  useLayoutEffect(() => {
+    const node = field.current;
+    if (!node || editing || disabledReason) return;
+    let live = true;
+    const fit = () => {
+      if (!live) return;
+      const metrics = placeholderRoom(node);
+      setFitted(metrics ? fitPlaceholder("Message ", name, metrics.room, metrics.measure) : null);
+    };
+    fit();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
+    observer?.observe(node);
+    void document.fonts?.ready.then(fit);
+    return () => {
+      live = false;
+      observer?.disconnect();
+    };
+  }, [name, editing, disabledReason]);
+
   /* Keys (lib/shortcuts): these run only while the field has the keyboard. */
   useShortcut("composer.send", event => {
     // On a touch screen Enter is a new line: the send button sends.
@@ -528,7 +563,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }
 
   const label = editing ? "Edit your message" : `Message ${name}`;
-  const placeholder = editing || !narrow ? label : `Message ${shortName(name)}`;
+  const placeholder = editing ? label : fitted ?? label;
+  // What shows under the field: a question about a drop first, else a waiting send, else the last saying.
+  const shownPending = !question && pending;
+  const shownNotice = !question && !pending ? notice : null;
+  const offlineDraft = draft.save === "offline";
   return (
     <div className={styles.composer} data-composer="">
       {editing ? (
@@ -565,7 +604,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         />
       ) : null}
       {link && !editing ? <LinkBar prefill={link.prefill} onAdd={addLink} onClose={() => { setLink(null); focus(); }} /> : null}
-      <GifPicker open={gif} onClose={() => setGif(null)} onPick={pickGif} onClosed={focus}>
+      <GifPicker open={gif} onClose={() => setGif(null)} onPick={pickGif} onClosed={focus} onAnnounce={announce}>
         <div className={styles.row}>
           {slash.length ? <SlashMenu id={listId} options={slash} active={slashActive} onRun={runSlashAt} onHover={setSlashIndex} /> : null}
           <ComposerActions side="start">
@@ -684,17 +723,23 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <button ref={questionYes} type="button" className={styles.noteAction} data-sq="surface" aria-describedby={`${listId}-question`} onClick={() => answerQuestion(true)}>{question.action}</button>
           <button type="button" className={styles.noteAction} data-sq="surface" aria-keyshortcuts="Escape" onClick={() => answerQuestion(false)}>Cancel</button>
         </div>
-      ) : pending ? (
-        <div className={styles.noteRow}>
-          <p className={styles.note} data-tone="pending" role="status">{waitingWords(items, online)}</p>
-          {/* Esc does the same; a phone has no Esc, so the wish can be taken back by touch too. */}
-          <button type="button" className={styles.noteAction} data-sq="surface" aria-label="Cancel sending" aria-keyshortcuts="Escape" title="Cancel sending (Esc)" onClick={cancelWaiting}>Cancel</button>
-        </div>
-      ) : notice ? (
-        <p className={styles.note} role="status">{notice}</p>
       ) : null}
-      {draft.save === "offline" ? <p className={styles.note} role="status">Offline: your draft is kept in this browser and saves when you are back.</p> : null}
-      <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
+      {/* What the composer says, through a live region that is always on the page: each saying is a new element in it,
+          so screen readers read it (a region that appears already holding its words is not read), the same words twice
+          included. Cancel stays outside it. */}
+      <div className={styles.noteRow} data-kind={shownPending ? "pending" : shownNotice || offlineDraft ? "notice" : "none"}>
+        <div className={styles.noteWords} role="status" aria-live="polite">
+          {shownPending ? (
+            <p className={styles.note} data-tone="pending">{waitingWords(items, online)}</p>
+          ) : shownNotice ? (
+            <p key={shownNotice.id} className={styles.note}>{shownNotice.words}</p>
+          ) : null}
+          {offlineDraft ? <p className={styles.note}>Offline: your draft is kept in this browser and saves when you are back.</p> : null}
+        </div>
+        {/* Esc does the same; a phone has no Esc, so the wish can be taken back by touch too. */}
+        {shownPending ? <button type="button" className={styles.noteAction} data-sq="surface" aria-label="Cancel sending" aria-keyshortcuts="Escape" title="Cancel sending (Esc)" onClick={cancelWaiting}>Cancel</button> : null}
+      </div>
+      <p className="sr-only" role="status" aria-live="polite">{announcement ? <span key={announcement.id}>{announcement.words}</span> : null}</p>
       {/* During an edit the layer says why nothing can be dropped (attachments go with a new message) before the drop. */}
       <DropOverlay blocked={editing ? ATTACH_AFTER_EDIT : null} filesOff={uploadsOff} maxBytes={maxBytes} capped={capped} onDrop={snapshot => void takeDrop(snapshot)} />
     </div>

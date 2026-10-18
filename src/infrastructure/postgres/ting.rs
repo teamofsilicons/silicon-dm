@@ -80,6 +80,10 @@ impl PostgresStore {
     ///
     /// # Errors
     /// Rejects invalid claim settings, or reports a durable database failure.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "two lanes, legacy discards and the persisted request form one claim"
+    )]
     pub async fn claim_ting_deliveries(
         &self,
         owner: &str,
@@ -101,10 +105,19 @@ impl PostgresStore {
         let mut transaction = self.pool().begin().await?;
         let mut claims = Vec::new();
         let mut discarded = 0_usize;
+        // New, edited and deleted messages go first, receipts after them: one bulk receipt
+        // queues a status handoff per message it marks, and a burst of those must not hold up
+        // the next message behind it. Within a lane, the oldest due first.
+        let mut content_first = true;
         // Discarded handoffs do not count towards the batch: keep looking (bounded) so a
         // backlog of legacy rows never stalls the ones that can be sent.
         while claims.is_empty() && discarded < MAX_DISCARDS_PER_CLAIM {
-            let records = sqlx::query_as::<_, HandoffRecord>(
+            let lane = if content_first {
+                "AND h.event IN ('message.created','message.updated','message.deleted')"
+            } else {
+                ""
+            };
+            let records = sqlx::query_as::<_, HandoffRecord>(sqlx::AssertSqlSafe(format!(
                 r#"
             SELECT h.delivery_id,h.target_kind::text AS target_kind,h.target_id,
                 a.current_id AS target_public_id,
@@ -113,7 +126,7 @@ impl PostgresStore {
                 h.event,h.routing_address,h.request_body,h.attempt_count
             FROM ting_handoffs h
             LEFT JOIN accounts a ON a.uuid = h.target_id
-            WHERE h.accepted_at IS NULL AND h.discarded_at IS NULL
+            WHERE h.accepted_at IS NULL AND h.discarded_at IS NULL {lane}
                 AND h.next_attempt_at<=clock_timestamp()
                 AND (h.lease_id IS NULL OR h.lease_expires_at<=clock_timestamp())
                 AND EXISTS(SELECT 1 FROM effective_conversation_participants p
@@ -121,12 +134,16 @@ impl PostgresStore {
                         AND p.actor_kind=h.target_kind AND p.actor_id=h.target_id)
             ORDER BY h.next_attempt_at,h.created_at,h.delivery_id
             LIMIT $1 FOR UPDATE OF h SKIP LOCKED
-            "#,
-            )
+            "#
+            )))
             .bind(limit)
             .fetch_all(&mut *transaction)
             .await?;
             if records.is_empty() {
+                if content_first {
+                    content_first = false;
+                    continue;
+                }
                 break;
             }
             for record in records {
@@ -207,7 +224,7 @@ impl PostgresStore {
         .bind(claim.target.id.as_str())
         .fetch_one(self.pool())
         .await
-        .map_err(AppError::Database)
+        .map_err(AppError::database)
     }
 
     /// Marks unsent handoffs discarded with a reason (never deletes them): what DM does

@@ -17,6 +17,16 @@ function area(kind: Area): Storage | null {
 
 const usable: Partial<Record<Area, boolean>> = {};
 
+/**
+ * After signing out nothing new is written (removing still works): a draft's save or a send answering while the page
+ * leaves would put the Carbon's words back into this browser right after they were removed (lib/chat/local-data.ts).
+ */
+let frozen = false;
+
+export function freezeStorage(): void {
+  frozen = true;
+}
+
 /** Whether this browser lets the page keep anything (a private window or blocked site data may not). */
 export function canStore(kind: Area = "local"): boolean {
   if (usable[kind] !== undefined) return usable[kind]!;
@@ -43,6 +53,7 @@ export function readJson<T>(key: string, fallback: T, kind: Area = "local"): T {
 
 /** Writes JSON (removes the key for null/undefined). Returns false when storage refused it. */
 export function writeJson(key: string, value: unknown, kind: Area = "local"): boolean {
+  if (frozen && value !== null && value !== undefined) return false;
   try {
     const store = area(kind);
     if (!store) return false;
@@ -63,6 +74,7 @@ export function readText(key: string, kind: Area = "local"): string | null {
 }
 
 export function writeText(key: string, value: string | null, kind: Area = "local"): void {
+  if (frozen && value !== null) return;
   try {
     const store = area(kind);
     if (!store) return;
@@ -81,4 +93,31 @@ export function onStorage(key: string, listener: () => void): () => void {
   };
   window.addEventListener("storage", handler);
   return () => window.removeEventListener("storage", handler);
+}
+
+/** Every key of this area that starts with one of `prefixes` (and passes `keep`, when given, is left). */
+export function keysStartingWith(prefixes: string[], kind: Area = "local"): string[] {
+  try {
+    const store = area(kind);
+    if (!store) return [];
+    const out: string[] = [];
+    for (let index = 0; index < store.length; index++) {
+      const key = store.key(index);
+      if (key && prefixes.some(prefix => key.startsWith(prefix))) out.push(key);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Removes keys (storage that refuses is left as it is); it works after freezeStorage too. */
+export function removeKeys(keys: string[], kind: Area = "local"): void {
+  for (const key of keys) {
+    try {
+      area(kind)?.removeItem(key);
+    } catch {
+      // Storage refused: nothing more to do.
+    }
+  }
 }

@@ -28,7 +28,9 @@ through ElevenLabs (`eleven_v4`), and transcribes with Deepgram (`nova-3`).
   custodian reading along and a Silicon saving it with `dm messages listen` all get the same bytes, so "it sounded
   sarcastic to me" is never a property of one client.
 - **Listening again is instant and free.** Kept audio is served straight away (`x-dm-cache: hit`) and never counts
-  against anyone's limits.
+  against anyone's limits. Listening to a spoken message is free even the first time: its sender paid when sending it.
+  A listener who arrives while it is being rendered (by any DM process) waits for that render instead of starting a
+  second one.
 
 ## Pre-rendering
 
@@ -42,7 +44,11 @@ after the fifth attempt the status is `failed`, and listening still tries again 
 
 ## The audio cache is derived, never an upload
 
-DM keeps rendered audio in its database (`speech_audio`), keyed by the model, the voice and the exact script. It is a
+DM keeps rendered audio in its database (`speech_audio`), keyed by the model, the voice and the exact script, and by
+whose it is: a message's audio belongs to its conversation, and a script rendered with `POST /speech` (a preview, a
+voice sample) belongs to the account that asked. A hit is fast and free, so one cache for everyone would let any
+signed-in account learn that some message, in a conversation it cannot read, said exactly what it guessed (a one-time
+code, a yes or no); with the scope in the key, a hit only ever finds audio the caller could already hear. It is a
 cache, not storage: any entry can be evicted (the least recently used beyond 2 GiB, or anything unused for 90 days, by
 default) and rendered again from the message's script and pinned voice. That is also why DM's rule "attachments are
 links; DM uploads nothing" still holds: nobody uploads speech, and nothing in the cache is the only copy of anything.
@@ -101,7 +107,12 @@ is never limited. Every refusal says which limit was reached and when to try aga
 
 A spoken message is charged when it is sent, in the same transaction that stores it: over a limit, the send itself is
 refused with 429 and nothing is stored, so a message never sits in a conversation with speech that will not come. A
-script DM already has in its cache (the same words, voice and model) costs nothing.
+script DM already has in that conversation's cache (the same words, voice and model) costs nothing. A render the
+provider fails gives the day's characters back (the budget counts what was rendered; the attempt still counts towards
+the per-minute limit, which paces retries during an outage). Each DM process also renders at most 7,500 characters
+and streams at most 64 audio answers at once, reading the audio from the cache a window at a time, so a burst of
+listeners or long scripts never takes the service's memory with it: past that, `speech_unavailable` (503) asks for
+a retry a few seconds later.
 [Limits](../reference/limits.md) has the numbers and the settings that change them.
 
 ## Transcription

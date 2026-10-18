@@ -9,7 +9,8 @@
  * Enter in the search picks the first GIF for what was typed (never one still on screen from before: it waits for the
  * results, asking at once). Picking puts the GIF in the tray; Enter then sends it. Under reduced motion the tiles show
  * Giphy's still frames. Offline it says so instead of loading forever. "Powered by GIPHY" is Giphy's own condition for
- * using its search.
+ * using its search. What it says (offline, nothing found) reaches screen readers through the composer's live region
+ * (`onAnnounce`), which is always on the page: one inside this panel would appear already holding its words, unread.
  *
  * While it is open the others see "looking for a GIF…" (reportActivity, throttled in lib/chat/presence.ts).
  */
@@ -113,7 +114,7 @@ function GifTiles({ gifs, label, start, active, reduced, onPick, onFocusTile }: 
   );
 }
 
-function GifPanel({ initialQuery, onPick }: { initialQuery: string; onPick: (gif: Gif) => void }) {
+function GifPanel({ initialQuery, onPick, onAnnounce }: { initialQuery: string; onPick: (gif: Gif) => void; onAnnounce?: (words: string) => void }) {
   const [query, setQuery] = useState(initialQuery);
   const [active, setActive] = useState(0);
   const typed = query.trim().slice(0, 50);
@@ -142,6 +143,13 @@ function GifPanel({ initialQuery, onPick }: { initialQuery: string; onPick: (gif
   // What is on screen answers what was typed (not the trending GIFs, nor the last search still shown meanwhile).
   const shownFor = search === typed && (search ? found.isSuccess && !found.isPlaceholderData : trending.isSuccess) ? typed : null;
   const first = all[0];
+  // The state line's words, said to screen readers as well (a failure is an alert of its own).
+  const offlineWords = "You are offline. GIFs show here when you are back.";
+  const emptyWords = search ? `No GIFs for “${search}”. Try another word.` : "No GIFs to show right now.";
+  const stateWords = failure ? "" : offline && !all.length ? offlineWords : !loading && !all.length ? emptyWords : "";
+  useEffect(() => {
+    if (stateWords) onAnnounce?.(stateWords);
+  }, [stateWords, onAnnounce]);
 
   useEffect(() => {
     if (pickWhenShown.current === null || shownFor !== pickWhenShown.current) return;
@@ -199,13 +207,13 @@ function GifPanel({ initialQuery, onPick }: { initialQuery: string; onPick: (gif
             <Button size="sm" variant="secondary" onClick={() => void (search ? found.refetch() : trending.refetch())}>Try again</Button>
           </div>
         ) : offline && !all.length ? (
-          <p className={styles.gifState} role="status">You are offline. GIFs show here when you are back.</p>
+          <p className={styles.gifState}>{offlineWords}</p>
         ) : loading && !all.length ? (
           <div className={styles.gifGrid} aria-busy="true" aria-label="Loading GIFs" role="status">
             {Array.from({ length: 9 }, (_, index) => <span key={index} className={styles.gifPlaceholder} data-sq="surface" />)}
           </div>
         ) : !all.length ? (
-          <p className={styles.gifState} role="status">{search ? `No GIFs for “${search}”. Try another word.` : "No GIFs to show right now."}</p>
+          <p className={styles.gifState}>{emptyWords}</p>
         ) : (
           <>
             {recentItems.length ? <p className={styles.gifSection}>Recent</p> : null}
@@ -229,9 +237,11 @@ export interface GifPickerProps {
   onClosed: () => void;
   /** The anchor (<GifAnchor asChild>…</GifAnchor>) and whatever sits around it. */
   children: ReactNode;
+  /** Says the picker's state to screen readers (the composer's live region). */
+  onAnnounce?: (words: string) => void;
 }
 
-export function GifPicker({ open, onClose, onPick, onClosed, children }: GifPickerProps) {
+export function GifPicker({ open, onClose, onPick, onClosed, children, onAnnounce }: GifPickerProps) {
   // The panel keeps its content while it fades out (it never shrinks to an empty box); each opening starts afresh.
   // (`open` is a new object for every opening: the composer makes one each time.)
   const [shown, setShown] = useState<{ opening: object; query: string; round: number } | null>(null);
@@ -258,7 +268,7 @@ export function GifPicker({ open, onClose, onPick, onClosed, children }: GifPick
           if (!active || active === document.body) onClosed();
         }}
       >
-        {shown ? <GifPanel key={shown.round} initialQuery={shown.query} onPick={onPick} /> : null}
+        {shown ? <GifPanel key={shown.round} initialQuery={shown.query} onPick={onPick} onAnnounce={onAnnounce} /> : null}
       </PopoverContent>
     </Popover>
   );

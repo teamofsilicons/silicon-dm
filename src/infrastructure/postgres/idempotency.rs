@@ -116,15 +116,22 @@ pub(crate) async fn claim(
     if existing.request_hash.len() != hash.len()
         || !bool::from(existing.request_hash.as_slice().ct_eq(hash.as_slice()))
     {
-        return Err(AppError::conflict(
+        return Err(AppError::refused(
+            http::StatusCode::CONFLICT,
+            "conflict",
             "idempotency key was already used with different request content",
-        ));
+        )
+        .with_hint("Use a new Idempotency-Key for a different request; repeat a key only to retry exactly the same request."));
     }
     match (existing.status.as_str(), existing.resource_id) {
         ("completed", Some(resource_id)) => Ok(IdempotencyClaim::Replay(resource_id)),
-        ("in_progress", _) => Err(AppError::conflict(
+        ("in_progress", _) => Err(AppError::refused(
+            http::StatusCode::CONFLICT,
+            "conflict",
             "idempotent request is still in progress",
-        )),
+        )
+        .with_hint("The first request with this Idempotency-Key is still running: retry in a moment with the same key to get its result.")
+        .with_retry_after(1)),
         _ => Err(AppError::internal(anyhow::anyhow!(
             "invalid idempotency record state"
         ))),

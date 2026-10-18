@@ -18,6 +18,7 @@ import { activityWords } from "@/lib/chat/presence";
 import type { AccountRef, Presence } from "@/lib/chat/types";
 import { notify, notifyError } from "@/lib/notify";
 import { AccountAvatar } from "../common/avatars";
+import { refocusIfLost } from "../common/refocus";
 import { useStartConversation } from "../dialogs/open-conversation";
 import { useChat } from "../shell/chat-context";
 import { useDetails } from "../shell/details";
@@ -123,13 +124,15 @@ export function PersonRow({ account, presence, notes = [], custodian = null, act
   removing?: boolean;
   onRemovingChange?: (removing: boolean) => void;
 }) {
+  const row = useRef<HTMLLIElement>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
   const morph = useRef<HTMLDivElement>(null);
   const [asking, setAsking] = useState(false);
   const wasRemoving = useRef(false);
   const name = accountName(account);
 
-  // The question takes the keyboard when it appears (from the menu); when it goes, focus returns to the menu button.
+  // The question takes the keyboard when it appears (from the menu); when it goes, focus returns to the menu button,
+  // unless a click elsewhere closed it and put focus there (common/refocus.ts).
   useEffect(() => {
     if (removing && !wasRemoving.current) {
       const frame = requestAnimationFrame(() => morph.current?.querySelector<HTMLElement>("button[data-autofocus]")?.focus());
@@ -138,12 +141,12 @@ export function PersonRow({ account, presence, notes = [], custodian = null, act
     }
     if (!removing && wasRemoving.current) {
       wasRemoving.current = false;
-      if (!menuButton.current?.isConnected || document.activeElement === document.body) requestAnimationFrame(() => menuButton.current?.focus());
+      return refocusIfLost(row.current, () => menuButton.current);
     }
   }, [removing]);
 
   return (
-    <li className={styles.person} data-account={account.id} data-asking={removing && removal ? "" : undefined}>
+    <li ref={row} className={styles.person} data-account={account.id} data-asking={removing && removal ? "" : undefined}>
       <AccountAvatar account={account} size="header" presence={presence} decorative />
       <span className={styles.personText}>
         <span className={styles.personName}>{name}</span>
@@ -157,7 +160,7 @@ export function PersonRow({ account, presence, notes = [], custodian = null, act
       </span>
       {removing && removal ? (
         <ConfirmMorph ref={morph} className={styles.morph} label={removal.confirmLabel} prompt={removal.prompt} confirmLabel={removal.confirmLabel} pendingLabel={removal.pendingLabel} doneLabel={removal.doneLabel}
-          defaultState="confirming" onConfirm={removal.run}
+          defaultState="confirming" confirmTimeout={0} onConfirm={removal.run}
           onStateChange={(state: ConfirmMorphState) => { if (state === "idle") onRemovingChange?.(false); }} />
       ) : actions.length ? (
         <DropdownMenuRoot onOpenChange={setAsking}>

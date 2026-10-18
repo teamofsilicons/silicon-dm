@@ -19,6 +19,10 @@
  *
  * and the browser asks GET /api/uploads/saving?id=… for the link (app/api/uploads/saving/route.ts), or DELETEs it.
  *
+ * A server told to stop (a deploy's SIGTERM) starts no new upload (503 website_restarting: the page sends the file again
+ * by itself) and stops every one under way, cancelling its reservation at Briefcase before the process exits
+ * (lib/server/briefcase.ts stopUploads; prepareServer runs from instrumentation.ts).
+ *
  * Errors are {"error":{code,message,hint}} in words a Carbon reads (lib/server/briefcase.ts has every one). Only this
  * site's own pages may call it (Origin and Sec-Fetch-Site), only signed in, at most MAX_UPLOADS_PER_ACCOUNT at once for
  * one account (429 too_many_uploads, Retry-After 5). A refusal decided before the bytes are read is answered at once
@@ -30,8 +34,8 @@
  * (which ends the whole sign-in). A token in its last 30 seconds answers 401 session_refresh_needed instead; the browser
  * renews its session and sends the file again (lib/upload/client.ts).
  */
-import type { NextRequest, NextResponse } from "next/server";
-import { claimUploadSlot, cleanFileName, contentTypeFor, declaredFile, discardBody, keepSaving, saveToBriefcase, SAVING_TIMING, storedName, tooManyUploads, UploadFailure, UploadProof, uploadsSettings, type SavedUpload } from "@/lib/server/briefcase";
+import { after, type NextRequest, type NextResponse } from "next/server";
+import { claimUploadSlot, cleanFileName, contentTypeFor, declaredFile, discardBody, failureOf, keepSaving, restarting, saveToBriefcase, SAVING_TIMING, stopping, storedName, tooManyUploads, trackUpload, UploadFailure, UploadProof, uploadsSettings, type SavedUpload } from "@/lib/server/briefcase";
 import { EnvError, serverEnv } from "@/lib/server/env";
 import { json, misconfigured } from "@/lib/server/responses";
 import { errorBody, readSession, sameOriginProblem } from "@/lib/server/session";
@@ -44,6 +48,18 @@ function failed(failure: UploadFailure): NextResponse {
   return json(failure.status, failure.body(), response => {
     if (failure.retryAfter) response.headers.set("Retry-After", String(Math.ceil(failure.retryAfter)));
   });
+}
+
+/**
+ * Keeps a stopping server's exit waiting for work that goes on after the answer (Next's after(), which `next start`
+ * awaits before it exits). Outside a Next request (the unit tests call this handler directly) there is nothing to keep.
+ */
+function outlasting(work: Promise<void>): void {
+  try {
+    after(work);
+  } catch {
+    // Not in a Next request.
+  }
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -67,6 +83,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     discardBody(request.body);
     return json(403, errorBody("cross_site_request", problem, "Use this site's own pages."));
   }
+  // The server is stopping (a deploy): the page sends the file again in a moment, to the server that comes next.
+  if (stopping()) return refuse(restarting());
   const settings = uploadsSettings();
   if (!settings.enabled) return refuse(new UploadFailure(503, "uploads_not_configured", settings.reason, "Send a link instead (+\u00a0→\u00a0Add a link)."));
   const session = readSession(request);
@@ -90,6 +108,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     // First, while the access token is surely valid: the proof then lives on its own, however long the bytes take.
     proof = await UploadProof.issue(env, session.at);
+    // The server began to stop while the proof was asked for: nothing is reserved yet.
+    if (stopping()) throw restarting();
     const used = proof;
     // Cancelling or abandoning a save that goes on after the 202 (the request's own signal no longer aborts by then).
     const stop = new AbortController();
@@ -99,6 +119,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       settings, proof: used, name: storedName(name), contentType, file: declared, body: request.body,
       signal: AbortSignal.any([request.signal, stop.signal]), owner: session.acct.uuid, appId: env.appId, onTransferred: () => transferred(),
     }).then(({ url }) => ({ url, name, content_type: contentType, size: declared.size }));
+    // Until it ends, a stopping server stops it and cancels its reservation (lib/server/briefcase.ts stopUploads).
+    trackUpload(stop, work);
     // Briefcase's answer, or (every byte in, no answer after holdMs) the 202. The browser leaving meanwhile aborts the
     // save, so `work` settles at once and answers (to nobody).
     const saved = await Promise.race([
@@ -108,14 +130,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     if (saved) return json(200, { type: "upload", data: saved });
     const id = keepSaving(session.acct.uuid, work, stop);
     ends = false;
-    void work.then(() => undefined, () => undefined).finally(() => {
+    // The save goes on after this answer, holding the slot and the proof. A server told to stop waits for it (after()),
+    // and stopUploads ends it at once, so its reservation is cancelled before the process exits.
+    outlasting(work.then(() => undefined, () => undefined).then(() => {
       slot();
-      void used.revoke();
-    });
+      return used.revoke();
+    }));
     return json(202, { type: "upload.saving", data: { id, name, content_type: contentType, size: declared.size } });
   } catch (error) {
-    const failure = UploadFailure.from(error);
-    if (!(error instanceof UploadFailure)) console.error(`upload failed: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`);
+    const failure = failureOf(error);
     // Refused before any byte was taken (Accounts or the reservation said no): the browser may still be sending. Once
     // the bytes were being piped, the body is the transfer's (discardBody leaves a stream in use alone).
     discardBody(request.body);

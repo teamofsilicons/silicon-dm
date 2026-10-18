@@ -64,7 +64,8 @@ export default async function SignInPage({ searchParams }: PageProps<"/sign-in">
     );
   }
 
-  const message = error ? ERRORS[error] ?? "The sign-in did not finish. Start it again." : null;
+  // Only the codes listed: a code such as `__proto__` or `constructor` is a property of every object, not a message.
+  const message = error ? (Object.hasOwn(ERRORS, error) ? ERRORS[error]! : "The sign-in did not finish. Start it again.") : null;
   return (
     <main id="main" className={styles.page}>
       <div className={styles.column}>

@@ -399,7 +399,7 @@ export function UserMenu({ user, status: statusProp, defaultStatus = "available"
   const bottomSheet = <AnimatePresence>
     {open && sheet && <motion.div key="scrim" className={styles.scrim} aria-hidden="true" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
       transition={{ duration: reduced ? .1 : .2, ease: standard }} onClick={() => close(true)} />}
-    {open && sheet && <motion.div key="sheet" ref={surfaceRef} {...menuProps} className={`${styles.panel} ${styles.sheet}`} aria-modal="true"
+    {open && sheet && <motion.div key="sheet" ref={surfaceRef} {...menuProps} className={`${styles.panel} ${styles.sheet}`}
       variants={reduced ? stillMotion : sheetMotion} initial="closed" animate="open" exit="exit"
       drag={reduced ? false : "y"} dragConstraints={{ top: 0, bottom: 0 }} dragElastic={{ top: .04, bottom: .9 }} dragMomentum={false} onDragEnd={onDragEnd}>
       <span className={styles.handle} aria-hidden="true" />
@@ -409,7 +409,7 @@ export function UserMenu({ user, status: statusProp, defaultStatus = "available"
 
   return <span ref={rootRef} className={styles.root}>
     <button ref={setTriggerRef} id={triggerId} type="button" className={[styles.trigger, className].filter(Boolean).join(" ")} data-state={open ? "open" : "closed"} data-name={showName || undefined}
-      aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} aria-label={`Account menu, ${user.name}, ${user.name.trim().split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join("")}${showStatus ? `, ${statusLabel(status)}` : ""}`}
+      aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} aria-label={`Account menu, ${user.name}${user.avatarSrc ? "" : `, ${user.name.trim().split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join("")}`}${showStatus ? `, ${statusLabel(status)}` : ""}`}
       onClick={onTriggerClick} onKeyDown={onTriggerKeyDown}>
       <Face user={user} status={showStatus ? status : undefined} size="sm" />
       {showName && <><span className={styles.triggerName}>{user.name}</span><ChevronDown className={styles.chevron} size={16} strokeWidth={1.75} aria-hidden="true" /></>}

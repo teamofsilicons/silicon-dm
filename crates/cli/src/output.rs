@@ -29,8 +29,57 @@ pub fn print_line(value: &Value) -> std::io::Result<()> {
     output.flush()
 }
 
+/// Input dm refuses before anything is sent or queued: a known mistake with its own code, the
+/// words of what is wrong, what to do instead, and the exit code (2 for what the arguments or
+/// their files say, like the parser's own refusals).
+#[derive(Debug)]
+pub struct Refusal {
+    pub code: &'static str,
+    pub message: String,
+    pub hint: String,
+    pub exit: i32,
+}
+impl Refusal {
+    /// `invalid_arguments` (exit 2): flags that do not fit together, or a value that is wrong.
+    pub fn arguments(message: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            code: "invalid_arguments",
+            message: message.into(),
+            hint: hint.into(),
+            exit: 2,
+        }
+    }
+    /// `invalid_input` (exit 2): a --data file (or standard input) that cannot be read or is
+    /// not the JSON the command takes.
+    pub fn input(message: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            code: "invalid_input",
+            message: message.into(),
+            hint: hint.into(),
+            exit: 2,
+        }
+    }
+}
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for Refusal {}
+
+/// The exit code for a failure: what a [`Refusal`] says, else 1.
+pub fn exit_code(error: &anyhow::Error) -> i32 {
+    error
+        .downcast_ref::<Refusal>()
+        .map_or(1, |refusal| refusal.exit)
+}
+
 /// The JSON error object for any failure, keeping the service's code, message and hint.
 pub fn error_json(error: &anyhow::Error) -> Value {
+    if let Some(refusal) = error.downcast_ref::<Refusal>() {
+        return json!({"error": {"code": refusal.code, "message": refusal.message,
+            "hint": refusal.hint}});
+    }
     if let Some(silicon_dm_client::Error::Api {
         status,
         code,

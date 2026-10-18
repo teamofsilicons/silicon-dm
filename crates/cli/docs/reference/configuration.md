@@ -182,6 +182,7 @@ The website's server (Next.js) reads these at request time; none of them reaches
 | `EXTRA_IMG_ORIGINS`, `EXTRA_ORIGINS` | More trusted profile-photo origins; another explicitly trusted website origin |
 | `BRIEFCASE_API_URL` | Silicon Briefcase's API origin, where the website saves a Carbon's files and voice notes (in `apps/dm/` of the Carbon's own Briefcase). Unset: uploads are off and the website says so; links and GIFs still work |
 | `UPLOADS_MAX_BYTES` | Optional: a limit of the website's own on one file, in bytes, for an operator who wants one. Unset (the default), the website takes files of any size up to Silicon Briefcase's 5 TiB |
+| `KEEP_ALIVE_TIMEOUT` | Optional, in milliseconds (Next's own setting): how long the website keeps an idle connection. Unset, it keeps one 185 seconds, longer than a load balancer keeps its own (production's: 180); behind a balancer whose idle timeout is longer, set it above that, or the balancer now and then reuses a connection the website is closing and answers 502 |
 
 The DM service never handles files: uploads are the website's job, done as DM acting for the Carbon at Silicon
 Briefcase with User verification proofs. The website's server passes each file's bytes through to Briefcase as they
@@ -207,5 +208,11 @@ a line that starts `dm: Uploads are off:`. What each one means:
 | the same | `UPLOADS_MAX_BYTES is not a whole number of bytes` | A whole number of bytes, such as `1073741824` (1 GiB), or unset for no limit of the website's own |
 
 Once uploads are on, a refusal by Silicon Accounts or Briefcase reaches the Carbon as the upload's own error
-([Errors](errors.md#from-the-website)): 503 `briefcase_not_allowed` means Briefcase does not list `dm` in its
-`BRIEFCASE_PROOF_ISSUERS`, and 503 `uploads_misconfigured` that the website's `APP_ID` or `APP_SECRET` is wrong.
+([Errors](errors.md#from-the-website)). 503 `briefcase_not_allowed` means Briefcase does not list `dm` in its
+`BRIEFCASE_PROOF_ISSUERS` for a scope an upload needs: before anything is saved, or after the file is saved when only
+`briefcase.link_access.update` is missing (the Carbon then reads that the file was saved but its link could not be
+opened, and where the copy is). 503 `uploads_misconfigured` means the website's `APP_ID` or `APP_SECRET` is wrong. For
+these, and for every other failure that points at Briefcase or Silicon Accounts (a 5xx), the website's server logs one
+line with Briefcase's own code, never a file's name: `upload failed: briefcase_not_allowed (proof_scope_missing)`. A
+cancel Briefcase refuses is logged as `upload: Silicon Briefcase did not cancel an unfinished upload (…)`: that upload
+stays pending there until it expires, within a day.

@@ -12,7 +12,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { chatKeys } from "../lib/chat/keys";
 import { offersConversationEvents } from "../lib/chat/features";
 import { applyConversationPlan, applyMessage, refetchAfterReset, refreshConversationsSoon } from "../lib/chat/sync";
-import { planConversationEvents, planEvents, SeenEvents, syncDelay } from "../lib/chat/sync-plan";
+import { failureOfMessage, fetchInOrder, planConversationEvents, planEvents, SeenEvents, syncDelay } from "../lib/chat/sync-plan";
 import type { AccountRef, ConversationSummary, Message, SyncEvent } from "../lib/chat/types";
 
 const ada: AccountRef = { type: "carbon", id: "c:ada", uuid: "u-ada", display_name: "Ada" };
@@ -266,4 +266,38 @@ test("a plan drops what you left at once, asks for the list or the invitations o
   await new Promise(resolve => setTimeout(resolve, 400));
   assert.deepEqual(asked, [JSON.stringify(chatKeys.conversations()), JSON.stringify(chatKeys.invitations())]);
   queryClient.clear();
+});
+
+test("a page's messages are applied in the page's order however their fetches finish, and a failure stops there", async () => {
+  // The second fetch is the slowest (a busy connection): it is still applied second, never after the third or fourth.
+  const delays: Record<string, number> = { a: 5, b: 40, c: 1, d: 10 };
+  const applied: string[] = [];
+  await fetchInOrder(["a", "b", "c", "d"], 4, async item => {
+    await new Promise(resolve => setTimeout(resolve, delays[item]));
+    return item.toUpperCase();
+  }, (item, result) => applied.push(`${item}:${result}`));
+  assert.deepEqual(applied, ["a:A", "b:B", "c:C", "d:D"]);
+
+  // A fetch that fails: what came before it is applied, nothing after it (the page is asked for again from there).
+  const partial: string[] = [];
+  await assert.rejects(fetchInOrder(["a", "b", "c"], 2, async item => {
+    if (item === "b") throw new Error("the service answered 500");
+    return item;
+  }, item => partial.push(item)), /answered 500/);
+  assert.deepEqual(partial, ["a"]);
+
+  // An apply that throws (a bug) stops it the same way.
+  const stopped: string[] = [];
+  await assert.rejects(fetchInOrder(["a", "b", "c"], 1, async item => item, item => {
+    if (item === "b") throw new Error("cannot apply");
+    stopped.push(item);
+  }), /cannot apply/);
+  assert.deepEqual(stopped, ["a"]);
+  await fetchInOrder([], 4, async () => 1, () => assert.fail("nothing to apply"));
+});
+
+test("a message's failure counts against it only when the service answered about it", () => {
+  assert.equal(failureOfMessage(500), true, "a message the service cannot load");
+  assert.equal(failureOfMessage(400), true);
+  for (const status of [0, 408, 429, 502, 503, 504]) assert.equal(failureOfMessage(status), false, `${status} passes with time`);
 });

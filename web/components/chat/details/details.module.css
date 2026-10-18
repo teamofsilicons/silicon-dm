@@ -55,7 +55,7 @@
   transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
 }
 @media (hover: hover) and (pointer: fine) { .rowMenu:hover { --sq-fill: var(--surface-muted); color: var(--foreground); } }
-.rowMenu:focus-visible, .rowMenu[data-state="open"] { --sq-fill: var(--surface-muted); color: var(--foreground); outline: none !important; }
+.rowMenu:focus-visible, .rowMenu[data-state="open"] { --sq-fill: var(--surface-muted); color: var(--foreground); outline: none !important; --focus-outline: transparent; }
 /* A removal asks on its own line under the person (the panel's whole width), so the row never squeezes. */
 .person[data-asking] { flex-wrap: wrap; row-gap: var(--space-2); padding-bottom: var(--space-2); }
 .person[data-asking] .morph { flex-basis: 100%; }
@@ -80,7 +80,7 @@
 .fact, .voiceFact { display: grid; min-width: 0; gap: 2px; }
 .factLabel { color: var(--text-muted); font-size: var(--text-xs); font-weight: 500; }
 .factLink { display: inline-flex; width: fit-content; align-items: center; gap: 4px; margin-top: 2px; color: var(--accent-ink); font-size: var(--text-sm); text-decoration: none; }
-.factLink:hover, .factLink:focus-visible { text-decoration: underline; text-underline-offset: 3px; outline: none; }
+.factLink:hover, .factLink:focus-visible { text-decoration: underline; text-underline-offset: 3px; outline: none; --focus-outline: transparent; }
 .voiceRow { min-width: 0; }
 /* The voice area draws nothing when voice is off: then the label goes too, and a section with nothing else in it. */
 .voiceFact:has(> .voiceRow:empty) { display: none; }

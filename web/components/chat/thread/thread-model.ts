@@ -7,7 +7,7 @@
  * several and a custodian's Silicon are named, and what a send still in the outbox shows.
  */
 import { accountName, custodianFromRef, firstName, sameAccount, shellQuote } from "@/lib/chat/address";
-import { ApiError } from "@/lib/errors";
+import { ApiError, unreachableWords as nothingAnswered } from "@/lib/errors";
 import { compareCodes } from "@/lib/chat/codes";
 import { plainPreview } from "@/lib/chat/markdown";
 import { messageMedia, type MediaKind } from "@/lib/chat/media";
@@ -58,6 +58,16 @@ export function unreadBeyondLoaded(conversation: Pick<ConversationSummary, "last
   const read = conversation.last_read_message_id;
   const loaded = fromOthers(messages, perspective).filter(message => !read || compareCodes(message["message-id"], read) > 0).length;
   return loaded < conversation.unread_count;
+}
+
+/**
+ * Whether the first unread message is worth waiting for as the thread opens: the pages of messages come one after
+ * another (each answer names the next), so a first unread further back than `pages` more pages could bring is not
+ * waited for at all (the thread opens at once, at the oldest unread message loaded). `pageSize` is what the first
+ * page held.
+ */
+export function unreadWithinReach(unreadCount: number | undefined, pageSize: number, pages: number): boolean {
+  return (unreadCount ?? 0) <= (pages + 1) * Math.max(1, pageSize);
 }
 
 /** Messages from others below what was seen: the count on the "Jump to latest" pill. */
@@ -542,21 +552,22 @@ export function messageCommands(address: string, message: Pick<Message, "message
 
 /**
  * A failure as the thread and the composer show it: the service's own words (they say what happened, why and what to
- * do), except where nothing answered, or the answer said nothing, whose generic words name the request ("Could not
- * reach this site for GET /api/v1/conversations/…: Failed to fetch") and mean nothing to a Carbon. The code and
- * status stay, so what branches on them still works.
+ * do), except where nothing answered, or the answer said nothing. Where nothing answered, the words every part of the
+ * website uses (lib/errors.ts unreachableWords: a read "keeps trying", a change says to try again), whatever words the
+ * failure came with (a send kept in this browser's outbox by an older version named the request: "Could not reach this
+ * site for POST /api/v1/…"). An answer that said nothing keeps the website's own words for it ("DM's service is not
+ * answering right now (HTTP 502)."), and anything older is said plainly. The code and status stay, so what branches on
+ * them still works.
  */
 export function plainFailure(failure: unknown, offline = typeof navigator !== "undefined" && navigator.onLine === false): ApiError {
   const error = ApiError.from(failure);
   const words =
     error.code === "network_error"
-      ? offline
-        ? { message: "This browser is offline.", hint: "It works again once you are back online." }
-        : { message: "DM could not be reached.", hint: "Check the connection, then try again." }
-      : error.code === "server_unavailable" || error.code === "unexpected_response"
+      ? nothingAnswered(error.method ?? "POST", offline)
+      : (error.code === "server_unavailable" || error.code === "unexpected_response") && !error.message.startsWith("DM")
         ? { message: "DM did not answer as it should.", hint: "Try again in a moment." }
         : null;
-  if (!words) return error;
+  if (!words || (words.message === error.message && words.hint === error.hint)) return error;
   return new ApiError({ status: error.status, code: error.code, message: words.message, hint: words.hint, details: error.details, requestId: error.requestId, retryAfter: error.retryAfter, method: error.method, path: error.path, cause: error });
 }
 

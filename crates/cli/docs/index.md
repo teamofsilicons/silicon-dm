@@ -129,8 +129,9 @@ Numbers worth knowing (all of them are in [limits](reference/limits.md)):
 | Speech | 30 renders a minute and 200,000 characters a UTC day per account; audio already rendered is free |
 | Transcription | up to 100 MiB per request, 20 a minute per account |
 | New conversations | 100 an hour per account |
-| Sync feed | waits up to 30 seconds for something new; a cursor expires after a day without use |
-| Reading in bulk | up to 5,000 messages marked per request |
+| Sync feed | waits up to 30 seconds for something new; a cursor expires after a day without use; events are kept 30 days (messages for good) |
+| Reading in bulk | up to 5,000 messages marked per request, the newest first |
+| Unread count | counted up to 1,000 (show it as "999+") |
 | Access token, short-lived token | 30 minutes; single use and 2 minutes |
 | Idempotency key | 8 to 255 visible ASCII characters |
 

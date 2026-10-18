@@ -236,20 +236,52 @@ impl Speech {
         spoken_words(&self.script)
     }
 
-    /// The cache key of the pinned voice saying the script.
+    /// The cache key of the pinned voice saying the script in `conversation`.
     #[must_use]
-    pub fn cache_key(&self) -> Option<[u8; 32]> {
-        self.pinned
-            .as_ref()
-            .map(|pinned| cache_key(&pinned.model, &pinned.voice_id, &self.script))
+    pub fn cache_key(&self, conversation: uuid::Uuid) -> Option<[u8; 32]> {
+        self.pinned.as_ref().map(|pinned| {
+            cache_key(
+                SpeechScope::Conversation(conversation),
+                &pinned.model,
+                &pinned.voice_id,
+                &self.script,
+            )
+        })
     }
 }
 
-/// The audio cache key of one rendering: SHA-256 of `model|voice_id|script`. Models and voice
-/// ids never contain `|`, so the key is unambiguous.
+/// Whose audio a rendering is. A message's audio belongs to its conversation: everyone who
+/// can read the message hears the same rendering, rendered once. A script rendered for
+/// `POST /api/v1/speech` (a preview, a voice sample) belongs to the account that asked. Keys
+/// never match across scopes, so finding audio in the cache (fast, free) tells nobody what a
+/// message in a conversation they cannot read says.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpeechScope<'a> {
+    /// A message's audio, kept for its conversation.
+    Conversation(uuid::Uuid),
+    /// A script rendered for one account (its storage key).
+    Account(&'a str),
+}
+
+/// The audio cache key of one rendering: SHA-256 of `<scope>|model|voice_id|script`, the scope
+/// being `conversation:<uuid>` or `account:<storage key>`. Scopes, models and voice ids never
+/// contain `|`, so the key is unambiguous. Migration 0048 computes the conversation form in
+/// SQL: `sha256(convert_to('conversation:' || id::text || '|' || model || '|' || voice_id ||
+/// '|' || script, 'UTF8'))`.
 #[must_use]
-pub fn cache_key(model: &str, voice_id: &str, script: &str) -> [u8; 32] {
+pub fn cache_key(scope: SpeechScope<'_>, model: &str, voice_id: &str, script: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
+    match scope {
+        SpeechScope::Conversation(conversation) => {
+            hasher.update(b"conversation:");
+            hasher.update(conversation.hyphenated().to_string().as_bytes());
+        }
+        SpeechScope::Account(account) => {
+            hasher.update(b"account:");
+            hasher.update(account.as_bytes());
+        }
+    }
+    hasher.update(b"|");
     hasher.update(model.as_bytes());
     hasher.update(b"|");
     hasher.update(voice_id.as_bytes());
@@ -388,8 +420,11 @@ fn collapse_whitespace(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use sha2::Digest as _;
+
     use super::{
-        Speech, VoiceCatalog, cache_key, plain_text_script, spoken_words, validate_script,
+        Speech, SpeechScope, VoiceCatalog, cache_key, plain_text_script, spoken_words,
+        validate_script,
     };
 
     #[test]
@@ -499,18 +534,41 @@ mod tests {
         };
         assert_eq!(speech.spoken_words(), "Hi there");
         assert!(
-            speech.cache_key().is_none(),
+            speech.cache_key(uuid::Uuid::nil()).is_none(),
             "no key before DM pins a voice"
         );
     }
 
     #[test]
-    fn cache_keys_cover_model_voice_and_script() {
-        let key = cache_key("eleven_v4", "voice", "Hello");
-        assert_ne!(key, cache_key("eleven_v3", "voice", "Hello"));
-        assert_ne!(key, cache_key("eleven_v4", "other", "Hello"));
-        assert_ne!(key, cache_key("eleven_v4", "voice", "Hello!"));
-        assert_eq!(key, cache_key("eleven_v4", "voice", "Hello"));
+    fn cache_keys_cover_scope_model_voice_and_script() {
+        let here = SpeechScope::Conversation(uuid::Uuid::from_u128(1));
+        let key = cache_key(here, "eleven_v4", "voice", "Hello");
+        assert_ne!(key, cache_key(here, "eleven_v3", "voice", "Hello"));
+        assert_ne!(key, cache_key(here, "eleven_v4", "other", "Hello"));
+        assert_ne!(key, cache_key(here, "eleven_v4", "voice", "Hello!"));
+        assert_eq!(key, cache_key(here, "eleven_v4", "voice", "Hello"));
+        assert_ne!(
+            key,
+            cache_key(
+                SpeechScope::Conversation(uuid::Uuid::from_u128(2)),
+                "eleven_v4",
+                "voice",
+                "Hello"
+            ),
+            "another conversation's audio is another key"
+        );
+        assert_ne!(
+            cache_key(SpeechScope::Account("K1E"), "eleven_v4", "voice", "Hello"),
+            cache_key(SpeechScope::Account("zQo"), "eleven_v4", "voice", "Hello"),
+            "a preview is the account's own"
+        );
+        // The form migration 0048 computes in SQL.
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(
+            b"conversation:00000000-0000-0000-0000-000000000001|eleven_v4|voice|Hello".as_slice(),
+        );
+        let expected: [u8; 32] = hasher.finalize().into();
+        assert_eq!(key, expected);
     }
 
     #[test]

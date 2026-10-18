@@ -41,6 +41,8 @@ a:not([data-variant]):hover { color: var(--accent-strong); }
    keeps it at one pseudo-class of specificity, so a component's own focus rule for its links still wins. */
 :where(a:not([data-variant], [data-sq])):focus-visible {
   outline: none;
+  /* Silicon UI's keyboard ring (components/silicon-ui/foundation.css) wins over `outline: none`; this turns it off. */
+  --focus-outline: transparent;
   border-radius: 4px;
   background: color-mix(in oklab, var(--accent) 12%, transparent);
   box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 12%, transparent);
@@ -99,7 +101,7 @@ hr { height: 1px; margin: 0; border: 0; background: var(--border); }
   transform: translateY(-160%);
   transition: transform var(--duration-standard) var(--ease-enter);
 }
-.skip-link:focus-visible { transform: none; color: var(--background); }
+.skip-link:focus-visible { transform: none; color: var(--background); --focus-outline: transparent; }
 
 /* ------------------------------------------------------------------------------------------------------------------
  * View transitions.

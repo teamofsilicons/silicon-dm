@@ -8,17 +8,19 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect } from "react";
 import { AudioLines, BookOpen, CircleUserRound, Copy, Eye, Headphones, Inbox, Keyboard, LogOut, Mail, MessageCircle, MessageSquarePlus, Mic, PanelRight, Settings2, Terminal, Users, Volume2 } from "lucide-react";
 import { appConfig } from "@/lib/app.config";
-import { accountName, conversationHref, conversationKindWords, conversationTitle, inboxHref, shellQuote } from "@/lib/chat/address";
+import { accountName, conversationHref, conversationKindWords, conversationTitle, inboxHref, otherParticipants, sameAccount, shellQuote } from "@/lib/chat/address";
 import { unreadOf } from "@/lib/chat/cache";
-import { useConversations } from "@/lib/chat/hooks";
+import { loadConversationsUntil, useConversations, useLoadEverything } from "@/lib/chat/hooks";
 import { markAllRead } from "@/lib/chat/receipts";
 import { useSignOut } from "@/lib/client/session";
-import { toggleCommandPalette, useRegisterCommands, type ShellCommand } from "@/lib/commands";
-import { notify, notifyError } from "@/lib/notify";
+import { toggleCommandPalette, useCommandPaletteQuery, useRegisterCommands, type ShellCommand } from "@/lib/commands";
+import { notify } from "@/lib/notify";
 import { isShortcutAvailable, runShortcut, setShortcutAvailability, useShortcut, useShortcutAvailability } from "@/lib/shortcuts/react";
 import { useVoiceAvailability } from "@/lib/voice";
+import { askToSignOut } from "../dialogs/sign-out-dialog";
 import { openDialog } from "../dialogs/store";
-import { useOpenAddress } from "../sidebar/conversations-pane";
+import { requestSearchFocus, useOpenAddress } from "../sidebar/conversations-pane";
+import type { ConversationSummary } from "@/lib/chat/types";
 import { useChat } from "./chat-context";
 import { useDetails } from "./details";
 
@@ -61,43 +63,59 @@ export function focusConversationSearch(): boolean {
 export function GlobalCommands() {
   const { me, view, readOnly, perspective, accountsUrl } = useChat();
   const router = useRouter();
-  const { items } = useConversations(view);
+  const list = useConversations(view);
+  const { items } = list;
   const openAddress = useOpenAddress();
   const details = useDetails();
   const { signOut } = useSignOut();
   // Voice actions appear in the palette once they work here (deps below re-register then).
   useVoiceShortcutAvailability();
   const available = useShortcutAvailability();
+  // A query typed in the palette looks through every conversation, not only the first ones loaded.
+  const paletteQuery = useCommandPaletteQuery();
+  useLoadEverything(view, !!paletteQuery.trim());
 
   const go = useCallback((href: string) => router.push(href), [router]);
 
-  const step = useCallback((direction: 1 | -1, unreadOnly: boolean) => {
-    if (!items.length) return;
-    const at = items.findIndex(item => item.id === openAddress);
-    for (let offset = 1; offset <= items.length; offset++) {
-      const index = at < 0 ? (direction === 1 ? offset - 1 : items.length - offset) : (at + direction * offset + items.length * 2) % items.length;
-      const candidate = items[index]!;
-      if (unreadOnly && !unreadOf(candidate, perspective)) continue;
-      go(conversationHref(candidate.id, { view }));
-      return;
-    }
-    if (unreadOnly) notify.info("Nothing unread", "Every conversation is read.");
-  }, [items, openAddress, perspective, view, go]);
+  /**
+   * The next or previous (unread) conversation from the open one, in list order. Forward, the conversations further down
+   * the list are loaded before it starts again from the top; back to the very end for an unread one, all of them are.
+   */
+  const step = useCallback(async (direction: 1 | -1, unreadOnly: boolean) => {
+    const fits = (candidate: ConversationSummary) => candidate.id !== openAddress && (!unreadOnly || unreadOf(candidate, perspective) > 0);
+    const at = (rows: ConversationSummary[]) => rows.findIndex(item => item.id === openAddress);
+    let rows = items;
+    if (direction === 1 && !rows.slice(at(rows) + 1).some(fits)) rows = await loadConversationsUntil(list, loaded => loaded.slice(at(loaded) + 1).some(fits));
+    if (direction === -1 && unreadOnly && !rows.slice(0, Math.max(at(rows), 0)).some(fits)) rows = await loadConversationsUntil(list, () => false);
+    const i = at(rows);
+    const order = direction === 1 ? [...rows.slice(i + 1), ...rows.slice(0, Math.max(i, 0))] : [...rows.slice(0, Math.max(i, 0)).reverse(), ...rows.slice(i + 1).reverse()];
+    const next = order.find(fits);
+    if (next) go(conversationHref(next.id, { view }));
+    else if (unreadOnly) notify.info("Nothing unread", "Every conversation is read.");
+  }, [items, list, openAddress, perspective, view, go]);
+
+  /** Every conversation read, the ones further down the list too (they are loaded first). */
+  const markEverythingRead = useCallback(async () => {
+    const rows = await loadConversationsUntil(list, () => false);
+    const count = await markAllRead(rows.filter(item => unreadOf(item, perspective) > 0));
+    if (count) notify.success("Everything is read", count === 1 ? "1 conversation marked read." : `${count} conversations marked read.`);
+  }, [list, perspective]);
 
   useShortcut("palette.open", () => toggleCommandPalette());
-  useShortcut("search.focus", () => (focusConversationSearch() ? undefined : false));
+  // On a phone (or a narrow window) the list is its own page: '/' goes there and puts the keyboard in its search.
+  useShortcut("search.focus", () => {
+    if (focusConversationSearch()) return;
+    requestSearchFocus();
+    go(inboxHref(view));
+  });
   useShortcut("shortcuts.open", () => openDialog("shortcuts"));
   useShortcut("conversation.new", () => openDialog("new-conversation"), !readOnly);
   useShortcut("group.new", () => openDialog("new-group"), !readOnly);
-  useShortcut("conversation.previous", () => step(-1, false));
-  useShortcut("conversation.next", () => step(1, false));
-  useShortcut("conversation.previousUnread", () => step(-1, true));
-  useShortcut("conversation.nextUnread", () => step(1, true));
-  useShortcut("conversations.markAllRead", () => {
-    void markAllRead(items.filter(item => unreadOf(item, perspective) > 0)).then(count => {
-      if (count) notify.success("Everything is read", count === 1 ? "1 conversation marked read." : `${count} conversations marked read.`);
-    });
-  }, !readOnly);
+  useShortcut("conversation.previous", () => void step(-1, false));
+  useShortcut("conversation.next", () => void step(1, false));
+  useShortcut("conversation.previousUnread", () => void step(-1, true));
+  useShortcut("conversation.nextUnread", () => void step(1, true));
+  useShortcut("conversations.markAllRead", () => void markEverythingRead(), !readOnly);
   useShortcut("go.settings", () => go("/settings"));
   useShortcut("go.voice", () => go("/settings#voice"));
   useShortcut("go.invitations", () => openDialog("invitations"));
@@ -120,14 +138,14 @@ export function GlobalCommands() {
       { id: "conversation.new", label: "New conversation", group: "Actions", icon: icon(MessageSquarePlus), shortcutId: "conversation.new", keywords: ["start", "message", "write"], run: () => openDialog("new-conversation") },
       { id: "group.new", label: "New group", group: "Actions", icon: icon(Users), shortcutId: "group.new", keywords: ["create"], run: () => openDialog("new-group") },
       { id: "go.invitations", label: "Invitations", group: "Actions", icon: icon(Mail), shortcutId: "go.invitations", keywords: ["groups", "invites", "accept"], run: () => openDialog("invitations") },
-      { id: "conversations.markAllRead", label: "Mark everything read", group: "Actions", icon: icon(Inbox), shortcutId: "conversations.markAllRead", keywords: ["clear", "unread"], run: () => void markAllRead(items.filter(item => unreadOf(item, perspective) > 0)) },
+      { id: "conversations.markAllRead", label: "Mark everything read", group: "Actions", icon: icon(Inbox), shortcutId: "conversations.markAllRead", keywords: ["clear", "unread"], run: () => void markEverythingRead() },
       { id: "shortcuts.open", label: "Keyboard shortcuts", group: "Actions", icon: icon(Keyboard), shortcutId: "shortcuts.open", keywords: ["keys", "cheatsheet", "help"], run: () => openDialog("shortcuts") },
       { id: "go.settings", label: "Settings", group: "Go to", icon: icon(Settings2), shortcutId: "go.settings", keywords: ["preferences", "sending", "notifications"], run: () => go("/settings") },
       { id: "go.voice", label: "Voice settings", group: "Go to", icon: icon(Volume2), shortcutId: "go.voice", keywords: ["voices", "speak", "listening"], run: () => go("/settings#voice") },
       { id: "go.keyboard", label: "Change keyboard shortcuts", group: "Go to", icon: icon(Keyboard), keywords: ["rebind", "keys"], run: () => go("/settings#keyboard") },
       { id: "go.docs", label: `${appConfig.name} docs`, description: "Opens in a new tab", group: "Go to", icon: icon(BookOpen), keywords: ["help", "guide", "cli"], run: () => void window.open(appConfig.links.docs, "_blank", "noopener") },
       { id: "go.account", label: "Your account", description: "Silicon Accounts, in a new tab", group: "Go to", icon: icon(CircleUserRound), keywords: ["profile", "photo"], run: () => void window.open(accountsUrl, "_blank", "noopener") },
-      { id: "account.signout", label: "Sign out", description: `Sign this browser out of ${appConfig.name}`, group: "Account", icon: icon(LogOut), keywords: ["log out", "logout"], run: () => void signOut().catch(failure => notifyError(failure, "Could not sign out")) },
+      { id: "account.signout", label: "Sign out", description: `Sign this browser out of ${appConfig.name}`, group: "Account", icon: icon(LogOut), keywords: ["log out", "logout"], run: () => void askToSignOut(signOut) },
     );
     // The voice actions run the same handlers as their keys (the open conversation's header and composer attach them).
     if (open && isShortcutAvailable("listen.mode")) commands.push({ id: "listen.mode", label: "Listen mode", description: "Speak new messages from Silicons in this conversation", group: "This conversation", icon: icon(Headphones), shortcutId: "listen.mode", keywords: ["voice", "speak", "hear", "headphones"], run: () => void runShortcut("listen.mode") });
@@ -140,18 +158,24 @@ export function GlobalCommands() {
     if (view) commands.push({ id: "view.mine", label: "Back to your conversations", group: "Viewing as", icon: icon(Eye), keywords: ["mine", "own"], run: () => go(inboxHref(null)) });
     for (const conversation of items) {
       const title = conversationTitle(conversation, perspective);
+      const others = otherParticipants(conversation, perspective).filter(account => !sameAccount(account, perspective));
       commands.push({
         id: `open.${conversation.id}`,
         label: title,
         description: `${conversationKindWords(conversation, perspective)} · ${conversation.id}`,
         group: "Conversations",
         icon: icon(conversation.group ? Users : MessageCircle),
-        keywords: [conversation.id, ...conversation.participants.flatMap(account => [account.id, account.display_name ?? ""]), conversation.group?.name ?? ""],
+        // Found by its name, its address and its people's ids and names (yours left out: you are in every one), ahead of
+        // an action that merely contains the letters (lib/command-rank.ts). A direct conversation answers to the other
+        // account's id as to its name.
+        conversation: true,
+        names: others.length === 1 ? [conversation.id, others[0]!.id] : [conversation.id],
+        members: others.length === 1 ? [] : others.flatMap(account => [account.id, account.display_name ?? ""]),
         run: () => go(conversationHref(conversation.id, { view })),
       });
     }
     return commands;
-  }, [items, open, view, me.custodian_of, perspective, details.open, details.toggle, go, accountsUrl, signOut, readOnly, available]);
+  }, [items, open, view, me.custodian_of, perspective, details.open, details.toggle, go, accountsUrl, signOut, readOnly, available, markEverythingRead]);
 
   return null;
 }

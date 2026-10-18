@@ -209,9 +209,10 @@ async fn recipient_conversation(
 ) -> AppResult<Uuid> {
     let recipient = state.directory().resolve(value).await?;
     if recipient.uuid == context.actor.id.as_str() {
-        return Err(AppError::validation(
+        return Err(AppError::invalid(
             "the recipient must be another account (you cannot message yourself)",
-        ));
+        )
+        .with_hint("Name another account's id (c:ada, si:scout); to keep a note for yourself, save a draft instead."));
     }
     let participants = vec![context.actor.clone(), recipient.actor()];
     if let Some(id) = state

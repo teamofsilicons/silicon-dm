@@ -5,7 +5,15 @@
  * whole burst). The cursor is kept in sessionStorage, so a reload continues where the tab was; a new tab starts at the
  * head, and once the head is known asks again for the list and threads it already fetched (refetchAfterReset). 409
  * `sync_reset_required` starts again from the head and then refreshes everything. Failures back off (1 s … 30 s) and
- * retry at once when the browser comes back online; a 401 stops the loop (the session keeper signs the Carbon in again).
+ * retry at once when the browser comes back online, the tab comes back into view, or another request succeeds (the
+ * service is back); once the loop is through again, whatever failed to load meanwhile is asked for again (a thread opened
+ * during a restart said "It keeps trying" and never did). A 401 stops the loop (the session keeper signs the Carbon in
+ * again).
+ *
+ * A page's messages are fetched four at a time and applied in the page's order (sync-plan.ts fetchInOrder): a message
+ * that lands after a newer one is lost to Listen mode's queue and the unread count. One message whose fetch keeps
+ * failing (the service answers it with an error three times) no longer holds the feed: it is left for the thread and
+ * the list to load on their own, and the cursor moves on.
  *
  * Conversation events (DM 0.17): when GET /api/v1/contracts announces them, the loop asks for them too
  * (`include=conversations`), so a conversation created with you, an invitation, a group joined or left on another
@@ -20,9 +28,9 @@ import type { QueryClient } from "@tanstack/react-query";
 import { ApiError } from "@/lib/errors";
 import { getContracts, getConversation, getMessage, syncPage } from "./api";
 import { applyMessageToSummaries, dropSummary, replaceSummary, summariesOf, upsertMessage, type ConversationPages, type MessagePages } from "./cache";
-import { offersConversationEvents, setConversationEventsActive } from "./features";
+import { offersConversationEvents, offersScopedActivity, setConversationEventsActive, setScopedActivity } from "./features";
 import { chatKeys } from "./keys";
-import { planConversationEvents, planEvents, SeenEvents, syncDelay, type ConversationPlan, type MessageRef } from "./sync-plan";
+import { failureOfMessage, fetchInOrder, planConversationEvents, planEvents, SeenEvents, syncDelay, type ConversationPlan, type MessageRef } from "./sync-plan";
 import { readText, writeText } from "./storage";
 import type { AccountRef, ConversationSummary, Message } from "./types";
 import { sameAccount } from "./address";
@@ -52,6 +60,8 @@ export interface SyncOptions {
 
 const WAIT_SECONDS = 25;
 const FETCH_CONCURRENCY = 4;
+/** Times the service may answer one message with an error before the feed goes on without it. */
+const MESSAGE_ATTEMPTS = 3;
 const cursorKey = (account: string) => `dm:sync-cursor:v1:${account}`;
 
 /** How long a burst of news waits before the list is asked for again (one request for all of it). */
@@ -134,10 +144,15 @@ export async function applyConversationPlan(queryClient: QueryClient, plan: Conv
   await Promise.all(plan.refresh.map(id => refreshConversation(queryClient, id, signal)));
 }
 
-/** Whether the service offers conversation events in the sync feed; null when it could not be asked (ask again later). */
+/**
+ * Whether the service offers conversation events in the sync feed; null when it could not be asked (ask again later).
+ * The same answer says whether activity is said per conversation (lib/chat/features.ts).
+ */
 async function conversationEventsOffered(signal: AbortSignal): Promise<boolean | null> {
   try {
-    return offersConversationEvents(await getContracts(signal));
+    const contracts = await getContracts(signal);
+    setScopedActivity(offersScopedActivity(contracts));
+    return offersConversationEvents(contracts);
   } catch (error) {
     const failure = ApiError.from(error);
     // An older service without the route, or one that refuses it: messages only. Anything else may pass: ask again.
@@ -180,26 +195,50 @@ export function applyMessage(queryClient: QueryClient, me: AccountRef, message: 
   return { fresh: fresh || !found };
 }
 
-async function inPool<T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
-  let next = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) await run(items[next++]!);
-  });
-  await Promise.all(workers);
+/** Ends the loop's wait after a failure (another request reached the service: it is back). */
+const wakers = new Set<() => void>();
+
+/** Tells a sync loop waiting out its backoff to try again now (components/chat/shell/chat-runtime.tsx). */
+export function wakeSync(): void {
+  for (const wake of [...wakers]) wake();
 }
 
+/** The wait after a failure: ends early when the browser is back online, the tab is back in view, or wakeSync is called. */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise(resolve => {
     const done = () => {
       clearTimeout(timer);
+      wakers.delete(done);
       window.removeEventListener("online", done);
+      window.removeEventListener("focus", done);
+      document.removeEventListener("visibilitychange", onVisible);
       signal.removeEventListener("abort", done);
       resolve();
     };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") done();
+    };
     const timer = setTimeout(done, ms);
+    wakers.add(done);
     window.addEventListener("online", done);
+    window.addEventListener("focus", done);
+    document.addEventListener("visibilitychange", onVisible);
     signal.addEventListener("abort", done);
   });
+}
+
+/** A failure that passes with time (no connection, the service away or busy), not one about what was asked. */
+function passing(error: unknown): boolean {
+  const failure = ApiError.from(error);
+  return failure.status === 0 || failure.status === 408 || failure.status === 429 || failure.status >= 500;
+}
+
+/**
+ * Once the loop is through again after failing: what could not be loaded meanwhile (a thread opened while the service
+ * restarted, a conversation, the invitations) is asked for again, where it is on screen.
+ */
+export function recoverQueries(queryClient: QueryClient): void {
+  void queryClient.refetchQueries({ type: "active", predicate: query => query.queryKey[0] === "dm" && query.state.status === "error" && passing(query.state.error) });
 }
 
 /** Runs the loop until `signal` aborts. Never throws. */
@@ -215,16 +254,53 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
   // Conversation events: asked for once the contracts announce them (null until they have answered).
   let events: boolean | null = null;
 
-  const applyRef = async (ref: MessageRef) => {
+  // Errors the service answered for each message, so one that keeps failing does not hold the feed (MESSAGE_ATTEMPTS).
+  const failed = new Map<string, number>();
+  const refKey = (ref: MessageRef) => `${ref.conversation}\u0000${ref.code}`;
+  /** Counts a failure against one message; true once it has had its attempts (the feed then goes on without it). */
+  const givesUp = (ref: MessageRef, error: unknown) => {
+    const failure = ApiError.from(error);
+    if (ApiError.is(error) && !failureOfMessage(failure.status)) return false;
+    const count = (failed.get(refKey(ref)) ?? 0) + 1;
+    failed.set(refKey(ref), count);
+    return count >= MESSAGE_ATTEMPTS;
+  };
+  /** A message the feed went on without: its thread and the list ask the service themselves. */
+  const leaveToTheThread = (ref: MessageRef) => {
+    void queryClient.invalidateQueries({ queryKey: chatKeys.messages(ref.conversation), exact: true });
+    refreshConversationsSoon(queryClient);
+  };
+  const LEFT = Symbol("left");
+  const fetchRef = async (ref: MessageRef): Promise<Message | null | typeof LEFT> => {
     try {
-      const message = await getMessage(ref.conversation, ref.code, { signal });
-      const info = applyMessage(queryClient, me, message);
-      if (!sameAccount(message.sender, me)) options.onIncoming?.(message, info);
+      return await getMessage(ref.conversation, ref.code, { signal });
     } catch (error) {
       const failure = ApiError.from(error);
       // Gone or no longer visible to this account: nothing to show.
-      if (failure.status !== 404 && failure.status !== 403 && failure.status !== 410) throw error;
+      if (failure.status === 404 || failure.status === 403 || failure.status === 410) return null;
+      if (!signal.aborted && givesUp(ref, error)) return LEFT;
+      throw error;
     }
+  };
+  // Deleted messages from others the row may still count as unread: the row asks the service for its count.
+  const recount = new Set<string>();
+  const unreadIn = (id: string) => summariesOf(queryClient.getQueryData<ConversationPages>(chatKeys.conversations())).find(item => item.id === id)?.unread_count ?? 0;
+  const applyFetched = (ref: MessageRef, message: Message | null | typeof LEFT) => {
+    if (message === LEFT) leaveToTheThread(ref);
+    else if (message) {
+      try {
+        const info = applyMessage(queryClient, me, message);
+        if (!sameAccount(message.sender, me)) {
+          // Counted unread when it came, and the service no longer counts it: the row takes the service's count.
+          if (message.deleted_at && unreadIn(message.conversation_id) > 0) recount.add(message.conversation_id);
+          options.onIncoming?.(message, info);
+        }
+      } catch (error) {
+        if (!givesUp(ref, error)) throw error;
+        leaveToTheThread(ref);
+      }
+    }
+    failed.delete(refKey(ref));
     for (const id of ref.eventIds) seen.add(id);
   };
 
@@ -248,10 +324,17 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
       const plan = planConversationEvents(page.events, seen);
       await applyConversationPlan(queryClient, plan, signal, options.onConversationGone);
       for (const id of plan.eventIds) seen.add(id);
-      await inPool(planEvents(page.events, seen), FETCH_CONCURRENCY, applyRef);
+      try {
+        await fetchInOrder(planEvents(page.events, seen), FETCH_CONCURRENCY, fetchRef, applyFetched);
+      } finally {
+        for (const id of recount) void refreshConversation(queryClient, id, signal);
+        recount.clear();
+      }
       cursor = page.cursor;
       writeText(cursorKey(account), cursor, "session");
       more = page.has_more;
+      // Through again after failing: ask again for what failed to load meanwhile.
+      if (failures) recoverQueries(queryClient);
       failures = 0;
     } catch (error) {
       if (signal.aborted) break;

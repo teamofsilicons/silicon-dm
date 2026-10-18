@@ -46,7 +46,7 @@ can probe for groups; the message names the id, and `dm groups list` shows yours
 - A custodian acts as an owner of groups its Silicon owns, may take its Silicon out of a group and
   decline invitations for it, but never accepts an invitation for it.
 - A member who joins sees the whole history: a group is one conversation, and someone invited to it is invited to
-  what was said there.
+  what was said there. It starts with nothing unread: what was said before it joined is history to read, not news.
 - Every change reaches the accounts it concerns as a conversation event, for clients that ask
   (`dm inbox --watch --conversations`, `GET /sync?include=conversations`): an invitation (`invited`), an answer
   (`invitation_accepted`, `invitation_declined`, on every device), a withdrawn one (`invitation_cancelled`),

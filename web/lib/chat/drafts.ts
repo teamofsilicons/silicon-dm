@@ -68,6 +68,23 @@ export function mergeDraft(local: LocalDraft | null, server: ServerDraft | null,
   return { draft: { text: server.text, replyTo: server.replyTo, version: server.version, dirty: false, updatedAt: Math.max(server.updatedAt, local.updatedAt) }, action: "adopt" };
 }
 
+/**
+ * Another tab of this browser wrote this conversation's draft (`stored`; null: it sent the message, or there is no
+ * draft any more). A tab with no unsaved words here takes what the other tab has, so a draft sent there never lingers
+ * (and goes again) here, and a long draft typed there is never replaced by a stale tab's next keystroke. Unsaved words
+ * here are newer and stay, rebased on the version the other tab last saw, so their next save is not made against a
+ * version the service no longer has. Returns `local` itself when nothing changes.
+ */
+export function adoptStored(local: LocalDraft | null, stored: LocalDraft | null): LocalDraft | null {
+  if (local?.dirty) {
+    const version = stored ? Math.max(local.version, stored.version) : 0;
+    return version === local.version ? local : { ...local, version };
+  }
+  if (!stored) return local && (hasContent(local) || local.version > 0) ? null : local;
+  if (local && local.text === stored.text && local.replyTo === stored.replyTo && local.version === stored.version && local.dirty === stored.dirty) return local;
+  return stored;
+}
+
 /** A local edit: the text (and reply) the Carbon now has, still to be saved. */
 export function editDraft(current: LocalDraft | null, change: Partial<Pick<LocalDraft, "text" | "replyTo">>, now: number): LocalDraft {
   const base = current ?? emptyDraft(now);

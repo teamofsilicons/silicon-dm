@@ -7,7 +7,7 @@
 .layout { display: grid; width: min(100%, 1000px); margin: 0 auto; padding: var(--space-8) var(--gutter) var(--space-16); column-gap: var(--space-10); grid-template-columns: 200px minmax(0, 1fr); grid-template-areas: "toc header" "toc sections"; }
 .header { display: grid; min-width: 0; gap: var(--space-2); padding-bottom: var(--space-6); grid-area: header; }
 .back { display: none; width: fit-content; align-items: center; gap: 6px; margin-bottom: var(--space-2); color: var(--text-secondary); font-size: var(--text-sm); text-decoration: none; }
-.back:hover, .back:focus-visible { color: var(--foreground); text-decoration: underline; text-underline-offset: 3px; outline: none; }
+.back:hover, .back:focus-visible { color: var(--foreground); text-decoration: underline; text-underline-offset: 3px; outline: none; --focus-outline: transparent; }
 .title { color: var(--accent-ink); font-family: var(--font-serif); font-size: clamp(2rem, 3.4vw, 2.75rem); font-weight: 400; letter-spacing: -.01em; line-height: 1.05; }
 .lede { color: var(--text-secondary); text-wrap: pretty; }
 .toc { position: sticky; top: var(--space-8); align-self: start; grid-area: toc; }
@@ -17,7 +17,7 @@
 .jumps { display: none; margin-top: var(--space-3); }
 .jumps ul { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin: 0; padding: 0; list-style: none; }
 .jumps a { color: var(--text-secondary); font-size: var(--text-sm); text-decoration: none; text-underline-offset: 4px; }
-.jumps a:hover, .jumps a:focus-visible { color: var(--foreground); text-decoration: underline; outline: none; }
+.jumps a:hover, .jumps a:focus-visible { color: var(--foreground); text-decoration: underline; outline: none; --focus-outline: transparent; }
 .jumps a[aria-current] { color: var(--foreground); font-weight: 500; }
 
 .section { display: grid; min-width: 0; gap: var(--space-5); border-top: 1px solid var(--border-subtle); padding: var(--space-8) 0; scroll-margin-top: var(--space-6); }
@@ -41,6 +41,8 @@
 .rowText { display: grid; min-width: 0; gap: 2px; }
 .rowLabel { font-size: var(--text-sm); font-weight: 500; }
 .rowDescription { color: var(--text-muted); font-size: var(--text-xs); line-height: 1.45; text-wrap: pretty; }
+/* A sentence about the whole section on this device (Sending on a touch screen, Keyboard without a keyboard). */
+.sectionNote { margin: 0 0 var(--space-1); color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; text-wrap: pretty; }
 
 /* Keyboard */
 .keyFilter { max-width: 420px; }
@@ -57,7 +59,7 @@
 .sequence { display: inline-flex; }
 .fixed { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
 .fixedNote { color: var(--text-muted); font-size: var(--text-xs); text-decoration: none; }
-.fixedNote:hover, .fixedNote:focus-visible { color: var(--foreground); text-decoration: underline; text-underline-offset: 3px; outline: none; }
+.fixedNote:hover, .fixedNote:focus-visible { color: var(--foreground); text-decoration: underline; text-underline-offset: 3px; outline: none; --focus-outline: transparent; }
 .or { color: var(--text-muted); font-size: var(--text-xs); }
 .also { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .keyFooter { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }

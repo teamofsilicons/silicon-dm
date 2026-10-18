@@ -1,7 +1,7 @@
 /** The thread's pure decisions (components/chat/thread/thread-model.ts). */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { activityStatus, arrivedSends, busyWords, conversationPhrase, copyableText, custodianOf, cutAtWord, emojiOnly, estimateBubbleHeight, fileNameParts, findFirstUnread, friendlyType, galleryRatio, galleryRows, locateCode, messageCommands, messageLabel, namesInWords, pendingMedia, peopleWords, photoRatio, plainFailure, routingOf, sentSentence, sentWhen, toolbarPlacement, unreachableWords, unreadBeyondLoaded, unseenCount, viewedName } from "../components/chat/thread/thread-model";
+import { activityStatus, arrivedSends, busyWords, conversationPhrase, copyableText, custodianOf, cutAtWord, emojiOnly, estimateBubbleHeight, fileNameParts, findFirstUnread, friendlyType, galleryRatio, galleryRows, locateCode, messageCommands, messageLabel, namesInWords, pendingMedia, peopleWords, photoRatio, plainFailure, routingOf, sentSentence, sentWhen, toolbarPlacement, unreachableWords, unreadBeyondLoaded, unreadWithinReach, unseenCount, viewedName } from "../components/chat/thread/thread-model";
 import type { AccountRef, ConversationSummary, Message } from "../lib/chat/types";
 import { ApiError } from "../lib/errors";
 
@@ -270,18 +270,35 @@ test("a long message is cut at a space, and a long file name keeps its end", () 
   assert.equal(fileNameParts(`${"n".repeat(40)}`).end, "nnnnnn");
 });
 
-test("failures the thread and the composer show: the service's words, or plain words where nothing answered", () => {
+test("a first unread only a few more pages can reach is waited for; one further back opens the thread at once", () => {
+  // The first page (50) and four more reach 250 back.
+  assert.equal(unreadWithinReach(120, 50, 4), true);
+  assert.equal(unreadWithinReach(250, 50, 4), true);
+  assert.equal(unreadWithinReach(251, 50, 4), false);
+  assert.equal(unreadWithinReach(600, 50, 4), false);
+  assert.equal(unreadWithinReach(undefined, 50, 4), true, "an older service says no count: as before");
+  assert.equal(unreadWithinReach(3, 0, 4), true, "an empty first page never divides by nothing");
+});
+
+test("failures the thread and the composer show: the service's words, or the website's plain words where nothing answered", () => {
   const lost = new ApiError({ status: 0, code: "network_error", message: "Could not reach this site for GET /api/v1/conversations/g%3Ax/messages: Failed to fetch.", hint: "Check your connection, then try again.", method: "GET", path: "/api/v1/conversations/g%3Ax/messages" });
   const plain = plainFailure(lost, false);
-  assert.equal(plain.message, "DM could not be reached.");
+  // The words the rest of the website says (lib/errors.ts unreachableWords): a read keeps trying by itself.
+  assert.equal(plain.message, "DM can't reach its service right now.");
+  assert.equal(plain.hint, "It keeps trying; check your connection if this lasts.");
   assert.equal(plain.code, "network_error", "the code stays for whatever branches on it");
-  assert.equal(plainFailure(lost, true).message, "This browser is offline.");
+  assert.equal(plainFailure(lost, true).message, "This browser is offline, so DM can't reach its service.");
+  // The website's own words for an answer that said nothing stay; anything older is said plainly.
+  const worded = new ApiError({ status: 502, code: "server_unavailable", message: "DM's service is not answering right now (HTTP 502).", hint: "Try again in a moment." });
+  assert.equal(plainFailure(worded), worded);
   const bare = new ApiError({ status: 502, code: "server_unavailable", message: "POST /api/v1/conversations/x/messages failed: the service could not be reached (HTTP 502), and the answer had no error details." });
   assert.equal(plainFailure(bare).message, "DM did not answer as it should.");
   const refused = new ApiError({ status: 403, code: "contact_not_allowed", message: "Scout does not take conversations from c:dmc-di.", hint: "Ask Scout's custodian to allow you." });
   assert.equal(plainFailure(refused), refused, "the service's own words stay");
-  // An outbox error is a plain object; it reads the same.
-  assert.equal(plainFailure({ status: 0, code: "network_error", message: "Could not reach this site for POST /api/v1/…" }, false).message, "DM could not be reached.");
+  // A send kept in this browser's outbox is a plain object, maybe from an older version: a change, so "try again".
+  const kept = plainFailure({ status: 0, code: "network_error", message: "Could not reach this site for POST /api/v1/…" }, false);
+  assert.equal(kept.message, "DM can't reach its service right now.");
+  assert.equal(kept.hint, "Check your connection, then try again.");
 });
 
 test("Message details say who sent a message, when and where, in names", () => {

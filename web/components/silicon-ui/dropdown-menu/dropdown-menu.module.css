@@ -31,6 +31,8 @@
 /* The composable parts. The label takes the free width, so a shortcut or check sits at the end of the row. */
 .itemLabel { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shortcut { flex: none; padding-left: var(--space-group); color: var(--text-muted); font: inherit; font-size: var(--text-xs); letter-spacing: var(--tracking-body); }
+/* A touch screen has no keys to press: the hints would only crowd the menu (as the user menu's sheet hides them). */
+@media (hover: none) and (pointer: coarse) { .shortcut { display: none; } }
 .indicator { display: inline-flex; flex: none; color: var(--foreground); }
 .sectionLabel { padding: var(--space-related) var(--space-group) var(--space-tight); color: var(--text-muted); font-size: var(--text-xs); font-weight: 500; }
 .subChevron { flex: none; color: var(--text-muted); }

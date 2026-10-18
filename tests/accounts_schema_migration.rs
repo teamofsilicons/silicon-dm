@@ -89,6 +89,35 @@ async fn legacy_columns(connection: &mut PgConnection, table: &str) -> Result<St
     Ok(format!("ROW({})", columns.join(",")))
 }
 
+/// A migration may read a whole table (0043's backfill reads every message): `dm-migrate`
+/// runs it without the services' statement deadline, which cancelled 0043 on a database of a
+/// million messages with nothing but "internal server error" to show for it.
+#[tokio::test]
+async fn migrations_run_without_the_request_statement_deadline() -> Result<(), BoxError> {
+    let database = TestDatabase::start().await?;
+    let settings = silicon_dm::config::DatabaseSettings {
+        url: secrecy::SecretString::from(database.url.clone()),
+        max_connections: std::num::NonZeroU32::new(2).ok_or("pool size")?,
+        min_connections: 0,
+        acquire_timeout: std::time::Duration::from_secs(10),
+        // Far shorter than the longest migration statement.
+        statement_timeout: std::time::Duration::from_millis(2),
+    };
+    let store = silicon_dm::infrastructure::postgres::PostgresStore::connect(&settings).await?;
+    store.migrate().await?;
+    let mut connection = store.pool().acquire().await?;
+    let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&mut *connection)
+        .await?;
+    assert_eq!(
+        timeout, "2ms",
+        "the pooled connection gets its deadline back"
+    );
+    drop(connection);
+    store.pool().close().await;
+    database.close().await
+}
+
 #[tokio::test]
 async fn empty_database_applies_every_migration() -> Result<(), BoxError> {
     let database = TestDatabase::start().await?;

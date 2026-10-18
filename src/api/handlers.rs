@@ -129,6 +129,7 @@ pub(super) async fn edit_message(
     let speech = prepare_message_speech(
         &state,
         &context.actor,
+        path.conversation_id,
         &mut input,
         previous
             .as_ref()
@@ -275,7 +276,8 @@ async fn send(
 ) -> AppResult<(StatusCode, Json<Message>)> {
     state.store.require_current(conversation_id).await?;
     resolve_routing(state, context, &mut body).await?;
-    let speech = prepare_message_speech(state, &context.actor, &mut body, None).await?;
+    let speech =
+        prepare_message_speech(state, &context.actor, conversation_id, &mut body, None).await?;
     let prepared = prepare_message_content(state, body)?;
     let message = state
         .store
@@ -328,8 +330,14 @@ pub(super) async fn create_message_bundle(
     }
     bundle.validate().map_err(AppError::validation)?;
     resolve_routing(&state, &context, &mut bundle.display_message).await?;
-    let speech =
-        prepare_message_speech(&state, &context.actor, &mut bundle.display_message, None).await?;
+    let speech = prepare_message_speech(
+        &state,
+        &context.actor,
+        path.conversation_id,
+        &mut bundle.display_message,
+        None,
+    )
+    .await?;
     let display_message = prepare_message_content(&state, bundle.display_message)?;
     bundle.display_message = display_message;
     let created = state
@@ -395,7 +403,7 @@ pub(super) async fn put_draft(
     ApiJson(input): ApiJson<DraftInput>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     require_participant_access(access)?;
-    input.validate().map_err(AppError::validation)?;
+    input.validate().map_err(crate::domain::invalid_content)?;
     let outcome = state
         .store
         .put_draft(PutDraftCommand {
@@ -414,7 +422,8 @@ pub(super) async fn put_draft(
             let mut body = serde_json::to_value(draft).map_err(AppError::internal)?;
             body["error"] = serde_json::json!({
                 "code": "draft_conflict",
-                "message": "The draft changed since the supplied version. Your save was not applied. Resolve against this draft and retry with its current version."
+                "message": "The draft changed since the supplied version. Your save was not applied. Resolve against this draft and retry with its current version.",
+                "hint": "This answer carries the current draft: merge your text into it and save again with If-Match set to its version."
             });
             (StatusCode::CONFLICT, Json(body))
         }
@@ -550,8 +559,10 @@ pub(super) async fn send_to_recipient(
             .ok_or_else(|| AppError::validation("message must be an object"))?
             .remove("recipient_id");
     }
-    let body: MessageCreate = serde_json::from_value(input)
-        .map_err(|_| AppError::validation("invalid message content"))?;
+    let body: MessageCreate = serde_json::from_value(input).map_err(|error| {
+        AppError::invalid(format!("invalid message content: {error}"))
+            .with_hint("Check the message against the MessageCreate schema in openapi.yaml (dm docs openapi): text in message, attachment objects in attachments, a voice note in voice (with duration_milliseconds), a GIF in gif.")
+    })?;
     send(&state, &context, conversation_id, idempotency_key, body).await
 }
 

@@ -7,8 +7,15 @@
  * while it is open (Tab goes between ✕ and ✓), since what it covers cannot be used meanwhile.
  *
  * A voice message goes to the composer's tray at once (uploading), uploads into the Carbon's Briefcase and is
- * transcribed in parallel, then the composer sends it (bridge.sendWhenReady). Dictation is transcribed and typed at
- * the caret; nothing is uploaded. When uploads are off the microphone dictates only, and says why.
+ * transcribed in parallel, then the composer sends it (bridge.sendWhenReady) with the words in the message field as its
+ * caption: the bar covers the field, so it shows those words while it records ("With your words: …") and ✓ says it
+ * sends them too, and a draft that arrives from another device meanwhile shows there as it comes. Dictation is
+ * transcribed and typed at the caret; nothing is uploaded. When uploads are off the microphone dictates only, and says
+ * why.
+ *
+ * What the bar is doing is said to screen readers by one polite region that is always here (waiting for the
+ * microphone, transcribing, the microphone stopped, the minute left, a recording left behind): a region added with its
+ * words is often not read.
  *
  * The others see "recording a voice message…" (or "typing…" while dictating); Listen mode holds its tongue meanwhile,
  * and anything else playing pauses (the microphone would hear it). A voice message may last 48 hours (it stops by
@@ -22,7 +29,7 @@
  * its conversation opens again, the bar offers to send it or throw it away (Esc: later). One for another conversation
  * is told once, in a toast with a way there.
  */
-import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
@@ -30,6 +37,7 @@ import { Check, Mic, X } from "lucide-react";
 import { TextShimmer } from "@/components/silicon-ui/text-shimmer/text-shimmer";
 import { conversationHref } from "@/lib/chat/address";
 import { transcribe } from "@/lib/chat/api";
+import { draftOf, subscribeDrafts } from "@/lib/chat/draft-store";
 import { clockDuration, clockTime, fileSize } from "@/lib/chat/format";
 import { dayLabel } from "@/lib/chat/timeline";
 import { reportActivity } from "@/lib/chat/presence";
@@ -190,8 +198,13 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
   const voice = useVoiceAvailability();
   const queryClient = useQueryClient();
   const router = useRouter();
-  const { me } = useChat();
+  const { me, perspective } = useChat();
   const account = me.account.uuid ?? me.account.id;
+  // The words in the message field (the composer's draft: lib/chat/draft-store.ts), which a voice message takes as its
+  // caption; the bar shows them while it covers the field.
+  const draftAccount = perspective.uuid ?? perspective.id;
+  const fieldAddress = bridge?.address ?? null;
+  const fieldWords = useSyncExternalStore(subscribeDrafts, () => (fieldAddress ? draftOf(draftAccount, fieldAddress)?.text.trim() ?? "" : ""), () => "");
   /** A voice message left behind for this conversation, offered in the bar: Send, or Throw away (Esc: later). */
   const [offer, setOffer] = useState<TakeInfo | null>(null);
   const [state, dispatchState] = useReducer(recorderReducer, IDLE_RECORDER);
@@ -546,6 +559,20 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
   const left = limit?.leftMs ?? null;
   const why = limit?.reason === "size" ? (dictating ? "it is as much as DM transcribes at once" : "it is as large as uploads here can be") : "48 hours is the longest voice message";
   const sendWords = dictating ? "inserts what it heard" : "sends what it recorded";
+  // A voice message takes the field's words with it, and the bar covers the field: it shows them while it is open.
+  const withWords = !dictating && !!fieldWords && (state.phase === "asking" || state.phase === "recording" || state.phase === "stopping");
+  // What the bar is doing, for screen readers, from the region that is always here (below).
+  const said = offering && offer
+    ? `A voice message you recorded was not sent: ${takeWords(offer)}. Send it now, or throw it away.`
+    : state.phase === "asking"
+      ? "Waiting for the microphone… If the browser asks, allow it."
+      : state.phase === "transcribing"
+        ? "Transcribing…"
+        : state.phase === "recording" && interrupted
+          ? `The microphone stopped. Enter ${sendWords}; Escape throws it away.`
+          : left !== null
+            ? `Less than a minute left: the recording stops then (${why}) and ${dictating ? "its words are inserted" : "it is sent"}.`
+            : "";
 
   let button;
   if (!bridge) {
@@ -567,7 +594,7 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
 
   const bar = offering && offer ? (
     <div ref={overlay} className={styles.recorder} data-sq="surface" data-voice-ui="" data-phase="offer" role="group" aria-label="A voice message that was not sent">
-      <div className={styles.problem} role="status">
+      <div className={styles.problem}>
         <span className={styles.offerTitle}>A voice message you recorded was not sent</span>
         <span className={styles.problemHint}>{`${takeWords(offer)}. Send it now, or throw it away.`}</span>
       </div>
@@ -596,15 +623,16 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
           <button type="button" ref={state.phase === "asking" || state.phase === "transcribing" ? primary : undefined} className={styles.recorderButton} data-sq="surface" aria-label={dictating ? "Cancel dictation" : "Cancel the voice message"} aria-keyshortcuts="Escape" onClick={cancel}>
             <X size={17} strokeWidth={1.9} aria-hidden="true" />
           </button>
-          <div className={styles.recorderBody}>
+          <div className={styles.recorderBody} data-with-words={withWords ? "" : undefined}>
+            {/* The notes are for the eyes: the region beside the microphone says them (it is always there). */}
             {state.phase === "asking" ? (
-              <span className={styles.recorderNote} role="status">Waiting for the microphone… If the browser asks, allow it.</span>
+              <span className={styles.recorderNote} aria-hidden="true">Waiting for the microphone… If the browser asks, allow it.</span>
             ) : state.phase === "transcribing" ? (
-              <span className={styles.recorderNote} role="status"><TextShimmer>Transcribing…</TextShimmer></span>
+              <span className={styles.recorderNote} aria-hidden="true"><TextShimmer>Transcribing…</TextShimmer></span>
             ) : interrupted ? (
               <>
                 <span className={styles.recTime}>{clockDuration(elapsed)}</span>
-                <span className={styles.recorderNote} role="status">{`The microphone stopped. ✓ ${sendWords}; ✕ throws it away.`}</span>
+                <span className={styles.recorderNote} aria-hidden="true">{`The microphone stopped. ✓ ${sendWords}; ✕ throws it away.`}</span>
               </>
             ) : (
               <>
@@ -619,20 +647,20 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
                   </span>
                 )}
                 {left !== null ? <span className={styles.warning} aria-hidden="true">{`${Math.ceil(left / 1000)} s left`}</span> : null}
-                {/* Said once when the warning starts (the countdown itself is for the eyes). */}
-                <span className="sr-only" role="status">{left !== null ? `Less than a minute left: the recording stops then (${why}) and ${dictating ? "its words are inserted" : "it is sent"}.` : ""}</span>
               </>
             )}
+            {/* The field's words go with the voice message (✓ says so): one line, cut at its end. */}
+            {withWords ? <span className={styles.recWords} title={fieldWords}>With your words: “{fieldWords}”</span> : null}
           </div>
           <button
             type="button"
             ref={state.phase === "recording" || state.phase === "stopping" ? primary : undefined}
             className={`${styles.recorderButton} ${styles.recorderSend}`}
             data-sq="surface"
-            aria-label={dictating ? "Stop and insert the words" : "Stop and send the voice message"}
+            aria-label={dictating ? "Stop and insert the words" : withWords ? "Stop and send the voice message with your words" : "Stop and send the voice message"}
             aria-keyshortcuts="Enter"
             aria-disabled={state.phase === "recording" ? undefined : true}
-            title={`${dictating ? "Insert the words" : "Send"} (Enter)`}
+            title={`${dictating ? "Insert the words" : withWords ? "Send with your words" : "Send"} (Enter)`}
             onClick={() => {
               if (state.phase === "recording") void finish();
             }}
@@ -646,6 +674,7 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
 
   return (
     <span ref={root} className={styles.mic} data-recording={busy ? "" : undefined}>
+      <span className="sr-only" role="status">{said}</span>
       {button}
       {bar && typeof document !== "undefined" ? createPortal(bar, document.body) : null}
     </span>

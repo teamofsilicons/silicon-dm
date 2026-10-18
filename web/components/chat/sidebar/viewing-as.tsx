@@ -18,10 +18,11 @@ export function ViewingAs() {
   return (
     <DropdownMenuRoot>
       <DropdownMenuTrigger asChild>
-        <button type="button" className={styles.viewAs} data-sq="surface">
+        {/* The whole name in one label: hidden text in the button read with a gap before it ("You , change…"). It starts
+            with the visible words, in order (WCAG 2.5.3). */}
+        <button type="button" className={styles.viewAs} data-sq="surface" aria-label={`Viewing as ${current}, change whose conversations you see`}>
           <span className={styles.viewAsLabel}>Viewing as </span>
-          {/* The hint sits inside the value, so the name reads "Viewing as You, change whose…" with no stray stop. */}
-          <span className={styles.viewAsValue}>{current}<span className="sr-only">, change whose conversations you see</span></span>
+          <span className={styles.viewAsValue}>{current}</span>
           <ChevronsUpDown size={14} strokeWidth={1.75} aria-hidden="true" />
         </button>
       </DropdownMenuTrigger>

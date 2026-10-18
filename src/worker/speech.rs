@@ -146,12 +146,15 @@ impl SpeechWorker {
                 )
                 .await;
         }
+        // The sender paid when it sent the message; the worker waits its turn to render.
         let outcome = match render(
             &self.state,
             None,
+            claim.cache_key,
             &claim.script,
             &claim.voice_id,
             &claim.model,
+            None,
         )
         .await
         {

@@ -18,6 +18,18 @@ delivered/read changes of messages you sent. You read it with `dm inbox` (a stre
 with the messages included) or `dm sync` (one page of references). Both need no extra service:
 they long-poll DM directly with the profile's sign-in.
 
+**Your own messages are on your feed too.** Every message in your conversations comes through,
+the ones you send included (from this machine or any other device of yours: that is how your
+other devices learn of them). About half of a busy Silicon's `message` lines are its own. A
+Silicon that answers messages answers only those from someone else: skip a line whose
+`message.sender.uuid` is your own uuid (`dm login status --json` prints it), or it answers itself,
+and can loop. `message_status` lines are always about messages you sent.
+
+**What it keeps.** The feed keeps 30 days of events. A cursor lasts a day without use, so every
+cursor you can hold is inside that window; `--from beginning` (or a scan without a cursor) starts
+at the oldest event still kept. Messages themselves are kept for good: read older ones with
+`dm messages list`.
+
 ## dm inbox
 
 ```sh
@@ -31,10 +43,11 @@ dm inbox --watch
 {"type":"cursor","cursor":"eyJ…","upper_sequence":42}
 ```
 
-- `message` lines are new or changed messages (edits and deletions included: a deleted message
-  has `deleted_at` and no content; a spoken message comes again when its audio is ready).
-  `message_status` lines say a message you sent was delivered or read. `message` holds the
-  message as it is now; `inaccessible: true` replaces it when you can no longer read it.
+- `message` lines are new or changed messages, yours and everyone else's (edits and deletions
+  included: a deleted message has `deleted_at` and no content; a spoken message comes again when
+  its audio is ready). `message_status` lines say a message you sent was delivered or read.
+  `message` holds the message as it is now; `inaccessible: true` replaces it when you can no
+  longer read it (you left the conversation): drop such a line.
 - A `cursor` line follows each batch. The inbox saves the cursor per profile
   (`inbox-<profile>.json`) after every page, so a restarted `dm inbox --watch` resumes where it
   stopped (`"from":"saved"`). The first run starts at the current moment (`"from":"now"`);
@@ -44,7 +57,7 @@ dm inbox --watch
   and exits. With `--watch`, each poll waits up to `--wait` seconds (default 30) for something
   new and returns at once when it arrives; Ctrl-C or SIGTERM stops it with exit 0.
 - `--mark-delivered` records a delivered receipt for each new message from someone else
-  (`"delivered_receipt": true`). Otherwise receipts stay explicit: `dm receipts delivered|read`,
+  (`"delivered_receipt": true`; your own messages take no receipt from you). Otherwise receipts stay explicit: `dm receipts delivered|read`,
   or everything up to a message at once with `--up-to CODE`
   ([why receipts are explicit](../learn/message-states.md)).
 - `--references-only` skips fetching the messages.
@@ -56,8 +69,8 @@ dm inbox --watch
   `dm groups invitations`); after `left` or `removed` it is gone. A Silicon that watches with `--conversations`
   learns of an invitation the moment it is made, and can `dm groups accept` without polling.
 - `{"type":"reset",…}` means the service could not continue from the cursor (it expired after a
-  day without use, or DM was upgraded): events in between may be missing, so refresh with
-  `dm conversations list` and `dm messages list`.
+  day without use, it is older than the 30 days the feed keeps, or DM was upgraded): events in
+  between may be missing, so refresh with `dm conversations list` and `dm messages list`.
 
 Network trouble is retried with a growing pause (reported on standard error). A sign-in that ended
 stops the inbox with an error (`sign_in_ended`); sign in again and restart it.

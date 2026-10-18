@@ -11,7 +11,7 @@ import { GET as config } from "../app/api/uploads/config/route";
 import { GET, HEAD } from "../app/api/uploads/file/route";
 import { fileResponseHeaders, publicFileTarget, uploadsSettings, type EnabledUploads } from "../lib/server/briefcase";
 import { sealSession, type StoredSession } from "../lib/server/session";
-import { displayUrl, downloadUrl, isBriefcaseFile, showsFromLocalBytes } from "../lib/upload/display";
+import { displayUrl, downloadUrl, isBriefcaseFile, loadsByItself, remoteSite, showsFromLocalBytes } from "../lib/upload/display";
 import { applyTestEnv, json, mockFetch } from "./env";
 
 const ACCOUNT = { uuid: "nln", kind: "carbon" as const, id: "c:ada", display_name: "Ada", pfp_url: null, custodian: null };
@@ -248,6 +248,19 @@ test("displayUrl: Briefcase public files come through this website, everything e
   for (const other of ["https://media.giphy.com/media/x/giphy.gif", "https://example.com/a.png", "https://example.com/api/v1/public/onlyowner", "https://example.com/api/v1/public/reports/q4.png", "https://user:pw@api.briefcase.test/api/v1/public/c:ada/a.png", "/api/uploads/file?url=x", "not a url"]) {
     assert.equal(displayUrl(other), other, other);
   }
+});
+
+test("what may load by itself as a message is shown: Briefcase files (through this website) and Giphy's GIFs; any other site would learn who reads the message", () => {
+  for (const url of [FILE, "https://media.giphy.com/media/x/giphy.gif", "https://media2.giphy.com/media/x/200w.gif", "https://i.giphy.com/x.gif"]) {
+    assert.equal(loadsByItself(url), true, url);
+    assert.equal(remoteSite(url), null, url);
+  }
+  for (const [url, site] of [["https://images.example.com/cat.png", "images.example.com"], ["https://giphy.com.example.net/x.gif", "giphy.com.example.net"], ["https://media.giphy.com.evil.test/x.gif", "media.giphy.com.evil.test"], ["http://media.giphy.com/x.gif", "media.giphy.com"], ["https://user:pw@media.giphy.com/x.gif", "media.giphy.com"]] as const) {
+    assert.equal(loadsByItself(url), false, url);
+    assert.equal(remoteSite(url), site, url);
+  }
+  assert.equal(loadsByItself("not a url"), false);
+  assert.equal(remoteSite("not a url"), null);
 });
 
 test("your own upload shows from this tab's bytes only for pictures, recordings and video (a blob: URL is DM's origin)", () => {

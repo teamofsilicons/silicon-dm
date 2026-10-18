@@ -27,7 +27,7 @@ pub use group::{
 pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use message::{
     Attachment, Gif, GifPage, Message, MessageCreate, MessagePage, MessageStatus, ReceiptStatus,
-    VoiceAttachment,
+    VoiceAttachment, invalid_content,
 };
 pub use pagination::{Cursor, PageRequest};
 pub use presence::{Activity, Availability, Presence};

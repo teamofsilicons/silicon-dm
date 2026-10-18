@@ -9,7 +9,8 @@
  *
  * A Briefcase public file is recognised by its path, `/api/v1/public/{owner}/{path…}` (Briefcase's public route, the
  * form every upload's link has), so the answer needs no settings to wait for; the proxy itself checks that the link is
- * the configured Briefcase's and refuses anything else. A picture, a recording or a video this tab just uploaded is
+ * the configured Briefcase's and refuses anything else (`loadsByItself` says which addresses may load as a message is
+ * shown without telling their site who reads it). A picture, a recording or a video this tab just uploaded is
  * shown from the bytes it already has (a blob: URL, created when first shown), so your own photo or voice note appears
  * at once instead of being downloaded again; that memory is per tab, holds at most 64 MB, and starts empty on every
  * page load (so a server render and the first browser render always agree).
@@ -74,4 +75,35 @@ export function displayUrl(url: string): string {
 /** The same file as a download (named after the file, never shown in place). */
 export function downloadUrl(url: string): string {
   return isBriefcaseFile(url) ? `/api/uploads/file?url=${encodeURIComponent(url)}&download=1` : url;
+}
+
+/** Giphy's own media hosts: the GIFs DM's GIF search finds, served by Giphy (only Giphy sees who loads one). */
+const GIPHY_MEDIA = /^(?:media\d*|i)\.giphy\.com$/i;
+
+/**
+ * Whether a message's picture, video or sound may load by itself as the message is shown: a Silicon Briefcase file
+ * (through this website), one this tab uploaded (its own bytes), or a GIF from Giphy's media. Any other address was
+ * chosen by the sender, and loading it would tell that site who opened the message, from where and when (a tracking
+ * picture), so it should load only when the reader asks, or open as a link. `displayUrl` still answers every address
+ * as it is: the thread decides (it decides how a photo, a video or a GIF is shown).
+ */
+export function loadsByItself(url: string): boolean {
+  if (isBriefcaseFile(url) || (typeof window !== "undefined" && local.has(url))) return true;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password && GIPHY_MEDIA.test(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** The site another address would load from ("images.example.com"), to name it before the reader asks; null when it loads by itself or is not a link. */
+export function remoteSite(url: string): string | null {
+  if (loadsByItself(url)) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.hostname : null;
+  } catch {
+    return null;
+  }
 }

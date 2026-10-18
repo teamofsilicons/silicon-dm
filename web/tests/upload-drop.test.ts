@@ -2,10 +2,12 @@
  * What a drop brings (lib/upload/drop.ts): plain files; folders walked by path with hidden files left out (and a cap
  * for a drop of a whole disk); a picture or link dragged from a web page attached as an https link, never fetched; a
  * picture inlined in a page (data:) taken as a file; everything else said in words, so a drop is never silently nothing.
- * The browser's DataTransfer and its entries are faked with plain objects.
+ * And what the composer does with it (components/chat/composer/drop-plan.ts): what goes in at once, what is asked, what
+ * is said and when. The browser's DataTransfer and its entries are faked with plain objects.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { planDrop } from "../components/chat/composer/drop-plan";
 import { addressesOf, foldersWords, httpsLink, leftOutWords, pictureFromDataUrl, readDrop, snapshotDrop, type DataTransferLike, type EntryLike, type ItemLike } from "../lib/upload/drop";
 
 const file = (name: string, text = name, type = "text/plain") => new File([text], name, { type });
@@ -143,3 +145,63 @@ test("files dragged from an app that gives a page only their addresses on disk (
   assert.match(dropped.problems[0] ?? "", /file:\/\/…\), which a web page cannot open/);
   assert.match(dropped.problems[0] ?? "", /\+\u00a0→\u00a0Upload a file/, "kept on one line: no-break spaces around the arrow");
 });
+
+const blankEntry = (name: string): EntryLike => ({ isFile: true, isDirectory: false, name, file: success => setTimeout(() => success(new File([], name)), 0) });
+const scanEntries = (count: number) => Array.from({ length: count }, (_, index) => entry(`scan-${String(index + 1).padStart(3, "0")}.txt`));
+
+test("a folder of more than 20 files dropped with a loose file: the loose one goes in at once, the question counts the folder's files only and names what was left out", async () => {
+  const scans = folder("Scans", [...scanEntries(25), entry(".DS_Store"), blankEntry("empty.txt")], 10);
+  const dropped = await readDrop(snapshotDrop(transfer({ items: [folderItem(scans), fileItem(file("cover.pdf", "%PDF", "application/pdf"))] })));
+  assert.deepEqual(dropped.loose.map(item => item.name), ["cover.pdf"]);
+  assert.equal(dropped.inFolders.length, 25);
+  assert.equal(dropped.files.length, 26, "files is both, as before");
+  const plan = planDrop(dropped, { room: 100, uploadsOff: null });
+  assert.deepEqual(plan.add.map(item => item.name), ["cover.pdf"], "the loose file goes in at once, so Cancel never takes it back");
+  assert.equal(plan.question?.words, "Scans has 25 files (one empty file left out). Upload all of them?");
+  assert.equal(plan.question?.action, "Upload 25 files");
+  assert.equal(plan.question?.files.length, 25);
+  assert.deepEqual(plan.sayings, [], "what was left out is in the question, never a note hidden behind it");
+});
+
+test("loose files never make a folder ask: 3 files from a folder and 20 loose ones go in at once, and what was left out is said", async () => {
+  const small = folder("Small", [entry("a.txt"), entry("b.txt"), blankEntry("c.txt")]);
+  const loose = Array.from({ length: 20 }, (_, index) => fileItem(file(`loose-${index}.txt`)));
+  const dropped = await readDrop(snapshotDrop(transfer({ items: [folderItem(small), ...loose] })));
+  const plan = planDrop(dropped, { room: 100, uploadsOff: null });
+  assert.equal(plan.question, null);
+  assert.equal(plan.add.length, 22);
+  assert.deepEqual(plan.sayings, ["One empty file was left out."]);
+});
+
+test("asked with less room than files: the first that fit; what else the drop says waits for the answer; no room at all is said", async () => {
+  const locked: EntryLike = { isFile: false, isDirectory: true, name: "Locked", createReader: () => ({ readEntries: (_success, failure) => failure?.(new DOMException("denied", "SecurityError")) }) };
+  const big = folder("Big", scanEntries(120), 50);
+  const dropped = await readDrop(snapshotDrop(transfer({ items: [folderItem(big), folderItem(locked), ...Array.from({ length: 5 }, (_, index) => fileItem(file(`loose-${index}.txt`)))] })));
+  const plan = planDrop(dropped, { room: 50, uploadsOff: null });
+  assert.equal(plan.add.length, 5);
+  assert.equal(plan.question?.words, "Big has 120 files, and a message carries up to 100 attachments. Upload the first 45?");
+  assert.equal(plan.question?.files.length, 45);
+  assert.match(plan.sayings[0] ?? "", /^The folder Locked could not be read/, "said once the question is answered (the composer keeps it for then)");
+  const full = planDrop(dropped, { room: 5, uploadsOff: null });
+  assert.equal(full.question, null);
+  assert.ok(full.sayings.includes("This message already carries 100 attachments, the most it takes. Send it first."));
+  const cut = await readDrop(snapshotDrop(transfer({ items: [folderItem(folder("Disk", scanEntries(40), 10))] })), { limit: 30 });
+  assert.equal(planDrop(cut, { room: 100, uploadsOff: null }).question?.words, "Disk has more than 30 files. Upload all of them?");
+});
+
+test("uploads off: no file is added or asked about, links still go, and it says why once", async () => {
+  const dropped = await readDrop(snapshotDrop(transfer({ items: [folderItem(folder("Scans", scanEntries(30), 10)), fileItem(file("a.txt"))] })));
+  const plan = planDrop(dropped, { room: 100, uploadsOff: "Uploads are not set up on this DM website yet." });
+  assert.deepEqual(plan.add, []);
+  assert.equal(plan.question, null);
+  assert.deepEqual(plan.sayings, ["Uploads are not set up on this DM website yet."]);
+  const link = await readDrop(snapshotDrop(transfer({ data: { "text/uri-list": "https://example.com/notes" } })));
+  assert.deepEqual(planDrop(link, { room: 100, uploadsOff: "Off." }), { links: ["https://example.com/notes"], add: [], question: null, sayings: [] });
+});
+
+test("left-out words inside a sentence", () => {
+  assert.equal(leftOutWords([{ empty: 1 }], "inline"), "one empty file left out");
+  assert.equal(leftOutWords([{ empty: 3, unreadable: 1 }], "inline"), "3 empty files and one file this browser could not read left out");
+  assert.equal(leftOutWords([{}], "inline"), null);
+});
+

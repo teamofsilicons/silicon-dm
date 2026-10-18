@@ -15,12 +15,14 @@
  *   a spoken message with a written caption: the caption is the message, then the player, then the spoken words
  *   a voice message cut off by a reload is kept on disk (OPFS) and offered when the conversation opens again
  *   a phone: Change opens the voices as a sheet; a playing spoken message keeps its voice's name (one speed button)
+ *   Listen mode only where a Silicon takes part (the palette leaves it out elsewhere, and ⌘⇧L says why)
+ *   listening and playing move nothing in the thread; keyboard focus on the voice controls changes them by 3:1 or more
  *   axe on the voice surfaces
  */
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type Browser, type BrowserContext, type Locator, type Page } from "@playwright/test";
 import { BASE, watchErrors } from "./support";
 
 const HELPER = join(process.cwd(), "..", "scripts", "chat-stack", "identities.mjs");
@@ -120,6 +122,53 @@ async function expectPlaying(page: Page, trackEnding: string | RegExp): Promise<
 }
 
 /**
+ * How much keyboard focus changes a control, as WCAG 1.4.11 measures a focus indicator (the same measure as
+ * e2e/thread.spec.ts): each pixel of the control and 4 px around it, focused against at rest (transitions off), as a
+ * contrast ratio; at least three quarters of its edge's length of pixels must change by 3:1 or more.
+ */
+async function expectFocusSeen(page: Page, name: string, target: Locator): Promise<void> {
+  await page.addStyleTag({ content: "*, *::before, *::after { transition: none !important; animation: none !important; }" });
+  await target.scrollIntoViewIfNeeded();
+  await page.mouse.move(1, 1);
+  const box = (await target.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  const x = Math.max(0, box.x - 4);
+  const y = Math.max(0, box.y - 4);
+  const clip = { x, y, width: Math.min(viewport.width - x, box.width + 8), height: Math.min(viewport.height - y, box.height + 8) };
+  await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
+  const rest = await page.screenshot({ clip });
+  // A key first, so the browser shows focus as it does for the keyboard (:focus-visible).
+  await page.keyboard.press("Shift");
+  await target.focus();
+  expect(await target.evaluate(element => element.matches(":focus-visible")), `${name}: the keyboard is on it`).toBe(true);
+  const focused = await page.screenshot({ clip });
+  const strong = await page.evaluate(async ([a, b]) => {
+    const pixels = async (base64: string) => {
+      const bitmap = await createImageBitmap(new Blob([Uint8Array.from(atob(base64), c => c.charCodeAt(0))], { type: "image/png" }));
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const context = canvas.getContext("2d")!;
+      context.drawImage(bitmap, 0, 0);
+      return context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+    };
+    const [p, q] = await Promise.all([pixels(a), pixels(b)]);
+    const channel = (value: number) => {
+      const c = value / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+    const luminance = (d: Uint8ClampedArray, i: number) => 0.2126 * channel(d[i]!) + 0.7152 * channel(d[i + 1]!) + 0.0722 * channel(d[i + 2]!);
+    let count = 0;
+    for (let i = 0; i < p.length; i += 4) {
+      const one = luminance(p, i);
+      const two = luminance(q, i);
+      if ((Math.max(one, two) + 0.05) / (Math.min(one, two) + 0.05) >= 3) count++;
+    }
+    return count;
+  }, [rest.toString("base64"), focused.toString("base64")] as const);
+  const edge = Math.round(2 * (box.width + box.height));
+  expect(strong, `${name}: pixels that change by 3:1 or more with keyboard focus (WCAG 1.4.11), against an edge of ${edge} px`).toBeGreaterThanOrEqual(edge * 0.75);
+}
+
+/**
  * axe-core's WCAG 2.2 A and AA rules on the voice surfaces on screen (`[data-voice-ui]`: players, Listen mode, the
  * recording bar, the voice pickers and settings); e2e/a11y.spec.ts audits whole pages.
  */
@@ -154,13 +203,18 @@ test("a voice note: recorded, uploaded, transcribed, heard by the other Carbon; 
   await field.press(`${MOD}+Shift+M`);
   const recording = page.getByRole("group", { name: "Recording a voice message" });
   await expect(recording).toBeVisible();
-  await expect(page.getByRole("button", { name: "Stop and send the voice message" })).toBeFocused();
+  // The bar covers the field: it shows the words that go with the voice message, and ✓ says it sends them.
+  const stopAndSend = page.getByRole("button", { name: "Stop and send the voice message with your words" });
+  await expect(stopAndSend).toBeFocused();
+  await expect(recording).toContainText(`With your words: “${caption}”`);
   await expect(recording.getByRole("timer")).toHaveText(/0:0[1-9]/, { timeout: 10_000 });
   // The bar covers the composer, so the keyboard stays in it: Tab goes between ✕ and ✓.
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "Cancel the voice message" })).toBeFocused();
   await page.keyboard.press("Tab");
-  await expect(page.getByRole("button", { name: "Stop and send the voice message" })).toBeFocused();
+  await expect(stopAndSend).toBeFocused();
+  await expectFocusSeen(page, "the recorder's Cancel", page.getByRole("button", { name: "Cancel the voice message" }));
+  await stopAndSend.focus();
   await page.waitForTimeout(500);
   // The send is held for a moment (this page's request only), to see the message wait in the outbox as itself. Once let
   // go, every send passes straight through.
@@ -200,6 +254,8 @@ test("a voice note: recorded, uploaded, transcribed, heard by the other Carbon; 
   await expect(received).toContainText(STAND_IN_WORDS);
   const play = received.getByRole("button", { name: /^Play Ada's voice message/ });
   await expect(play).toBeVisible();
+  await expectFocusSeen(friend, "a voice message's Play", play);
+  await expectFocusSeen(friend, "a voice message's waveform", received.getByRole("slider", { name: /^Position in Ada's voice message/ }));
   const code = await received.getAttribute("data-message-code");
   await play.click();
   await expectPlaying(friend, `|${code}`);
@@ -386,9 +442,17 @@ test("Listen plays a Silicon's words; a spoken message prepares, then shows its 
   const text = page.locator("article[data-message-code]", { hasText: words });
   await expect(text).toBeVisible();
   const textCode = await text.getAttribute("data-message-code");
+  // Where it rests once it has risen in (a message that arrives rises 6 px into place).
+  const textTop = await text.evaluate(async node => {
+    await Promise.all(node.getAnimations({ subtree: true }).filter(animation => animation.effect?.getTiming().iterations !== Infinity).map(animation => animation.finished.catch(() => undefined)));
+    return node.getBoundingClientRect().top;
+  });
   await text.click({ button: "right" });
   await page.getByRole("menuitem", { name: "Listen" }).click();
   await expectPlaying(page, `|${textCode}`);
+  // Listening moves nothing (its progress is drawn inside the bubble), and the thread says it to screen readers.
+  expect(Math.abs((await text.evaluate(node => node.getBoundingClientRect().top)) - textTop), "the message stays where it was").toBeLessThanOrEqual(1);
+  await expect(page.getByRole("main").getByRole("status").filter({ hasText: /^Playing$/ })).toHaveCount(1);
 
   // A voice that cannot say the words: the Carbon reads what happened and what to do, never the service's wording for
   // Silicons ("choose another voice from GET /api/v1/voices"). This page's speech requests only.
@@ -425,10 +489,15 @@ test("Listen plays a Silicon's words; a spoken message prepares, then shows its 
   await expect(speech).not.toContainText("Preparing audio…");
   expect(await page.evaluate(marker => ((window as unknown as { __preparing?: string[] }).__preparing ?? []).some(text => text.includes(marker)), spoken), "it said Preparing audio… while the service rendered it").toBe(true);
   await sent;
-  // Seeking by keyboard on its waveform once it plays.
+  await expectFocusSeen(page, "a spoken message's Play", speech.getByRole("button", { name: /^Play Scout's spoken message/ }));
+  await expectFocusSeen(page, "a spoken message's waveform", speech.getByRole("slider", { name: /^Position in Scout's spoken message/ }));
+  // Seeking by keyboard on its waveform once it plays (the speed that shows meanwhile does not grow the bubble).
+  const bubbleHeight = () => speech.evaluate(node => node.querySelector("[data-sq='surface']")!.getBoundingClientRect().height);
+  const resting = await bubbleHeight();
   await speech.getByRole("button", { name: /^Play Scout's spoken message/ }).click();
   const speechCode = await speech.getAttribute("data-message-code");
   await expectPlaying(page, `|${speechCode}`);
+  expect(Math.abs((await bubbleHeight()) - resting), "playing does not grow the bubble").toBeLessThanOrEqual(1);
   const slider = speech.getByRole("slider", { name: /^Position in Scout's spoken message/ });
   await slider.focus();
   const before = (await player(page))!.time;
@@ -507,6 +576,35 @@ test("Listen plays a Silicon's words; a spoken message prepares, then shows its 
   await ada.close();
 });
 
+test("Listen mode is offered only where a Silicon takes part: elsewhere the palette leaves it out and ⌘⇧L says why", async ({ browser }) => {
+  const carbons = await dmApi<{ id: string }>("ada", "POST", "/api/v1/groups", { type: "create_group", data: { name: `Carbons only ${stamp()}`, member_ids: ["c:dmc-bo"] } });
+  const withScout = await groupWithScout("Listen offered");
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = watchErrors(page);
+  const paletteOffers = async () => {
+    await page.keyboard.press(`${MOD}+k`);
+    await page.keyboard.type("Listen mode");
+    const options = page.getByRole("option", { name: /^Listen mode/ });
+    await page.waitForTimeout(300);
+    const count = await options.count();
+    await page.keyboard.press("Escape");
+    return count;
+  };
+  await page.goto(`/c/${carbons.id}`);
+  await expect(page.getByRole("textbox", { name: /^Message / })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Show details" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Listen mode" })).toHaveCount(0);
+  await page.keyboard.press(`${MOD}+Shift+L`);
+  await expect(page.getByText("Nothing for Listen mode here")).toBeVisible();
+  expect(await paletteOffers(), "the palette leaves Listen mode out where nothing could be spoken").toBe(0);
+  await page.goto(`/c/${withScout}`);
+  await expect(page.getByRole("button", { name: "Listen mode" })).toBeVisible();
+  expect(await paletteOffers()).toBe(1);
+  expect(errors).toEqual([]);
+  await ada.close();
+});
+
 /* Settings → Voice ------------------------------------------------------------------------------------------------- */
 
 test("Settings → Voice: a sample plays, Scout's voice is chosen and reset, and the service says so", async ({ browser }) => {
@@ -519,6 +617,9 @@ test("Settings → Voice: a sample plays, Scout's voice is chosen and reset, and
   const voices = page.getByRole("radiogroup", { name: "Scout's voice" });
   await expect(voices).toBeVisible();
   await audit(page, "Settings → Voice");
+  // The default voice's card says so after its name, as a word of its own ("Mark Default", never "MarkDefault").
+  await expect(voices.getByRole("radio", { name: /Default$/ })).toHaveAccessibleName(/\S Default$/);
+  await expectFocusSeen(page, "a voice's sample", page.getByRole("button", { name: "Play Hope's sample" }).first());
 
   // ▶ plays the sample line in that voice.
   await page.getByRole("button", { name: "Play Hope's sample" }).first().click();
@@ -531,6 +632,15 @@ test("Settings → Voice: a sample plays, Scout's voice is chosen and reset, and
   const chosen = await dmApi<{ voice: { key: string; name: string }; chosen: boolean; chosen_by: { id: string } | null }>("ada", "GET", "/api/v1/voices/si:dmc-scout");
   expect(chosen.chosen).toBe(true);
   expect(chosen.chosen_by?.id).toBe("c:dmc-ada");
+  // Who chose it and when, on one line: where the time does not fit (a medium window) it gives way whole, never cut.
+  await page.setViewportSize({ width: 780, height: 900 });
+  const chosenLine = page.getByRole("region", { name: "Scout's voice" }).locator("[title*='Chosen by you']");
+  await expect.poll(() => chosenLine.evaluate(line => {
+    const [main, when] = [line.firstElementChild as HTMLElement, line.lastElementChild as HTMLElement];
+    const shown = when !== main && when.getBoundingClientRect().top - line.getBoundingClientRect().top < line.clientHeight - 1;
+    return { mainCut: main.scrollWidth > main.clientWidth + 1, timeCut: shown && when.getBoundingClientRect().right > line.getBoundingClientRect().right + 1 };
+  })).toEqual({ mainCut: false, timeCut: false });
+  await page.setViewportSize({ width: 1280, height: 720 });
 
   // Back to the default, as it was: Reset to default sits beside Scout's name (it appears without moving anything).
   await page.getByRole("region", { name: "Scout's voice" }).getByRole("button", { name: "Reset to default" }).click();

@@ -2,7 +2,7 @@
 
 /**
  * Which of the chat's own dialogs is open (one at a time): new conversation, new group, invitations, keyboard
- * shortcuts. Shortcuts, the palette, buttons and addresses (`/c?new=1`, `/c?new=group`) all open them through here, so
+ * shortcuts, and signing out with messages still unsent. Shortcuts, the palette, buttons and addresses (`/c?new=1`, `/c?new=group`) all open them through here, so
  * each is mounted once (components/chat/shell/chat-app.tsx).
  *
  * It also remembers what to give focus back to when the dialog closes (WCAG 2.4.3). Silicon UI's Dialog returns focus
@@ -12,7 +12,7 @@
  */
 import { useSyncExternalStore } from "react";
 
-export type ChatDialog = "new-conversation" | "new-group" | "invitations" | "shortcuts";
+export type ChatDialog = "new-conversation" | "new-group" | "invitations" | "shortcuts" | "sign-out";
 
 let open: ChatDialog | null = null;
 let opener: HTMLElement | null = null;

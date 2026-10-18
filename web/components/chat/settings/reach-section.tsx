@@ -26,6 +26,7 @@ import { ApiError } from "@/lib/errors";
 import { formatDate } from "@/lib/format";
 import { notify, notifyError } from "@/lib/notify";
 import { AccountAvatar } from "../common/avatars";
+import { refocusIfLost } from "../common/refocus";
 import { AccountPicker, type AccountPickerHandle } from "../dialogs/account-picker";
 import { idsNamedIn } from "../dialogs/contacts";
 import { useShowWhenSet } from "../dialogs/show-when-set";
@@ -40,10 +41,13 @@ interface AllowEntry {
 
 /**
  * One account on a Silicon's list. At rest it offers a quiet Remove (no box, so a long list stays calm); pressing it asks
- * in place, on its own line (Silicon UI's ConfirmMorph), and Cancel or Esc gives the keyboard back to Remove.
+ * in place, on its own line (Silicon UI's ConfirmMorph). The question waits for an answer (no timeout: it never closes
+ * under someone reading it, WCAG 2.2.1); Cancel or Esc gives the keyboard back to Remove, and a click elsewhere leaves it
+ * where it went (common/refocus.ts), so typing in another field never answers a question asked again.
  */
 function AllowedRow({ entry, onRemove }: { entry: AllowEntry; onRemove: (account: AccountRef) => Promise<void> }) {
   const [asking, setAsking] = useState(false);
+  const row = useRef<HTMLLIElement>(null);
   const removeButton = useRef<HTMLButtonElement>(null);
   const morph = useRef<HTMLDivElement>(null);
   const wasAsking = useRef(false);
@@ -56,11 +60,11 @@ function AllowedRow({ entry, onRemove }: { entry: AllowEntry; onRemove: (account
     }
     if (!asking && wasAsking.current) {
       wasAsking.current = false;
-      requestAnimationFrame(() => removeButton.current?.focus());
+      return refocusIfLost(row.current, () => removeButton.current);
     }
   }, [asking]);
   return (
-    <li className={styles.allowedRow} data-asking={asking ? "" : undefined}>
+    <li ref={row} className={styles.allowedRow} data-asking={asking ? "" : undefined}>
       <AccountAvatar account={account} size="small" decorative />
       <span className={styles.allowedText}>
         <span className={styles.allowedName}>{accountName(account)}</span>
@@ -72,7 +76,7 @@ function AllowedRow({ entry, onRemove }: { entry: AllowEntry; onRemove: (account
       </span>
       {asking ? (
         <ConfirmMorph ref={morph} className={styles.allowedMorph} label={<>Remove<span className="sr-only"> {account.id}</span></>} prompt={`Remove ${firstName(account)}?`}
-          confirmLabel="Remove" pendingLabel="Removing" doneLabel="Removed" defaultState="confirming" onConfirm={() => onRemove(account)}
+          confirmLabel="Remove" pendingLabel="Removing" doneLabel="Removed" defaultState="confirming" confirmTimeout={0} onConfirm={() => onRemove(account)}
           onStateChange={(state: ConfirmMorphState) => { if (state === "idle") setAsking(false); }} />
       ) : (
         <Button ref={removeButton} size="sm" variant="ghost" className={styles.allowedRemove} onClick={() => setAsking(true)}>

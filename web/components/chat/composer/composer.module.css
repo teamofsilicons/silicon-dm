@@ -272,9 +272,15 @@
 .disabled { color: var(--text-muted); font-size: var(--text-sm); text-align: center; padding: var(--space-2) 0; }
 .note { margin-top: var(--space-2); color: var(--text-muted); font-size: var(--text-xs); }
 .note[data-tone="pending"] { color: var(--accent-ink); }
-/* A waiting send: its line, and Cancel beside it (a quiet text button, as tall as a target needs). */
+/* A waiting send: its line, and Cancel beside it (a quiet text button, as tall as a target needs). The row of what the
+   composer says is always there (its live region must be, for screen readers to read what comes into it): nothing to
+   say, it takes no room. */
 .noteRow { display: flex; align-items: baseline; gap: var(--space-2); margin-top: var(--space-1); }
+.noteRow[data-kind="none"] { margin-top: 0; }
+.noteRow[data-kind="notice"] { margin-top: var(--space-2); }
 .noteRow .note { min-width: 0; margin-top: 0; }
+.noteWords { min-width: 0; flex: 1; }
+.noteWords > .note + .note { margin-top: var(--space-1); }
 .noteAction {
   --sq-r: 7px;
   --sq-fill: transparent;

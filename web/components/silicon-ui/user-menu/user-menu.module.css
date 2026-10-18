@@ -63,7 +63,7 @@
 /* Sign out is not destructive, so it stays neutral like every other row. */
 @media (hover: none) { .item:active { background: var(--surface-muted); } }
 
-.keys { display: inline-flex; flex: none; align-items: center; gap: 1px; margin-left: auto; color: var(--text-muted); font-family: var(--font-body); font-size: var(--text-xs); letter-spacing: 0; opacity: .8; font-variant-numeric: tabular-nums; }
+.keys { display: inline-flex; flex: none; align-items: center; gap: 1px; margin-left: auto; color: var(--text-muted); font-family: var(--font-body); font-size: var(--text-xs); letter-spacing: 0; font-variant-numeric: tabular-nums; }
 .key { display: inline-block; min-width: 1.05em; font: inherit; text-align: center; }
 
 .row { position: relative; display: flex; height: 36px; align-items: center; gap: var(--space-group); padding: 0 var(--space-tight) 0 var(--space-related); }

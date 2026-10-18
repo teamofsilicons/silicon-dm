@@ -60,7 +60,8 @@ pub fn sign_in_hint(profile: &str) -> String {
         format!("--profile {profile} ")
     };
     format!(
-        "Carbon: dm {flag}login (approve the code it prints). Silicon: silicon-accounts login --app dm -q | dm {flag}login --slt-stdin"
+        "Carbon: dm {flag}login (approve the code it prints). Silicon: silicon-accounts login --app dm -q | dm {flag}login --slt-stdin, once signed in to Silicon Accounts with its si:id and STK ({}; silicon-accounts login status --json says whether it is)",
+        crate::accounts::SILICON_ACCOUNTS_SIGN_IN
     )
 }
 

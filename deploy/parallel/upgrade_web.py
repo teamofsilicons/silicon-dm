@@ -27,13 +27,14 @@ def upgrade(stage, source):
     backup = 'dm-accounts-web-before-' + str(int(time.time()))
     # Preload the image before the brief restart. Old IAM gateway never changes.
     run(['docker', 'load', '--input', str(stage / 'gateway.tar')])
-    run(['docker', 'stop', install_web.NAME])
+    # 30 s, not docker's 10: the website cancels the Briefcase reservations of uploads under way as it stops.
+    run(['docker', 'stop', '--time', '30', install_web.NAME])
     run(['docker', 'rename', install_web.NAME, backup])
     try:
         install_web.install(stage, source)
     except BaseException:
         if install_web.NAME in run(['docker', 'ps', '-a', '--format', '{{.Names}}']).splitlines():
-            run(['docker', 'stop', install_web.NAME])
+            run(['docker', 'stop', '--time', '30', install_web.NAME])
             run(['docker', 'rename', install_web.NAME, 'dm-accounts-web-failed-' + str(int(time.time()))])
         run(['docker', 'rename', backup, install_web.NAME])
         run(['docker', 'start', install_web.NAME])

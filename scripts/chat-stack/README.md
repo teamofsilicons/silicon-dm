@@ -147,7 +147,11 @@ The **Briefcase stand-in** implements Briefcase 4's delegated uploads with the s
 Every proof is verified with the local Accounts stack using briefcase's credentials and must carry the route's
 scope. Like Briefcase, public bytes come with `Cross-Origin-Resource-Policy: same-origin` and a sandbox CSP, so the
 website must serve them through its own origin rather than embed them directly. Files live in `.dev/briefcase/`;
-`GET /_state` lists them.
+`GET /_state` lists them. Transfers stream to disk (runs of zeros are left as holes, so big test files cost no disk),
+up to Briefcase's 5 TiB; names follow Briefcase's `EntryName` (trimmed, at most 255 bytes of UTF-8).
+`POST /_faults` takes `{"route","status","code","count"}` and `"match"`: a text in the upload's name, so a test on this
+shared stand-in never trips anyone else's; for the transfer, `"delay_ms"` (with `"match"`) holds the answer after the
+last byte, as Briefcase storing a large file does. `DELETE /_files/{sha256}` removes a test file's bytes.
 
 ## When something is wrong
 

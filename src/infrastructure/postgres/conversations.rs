@@ -14,7 +14,8 @@ use crate::{
     application::commands::CreateConversationCommand,
     domain::{
         ActorId, ActorRef, ActorType, Conversation, ConversationAccess, ConversationChange,
-        ConversationPage, Cursor, MAX_CONVERSATION_PARTICIPANTS, OrganizationId, PageRequest,
+        ConversationPage, Cursor, MAX_CONVERSATION_PARTICIPANTS, Message, OrganizationId,
+        PageRequest,
     },
 };
 
@@ -422,7 +423,9 @@ impl PostgresStore {
               AND participant.actor_id = $2
               AND conversation.superseded_by IS NULL
               AND (NOT $6 OR conversation.is_group)
-              AND ($3::timestamptz IS NULL OR (conversation.updated_at, conversation.id) < ($3, $4))
+              AND (conversation.updated_at, conversation.id)
+                  < (COALESCE($3::timestamptz, 'infinity'::timestamptz),
+                     COALESCE($4::uuid, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid))
             ORDER BY conversation.updated_at DESC, conversation.id DESC
             LIMIT $5
             "
@@ -582,11 +585,28 @@ impl PostgresStore {
         }
         let mut unread = self.unread_summaries(subject, &conversation_ids).await?;
         let mut drafts = self.draft_versions(subject, &conversation_ids).await?;
+        let mut groups = self.groups_details(viewer, &conversation_ids).await?;
+        // Every row's last message in a batch (within the page's byte budget), not one by one.
+        let last_ids: Vec<Uuid> = records
+            .iter()
+            .filter_map(|record| record.last_message_id)
+            .collect();
+        let estimates = self.message_size_estimates(&last_ids).await?;
+        let mut last_messages: HashMap<Uuid, Message> = self
+            .load_messages_within_budget(&estimates)
+            .await?
+            .into_iter()
+            .map(|message| (message.id, message))
+            .collect();
         let mut items = Vec::with_capacity(records.len());
         let mut payload_bytes: usize = 0;
         for record in &records {
             let last_message = match record.last_message_id {
-                Some(id) => Some(self.load_message(id).await?),
+                // A last message the budget left out ends the page here.
+                Some(id) => match last_messages.remove(&id) {
+                    Some(message) => Some(message),
+                    None => break,
+                },
                 None => None,
             };
             let message_bytes = last_message
@@ -608,7 +628,7 @@ impl PostgresStore {
                 visible_to_custodians: custodians.remove(&record.id).unwrap_or_default(),
                 superseded_by: record.superseded_by,
                 supersedes: supersedes.remove(&record.id).unwrap_or_default(),
-                group: self.group_details(viewer, record.id).await?,
+                group: groups.remove(&record.id),
                 last_message,
                 unread_count: summary.unread_count,
                 last_read_message_id: summary

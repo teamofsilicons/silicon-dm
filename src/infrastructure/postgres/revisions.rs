@@ -82,7 +82,7 @@ impl PostgresStore {
             ));
         }
         if let Some(content) = &content {
-            content.validate().map_err(AppError::validation)?;
+            content.validate().map_err(crate::domain::invalid_content)?;
             if content
                 .sender_id
                 .as_ref()
@@ -246,8 +246,10 @@ impl PostgresStore {
                 super::messages::limit_allowance(limit, job),
             ));
         }
-        // Private outbox discriminator prevents delivery deduplication from hiding later edits/deletions.
-        let next: i64 = sqlx::query_scalar("SELECT COALESCE(max(delivery_revision),0)+1 FROM actor_deliveries WHERE message_id=$1 AND delivery_kind='message'")
+        // Private outbox discriminator prevents delivery deduplication from hiding later
+        // edits/deletions. Revision 1 is the send; the outbox may have let a message's older
+        // deliveries go (retention), so a revision is never below 2 here.
+        let next: i64 = sqlx::query_scalar("SELECT COALESCE(max(delivery_revision),1)+1 FROM actor_deliveries WHERE message_id=$1 AND delivery_kind='message'")
             .bind(id).fetch_one(&mut *tx).await?;
         sqlx::query("UPDATE conversations SET updated_at=clock_timestamp() WHERE id=$1")
             .bind(conversation)

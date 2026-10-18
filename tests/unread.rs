@@ -497,3 +497,248 @@ async fn bundled_messages_count_once_through_their_display_message() -> Result<(
     assert_eq!(outcome["unread_count"], 0);
     app.close().await
 }
+
+#[tokio::test]
+async fn an_account_that_joins_a_group_starts_with_nothing_unread() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let p = people(&app).await;
+    let ada = app.accounts.token(&p.ada);
+    let bob = app.accounts.token(&p.bob);
+    let cy = app.accounts.token(&p.cy);
+    let scout = app.accounts.token(&p.scout);
+    let group = app
+        .post(
+            "/api/v1/groups",
+            &ada,
+            json!({"name": "Joiners", "member_ids": ["c:cy"]}),
+        )
+        .await?;
+    expect_status(&group, StatusCode::CREATED)?;
+    let id = group.1["id"].as_str().unwrap_or_default().to_owned();
+    expect_status(
+        &app.post(&format!("/api/v1/groups/{id}/accept"), &cy, json!(null))
+            .await?,
+        StatusCode::OK,
+    )?;
+    let mut codes = Vec::new();
+    for text in ["before one", "before two", "before three"] {
+        let sent = app
+            .post(
+                &format!("/api/v1/conversations/{id}/messages"),
+                &ada,
+                json!({"message": text}),
+            )
+            .await?;
+        expect_status(&sent, StatusCode::ACCEPTED)?;
+        codes.push(code(&sent.1));
+    }
+    // Cy reads them all: Ada's ticks say read, because Cy was the one who received them.
+    let (status, _) = bulk(
+        &app,
+        &cy,
+        &id,
+        json!({"type": "receipts.read", "data": {"up_to": codes[2]}}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        summary(&app, &ada, "", &id).await?["last_message_status"],
+        "read"
+    );
+
+    // Bob is invited and accepts; Ada's custodian adds Scout, which joins at once.
+    let invited = app
+        .post(
+            &format!("/api/v1/groups/{id}/members"),
+            &ada,
+            json!({"member_ids": ["c:bob", "si:scout"]}),
+        )
+        .await?;
+    expect_status(&invited, StatusCode::OK)?;
+    expect_status(
+        &app.post(&format!("/api/v1/groups/{id}/accept"), &bob, json!(null))
+            .await?,
+        StatusCode::OK,
+    )?;
+    for (token, who) in [(&bob, "bob"), (&scout, "scout")] {
+        let joined = summary(&app, token, "", &id).await?;
+        assert_eq!(
+            joined["unread_count"], 0,
+            "{who}: what was said before it joined is history, not unread: {joined}"
+        );
+    }
+    assert_eq!(
+        summary(&app, &ada, "", &id).await?["last_message_status"],
+        "read",
+        "joining never changes the ticks of messages sent before"
+    );
+    // Bob still reads the whole history.
+    let history = app
+        .get(&format!("/api/v1/conversations/{id}/messages"), &bob)
+        .await?;
+    assert_eq!(history.1["items"].as_array().map(Vec::len), Some(3));
+
+    // What is said after joining counts, and waits for the new member's receipts.
+    let after = app
+        .post(
+            &format!("/api/v1/conversations/{id}/messages"),
+            &ada,
+            json!({"message": "after"}),
+        )
+        .await?;
+    expect_status(&after, StatusCode::ACCEPTED)?;
+    assert_eq!(summary(&app, &bob, "", &id).await?["unread_count"], 1);
+    assert_eq!(summary(&app, &cy, "", &id).await?["unread_count"], 1);
+    // A member invited again keeps its unread messages.
+    expect_status(
+        &app.post(
+            &format!("/api/v1/groups/{id}/members"),
+            &ada,
+            json!({"member_ids": ["si:scout"]}),
+        )
+        .await?,
+        StatusCode::OK,
+    )?;
+    assert_eq!(summary(&app, &scout, "", &id).await?["unread_count"], 1);
+    for token in [&bob, &cy, &scout] {
+        let (status, _) = bulk(
+            &app,
+            token,
+            &id,
+            json!({"type": "receipts.read", "data": {"up_to": code(&after.1)}}),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+    }
+    assert_eq!(
+        summary(&app, &ada, "", &id).await?["last_message_status"],
+        "read",
+        "read by everyone it was delivered to"
+    );
+    app.close().await
+}
+
+#[tokio::test]
+async fn bulk_receipts_start_above_what_was_already_marked() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let p = people(&app).await;
+    let ada = app.accounts.token(&p.ada);
+    let bob = app.accounts.token(&p.bob);
+    let pair = "c:ada::c:bob";
+    let mut codes = Vec::new();
+    for index in 0..6 {
+        let sent = app
+            .post(
+                "/api/v1/messages",
+                &bob,
+                json!({"recipient_id": "c:ada", "message": format!("m{index}")}),
+            )
+            .await?;
+        codes.push(code(&sent.1));
+    }
+    // Delivered up to the fourth, then up to the sixth: the second call marks only the two
+    // it has not marked.
+    let (_, first) = bulk(
+        &app,
+        &ada,
+        pair,
+        json!({"type": "receipts.delivered", "data": {"up_to": codes[3]}}),
+    )
+    .await?;
+    assert_eq!(first["updated"], 4);
+    let (_, second) = bulk(
+        &app,
+        &ada,
+        pair,
+        json!({"type": "receipts.delivered", "data": {"up_to": codes[5]}}),
+    )
+    .await?;
+    assert_eq!(second["updated"], 2);
+    // Reading half, then all.
+    let (_, half) = bulk(
+        &app,
+        &ada,
+        pair,
+        json!({"type": "receipts.read", "data": {"up_to": codes[2]}}),
+    )
+    .await?;
+    assert_eq!(half["updated"], 3);
+    assert_eq!(half["unread_count"], 3);
+    let (_, rest) = bulk(
+        &app,
+        &ada,
+        pair,
+        json!({"type": "receipts.read", "data": {"up_to": codes[5]}}),
+    )
+    .await?;
+    assert_eq!(rest["updated"], 3);
+    assert_eq!(rest["unread_count"], 0);
+    let positions: (i64, i64) = sqlx::query_as(
+        "SELECT read_through_sequence, delivered_through_sequence FROM conversation_read_states
+         WHERE actor_id = $1",
+    )
+    .bind(&p.ada.uuid)
+    .fetch_one(app.state.store.pool())
+    .await?;
+    assert_eq!(positions, (6, 6), "both positions sit on the sixth message");
+    // A new message is the only thing a later call looks at.
+    let late = app
+        .post(
+            "/api/v1/messages",
+            &bob,
+            json!({"recipient_id": "c:ada", "message": "late"}),
+        )
+        .await?;
+    let (_, late_read) = bulk(
+        &app,
+        &ada,
+        pair,
+        json!({"type": "receipts.read", "data": {"up_to": code(&late.1)}}),
+    )
+    .await?;
+    assert_eq!(late_read["updated"], 1);
+    let message = app
+        .get(
+            &format!("/api/v1/conversations/{pair}/messages/{}", code(&late.1)),
+            &bob,
+        )
+        .await?;
+    assert!(message.1["read_at"].is_string(), "{}", message.1);
+    app.close().await
+}
+
+#[tokio::test]
+async fn unread_counts_stop_at_a_thousand() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let p = people(&app).await;
+    let ada = app.accounts.token(&p.ada);
+    let scout = app.accounts.token(&p.scout);
+    let pair = "c:ada::si:scout";
+    let cap = silicon_dm::infrastructure::postgres::UNREAD_COUNT_CAP;
+    let mut last = String::new();
+    for index in 0..=cap {
+        let sent = app
+            .post(
+                "/api/v1/messages",
+                &ada,
+                json!({"recipient_id": "si:scout", "message": format!("note {index}")}),
+            )
+            .await?;
+        expect_status(&sent, StatusCode::ACCEPTED)?;
+        last = code(&sent.1);
+    }
+    // A Silicon that never marks anything read: its count says "a thousand or more".
+    let listed = summary(&app, &scout, "", pair).await?;
+    assert_eq!(listed["unread_count"], cap, "{listed}");
+    let (status, outcome) = bulk(
+        &app,
+        &scout,
+        pair,
+        json!({"type": "receipts.read", "data": {"up_to": last}}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{outcome}");
+    assert_eq!(outcome["updated"], cap + 1);
+    assert_eq!(outcome["unread_count"], 0);
+    app.close().await
+}

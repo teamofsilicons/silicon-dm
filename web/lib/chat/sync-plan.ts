@@ -110,6 +110,53 @@ export function planEvents(events: SyncEvent[], seen: SeenEvents): MessageRef[] 
   return [...refs.values()];
 }
 
+/**
+ * Fetches a page's messages, at most `limit` at once, and applies them in the page's order, each as soon as every one
+ * before it is in. Fetches finish in any order (a slower answer, a busy connection), and a message applied after a
+ * newer one is lost to what keeps a high-water mark: Listen mode's queue never spoke it, the row's unread count did not
+ * count it, and no notification went. A failure stops the page at that message: nothing after it is applied, so the page
+ * is asked for again and goes on from there in order. Rejects with the first failure.
+ */
+export async function fetchInOrder<T, R>(items: T[], limit: number, fetchOne: (item: T) => Promise<R>, applyOne: (item: T, result: R) => void): Promise<void> {
+  const results: Array<{ value: R } | undefined> = new Array(items.length);
+  let next = 0;
+  let applied = 0;
+  let failure: { error: unknown } | null = null;
+  const release = () => {
+    while (!failure && applied < items.length && results[applied]) {
+      try {
+        applyOne(items[applied]!, results[applied]!.value);
+      } catch (error) {
+        failure = { error };
+        return;
+      }
+      applied += 1;
+    }
+  };
+  const worker = async () => {
+    while (!failure && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = { value: await fetchOne(items[index]!) };
+      } catch (error) {
+        failure ??= { error };
+        return;
+      }
+      release();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure) throw (failure as { error: unknown }).error;
+}
+
+/**
+ * Whether a failed fetch of one message counts against that message: the service answered, and not with "busy" or
+ * "away" (408, 429, 502–504) or the network failing, which say nothing about the message and pass with time.
+ */
+export function failureOfMessage(status: number): boolean {
+  return status !== 0 && status !== 408 && status !== 429 && !(status >= 502 && status <= 504);
+}
+
 /** The wait after `failures` failed polls in a row: 1 s, 2 s, 4 s … up to 30 s, with up to 25 % jitter. */
 export function syncDelay(failures: number, random: () => number = Math.random): number {
   const base = Math.min(30_000, 1000 * 2 ** Math.max(0, failures - 1));

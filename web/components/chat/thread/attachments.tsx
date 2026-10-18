@@ -7,15 +7,16 @@
  * bounded; two side by side sharing a height; three or four in rows that share a height, thread-model.ts galleryRows)
  * and open a lightbox (← and → between photos, Esc to close, focus back on the photo), a GIF in its own shape, videos
  * inline, audio files as a small player card, and other files as cards with their name, type, size, Open and
- * Download. A GIF shows its first frame only under reduced motion. A photo or video that does not load becomes a file
- * card, never a broken image.
+ * Download. A GIF shows its first frame only under reduced motion. A photo, video or GIF that does not load becomes a
+ * file card, never a broken image, and is tried again: once by itself a few seconds later, whenever the browser is back
+ * online, and with the card's Try again (a picture loads lazily, so one off screen is asked for when it comes back).
  *
  * Every address goes through displayUrl() (lib/upload/display.ts): Silicon Briefcase serves files only to its own
  * origin, so the browser loads them through this website.
  */
-import { memo, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type SyntheticEvent } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type SyntheticEvent } from "react";
 import { useReducedMotion } from "motion/react";
-import { ChevronLeft, ChevronRight, Download, FileArchive, FileText, Film, ImageOff, Music, Pause, Play } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, FileArchive, FileText, Film, ImageOff, Music, Pause, Play, RotateCw } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/silicon-ui/dialog/dialog";
 import { clockDuration, fileSize } from "@/lib/chat/format";
 import { attachmentName, safeHttpsUrl, type MediaKind } from "@/lib/chat/media";
@@ -24,6 +25,7 @@ import type { AttachmentDetail, Gif } from "@/lib/chat/types";
 import { displayUrl, downloadUrl } from "@/lib/upload/display";
 import { useLayer } from "./thread-actions";
 import { fileNameParts, friendlyType, galleryRatio, galleryRows, photoRatio } from "./thread-model";
+import { useOnline } from "./use-online";
 import styles from "./thread.module.css";
 
 export type ShownAttachment = AttachmentDetail & { kind: MediaKind };
@@ -104,15 +106,21 @@ function Lightbox({ images, index, onIndex, onClose }: { images: ShownAttachment
   const image = index === null ? null : images[index] ?? null;
   const count = images.length;
   useLayer(image !== null);
+  // ← and → change the photo while the keyboard stays where it is: the dialog says which one it shows now (its title
+  // and description are read when it opens).
+  const [said, setSaid] = useState("");
   const step = (by: number) => {
     if (index === null || count < 2) return;
-    onIndex((index + by + count) % count);
+    const next = (index + by + count) % count;
+    const shown = images[next];
+    setSaid(shown ? `Photo ${next + 1} of ${count}, ${attachmentName(shown)}` : "");
+    onIndex(next);
   };
   const name = image ? attachmentName(image) : "Photo";
   const url = image ? displayUrl(image.url) : "";
   const meta = image ? [friendlyType(image.content_type, name), fileSize(image.size)].filter(Boolean).join(" · ") : "";
   return (
-    <Dialog open={image !== null} onOpenChange={open => { if (!open) onClose(); }}>
+    <Dialog open={image !== null} onOpenChange={open => { if (!open) { setSaid(""); onClose(); } }}>
       <DialogContent
         title={name}
         description={count > 1 && index !== null ? `Photo ${index + 1} of ${count}${meta ? ` · ${meta}` : ""}` : meta || undefined}
@@ -122,6 +130,7 @@ function Lightbox({ images, index, onIndex, onClose }: { images: ShownAttachment
           if (event.key === "ArrowLeft") { event.preventDefault(); step(-1); }
         }}
       >
+        <span className="sr-only" role="status">{said}</span>
         {image ? (
           <figure className={styles.lightboxFigure}>
             <div className={styles.lightboxStage}>
@@ -162,14 +171,14 @@ const UNKNOWN_RATIO = 4 / 3;
 const learnFrom = (url: string) => (event: SyntheticEvent<HTMLImageElement>) => learnShape(url, event.currentTarget.naturalWidth, event.currentTarget.naturalHeight);
 
 /** One photo alone: at its own shape, as wide as the bubble allows, never taller than 420 px (a tall one is narrower). */
-function SinglePhoto({ image, onOpen, onBroken }: { image: ShownAttachment; onOpen: () => void; onBroken: () => void }) {
+function SinglePhoto({ image, attempt, onOpen, onBroken }: { image: ShownAttachment; attempt: number; onOpen: () => void; onBroken: () => void }) {
   const [ratio] = useShape(image.url, UNKNOWN_RATIO, photoRatio);
   // A width in pixels (the bubble's own width follows it; max-width: 100% narrows it on a phone, keeping the shape).
   const style: CSSProperties = { aspectRatio: ratio, width: `${Math.min(PHOTO_MAX_WIDTH, Math.round(PHOTO_MAX_HEIGHT * ratio))}px` };
   return (
     <button type="button" className={styles.photo} data-sq="clip" style={style} onClick={onOpen}
       aria-label={`Open the photo${image.name ? ` ${image.name}` : ""}`}>
-      <img src={displayUrl(image.url)} alt="" decoding="async" loading="lazy" onLoad={learnFrom(image.url)} onError={onBroken} />
+      <img key={attempt} src={displayUrl(image.url)} alt="" decoding="async" loading="lazy" onLoad={learnFrom(image.url)} onError={onBroken} />
     </button>
   );
 }
@@ -179,7 +188,7 @@ function SinglePhoto({ image, onOpen, onBroken }: { image: ShownAttachment; onOp
  * asks (thread-model.ts galleryRows), so headlines and faces are never cut to a square. A gallery of one row is
  * narrower rather than cropped when its photos are tall.
  */
-function Gallery({ images, onOpen, onBroken }: { images: ShownAttachment[]; onOpen: (index: number) => void; onBroken: (url: string) => void }) {
+function Gallery({ images, attempts, onOpen, onBroken }: { images: ShownAttachment[]; attempts: ReadonlyMap<string, number>; onOpen: (index: number) => void; onBroken: (url: string) => void }) {
   useShapes();
   const shown = images.slice(0, 4);
   const ratios = shown.map(image => galleryRatio(shapeMap().get(image.url) ?? UNKNOWN_RATIO));
@@ -197,7 +206,7 @@ function Gallery({ images, onOpen, onBroken }: { images: ShownAttachment[]; onOp
             return (
               <button key={`${image.url}-${index}`} type="button" className={styles.galleryItem} data-sq="clip" style={{ flexGrow: ratios[index] }} onClick={() => onOpen(index)}
                 aria-label={`Open photo ${index + 1} of ${images.length}${image.name ? `, ${image.name}` : ""}${more ? `, +${more} more` : ""}`}>
-                <img src={displayUrl(image.url)} alt="" loading="lazy" decoding="async" onLoad={learnFrom(image.url)} onError={() => onBroken(image.url)} />
+                <img key={attempts.get(image.url) ?? 0} src={displayUrl(image.url)} alt="" loading="lazy" decoding="async" onLoad={learnFrom(image.url)} onError={() => onBroken(image.url)} />
                 {more ? <span className={styles.galleryMore} aria-hidden="true">+{more}</span> : null}
               </button>
             );
@@ -241,7 +250,7 @@ function FileName({ name }: { name: string }) {
   );
 }
 
-function FileCard({ item, note }: { item: ShownAttachment; note?: string }) {
+function FileCard({ item, note, onRetry }: { item: ShownAttachment; note?: string; onRetry?: () => void }) {
   const name = attachmentName(item);
   const url = displayUrl(item.url);
   const type = friendlyType(item.content_type, name);
@@ -261,6 +270,11 @@ function FileCard({ item, note }: { item: ShownAttachment; note?: string }) {
         <span className={styles.fileMeta} data-note={note ? "" : undefined}>{meta}</span>
         <span className="sr-only"> (opens in a new tab)</span>
       </a>
+      {onRetry ? (
+        <button type="button" className={styles.fileAction} data-sq="surface" onClick={onRetry} aria-label={`Try showing ${name} again`} title="Try again">
+          <RotateCw size={16} strokeWidth={1.75} aria-hidden="true" />
+        </button>
+      ) : null}
       <a href={downloadUrl(item.url)} download={name} className={styles.fileAction} data-sq="surface" aria-label={`Download ${name}`}>
         <Download size={16} strokeWidth={1.75} aria-hidden="true" />
       </a>
@@ -311,26 +325,77 @@ function AudioCard({ item, onBroken }: { item: ShownAttachment; onBroken: () => 
   );
 }
 
-/* The set ------------------------------------------------------------------------------------------------------------ */
+/* What could not be shown is tried again ------------------------------------------------------------------------ */
 
+/** How long after a failure a picture is asked for once more by itself (a blip, a server restarting). */
+const RETRY_MS = 4000;
 const NONE: ReadonlySet<string> = new Set();
+const NO_ATTEMPTS: ReadonlyMap<string, number> = new Map();
+
+/**
+ * Which addresses failed to load, and how often each was tried (a new try is a new element, so the browser asks again):
+ * each failure is tried once more by itself a few seconds later, everything that failed again when the browser is back
+ * online, and one at a time with Try again.
+ */
+function useRetries() {
+  const online = useOnline();
+  const [state, setState] = useState<{ broken: ReadonlySet<string>; attempts: ReadonlyMap<string, number> }>({ broken: NONE, attempts: NO_ATTEMPTS });
+  const retried = useRef(new Set<string>());
+  const timers = useRef(new Set<number>());
+  const retry = useCallback((url?: string) => setState(current => {
+    const urls = url ? [url] : [...current.broken];
+    if (!urls.some(item => current.broken.has(item))) return current;
+    const broken = new Set(current.broken);
+    const attempts = new Map(current.attempts);
+    for (const item of urls) {
+      broken.delete(item);
+      attempts.set(item, (attempts.get(item) ?? 0) + 1);
+    }
+    return { broken, attempts };
+  }), []);
+  const fail = useCallback((url: string) => {
+    setState(current => (current.broken.has(url) ? current : { ...current, broken: new Set([...current.broken, url]) }));
+    if (retried.current.has(url)) return;
+    retried.current.add(url);
+    const timer = window.setTimeout(() => {
+      timers.current.delete(timer);
+      retry(url);
+    }, RETRY_MS);
+    timers.current.add(timer);
+  }, [retry]);
+  const wasOnline = useRef(online);
+  useEffect(() => {
+    if (online && !wasOnline.current) retry();
+    wasOnline.current = online;
+  }, [online, retry]);
+  useEffect(() => () => {
+    for (const timer of timers.current) window.clearTimeout(timer);
+  }, []);
+  return { ...state, fail, retry };
+}
+
+const failedNote = (kind: MediaKind) => `${kind === "image" ? "The photo" : kind === "video" ? "The video" : "The file"} could not be shown here.`;
+
+/* The set ------------------------------------------------------------------------------------------------------------ */
 
 export const Attachments = memo(function Attachments({ items }: { items: ShownAttachment[] }) {
   const [open, setOpen] = useState<number | null>(null);
-  const [broken, setBroken] = useState<ReadonlySet<string>>(NONE);
+  const { broken, attempts, fail, retry } = useRetries();
   if (!items.length) return null;
-  const markBroken = (url: string) => setBroken(current => (current.has(url) ? current : new Set([...current, url])));
   const images = items.filter(item => item.kind === "image" && !broken.has(item.url));
   const videos = items.filter(item => item.kind === "video" && !broken.has(item.url));
   const audio = items.filter(item => item.kind === "audio" && !broken.has(item.url));
   const files = items.filter(item => item.kind === "file" || broken.has(item.url));
   return (
     <div className={styles.attachments}>
-      {images.length === 1 ? <SinglePhoto image={images[0]!} onOpen={() => setOpen(0)} onBroken={() => markBroken(images[0]!.url)} /> : null}
-      {images.length > 1 ? <Gallery images={images} onOpen={setOpen} onBroken={markBroken} /> : null}
-      {videos.map((video, index) => <VideoView key={`${video.url}-${index}`} item={video} onBroken={() => markBroken(video.url)} />)}
-      {audio.map((item, index) => <AudioCard key={`${item.url}-${index}`} item={item} onBroken={() => markBroken(item.url)} />)}
-      {files.map((item, index) => <FileCard key={`${item.url}-${index}`} item={item} note={broken.has(item.url) ? `${item.kind === "image" ? "The photo" : item.kind === "video" ? "The video" : "The file"} could not be shown here. Open it to try.` : undefined} />)}
+      {images.length === 1 ? <SinglePhoto image={images[0]!} attempt={attempts.get(images[0]!.url) ?? 0} onOpen={() => setOpen(0)} onBroken={() => fail(images[0]!.url)} /> : null}
+      {images.length > 1 ? <Gallery images={images} attempts={attempts} onOpen={setOpen} onBroken={fail} /> : null}
+      {videos.map((video, index) => <VideoView key={`${video.url}-${index}-${attempts.get(video.url) ?? 0}`} item={video} onBroken={() => fail(video.url)} />)}
+      {audio.map((item, index) => <AudioCard key={`${item.url}-${index}-${attempts.get(item.url) ?? 0}`} item={item} onBroken={() => fail(item.url)} />)}
+      {files.map((item, index) => {
+        const failed = broken.has(item.url);
+        return <FileCard key={`${item.url}-${index}`} item={item} note={failed ? failedNote(item.kind) : undefined} onRetry={failed ? () => retry(item.url) : undefined} />;
+      })}
       {images.length ? <Lightbox images={images} index={open} onIndex={setOpen} onClose={() => setOpen(null)} /> : null}
     </div>
   );
@@ -347,9 +412,11 @@ export function GifView({ gif }: { gif: Gif }) {
   const reduced = useReducedMotion();
   // null follows the device (moving unless it asks for less motion); true or false is the reader's own choice.
   const [choice, setChoice] = useState<boolean | null>(null);
-  const [failed, setFailed] = useState(false);
+  const { broken, attempts, fail, retry } = useRetries();
   const canvas = useRef<HTMLCanvasElement>(null);
   const safe = safeHttpsUrl(gif.url);
+  const failed = !!safe && broken.has(safe);
+  const attempt = safe ? attempts.get(safe) ?? 0 : 0;
   const url = safe ? displayUrl(safe) : null;
   const [ratio, learn] = useShape(safe ?? "", 4 / 3, mediaRatio);
   const moving = choice ?? !reduced;
@@ -366,20 +433,21 @@ export function GifView({ gif }: { gif: Gif }) {
       learn(image.naturalWidth, image.naturalHeight);
       node.getContext("2d")?.drawImage(image, 0, 0);
     };
-    image.onerror = () => setFailed(true);
+    image.onerror = () => fail(safe!);
     image.src = url;
-    // `learn` changes with the shape it already knows; drawing again for that would only repeat the same frame.
+    // `learn` changes with the shape it already knows; drawing again for that would only repeat the same frame. A new
+    // attempt (after a failure) draws again.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [still, url]);
+  }, [still, url, attempt]);
   if (!url) return null;
   const label = gif.title ? `GIF: ${gif.title}` : "GIF";
-  if (failed) return <FileCard item={{ url: safe!, name: gif.title || "GIF", kind: "image" }} note="The GIF could not be shown here. Open it to try." />;
+  if (failed) return <FileCard item={{ url: safe!, name: gif.title || "GIF", kind: "image" }} note="The GIF could not be shown here." onRetry={() => retry(safe!)} />;
   return (
     <figure className={styles.gif} data-sq="clip" style={{ aspectRatio: ratio }}>
       {still ? (
         <canvas ref={canvas} className={styles.gifMedia} role="img" aria-label={label} />
       ) : (
-        <img src={url} alt={label} className={styles.gifMedia} loading="lazy" decoding="async" onLoad={event => learn(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)} onError={() => setFailed(true)} />
+        <img key={attempt} src={url} alt={label} className={styles.gifMedia} loading="lazy" decoding="async" onLoad={event => learn(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)} onError={() => fail(safe!)} />
       )}
       <button type="button" className={styles.gifPlay} data-sq="surface" data-shown={still ? "" : undefined} onClick={() => setChoice(!moving)} aria-label={`${still ? "Play" : "Pause"} ${label}`}>
         {still ? <Play size={14} strokeWidth={2} aria-hidden="true" /> : <Pause size={14} strokeWidth={2} aria-hidden="true" />} GIF

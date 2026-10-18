@@ -110,31 +110,102 @@ export function uploadsSettings(source: Record<string, string | undefined> = pro
 export type EnabledUploads = Extract<UploadsSettings, { enabled: true }>;
 
 /* ------------------------------------------------------------------------------------------------------------------ */
-/* Node's request deadline                                                                                             */
+/* The website's own server: the deadline for a body, idle connections, stopping                                      */
 /* ------------------------------------------------------------------------------------------------------------------ */
 
 /**
- * Node's HTTP server ends a request whose body is still arriving after `requestTimeout` (300 s by default), answering
- * 408: at a home connection's 100 Mbit/s that is under 4 GB. Next creates its server with Node's defaults and has no
- * setting for it, so this lifts it on the server that takes this website's uploads, through the `http.server.request.
- * start` diagnostics channel (whose message carries the server), the first time a request for /api/uploads… arrives:
- * the browser always asks GET /api/uploads/config before it uploads, and production servers load this module at start.
- * The guard against slow headers (`headersTimeout`, 60 s) stays; a body that stops moving is the upload's own stall
- * timeout's business (below) and the ingress's idle timeout's.
+ * The longest one request may take to arrive, body included, on the website's server. Node's own is 300 s (it answers
+ * 408 after it): at a home connection's 100 Mbit/s that is under 4 GB, so a larger file would never arrive. A day rather
+ * than no deadline at all: a body that trickles forever still ends, and no upload takes that long (Briefcase's own
+ * BRIEFCASE_UPLOAD_TIMEOUT_SECONDS is far shorter). Slow headers are still cut after 60 s (`headersTimeout`), and a body
+ * that stops moving is the upload's own stall timeout's business (TRANSFER_TIMING).
  */
-const LIFTED = Symbol.for("dm.uploads.request-deadline");
+export const REQUEST_DEADLINE_MS = 24 * 60 * 60_000;
+/**
+ * How long the website keeps an idle connection open. Node closes one after 5 s, and Next keeps that unless
+ * KEEP_ALIVE_TIMEOUT is set. A load balancer that keeps its own longer (production's: 180 s) then sends a request now and
+ * then on a connection the website is just closing, and answers it 502 (an upload's included, at its first byte): the
+ * website's must outlast the balancer's.
+ */
+export const KEEP_ALIVE_MS = 185_000;
+/** Node's own keep-alive, what Next leaves in place when KEEP_ALIVE_TIMEOUT is not set. */
+const NODE_KEEP_ALIVE_MS = 5_000;
+const PREPARED = Symbol.for("dm.uploads.server");
 
-export function liftRequestDeadline(): void {
-  const scope = globalThis as { [LIFTED]?: boolean };
-  if (scope[LIFTED]) return;
-  scope[LIFTED] = true;
+/**
+ * Sets up the website's server for uploads of any length: instrumentation.ts runs it when the server starts, before it
+ * answers anything (Next loads a route's code only when the route's first request arrives, too late to change how that
+ * request is timed). Next creates its server with Node's defaults and offers no setting for the deadline, so this listens
+ * on the `http.server.request.start` diagnostics channel, whose message carries the server, and on the first request,
+ * whatever its path, sets the whole server's REQUEST_DEADLINE_MS (Node has one per server and reads it at each check, so
+ * a request already under way is covered as well) and, unless KEEP_ALIVE_TIMEOUT says otherwise, KEEP_ALIVE_MS. It also
+ * stops the uploads under way when the process is told to stop (stopUploads). Once per process.
+ */
+export function prepareServer(source: Record<string, string | undefined> = process.env): void {
+  const scope = globalThis as { [PREPARED]?: boolean };
+  if (scope[PREPARED]) return;
+  scope[PREPARED] = true;
+  const prepared = new WeakSet<object>();
   subscribe("http.server.request.start", message => {
-    const { request, server } = message as { request?: { url?: string }; server?: http.Server };
-    if (server && server.requestTimeout !== 0 && request?.url?.startsWith("/api/uploads")) server.requestTimeout = 0;
+    const { server } = message as { server?: http.Server };
+    if (!server || prepared.has(server)) return;
+    prepared.add(server);
+    if (server.requestTimeout > 0 && server.requestTimeout < REQUEST_DEADLINE_MS) server.requestTimeout = REQUEST_DEADLINE_MS;
+    // An operator's own keep-alive (KEEP_ALIVE_TIMEOUT, which Next applies itself) stays as it is.
+    if (!source.KEEP_ALIVE_TIMEOUT?.trim() && server.keepAliveTimeout === NODE_KEEP_ALIVE_MS) server.keepAliveTimeout = KEEP_ALIVE_MS;
   });
+  const onSignal = (signal: NodeJS.Signals) => {
+    const stopped = stopUploads();
+    // Node's own exit on a signal is off while anything listens for it. Next listens (and exits once its requests and
+    // after() work are done, these uploads' included); a server without such a listener ends here, once they are let go.
+    if (process.listenerCount(signal) <= 1) void stopped.finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  };
+  process.on("SIGTERM", onSignal);
+  process.on("SIGINT", onSignal);
 }
 
-liftRequestDeadline();
+/** The server is stopping (a deploy or a restart): the file was not saved, and the page sends it again by itself. */
+export const restarting = () =>
+  new UploadFailure(503, "website_restarting", "This DM website is restarting, so the file was not saved.", "Send it again in a moment, from its first byte (this website's pages do it by themselves).", 10);
+
+interface UploadsRuntime {
+  stopping: boolean;
+  /**
+   * Every upload this process is working on, from its proof to its outcome (the save after a 202 included). `stop`
+   * stops it with a failure made by the copy of this module that started it: instrumentation.ts and the routes are
+   * bundled apart, each with its own copy, and a failure made by one is not an instance of the other's class.
+   */
+  running: Set<{ stop: () => void; ended: Promise<void> }>;
+}
+const RUNTIME = Symbol.for("dm.uploads.runtime");
+/** On the global object, so a module loaded twice (a dev server's reload, two route bundles) shares it. */
+const runtime: UploadsRuntime = ((globalThis as { [RUNTIME]?: UploadsRuntime })[RUNTIME] ??= { stopping: false, running: new Set() });
+
+/** Whether this server is stopping (it starts no upload). */
+export const stopping = () => runtime.stopping;
+
+/** Counts an upload as under way until `work` settles; `stop` stops it if the server stops first. */
+export function trackUpload(stop: AbortController, work: Promise<unknown>): void {
+  const entry = { stop: () => stop.abort(restarting()), ended: work.then(() => undefined, () => undefined) };
+  runtime.running.add(entry);
+  void entry.ended.then(() => runtime.running.delete(entry));
+}
+
+/**
+ * The process is told to stop (a deploy's SIGTERM, or Ctrl-C): no new upload starts, and every one under way stops now,
+ * with its reservation at Briefcase cancelled with a proof token of its own. Left alone, a reservation would stay
+ * pending at Briefcase for up to a day, counted against the Carbon's daily allowance and their 32 unfinished uploads,
+ * because nothing in a new process knows it. Next waits for open requests before it exits, and for a save that goes on
+ * after a 202 through after() (app/api/uploads/route.ts); a stop that kills the process sooner (docker stop's 10 s)
+ * cuts only what Briefcase had not answered by then. Resolves once every one has ended.
+ */
+export function stopUploads(): Promise<void> {
+  runtime.stopping = true;
+  const running = [...runtime.running];
+  if (running.length) console.warn(`dm: stopping; ${running.length === 1 ? "one upload was" : `${running.length} uploads were`} under way and ${running.length === 1 ? "its reservation is" : "their reservations are"} being cancelled at Silicon Briefcase`);
+  for (const upload of running) upload.stop();
+  return Promise.all(running.map(upload => upload.ended)).then(() => undefined);
+}
 
 /* ------------------------------------------------------------------------------------------------------------------ */
 /* Failures in the words a Carbon reads                                                                                */
@@ -146,14 +217,19 @@ export class UploadFailure extends Error {
   readonly code: string;
   readonly hint: string | undefined;
   readonly retryAfter: number | undefined;
+  /** What Silicon Briefcase or Silicon Accounts itself answered (its own error code, or "HTTP 503"), for the server's log. */
+  upstream: string | undefined;
+  /** Briefcase did not let go of this upload's reservation (its cancel was refused or not answered): it expires there. */
+  reservationLeft = false;
 
-  constructor(status: number, code: string, message: string, hint?: string, retryAfter?: number) {
+  constructor(status: number, code: string, message: string, hint?: string, retryAfter?: number, upstream?: string) {
     super(message);
     this.name = "UploadFailure";
     this.status = status;
     this.code = code;
     this.hint = hint;
     this.retryAfter = retryAfter;
+    this.upstream = upstream;
   }
 
   body() {
@@ -165,6 +241,20 @@ export class UploadFailure extends Error {
     if (error instanceof UploadFailure) return error;
     return new UploadFailure(500, "upload_failed", "Something on this website failed while saving the file, so it was not sent.", "Try again; if it keeps failing, report it in Settings → Report a problem.");
   }
+}
+
+/**
+ * What an upload ended with, as the failure the browser hears. The server's log gets what an operator can act on: this
+ * website's own errors, and refusals that point at Briefcase's or Silicon Accounts' setup or availability (5xx: its
+ * code, and theirs, such as `briefcase_not_allowed (proof_scope_missing)`), never a file's name, a token or a proof. A
+ * Carbon's own refusals (too large, changed, too many at once) are not logged.
+ */
+export function failureOf(error: unknown, when = ""): UploadFailure {
+  const failure = UploadFailure.from(error);
+  const what = `upload failed${when ? ` ${when}` : ""}`;
+  if (!(error instanceof UploadFailure)) console.error(`${what}: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`);
+  else if (failure.status >= 500 && failure.code !== "website_restarting") console.warn(`${what}: ${failure.code}${failure.upstream ? ` (${failure.upstream})` : ""}`);
+  return failure;
 }
 
 const KB = 1024;
@@ -526,19 +616,50 @@ const retryAfterOf = (answer: Answer) => {
   return Number.isFinite(value) && value > 0 ? value : undefined;
 };
 
-/** Why Briefcase did not take the file, as the browser hears it. */
-export function briefcaseRefused(answer: Answer, step: string): UploadFailure {
+/**
+ * What Silicon Briefcase takes into one Briefcase in a UTC day unless its operators gave that one more (its
+ * DEFAULT_DAILY_UPLOAD_LIMIT_BYTES, 100 GiB). Unfinished uploads count toward it too, so a larger file is refused at its
+ * reservation on any day. DM cannot see a Briefcase's own allowance, so it never refuses a file for it: the composer
+ * says so when such a file is added, and a refusal says which case it is.
+ */
+export const BRIEFCASE_DAILY_UPLOAD_BYTES = 100 * 1024 ** 3;
+
+/** Briefcase's own answer in a few words, for the server's log: its error code, else its HTTP status. */
+const upstreamOf = (answer: Answer) => errorOf(answer).code || (answer.status ? `HTTP ${answer.status}` : "no answer");
+
+/** What a refusal is about, when the step knows it: the file's size, for words that fit the case. */
+export interface RefusedFile {
+  size?: number;
+}
+
+/** Why Briefcase did not take the file, as the browser hears it (and, for the server's log, what Briefcase said). */
+export function briefcaseRefused(answer: Answer, step: string, file: RefusedFile = {}): UploadFailure {
+  const failure = refusalFor(answer, step, file);
+  failure.upstream ??= upstreamOf(answer);
+  return failure;
+}
+
+function refusalFor(answer: Answer, step: string, file: RefusedFile): UploadFailure {
   if (transient(answer.status)) return unavailable("Silicon Briefcase", retryAfterOf(answer));
   const { code, message } = errorOf(answer);
   if (["proof_issuer_not_allowed", "proof_scope_missing", "proof_kind_not_accepted"].includes(code)) {
     return new UploadFailure(503, "briefcase_not_allowed", "Silicon Briefcase does not accept files from DM yet.", "Send a link instead (+\u00a0→\u00a0Add a link). Briefcase's operators allow DM in BRIEFCASE_PROOF_ISSUERS.");
   }
   if (answer.status === 507) return new UploadFailure(507, "briefcase_full", "Your Silicon Briefcase is full, so the file was not saved.", "Free some space in Silicon Briefcase, then try again.");
-  if (answer.status === 429) {
-    return new UploadFailure(429, "briefcase_limit", "You reached today's upload allowance in Silicon Briefcase.", "It resets at 00:00 UTC; until then, send a link instead.", retryAfterOf(answer));
+  if (answer.status === 429 && code === "daily_upload_limit_exhausted") {
+    // Briefcase says only that the day has no room. A file larger than the usual allowance has none on any day, so
+    // waiting for midnight would not help it: say that, not "today".
+    if ((file.size ?? 0) > BRIEFCASE_DAILY_UPLOAD_BYTES) {
+      return new UploadFailure(429, "briefcase_limit", `This file is larger than ${formatBytes(BRIEFCASE_DAILY_UPLOAD_BYTES)}, the most Silicon Briefcase takes into one Briefcase in a day, so it was not saved.`, "Split it into parts smaller than that, or share a link to it instead (+\u00a0→\u00a0Add a link). Briefcase's operators can give a Briefcase a larger allowance.");
+    }
+    return new UploadFailure(429, "briefcase_limit", "Today's upload allowance in your Silicon Briefcase has no room left for this file: what you uploaded today counts, and so do uploads not yet finished.", "It resets at 00:00 UTC, and an unfinished upload stops counting once it ends; until then, send a link instead (+\u00a0→\u00a0Add a link).", retryAfterOf(answer));
   }
   if (code === "delegated_upload_staging_limit_exhausted") {
     return new UploadFailure(429, "briefcase_busy", "Silicon Briefcase is still holding other unfinished uploads of yours, so it did not take another one.", "Wait for your other uploads to finish (or remove them), then retry this one.", 30);
+  }
+  if (answer.status === 429) {
+    // Briefcase asked DM to slow down: a limit of Briefcase's, not of the Carbon's.
+    return new UploadFailure(503, "briefcase_unavailable", "Silicon Briefcase is busy and asked DM to wait, so the file was not saved.", "Try again in a moment.", retryAfterOf(answer) ?? 5);
   }
   if (answer.status === 413) return new UploadFailure(413, "file_too_large", "Silicon Briefcase does not take a file this large.", "Split it into smaller files, or share a link to it instead (+\u00a0→\u00a0Add a link).");
   if (answer.status === 401) {
@@ -557,7 +678,7 @@ interface UploadState {
 }
 
 /** A call to a delegated route with a fresh proof token; one more attempt (a new token, the same body) when it failed on the way. */
-async function delegated(settings: EnabledUploads, proof: UploadProof, route: string, payload: unknown, step: string): Promise<Answer> {
+async function delegated(settings: EnabledUploads, proof: UploadProof, route: string, payload: unknown, step: string, file: RefusedFile = {}): Promise<Answer> {
   let answer: Answer = { status: 0, body: null, headers: new Headers() };
   for (let attempt = 0; attempt < 2; attempt++) {
     const token = await proof.fresh();
@@ -570,7 +691,27 @@ async function delegated(settings: EnabledUploads, proof: UploadProof, route: st
     if (!transient(answer.status)) break;
     if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 500));
   }
-  throw briefcaseRefused(answer, step);
+  throw briefcaseRefused(answer, step, file);
+}
+
+/**
+ * Cancels a reservation with a proof token of its own (cancelling never touches a published file). Answers whether
+ * Briefcase let it go. When it did not (it refused, or did not answer), the reservation stays pending there until it
+ * expires (within a day), counted against the Carbon's daily allowance meanwhile: the server's log says so, with
+ * Briefcase's own code and never the file's name, and the caller tells the browser the truth.
+ */
+async function cancelReservation(settings: EnabledUploads, proof: UploadProof, operation: string): Promise<boolean> {
+  try {
+    const answer = (await delegated(settings, proof, "uploads/cancel", { operation_id: operation }, "cancel")).body as UploadState | null;
+    // A reservation that had already ended (expired, cancelled) is let go as well; one still taking bytes is not.
+    if (!["reserved", "receiving", "staged"].includes(answer?.state ?? "")) return true;
+    console.warn(`upload: Silicon Briefcase answered a cancel but still holds the upload (${answer?.state}); it expires there within a day`);
+    return false;
+  } catch (error) {
+    const why = error instanceof UploadFailure ? (error.upstream ?? error.code) : error instanceof Error ? error.name : "unknown";
+    console.warn(`upload: Silicon Briefcase did not cancel an unfinished upload (${why}); it stays reserved there until it expires, within a day`);
+    return false;
+  }
 }
 
 /* ------------------------------------------------------------------------------------------------------------------ */
@@ -778,8 +919,8 @@ export interface SaveInput {
   /** The browser's body: the file's bytes, piped through as they arrive. */
   body: ReadableStream<Uint8Array>;
   /**
-   * Aborts when the browser goes away, or when the save is cancelled or abandoned after its last byte (the reason is
-   * then the UploadFailure the browser would hear: `cancelled`, `abandoned`).
+   * Aborts when the browser goes away, when the save is cancelled or abandoned after its last byte, or when the server
+   * stops (the reason is then the UploadFailure the browser would hear: `cancelled`, `abandoned`, `restarting`).
    */
   signal?: AbortSignal;
   /** The Carbon's account uuid: links name the owner by uuid, which never changes (an id can). */
@@ -790,23 +931,36 @@ export interface SaveInput {
   onTransferred?: () => void;
 }
 
-/** Why a save was stopped by this website (cancelled, abandoned), when the abort says; else null (the browser left). */
-const stopReason = (signal: AbortSignal | undefined) => (signal?.aborted && signal.reason instanceof UploadFailure ? signal.reason : null);
+/** Why a save was stopped by this website (cancelled, abandoned, restarting), when the abort says; else null (the browser left). */
+function stopReason(signal: AbortSignal | undefined): UploadFailure | null {
+  if (!signal?.aborted) return null;
+  const reason: unknown = signal.reason;
+  if (reason instanceof UploadFailure) return reason;
+  // One made by another copy of this module (instrumentation.ts is bundled apart from the routes): the same words.
+  if (reason instanceof Error && reason.name === "UploadFailure") {
+    const { status, code, hint, retryAfter } = reason as UploadFailure;
+    if (typeof status === "number" && typeof code === "string") return new UploadFailure(status, code, reason.message, hint, retryAfter);
+  }
+  return null;
+}
 
 /**
  * Reserve → transfer (the browser's bytes piped through) → commit → link-access. Whatever stops it before the commit
- * (the browser leaving, a stall, a refusal, Briefcase out of reach) cancels the reservation with a proof token of its
- * own, so nothing is left reserved; a transfer whose outcome is unknown is first reconciled through its status (the
- * bytes may all have arrived).
+ * (the browser leaving, a stall, a refusal, Briefcase out of reach, the server stopping) cancels the reservation with a
+ * proof token of its own, so nothing is left reserved (when Briefcase does not let go, the failure says so:
+ * `reservationLeft`); a transfer whose outcome is unknown is first reconciled through its status (the bytes may all
+ * have arrived).
  */
 export async function saveToBriefcase(input: SaveInput): Promise<{ url: string }> {
   const { settings, proof, name, contentType, file, owner, appId } = input;
+  // Stopped before anything was asked of Briefcase (the server is stopping, or the browser already left).
+  if (input.signal?.aborted) throw stopReason(input.signal) ?? interrupted();
   const operation = randomUUID();
   const manifest = { operation_id: operation, parent_path: "", name, content_type: contentType, size: file.size, sha256: file.sha256 };
   let reserved = false;
   let committed = false;
   try {
-    const reservation = (await delegated(settings, proof, "uploads/reserve", manifest, "reserve")).body as UploadState;
+    const reservation = (await delegated(settings, proof, "uploads/reserve", manifest, "reserve", { size: file.size })).body as UploadState;
     reserved = true;
     if (reservation.state !== "reserved" || !reservation.upload_id || !reservation.capability) {
       throw new UploadFailure(502, "briefcase_refused", `Silicon Briefcase did not open the upload (it is ${reservation.state ?? "in an unknown state"}).`, "Try again.");
@@ -837,24 +991,40 @@ export async function saveToBriefcase(input: SaveInput): Promise<{ url: string }
       throw new UploadFailure(502, "briefcase_refused", `Silicon Briefcase did not publish the file (it is ${upload.state ?? "in an unknown state"}).`, "Try again.");
     }
     committed = true;
-    // The file is saved from here on: a failure now is about its link, and says so (never "not saved").
-    const linkFailed = (why: UploadFailure | null) =>
-      new UploadFailure(why?.status === 503 || why?.status === 429 ? why.status : 502, why?.code === "briefcase_unavailable" ? "briefcase_unavailable" : "briefcase_refused", "Silicon Briefcase saved the file but did not open a link to it, so it was not added to the message.", "Try again (it uploads again); this copy stays in your Briefcase under apps/dm.", why?.retryAfter);
     let link: { url?: unknown; effective?: unknown };
     try {
       link = (await delegated(settings, proof, "link-access", { operation_id: randomUUID(), entry_id: upload.published_entry_id, enabled: true }, "link")).body as { url?: unknown; effective?: unknown };
     } catch (error) {
-      throw linkFailed(error instanceof UploadFailure ? error : null);
+      throw linkFailed(error instanceof UploadFailure ? error : null, `apps/${appId}/${name}`);
     }
-    if (link.effective !== true) throw linkFailed(null);
+    if (link.effective !== true) throw linkFailed(null, `apps/${appId}/${name}`);
     return { url: publicFileUrl(settings, owner, pathFromLink(link.url, name) ?? ["apps", appId, name]) };
   } catch (error) {
-    if (reserved && !committed) {
-      // An abandoned reservation is cancelled with a proof token of its own; cancelling never touches a published file.
-      await delegated(settings, proof, "uploads/cancel", { operation_id: operation }, "cancel").catch(() => undefined);
-    }
+    // Anything not committed is let go at Briefcase; when Briefcase does not let go, the browser is told the truth.
+    if (reserved && !committed && !(await cancelReservation(settings, proof, operation)) && error instanceof UploadFailure) error.reservationLeft = true;
     throw error;
   }
+}
+
+/**
+ * The file is saved (committed) but its link did not open: what the browser hears. Never "not saved", and the copy is
+ * named by its place in the Carbon's Briefcase, since each attempt saves one of its own. A refusal that sending again
+ * cannot change (Briefcase not letting DM open links: `link_access.update` missing from its BRIEFCASE_PROOF_ISSUERS for
+ * dm) says so instead of asking for a retry; one that can pass (Briefcase or Silicon Accounts out of reach) asks for one.
+ * The server's log gets Briefcase's own code (failureOf), never the file's name.
+ */
+function linkFailed(why: UploadFailure | null, place: string): UploadFailure {
+  const copy = `this copy stays in your Briefcase as ${place}`;
+  if (why?.code === "briefcase_not_allowed") {
+    return new UploadFailure(503, "briefcase_not_allowed", "Silicon Briefcase saved the file but does not let DM open links to files yet, so it was not added to the message.", `Share it from Silicon Briefcase instead (${copy}); sending it again would only save another copy. Briefcase's operators allow DM in BRIEFCASE_PROOF_ISSUERS.`, undefined, why.upstream);
+  }
+  if (why?.code === "briefcase_unavailable" || why?.code === "accounts_unavailable") {
+    return new UploadFailure(503, why.code, "Silicon Briefcase saved the file but could not open a link to it just now, so it was not added to the message.", `Try again in a moment: it uploads again, and ${copy}.`, why.retryAfter, why.upstream);
+  }
+  if (why?.code === "signed_out" || why?.code === "permission_ended") {
+    return new UploadFailure(why.status, why.code, "Silicon Briefcase saved the file, but DM's permission to act for you ended before it could open a link to it, so it was not added to the message.", `Sign in again if you signed out, then send it again (${copy}).`, undefined, why.upstream);
+  }
+  return new UploadFailure(502, "briefcase_refused", `Silicon Briefcase saved the file but did not open a link to it${why?.upstream ? ` (${why.upstream})` : ""}, so it was not added to the message.`, `Try again: it uploads again, and ${copy}. If it keeps failing, report it in Settings → Report a problem.`, undefined, why?.upstream);
 }
 
 /* ------------------------------------------------------------------------------------------------------------------ */
@@ -889,7 +1059,8 @@ export type SavingOutcome = { kind: "saving" } | { kind: "saved"; upload: SavedU
 interface Saving {
   owner: string;
   outcome: SavingOutcome;
-  stop: AbortController;
+  /** Cancels it (the transfer to Briefcase stops and its reservation is cancelled), in this copy's words. */
+  cancel: () => void;
   /** Resolves once the outcome is known. */
   known: Promise<void>;
   /** Asks waiting right now, and when the last one ended (or the 202 went). */
@@ -918,7 +1089,7 @@ const savings: Map<string, Saving> = ((globalThis as { [SAVINGS]?: Map<string, S
  */
 export function keepSaving(owner: string, work: Promise<SavedUpload>, stop: AbortController, timing = SAVING_TIMING): string {
   const id = randomUUID();
-  const entry: Saving = { owner, outcome: { kind: "saving" }, stop, asking: 0, seenAt: Date.now(), known: Promise.resolve() };
+  const entry: Saving = { owner, outcome: { kind: "saving" }, cancel: () => stop.abort(cancelled()), asking: 0, seenAt: Date.now(), known: Promise.resolve() };
   // The tab that stopped asking: cancelled, as a transfer is when its browser goes away.
   const watch = setInterval(() => {
     if (entry.outcome.kind === "saving" && entry.asking === 0 && Date.now() - entry.seenAt > timing.abandonMs) stop.abort(abandoned());
@@ -929,9 +1100,7 @@ export function keepSaving(owner: string, work: Promise<SavedUpload>, stop: Abor
       entry.outcome = { kind: "saved", upload };
     },
     error => {
-      // Something of this website's own broke (never a file's name or bytes in the line); refusals are the browser's.
-      if (!(error instanceof UploadFailure)) console.error(`upload failed while saving: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`);
-      entry.outcome = { kind: "failed", failure: UploadFailure.from(error) };
+      entry.outcome = { kind: "failed", failure: failureOf(error, "while saving") };
     },
   ).finally(() => {
     clearInterval(watch);
@@ -987,7 +1156,7 @@ export async function cancelSaving(id: string, owner: string, waitMs = 5_000): P
   const entry = savingOf(id, owner);
   if (!entry) return null;
   if (entry.outcome.kind === "saving") {
-    entry.stop.abort(cancelled());
+    entry.cancel();
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([entry.known, new Promise<void>(resolve => (timer = setTimeout(resolve, waitMs)))]);
     clearTimeout(timer);

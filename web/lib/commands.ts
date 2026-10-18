@@ -18,6 +18,12 @@ export interface ShellCommand {
   /** Group heading in the palette ("Go to", "Appearance", "Items"…). */
   group?: string;
   keywords?: string[];
+  /** Other names it answers to as itself (a conversation's address; the other account's id in a direct one). */
+  names?: string[];
+  /** The people in a conversation, by id and name (lib/command-rank.ts ranks them below its own names). */
+  members?: string[];
+  /** A conversation to open: it leads a tie, and the empty palette lists the most recent few (lib/command-rank.ts). */
+  conversation?: boolean;
   icon?: ReactNode;
   /** A hint shown at the end of the row, for example "4". */
   shortcut?: string;
@@ -33,6 +39,8 @@ interface Source {
 
 let sources: Source[] = [];
 let open = false;
+/** What is typed in the palette while it is open ("" otherwise): the chat looks through older conversations for it. */
+let query = "";
 let nextId = 0;
 let snapshot: ShellCommand[] = [];
 const listeners = new Set<() => void>();
@@ -92,7 +100,21 @@ export function useCommandPaletteOpen(): boolean {
 export function setCommandPaletteOpen(next: boolean): void {
   if (open === next) return;
   open = next;
+  if (!next) query = "";
   emit();
+}
+
+/** The palette says what is typed in it (components/foundation/shell/command-menu.tsx). */
+export function setCommandPaletteQuery(next: string): void {
+  const value = open ? next : "";
+  if (value === query) return;
+  query = value;
+  emit();
+}
+
+/** What is typed in the open palette ("" when it is closed or empty). */
+export function useCommandPaletteQuery(): string {
+  return useSyncExternalStore(subscribe, () => query, () => "");
 }
 
 export const openCommandPalette = () => setCommandPaletteOpen(true);

@@ -10,7 +10,7 @@ pub fn prepare_message_content(
     _state: &AppState,
     content: MessageCreate,
 ) -> AppResult<MessageCreate> {
-    content.validate().map_err(AppError::validation)?;
+    content.validate().map_err(crate::domain::invalid_content)?;
     Ok(content)
 }
 

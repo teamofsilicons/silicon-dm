@@ -346,6 +346,86 @@ test("your own HTML file opens through this website's file proxy as a download, 
   await close();
 });
 
+test("what the composer says reaches screen readers: each saying comes into a live region already on the page, the same words twice too, and the GIF picker's states as well", async ({ browser }) => {
+  const stamp = Date.now().toString(36);
+  const { page, close } = await twoCarbons(browser, stamp);
+  const field = page.getByRole("textbox", { name: /^Message / });
+  await field.fill(`Mine to edit ${stamp}`);
+  await field.press("Enter");
+  await expect(article(page, `Mine to edit ${stamp}`)).toBeVisible({ timeout: 30_000 });
+  // Every live region on the page now is marked; then every element added with words is recorded, with whether it
+  // came into one of those (read) or is a region of its own that appeared holding its words (not read).
+  await page.evaluate(() => {
+    for (const region of document.querySelectorAll("[aria-live], [role=status], [role=alert]")) region.setAttribute("data-was-here", "");
+    const scope = window as unknown as { __said: Array<{ words: string; intoLiveRegion: boolean }> };
+    scope.__said = [];
+    new MutationObserver(records => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          const words = node.textContent?.trim() ?? "";
+          if (!words) continue;
+          const parent = record.target instanceof Element ? record.target : null;
+          scope.__said.push({ words, intoLiveRegion: !!parent?.closest("[data-was-here][aria-live], [data-was-here][role=status]") });
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  const said = (words: string) => page.evaluate(text => (window as unknown as { __said: Array<{ words: string; intoLiveRegion: boolean }> }).__said.filter(entry => entry.words === text), words);
+  const notEditable = "Finish or cancel the edit first: attachments go with a new message.";
+
+  // ↑ edits the last message; ⌘⇧U then can only say why not. Twice: said twice.
+  await field.click();
+  await field.press("ArrowUp");
+  const edit = page.getByRole("textbox", { name: "Edit your message" });
+  await expect(edit).toBeFocused();
+  await page.keyboard.press(`${mod}+Shift+U`);
+  await expect(page.getByRole("status").filter({ hasText: notEditable })).toBeVisible();
+  await page.keyboard.press(`${mod}+Shift+U`);
+  await expect.poll(async () => (await said(notEditable)).length).toBe(2);
+  expect((await said(notEditable)).every(entry => entry.intoLiveRegion), JSON.stringify(await said(notEditable))).toBe(true);
+  await page.keyboard.press("Escape");
+
+  // The GIF picker finding nothing.
+  await field.fill("/gif zzz");
+  await field.press("Enter");
+  const picker = page.getByRole("dialog", { name: "Choose a GIF" });
+  await expect(picker.getByText("No GIFs for “zzz”. Try another word.")).toBeVisible();
+  await expect.poll(async () => (await said("No GIFs for “zzz”. Try another word.")).some(entry => entry.intoLiveRegion)).toBe(true);
+  await page.keyboard.press("Escape");
+  await close();
+});
+
+test("the empty field's words fit the field: a long name is cut at a word with an ellipsis on a narrow phone, never through a letter", async ({ browser }) => {
+  const stamp = Date.now().toString(36);
+  const { page, close } = await twoCarbons(browser, stamp);
+  const field = page.getByRole("textbox", { name: /^Message Composer check/ });
+  // How the placeholder draws in the field's own font, and the room inside its padding.
+  const drawn = () => field.evaluate((node: HTMLTextAreaElement) => {
+    const style = getComputedStyle(node);
+    const context = document.createElement("canvas").getContext("2d")!;
+    context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    return { text: node.placeholder, width: context.measureText(node.placeholder).width, room: node.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) };
+  });
+  const whole = `Message Composer check ${stamp}`;
+  await expect.poll(async () => (await drawn()).text).toBe(whole);
+  // At 360 px "Composer" fits whole, so the cut is at the word's end; at 320 even it does not, so at a character.
+  for (const [width, cut] of [[320, /…$/], [360, /^Message Composer( check)?…$/]] as const) {
+    await page.setViewportSize({ width, height: 700 });
+    // The words follow the field's new width a frame after it changes: asked until they have.
+    await expect.poll(async () => {
+      const shown = await drawn();
+      return cut.test(shown.text) && shown.width <= shown.room ? "fits" : JSON.stringify(shown);
+    }, { message: `at ${width} px the name is shortened to fit the field` }).toBe("fits");
+    const { text } = await drawn();
+    expect(whole.startsWith(text.slice(0, -1)), `"${text}" is the start of the name`).toBe(true);
+  }
+  // The field's name is whole whatever its width.
+  await expect(field).toHaveAttribute("aria-label", `Message Composer check ${stamp}`);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect.poll(async () => (await drawn()).text).toBe(`Message Composer check ${stamp}`);
+  await close();
+});
+
 const AXE = join(process.cwd(), "node_modules", "axe-core", "axe.min.js");
 
 /** axe-core's WCAG 2.2 A and AA rules on the composer and what floats from it (the rest of the page is other specs'). */

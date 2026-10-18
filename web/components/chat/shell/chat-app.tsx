@@ -12,8 +12,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { CommandMenu } from "@/components/foundation/shell/command-menu";
 import type { SessionAccount } from "@/lib/account";
+import { useHydrated } from "@/lib/chat/hydrated";
 import { chatKeys } from "@/lib/chat/keys";
-import type { ConversationSummary, Me, Page } from "@/lib/chat/types";
+import type { ConversationSummary, Invitation, Me, Page } from "@/lib/chat/types";
 import { ShortcutsProvider } from "@/lib/shortcuts/react";
 import { ChatDialogs } from "../dialogs/chat-dialogs";
 import { openDialog } from "../dialogs/store";
@@ -23,6 +24,7 @@ import { ChatRuntime } from "./chat-runtime";
 import { DetailsHost, DetailsProvider } from "./details";
 import { GlobalCommands } from "./global-commands";
 import { ToastPlace } from "./toast-place";
+import { useLayoutMode } from "./use-layout-mode";
 import styles from "./shell.module.css";
 
 export interface ChatAppProps {
@@ -32,6 +34,8 @@ export interface ChatAppProps {
   initialMe: Me | null;
   /** The first page of your conversations as the server read it, so the list paints with the page. */
   initialConversations: Page<ConversationSummary> | null;
+  /** Your invitations as the server read it, so their line is there when the list paints (nothing moves after). */
+  initialInvitations?: { items: Invitation[] } | null;
   children: ReactNode;
 }
 
@@ -58,11 +62,15 @@ function routeOf(pathname: string): "inbox" | "thread" | "settings" {
 
 function ChatFrame({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  // One list at a time: on a phone the sidebar is hidden (the inbox page is the list), so its list is not kept alive
+  // under the thread. The server and the first render keep both, so the page paints right at every width.
+  const hydrated = useHydrated();
+  const narrow = useLayoutMode() === "narrow";
   return (
     <div className={styles.app} data-route={routeOf(pathname)}>
       <a className="skip-link" data-sq="surface" href="#main">Skip to content</a>
       <div className={styles.sidebar}>
-        <ConversationsPane />
+        {hydrated && narrow ? null : <ConversationsPane />}
       </div>
       <main id="main" className={styles.main} tabIndex={-1}>
         {children}
@@ -72,12 +80,13 @@ function ChatFrame({ children }: { children: ReactNode }) {
   );
 }
 
-export function ChatApp({ account, accountsUrl, initialMe, initialConversations, children }: ChatAppProps) {
+export function ChatApp({ account, accountsUrl, initialMe, initialConversations, initialInvitations = null, children }: ChatAppProps) {
   const queryClient = useQueryClient();
   // Seed the caches once, before anything reads them, with what the server already fetched.
   useState(() => {
     if (initialMe && !queryClient.getQueryData(chatKeys.me)) queryClient.setQueryData(chatKeys.me, initialMe);
     if (initialConversations && !queryClient.getQueryData(chatKeys.conversations())) queryClient.setQueryData(chatKeys.conversations(), { pages: [initialConversations], pageParams: [null] });
+    if (initialInvitations && !queryClient.getQueryData(chatKeys.invitations())) queryClient.setQueryData(chatKeys.invitations(), initialInvitations);
     return true;
   });
   return (

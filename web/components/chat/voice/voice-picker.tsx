@@ -132,8 +132,9 @@ export function VoicePicker({ label, voices, value, defaultKey, onChoose, locked
       placeholderLine(voice.name)
     ) : (
       <>
+        {/* A space before the mark, so the card's name reads "Mark Default", not "MarkDefault". */}
         {voice.name}
-        {!loading && voice.key === defaultKey ? <span className={styles.defaultMark}>Default</span> : null}
+        {!loading && voice.key === defaultKey ? <> <span className={styles.defaultMark}>Default</span></> : null}
       </>
     ),
     description: isPlaceholder(voice) ? placeholderLine(voice.description) : voice.description,
@@ -292,7 +293,7 @@ export function AccountVoiceRow({ account }: { account: string }) {
       <div className={styles.accountVoiceHead}>
         <span className={styles.accountVoiceName}>
           {data.voice.name}
-          {data.chosen ? null : <span className={styles.defaultMark}>Default</span>}
+          {data.chosen ? null : <> <span className={styles.defaultMark}>Default</span></>}
         </span>
         <span className={styles.accountVoiceActions}>
           <PreviewButton voice={data.voice} name={name} who={who} off={features.listen ? null : features.listenReason} />

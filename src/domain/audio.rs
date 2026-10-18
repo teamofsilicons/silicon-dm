@@ -15,8 +15,25 @@ pub const PEAK_COUNT: usize = 64;
 #[must_use]
 pub fn wav_from_pcm(pcm: &[u8]) -> Vec<u8> {
     let data = &pcm[..pcm.len() - pcm.len() % 2];
-    let data_length = u32::try_from(data.len()).unwrap_or(u32::MAX - 36);
     let mut wav = Vec::with_capacity(WAV_HEADER_BYTES + data.len());
+    wav.extend_from_slice(&wav_header(data.len()));
+    wav.extend_from_slice(data);
+    wav
+}
+
+/// [`wav_from_pcm`] that reuses the PCM's own buffer: the header is written in front of the
+/// samples instead of copying them, so a long rendering is held in memory once, not twice.
+#[must_use]
+pub fn wav_from_pcm_buffer(mut pcm: Vec<u8>) -> Vec<u8> {
+    pcm.truncate(pcm.len() - pcm.len() % 2);
+    let header = wav_header(pcm.len());
+    pcm.splice(0..0, header);
+    pcm
+}
+
+fn wav_header(data_bytes: usize) -> [u8; WAV_HEADER_BYTES] {
+    let data_length = u32::try_from(data_bytes).unwrap_or(u32::MAX - 36);
+    let mut wav = Vec::with_capacity(WAV_HEADER_BYTES);
     wav.extend_from_slice(b"RIFF");
     wav.extend_from_slice(&(36 + data_length).to_le_bytes());
     wav.extend_from_slice(b"WAVEfmt ");
@@ -29,8 +46,9 @@ pub fn wav_from_pcm(pcm: &[u8]) -> Vec<u8> {
     wav.extend_from_slice(&16_u16.to_le_bytes()); // bits per sample
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_length.to_le_bytes());
-    wav.extend_from_slice(data);
-    wav
+    let mut header = [0; WAV_HEADER_BYTES];
+    header.copy_from_slice(&wav);
+    header
 }
 
 /// Milliseconds of audio in raw PCM, rounded to the nearest millisecond.
@@ -89,7 +107,9 @@ pub fn is_wav(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PEAK_COUNT, duration_milliseconds, is_wav, peaks, wav_from_pcm};
+    use super::{
+        PEAK_COUNT, duration_milliseconds, is_wav, peaks, wav_from_pcm, wav_from_pcm_buffer,
+    };
 
     fn tone(samples: usize, amplitude: i16) -> Vec<u8> {
         (0..samples)
@@ -124,6 +144,12 @@ mod tests {
             u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]),
             u32::try_from(pcm.len()).unwrap_or_default()
         );
+        assert_eq!(
+            wav_from_pcm_buffer(pcm.clone()),
+            wav,
+            "the same file, built in the PCM's own buffer"
+        );
+        assert_eq!(wav_from_pcm_buffer(vec![1, 2, 3]).len(), 46);
         assert_eq!(
             wav_from_pcm(&[1, 2, 3]).len(),
             46,

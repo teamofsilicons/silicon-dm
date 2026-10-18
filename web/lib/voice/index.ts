@@ -25,7 +25,7 @@ import type { AccountRef, Message } from "@/lib/chat/types";
 import { provideShortcuts } from "@/lib/shortcuts/react";
 import { useVoiceFeatures, type VoiceFeatures } from "./availability";
 import { attachListenMode, listenModeView, reportPlaybackFailures, setAutoplay, setListenAvailable, setListenMode, subscribeListenMode, viewFor, type ListenModeView } from "./listen-mode";
-import { toggle, useTrack } from "./player";
+import { playerState, subscribePlayer, toggle, useTrack } from "./player";
 import { messageKey, messageTrack, warmTrack } from "./sources";
 
 export interface VoiceAvailability extends VoiceFeatures {
@@ -136,6 +136,19 @@ export interface ListenState {
   state: "idle" | "loading" | "playing" | "paused";
   /** 0–1 through the audio. */
   progress: number;
+}
+
+/**
+ * What Listen on a message of this conversation is doing, as the thread says it to screen readers ("Preparing audio…",
+ * "Playing", "Paused"; "" otherwise). Listen mode says its own ("Speaking…", in the header).
+ */
+export function useListenAnnouncement(address: string): string {
+  const prefix = messageKey(address, "");
+  return useSyncExternalStore(subscribePlayer, () => {
+    const state = playerState();
+    if (state.origin !== "listen" || !state.key?.startsWith(prefix)) return "";
+    return state.status === "loading" ? "Preparing audio…" : state.status === "playing" ? "Playing" : state.status === "paused" ? "Paused" : "";
+  }, () => "");
 }
 
 /** Whether this message is the one being listened to, so its row can show it. */

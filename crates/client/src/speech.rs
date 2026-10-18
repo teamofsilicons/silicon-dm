@@ -748,13 +748,88 @@ pub struct FetchedAudio {
     pub url: url::Url,
 }
 
-fn allowed_audio_url(url: &url::Url) -> Result<(), SpeechError> {
-    let plain_local = url.scheme() == "http" && crate::is_loopback(url);
+/// Where [`fetch_audio_from`] may download from. A message's links are the sender's to choose,
+/// so a download must never become a way for the sender to make your machine read something
+/// only it can reach (this machine's own services, a private network, a cloud metadata
+/// address), not even through a redirect or a name that resolves there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AudioHosts {
+    /// Public internet hosts only, over https: what to use with any DM service elsewhere.
+    Public,
+    /// Also this machine and private networks (plain http only on this machine): for a DM
+    /// service on this machine, in local development, whose files live on this machine too.
+    AlsoLocal,
+}
+
+/// Whether an address is on the public internet: not this machine, a private or shared
+/// network, a link-local, documentation, benchmarking, multicast or reserved range.
+#[must_use]
+pub fn is_public_address(address: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match address {
+        IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
+            !(v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                || a == 0
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 198 && (18..20).contains(&b))
+                || a >= 240)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_address(IpAddr::V4(v4));
+            }
+            let segments = v6.segments();
+            // NAT64 (64:ff9b::/96) carries an IPv4 address.
+            if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [_, _, _, _, _, _, high, low] = segments;
+                let embedded = std::net::Ipv4Addr::new(
+                    (high >> 8) as u8,
+                    high as u8,
+                    (low >> 8) as u8,
+                    low as u8,
+                );
+                return is_public_address(IpAddr::V4(embedded));
+            }
+            !(v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00 // unique local
+                || (segments[0] & 0xffc0) == 0xfe80 // link-local
+                || (segments[0] & 0xffc0) == 0xfec0 // site-local (deprecated)
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8) // documentation
+                || (segments[0] == 0x0100 && segments[1..4] == [0, 0, 0]) // discard
+                || segments[..6] == [0, 0, 0, 0, 0, 0]) // IPv4-compatible (deprecated)
+        }
+    }
+}
+
+fn private_host(url: &url::Url) -> SpeechError {
+    SpeechError::audio(
+        "insecure_audio_url",
+        format!(
+            "{} points at this machine or a private network; dm downloads a message's audio only from public hosts, so a sender's link cannot make it read what only this machine can reach.",
+            display_url(url)
+        ),
+        "Download the file yourself if you trust it, and run dm speech transcribe FILE.",
+    )
+}
+
+fn allowed_audio_url(url: &url::Url, hosts: AudioHosts) -> Result<(), SpeechError> {
+    let plain_local =
+        url.scheme() == "http" && hosts == AudioHosts::AlsoLocal && crate::is_loopback(url);
     if url.scheme() != "https" && !plain_local {
         return Err(SpeechError::audio(
             "insecure_audio_url",
             format!(
-                "{} is not an https link; dm downloads audio only over https (plain http only from this machine).",
+                "{} is not an https link; dm downloads audio only over https (plain http only from this machine, in local development).",
                 display_url(url)
             ),
             "Ask the sender for an https link, or download the file yourself and run dm speech transcribe FILE.",
@@ -767,21 +842,72 @@ fn allowed_audio_url(url: &url::Url) -> Result<(), SpeechError> {
             "Download the file yourself and run dm speech transcribe FILE.",
         ));
     }
+    if hosts == AudioHosts::Public {
+        let local = match url.host() {
+            Some(url::Host::Domain(domain)) => {
+                let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+                domain == "localhost" || domain.ends_with(".localhost")
+            }
+            Some(url::Host::Ipv4(ip)) => !is_public_address(ip.into()),
+            Some(url::Host::Ipv6(ip)) => !is_public_address(ip.into()),
+            None => true,
+        };
+        if local {
+            return Err(private_host(url));
+        }
+    }
     Ok(())
+}
+
+/// Resolves host names for audio downloads keeping public addresses only, so a name that
+/// resolves (or is made to resolve) to this machine or a private network is never connected
+/// to. Literal addresses are checked by [`allowed_audio_url`].
+struct PublicOnly;
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addresses: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .filter(|address| is_public_address(address.ip()))
+                .collect();
+            if addresses.is_empty() {
+                return Err(
+                    format!("{host} resolves only to this machine or private networks").into(),
+                );
+            }
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Downloads audio to transcribe from a public attachment host, at most `max_bytes`: as
+/// [`fetch_audio_from`] with [`AudioHosts::Public`].
+///
+/// # Errors
+/// As [`fetch_audio_from`].
+pub async fn fetch_audio(url: &str, max_bytes: u64) -> Result<FetchedAudio, SpeechError> {
+    fetch_audio_from(url, max_bytes, AudioHosts::Public).await
 }
 
 /// Downloads audio to transcribe from an attachment host, at most `max_bytes`.
 ///
 /// The request is a plain GET from a separate HTTP client: it never carries DM's credentials,
-/// cookies or contract headers, follows at most 5 redirects (each again https, or http on this
-/// machine), and gives up after 10 seconds to connect or 5 minutes in total. The answer must be
-/// audio DM can transcribe, by its `Content-Type`, or by its first bytes when the host only says
-/// `application/octet-stream`.
+/// cookies or contract headers, follows at most 5 redirects, and gives up after 10 seconds to
+/// connect or 5 minutes in total. With [`AudioHosts::Public`] every hop must be https to a
+/// public host, and host names are connected to only at the public addresses they resolve to.
+/// The answer must be audio DM can transcribe, by its `Content-Type`, or by its first bytes
+/// when the host only says `application/octet-stream`.
 ///
 /// # Errors
 /// [`SpeechError`] with `insecure_audio_url`, `audio_too_large`, `audio_download_failed` or
 /// `unsupported_audio_type`.
-pub async fn fetch_audio(url: &str, max_bytes: u64) -> Result<FetchedAudio, SpeechError> {
+pub async fn fetch_audio_from(
+    url: &str,
+    max_bytes: u64,
+    hosts: AudioHosts,
+) -> Result<FetchedAudio, SpeechError> {
     let url = url::Url::parse(url).map_err(|error| {
         SpeechError::audio(
             "audio_download_failed",
@@ -789,29 +915,31 @@ pub async fn fetch_audio(url: &str, max_bytes: u64) -> Result<FetchedAudio, Spee
             "dm messages show CONVERSATION MESSAGE lists the message's links.",
         )
     })?;
-    allowed_audio_url(&url)?;
-    let policy = reqwest::redirect::Policy::custom(|attempt| {
+    allowed_audio_url(&url, hosts)?;
+    let policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= 5 {
             attempt.error("more than 5 redirects")
-        } else if allowed_audio_url(attempt.url()).is_err() {
-            attempt.error("a redirect left https")
+        } else if allowed_audio_url(attempt.url(), hosts).is_err() {
+            attempt.error("a redirect went to a link dm does not download from (not https, or this machine or a private network)")
         } else {
             attempt.follow()
         }
     });
-    let http = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .redirect(policy)
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(300))
-        .user_agent(concat!("silicon-dm-client/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|error| {
-            SpeechError::audio(
-                "audio_download_failed",
-                format!("dm could not prepare the download: {error}"),
-                "Retry; if it persists, report it with dm report.",
-            )
-        })?;
+        .user_agent(concat!("silicon-dm-client/", env!("CARGO_PKG_VERSION")));
+    if hosts == AudioHosts::Public {
+        builder = builder.dns_resolver(std::sync::Arc::new(PublicOnly));
+    }
+    let http = builder.build().map_err(|error| {
+        SpeechError::audio(
+            "audio_download_failed",
+            format!("dm could not prepare the download: {error}"),
+            "Retry; if it persists, report it with dm report.",
+        )
+    })?;
     let shown = display_url(&url);
     let failed = |what: String| {
         SpeechError::audio(
@@ -1081,5 +1209,97 @@ mod tests {
             .await
             .expect_err("credentials");
         assert_eq!(refused.code, "insecure_audio_url");
+    }
+
+    #[test]
+    fn only_public_addresses_count_as_public() {
+        for private in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "172.16.1.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "192.0.2.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12::1",
+            "fe80::1",
+            "2001:db8::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.1.2.3",
+            "64:ff9b::a00:1",
+        ] {
+            let address: std::net::IpAddr = private.parse().expect("an address");
+            assert!(!is_public_address(address), "{private}");
+        }
+        for public in [
+            "93.184.216.34",
+            "8.8.8.8",
+            "2606:4700::1111",
+            "64:ff9b::808:808",
+        ] {
+            let address: std::net::IpAddr = public.parse().expect("an address");
+            assert!(is_public_address(address), "{public}");
+        }
+    }
+
+    /// A sender's link may not make the reader's machine fetch from itself or a private
+    /// network, directly, through a name or through a redirect.
+    #[tokio::test]
+    async fn downloads_stay_on_public_hosts_unless_the_service_is_local() {
+        for link in [
+            "https://127.0.0.1/a.ogg",
+            "https://10.0.0.5/a.ogg",
+            "https://[::1]/a.ogg",
+            "https://169.254.169.254/latest/meta-data",
+            "https://localhost/a.ogg",
+            "https://files.localhost/a.ogg",
+            "http://127.0.0.1:4541/a.ogg",
+        ] {
+            let refused = fetch_audio(link, 1024).await.expect_err(link);
+            assert_eq!(refused.code, "insecure_audio_url", "{link}");
+        }
+        // Every redirect hop is held to the same rule (the policy checks each one), and a
+        // name is only connected to at the public addresses it resolves to.
+        let hop = url::Url::parse("http://127.0.0.1:47631/internal.wav").expect("a link");
+        assert!(allowed_audio_url(&hop, AudioHosts::Public).is_err());
+        assert!(allowed_audio_url(&hop, AudioHosts::AlsoLocal).is_ok());
+        let name: reqwest::dns::Name = "localhost".parse().expect("a name");
+        let resolved = reqwest::dns::Resolve::resolve(&PublicOnly, name).await;
+        assert!(resolved.is_err(), "localhost has no public address");
+        // In local development (a DM service on this machine) a local file still downloads.
+        let local = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let port = local.local_addr().expect("an address").port();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            if let Ok((mut stream, _)) = local.accept().await {
+                let mut buffer = [0_u8; 1024];
+                let _ = stream.read(&mut buffer).await;
+                let wav = [b"RIFF".as_slice(), &[36, 0, 0, 0], b"WAVEfmt "].concat();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\n\r\n",
+                    wav.len()
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&wav).await;
+            }
+        });
+        let fetched = fetch_audio_from(
+            &format!("http://127.0.0.1:{port}/note.wav"),
+            1024 * 1024,
+            AudioHosts::AlsoLocal,
+        )
+        .await
+        .expect("a local file in local development");
+        assert_eq!(fetched.content_type, "audio/wav");
+        server.abort();
     }
 }

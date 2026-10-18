@@ -36,7 +36,9 @@ async fn discovery_answers_offline_in_an_empty_home_and_writes_nothing() {
             "app_id":"dm","client_id":"dm","accounts_url":"https://accounts.teamofsilicons.com",
             "api_url":"https://api.dm.teamofsilicons.com","version":env!("CARGO_PKG_VERSION"),
             "contract_version":4,"device_flow":true,"public_client":true,
-            "sign_in":{"carbon":"dm login","silicon":"silicon-accounts login --app dm -q | dm login --slt-stdin"},
+            "sign_in":{"carbon":"dm login","silicon":"silicon-accounts login --app dm -q | dm login --slt-stdin",
+                "silicon_accounts_first":"printf '%s' \"$STK\" | silicon-accounts login --silicon si:you --stk-stdin",
+                "silicon_accounts_status":"silicon-accounts login status --json"},
             "status":"dm login status --json","install":"silicon-apps install dm",
             "website_url":"https://dm.teamofsilicons.com","docs_url":"https://docs.dm.teamofsilicons.com",
             "repository_url":"https://github.com/teamofsilicons/silicon-dm",
@@ -283,10 +285,22 @@ async fn refused_short_lived_tokens_are_explained_without_echoing_them() {
             .iter()
             .all(|f| f["slt"] != "sar_not-a-short-lived-token")
     }));
+    // An empty pipe means the step before it printed no token: dm says which step a Silicon
+    // skipped (signing in to Silicon Accounts with its si:id and STK).
     let empty = home
         .run_with_stdin(&["--json", "login", "--slt-stdin"], "\n")
         .await;
     assert_eq!(empty.code, Some(1));
+    assert_eq!(empty.error()["error"]["code"], "slt_missing");
+    let hint = empty.error()["error"]["hint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        hint.contains("silicon-accounts login --silicon si:you --stk-stdin")
+            && hint.contains("silicon-accounts login status --json"),
+        "{hint}"
+    );
     assert_eq!(
         home.run(&["login", "status", "--json"]).await.json(),
         json!({"authenticated":false})

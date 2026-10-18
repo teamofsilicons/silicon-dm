@@ -583,6 +583,67 @@ fn validate_attachment_metadata(
     Ok(())
 }
 
+/// A message-shape rule a request broke (one of [`MessageCreate::validate`]'s messages), as a
+/// 422 `validation_error` that also says what to send instead.
+#[must_use]
+pub fn invalid_content(rule: &'static str) -> crate::AppError {
+    let hint = match rule {
+        "message text must contain at least one character" => {
+            "Write some text, or leave message out when the message carries an attachment, a voice note, speech or a GIF."
+        }
+        "a message must contain text, an attachment, voice, speech, or a GIF" => {
+            "Add message (text), attachments, voice, speech or gif; dm messages send --help (or the MessageCreate schema in openapi.yaml) shows each."
+        }
+        "a message carries one recording: a voice note (voice) or speech, not both" => {
+            "Send the voice note and the spoken message as two messages."
+        }
+        "speech.script must contain at least one character" => {
+            "Write the words to say in speech.script, with cues such as [warmly] before them (dm docs expressive)."
+        }
+        "speech.script exceeds 5,000 characters" => {
+            "Split the script into several spoken messages."
+        }
+        "message text exceeds 100,000,000 characters"
+        | "voice transcript exceeds 100,000,000 characters" => {
+            "Send the text as a file (an attachment) instead."
+        }
+        "voice_transcript requires a voice attachment or speech"
+        | "voice_transcript requires a voice attachment" => {
+            "Send the transcript with the voice note it transcribes (voice), or put the words in message."
+        }
+        "draft text exceeds 100,000,000 characters" => {
+            "Keep the draft shorter, or attach the text as a file."
+        }
+        "voice duration must contain 1 millisecond to 48 hours" => {
+            "Send voice.duration_milliseconds: the recording's length in whole milliseconds, 1 to 172800000 (48 hours)."
+        }
+        "attachments require a credential-free HTTPS permanent URL of at most 8,192 bytes" => {
+            "Upload the file somewhere that serves it over https without a password in the link (the DM website uploads to Silicon Briefcase), then send that link."
+        }
+        "attachment name must contain 1 to 1,024 characters"
+        | "attachment content_type must contain 1 to 255 bytes" => {
+            "Leave the field out, or send a shorter one."
+        }
+        "GIF provider_id must contain 1 to 255 bytes"
+        | "GIF URL must be HTTPS and at most 8,192 bytes"
+        | "GIF preview URL must be HTTPS and at most 8,192 bytes"
+        | "GIF title may not exceed 1,000 characters" => {
+            "Send a GIF exactly as GET /api/v1/gifs/search (dm gifs search) gives it."
+        }
+        "silicon address must be ISI@si:handle with a non-empty ISI"
+        | "actor ID must be c:handle or si:handle" => {
+            "Name accounts by their id (c:ada, si:scout) or address a Silicon's intent as ISI@si:handle (release-notes@si:sol)."
+        }
+        _ if rule.starts_with("an attachment's declared size") => {
+            "Send the file's real size in bytes, or leave size out."
+        }
+        _ => {
+            "Check the message against the MessageCreate schema in openapi.yaml (dm docs openapi)."
+        }
+    };
+    crate::AppError::invalid(rule).with_hint(hint)
+}
+
 pub(crate) fn validate_gif(gif: Option<&Gif>) -> Result<(), &'static str> {
     let Some(gif) = gif else {
         return Ok(());

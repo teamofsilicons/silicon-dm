@@ -65,7 +65,8 @@ export default function SegmentedControl({ options, value, onValueChange, label,
   };
 
   return <div className={`${styles.root} ${className ?? ""}`} role="group" aria-label={label} data-size={size}>
-    <LayoutGroup id={id}><motion.div ref={track} layoutScroll className={styles.track}>
+    {/* A stable group (not useId): motion keeps every layoutId stack it has seen, with its last element, so a new id per mount kept each unmounted control. */}
+    <LayoutGroup id={`segmented-${label ?? "control"}`}><motion.div ref={track} layoutScroll className={styles.track}>
       {options.map((option, index) => <button key={option.value} id={`${id}-${option.value}`} className={styles.button} type="button" data-value={option.value} aria-pressed={value === option.value} tabIndex={index === selectedIndex ? 0 : -1} onClick={() => onValueChange(option.value)} onKeyDown={onKeyDown} onPointerEnter={onOptionIntent ? () => onOptionIntent(option.value) : undefined} onFocus={onOptionIntent ? () => onOptionIntent(option.value) : undefined}>
         {value === option.value && <motion.span className={styles.selection} layoutId="selection" layoutDependency={value} transition={reduced ? { duration: 0 } : motionTokens.spring.morph} aria-hidden="true" />}
         <span className={styles.label}>{option.label}{option.accessory}</span>

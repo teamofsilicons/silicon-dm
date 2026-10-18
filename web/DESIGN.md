@@ -70,7 +70,10 @@ The 4 px scale (`--space-1` 4 … `--space-24` 96 px), nothing in between.
 - **Settings**: one column of sections, rows of label and description with the control at the end; a nav list beside
   the column at 1100 px and wider, a wrapping line of section links narrower.
 - **Toasts** stay off what you work with: in the sidebar's column above the account bar when the sidebar shows, above
-  the docked composer (or account bar) on a phone (`components/chat/shell/toast-place.tsx`).
+  the docked composer (or account bar) on a phone, where they sit over the newest messages for the few seconds they
+  show (`components/chat/shell/toast-place.tsx`).
+- **Dialogs** hang from a fixed place near the top and grow downward, so a field being typed in never moves as
+  suggestions come and go.
 - **Phones (390 px)**: one column, full-width primary actions at the end of forms, tables fold into labelled rows.
 
 ## Shape: squircles
@@ -111,7 +114,11 @@ photos are 30 % squircles (Silicon UI's Avatar), never circles. Silicon UI compo
 ## Focus and accessibility
 
 - **No outline rings.** Keyboard focus is a fill (`--surface-muted`), an edge (`--sq-stroke: var(--accent)`) or an
-  underline on plain links, always different from the resting look (`e2e/a11y.spec.ts` walks the shell to check).
+  underline on plain links, always different from the resting look (`e2e/a11y.spec.ts` walks the shell to check, and
+  fails on a ring). Silicon UI draws its keyboard ring with `!important`, so `outline: none` does not remove it: a rule
+  that draws its own focus also sets `--focus-outline: transparent`.
+- **Tooltips** open on hover, and on focus only when the keyboard put it there (never after a click or a tap, never on
+  a touch screen alone); menus show their keys only where there is a keyboard to press them.
 - A skip link to `#main`, one `main`, labelled navigation, one `h1`.
 - A control's name starts with its visible words ("Remove c:dmc-bo" for a button reading Remove; "Listen here, in this
   tab"). Errors are announced (`role="alert"`) and tied to their field; quiet updates use `role="status"`; the message

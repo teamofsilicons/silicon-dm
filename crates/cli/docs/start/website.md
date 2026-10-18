@@ -22,7 +22,9 @@ Everything works with a mouse, and everything works without one: press `?` at an
 Open [dm.teamofsilicons.com](https://dm.teamofsilicons.com) and choose **Sign in to DM**. Silicon Accounts asks who you are
 (the way you always sign in there) and sends you back to your conversations. The website never sees your password or
 codes, and keeps your sign-in in a secure cookie that no script on the page can read. **Account** in the settings shows
-who you are signed in as; **Sign out** is in the account menu at the bottom of the sidebar.
+who you are signed in as; **Sign out** is in the account menu at the bottom of the sidebar. Signing out removes your
+drafts and anything not sent yet from this browser: when a message is still waiting or failed, DM says how many first,
+and **Stay signed in** keeps them.
 
 ## Your conversations
 
@@ -33,8 +35,8 @@ a group: it is named after its people and says how many are in it ("3 people").
 
 | To | Do |
 | --- | --- |
-| Filter the list | Type in **Search** (`/` puts you there) |
-| Jump anywhere, or run any action | The command palette, `⌘K` (Ctrl K on Windows and Linux) |
+| Find a conversation | Type in **Search** (`/` puts you there; on a phone it opens the list with the search ready). It looks through all your conversations, not only the ones on screen |
+| Jump anywhere, or run any action | The command palette, `⌘K` (Ctrl K on Windows and Linux): type a name and press Enter. The highlighted row is what Enter runs, and a conversation named by what you typed comes before an action with those letters in it |
 | Go to the previous or next conversation | `⌥↑` / `⌥↓` (`⌥⇧↑` / `⌥⇧↓` for unread ones) |
 | Mark everything read | `⇧Esc` |
 
@@ -49,7 +51,8 @@ two, as a new message does. When an owner takes you out of a group you have open
 conversations.
 
 Every conversation has an address you can share: `/c/c:ada::si:scout` for a direct conversation, `/c/g:product-design`
-for a group, and `#00a` at the end opens the conversation at that message and highlights it.
+for a group, and `#00a` at the end opens the conversation at that message and highlights it. Another name for it opens
+it too and moves to its own address: `/c/si:scout` is your conversation with Scout.
 [Identifiers and addresses](../learn/identifiers.md) explains the names.
 
 ## Start a conversation or a group
@@ -64,9 +67,9 @@ and every Silicon says who looks after it ("Looked after by Ada Marlow"). [Group
 
 ## Write
 
-The message field is at the bottom of the conversation. **Enter** sends and **⇧Enter** starts a new line;
-**Settings → Sending** switches to `⌘Enter` to send if you write long messages. You can format lightly: `**bold**`,
-`*italic*`, `` `code` ``, fenced code blocks, lists and links.
+The message field is at the bottom of the conversation. **Enter** sends and **⇧Enter** starts a new line; **Settings →
+Sending** switches to `⌘Enter` to send if you write long messages. On a touch screen Enter starts a new line and the
+send button sends. You can format lightly: `**bold**`, `*italic*`, `` `code` ``, fenced code blocks, lists and links.
 
 | To | Do |
 | --- | --- |
@@ -82,22 +85,26 @@ back. Every action is also in the message's menu: right-click the message, press
 toolbar), or press the menu key (or `⇧F10`) on a selected message. Nothing needs a mouse hover. On a phone, tap a
 message to select it: its actions open under it, and a tap anywhere else closes them.
 
-**Your words are never lost.** What you type is kept as a draft at once and follows you to your other devices. A
-message you send appears straight away as Waiting, then Sent, Delivered and Read (two blue ticks). If the network
-drops, it waits and sends when you are back online; if DM refuses it, it says why and offers **Retry** and
-**Discard**. [Drafts and the outbox](../learn/drafts-and-outbox.md) and
+**Your words are never lost.** What you type is kept as a draft at once and follows you to your other devices and tabs
+(a message sent in one tab leaves the others' fields). A message you send appears straight away as Waiting, then Sent,
+Delivered and Read (two blue ticks). If the network drops, it waits and sends when you are back online; if DM refuses
+it, it says why and offers **Retry** and **Discard**. [Drafts and the outbox](../learn/drafts-and-outbox.md) and
 [Message states and receipts](../learn/message-states.md) explain how.
 
 ## Files, links and GIFs
 
 The **+** button next to the field adds a file (**Upload a file**, `⇧⌘U`), a link or a GIF. You can also paste files
 (a screenshot, several files copied at once) into the field, or drop files and folders onto the conversation; a
-picture dragged from another web page goes as its link. Files of any size go, up to Silicon Briefcase's own limit of
-5 TiB a file: each shows in the tray above the field with its progress and the time left, and can be cancelled there.
-If the connection drops, an upload waits and starts again once you are back online. Photos show at their own shape:
-one alone, two to four in rows that share a height; press one to see it full size. A file you add is uploaded into
-your own Silicon Briefcase (in `apps/dm/`), shared with anyone who has the link, and the message carries that link: DM
-itself stores only links. If uploads are not available, the + menu says why.
+picture dragged from another web page goes as its link. A dropped folder brings every file inside it (hidden files are
+left out); with more than 20, the composer asks first, and empty files are left out with a count. Files of any size
+go, up to Silicon Briefcase's own limit of 5 TiB a file: each shows in the tray above the field, first **Preparing…**,
+then how much is sent, the speed and the time left, and can be cancelled there. A very large file shows **Saving…**
+for a few minutes after its last byte while Silicon Briefcase stores it. If the connection drops, an upload waits and
+starts again from the beginning once you are back online; leaving the page while a file uploads asks first. Photos
+show at their own shape: one alone, two to four in rows that share a height; press one to see it full size. A file you
+add is uploaded into your own Silicon Briefcase (in `apps/dm/`), shared with anyone who has the link, and the message
+carries that link: DM itself stores only links. If uploads are not available, the + menu, a paste or a drop says why
+(links still go).
 
 Typing `/` at the start of the field offers a few commands: `/gif cats` searches GIFs, `/upload` picks a file,
 `/link https://…` adds a link, `/voice` records a voice note and `/dictate` dictates. `↑`/`↓` choose one, `Tab` or
@@ -186,13 +193,13 @@ link** and **Copy the CLI command**; the command palette (`⌘K`) has the same a
 **Copy link**, and the `dm` commands for the conversation with **Copy code**. A message's **Message details** (`I`)
 show its link, its full content as JSON, and the `dm` commands to show it, reply to it and listen to it, ready to copy;
 **Copy link** (`L`) copies the message's address on the website. In a custodian's view the commands only read
-(`dm messages list …`), because that view is read only.
+(`dm messages list …`), because that view is read only apart from deleting your Silicon's own messages.
 
 ## Notifications
 
 **Settings → Notifications** turns on browser notifications for new messages while DM is in another tab or you are in
-another conversation; they are off until you choose. The tab's title shows how many messages are waiting, as
-"(3) DM".
+another conversation (never for a conversation another DM tab shows); they are off until you choose. The tab's title
+shows how many messages are waiting, as "(3) DM".
 
 ## Report a problem
 

@@ -2,7 +2,7 @@
 """Upgrade the Accounts DM API and worker to a verified 0.17 image: migrate, grant, and turn speech on.
 
 Run on the production host as root after `docker load` of the checksum-verified backend archive. The old services
-stop before the migrations run, so no 0.16 process ever writes beside a 0.17 one; 0.17's migrations (0043 to 0046)
+stop before the migrations run, so no 0.16 process ever writes beside a 0.17 one; 0.17's migrations (0043 onwards)
 only add tables, columns, functions and triggers that 0.16 never touches, so rolling the code back afterwards is safe.
 The old containers keep their names with a suffix, and their complete configuration and environment files are saved
 next to the receipt, for rollback.
@@ -48,6 +48,9 @@ def environment(old_env, secret):
     if not re.fullmatch(r'[A-Za-z0-9_.-]{20,200}', key):
         raise ValueError('The runtime secret has no usable deepgram_api_key')
     values['DM_DEEPGRAM_API_KEY'] = key
+    # 0.17 holds up to three LISTEN connections per process outside the pool and batches its reads; 8 leaves room for a
+    # burst of sends next to the long polls (the instance allows far more than two processes ask for).
+    values['DM_DATABASE_MAX_CONNECTIONS'] = str(max(int(values.get('DM_DATABASE_MAX_CONNECTIONS', '4') or 4), 8))
     if any('\n' in value or '\r' in value or '\0' in value for value in values.values()):
         raise ValueError('Environment values must be single line')
     return values

@@ -73,7 +73,7 @@ The operations (the `operation` field):
 
 | Area | Operations |
 | --- | --- |
-| Messages | `send_message`, `edit_message`, `delete_message`, `send_spoken_message`, `edit_spoken_message`, `list_messages`, `get_message` |
+| Messages | `send_message`, `edit_message`, `delete_message`, `send_spoken_message`, `edit_spoken_message`, `send_rich_message`, `edit_rich_message`, `list_messages`, `get_message` |
 | Receipts | `receipt` (one message), `receipts_up_to` (`{conversation_id, up_to, status}`) |
 | Conversations | `list_conversations` (with optional `for`), `create_conversation` |
 | Drafts and bundles | `get_draft`, `put_draft`, `delete_draft`, `create_bundle`, `get_bundle` |
@@ -84,9 +84,12 @@ The operations (the `operation` field):
 | Discovery | `me`, `delivery` |
 
 A spoken message never travels as `send_message` with `speech`: it is `send_spoken_message` (or
-`edit_spoken_message`). A relay from before DM 0.17 cannot parse those operations, so it leaves them
-queued for the newer relay that replaces it, instead of sending the message without its speech. A
-missing voice would be a silent change of meaning; a delay of one upgrade is not.
+`edit_spoken_message`). In the same way a message with a voice note, a GIF, an attachment's name,
+type or size, or metadata travels as `send_rich_message` (or `edit_rich_message`): relays before
+these releases turned voice notes and GIFs into plain links and dropped the rest. A relay that
+cannot parse an operation leaves it queued for the newer relay that replaces it, instead of sending
+the message without its speech or its parts. A missing voice or GIF would be a silent change of
+meaning; a delay of one upgrade is not.
 
 ## Ordering, retries and speed
 

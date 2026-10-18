@@ -116,6 +116,11 @@ function trackInput(): void {
   }, true);
 }
 
+/** The first row of the newest WINDOW rows (null: the thread is short enough to render whole). */
+function newestWindow(rows: Row[]): string | null {
+  return rows.length > WINDOW ? rows[rows.length - WINDOW]!.key : null;
+}
+
 /** The first row a long thread renders when it opens: enough for the newest messages, the first unread and a link's target. */
 function initialWindow(rows: Row[], target: string | null): string | null {
   if (rows.length <= WINDOW) return null;
@@ -358,25 +363,57 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
     }
   }, []);
 
+  /*
+   * Back at the latest messages, a thread that rendered far back (reading up, a link to an old message) lets the old rows
+   * go again and keeps the newest WINDOW: every row rendered costs something on each change (a new message, a resize),
+   * and the old ones come back from the cache as you scroll up. Only once the reader has stayed at the bottom a moment,
+   * never while a message is sought, and never the row the keyboard is on.
+   */
+  const shrinkTimer = useRef(0);
+  const shrinkToNewest = useCallback(() => {
+    const now = latest.current;
+    const start = newestWindow(now.rows);
+    const index = start ? now.rows.findIndex(row => row.key === start) : 0;
+    if (index <= now.startIndex || wanted.current) return;
+    const held = document.activeElement instanceof HTMLElement ? document.activeElement.closest<HTMLElement>("[data-row-key]") : null;
+    if (held && log.current?.contains(held)) {
+      const at = now.rows.findIndex(row => row.key === held.dataset.rowKey);
+      if (at >= 0 && at < index) return;
+    }
+    setWindowStart(start);
+  }, []);
+  useEffect(() => () => window.clearTimeout(shrinkTimer.current), []);
+
   const readPosition = useCallback(() => {
     const node = scroller.current;
     if (!node) return;
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
     stick.current = distance <= STICK_PX;
     store.set({ atBottom: stick.current, away: distance > PILL_PX });
-  }, [store]);
+    window.clearTimeout(shrinkTimer.current);
+    if (stick.current && latest.current.rows.length - latest.current.startIndex > WINDOW + STEP) {
+      shrinkTimer.current = window.setTimeout(() => {
+        if (stick.current) shrinkToNewest();
+      }, 800);
+    }
+  }, [store, shrinkToNewest]);
+
+  /** A selected message's toolbar is open under it, in the thread's flow (thread.module.css makes room for it). */
+  const roomBelow = useCallback(() => !!log.current?.querySelector("[role='toolbar'][data-place='below']"), []);
 
   /** After anything changed: the bottom stays the bottom; otherwise what you were reading stays where it was. */
   const restore = useCallback(() => {
     const node = scroller.current;
     if (!node || !positioned.current) return;
-    if (stick.current) {
+    // The room a toolbar opens under a selected message is not news at the bottom: the message tapped (and all above
+    // it) stays under the finger, and what follows moves down to make room (Toolbar shows itself if it is off screen).
+    if (stick.current && !roomBelow()) {
       if (node.scrollTop + node.clientHeight < node.scrollHeight - 1) node.scrollTop = node.scrollHeight;
       lastTop.current = node.scrollTop;
       return;
     }
     keepAnchor();
-  }, [keepAnchor]);
+  }, [keepAnchor, roomBelow]);
 
   /** Near the top: render more of the cached rows, or ask the service for the page before. */
   const maybeLoadOlder = useCallback(() => {
@@ -428,12 +465,13 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
   const scrollToBottom = useCallback(() => {
     const node = scroller.current;
     if (!node) return;
-    if (latest.current.startIndex > 0 && latest.current.rows.length > WINDOW) setWindowStart(initialWindow(latest.current.rows, null));
     stick.current = true;
+    // Jump to latest, End, your own send: the rows far back go at once (shrinkToNewest).
+    shrinkToNewest();
     node.scrollTop = node.scrollHeight;
     captureAnchor();
     readPosition();
-  }, [captureAnchor, readPosition]);
+  }, [captureAnchor, readPosition, shrinkToNewest]);
 
   const flash = useCallback((code: string) => {
     setHighlight(code);
@@ -778,10 +816,14 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
    * The log reads new messages out politely. Rows that are not new must not be read: the first page, an older page, the
    * cached rows drawn as you scroll up. The commit that puts rows above the old top has aria-live="off", and the log
    * speaks again a moment later (aria-busy alone only delays the reading). Your own rows never speak (message-row.tsx).
+   * A conversation that opened empty has no top yet: its first message is news, read out like any after it.
    */
   const topKey = shown.find(row => row.type === "entry")?.key ?? null;
-  const [spokenTop, setSpokenTop] = useState<string | null>(null);
-  const quiet = topKey !== spokenTop;
+  // undefined until the rows are first drawn; null while the conversation is empty.
+  const [spokenTop, setSpokenTop] = useState<string | null | undefined>(undefined);
+  if (!loading && spokenTop === undefined && topKey === null) setSpokenTop(null);
+  if (!loading && spokenTop === null && topKey !== null) setSpokenTop(topKey);
+  const quiet = !loading && topKey !== null && spokenTop !== null && topKey !== spokenTop;
   useEffect(() => {
     if (!quiet) return;
     const timer = window.setTimeout(() => setSpokenTop(topKey), 400);

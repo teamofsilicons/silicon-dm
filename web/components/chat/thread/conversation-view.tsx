@@ -29,10 +29,11 @@ import { useTitle } from "@/lib/chat/title";
 import type { AccountRef, Message, Presence } from "@/lib/chat/types";
 import { notify } from "@/lib/notify";
 import { useShortcutScope } from "@/lib/shortcuts/react";
-import { toggleListen } from "@/lib/voice";
+import { toggleListen, useListenAnnouncement } from "@/lib/voice";
 import { Composer, type ComposerHandle } from "../composer/composer";
 import { useStartConversation } from "../dialogs/open-conversation";
 import { DetailsPanel } from "../details/details-panel";
+import { openDialog } from "../dialogs/store";
 import { useChat } from "../shell/chat-context";
 import { DetailsPortal } from "../shell/details";
 import { MessageDetailsDialog } from "./message-details-dialog";
@@ -40,8 +41,9 @@ import { MessageList, type MessageListHandle } from "./message-list";
 import { MessageMenu, type MenuState } from "./message-menu";
 import { ThreadBeginning } from "./thread-beginning";
 import { ThreadHeader } from "./thread-header";
-import { conversationPhrase, custodianOf, findFirstUnread, plainFailure, unreadBeyondLoaded, viewedName, type Busy, type FirstUnread } from "./thread-model";
+import { conversationPhrase, custodianOf, findFirstUnread, plainFailure, unreadBeyondLoaded, unreadWithinReach, viewedName, type Busy, type FirstUnread } from "./thread-model";
 import { copyableText, ThreadActionsProvider, ThreadPeopleProvider, valueStore, type ThreadActions, type ThreadPeople } from "./thread-actions";
+import { takeKeyboardFromOwnRow, takeKeyboardOnOpen } from "./open-focus";
 import { useOnline } from "./use-online";
 import styles from "./thread.module.css";
 
@@ -49,6 +51,7 @@ import styles from "./thread.module.css";
 const UNREAD_PAGES = 4;
 /** Nobody's presence, while this browser is offline. */
 const NO_PRESENCE: Map<string, Presence> = new Map();
+const OFFLINE_WORDS = "You are offline. New messages arrive when you are back; what you send waits and goes out then.";
 
 async function copy(text: string, what: string) {
   try {
@@ -75,6 +78,7 @@ export function ConversationView({ address }: { address: string }) {
   const startConversation = useStartConversation();
   const queryClient = useQueryClient();
   const online = useOnline();
+  const listening = useListenAnnouncement(address);
   const { conversation, error: conversationError } = useConversation(address, view);
   const thread = useMessages(address, view);
   const outbox = useConversationOutbox(address);
@@ -114,7 +118,9 @@ export function ConversationView({ address }: { address: string }) {
   // position, not the divider. When it is older than the first page, a few older pages load first.
   const [opened, setOpened] = useState<{ firstUnread: FirstUnread | null } | null>(null);
   const known = thread.isSuccess && (!!conversation || !!conversationError);
-  const needOlder = known && !opened && unreadBeyondLoaded(conversation, thread.messages, perspective) && !!thread.hasNextPage && (thread.data?.pages.length ?? 0) <= UNREAD_PAGES;
+  // Only while a few pages can reach it (thread-model.ts unreadWithinReach): a first unread further back opens at once.
+  const reachable = unreadWithinReach(conversation?.unread_count, thread.data?.pages[0]?.items.length || 50, UNREAD_PAGES);
+  const needOlder = known && !opened && reachable && unreadBeyondLoaded(conversation, thread.messages, perspective) && !!thread.hasNextPage && (thread.data?.pages.length ?? 0) <= UNREAD_PAGES;
   if (!opened && known && !needOlder && !thread.isFetchingNextPage) setOpened({ firstUnread: findFirstUnread(conversation, thread.messages, perspective) });
   const { isFetchingNextPage, fetchNextPage } = thread;
   useEffect(() => {
@@ -134,22 +140,36 @@ export function ConversationView({ address }: { address: string }) {
     }
   }, [thread.messages, readOnly, perspective, address]);
 
-  // Typing anywhere in the thread (outside a field or a control) types into the composer. It listens on window, after
-  // the shortcuts (on document) had their turn: a key a shortcut used is never typed.
+  // Typing anywhere in the thread (outside a field or a control), or with the keyboard nowhere (the page itself has it),
+  // types into the composer. It listens on window, after the shortcuts (on document) had their turn: a key a shortcut
+  // used is never typed.
   useEffect(() => {
     if (readOnly) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.key.length !== 1 || event.isComposing) return;
       const target = event.target as HTMLElement | null;
-      if (target && target.closest("input, textarea, select, button, a, [contenteditable], [role='dialog'], [role='menu'], [role='listbox']")) return;
-      if (target && !target.closest("main")) return;
-      // Space on a selected message is Listen (or nothing where it cannot play), never a space typed into the composer.
-      if (event.key === " " && target?.closest("[data-message-row]")) return;
+      const nowhere = !target || target === document.body || target === document.documentElement;
+      if (nowhere) {
+        // A space alone starts nothing.
+        if (event.key === " ") return;
+      } else {
+        if (target.closest("input, textarea, select, button, a, [contenteditable], [role='dialog'], [role='menu'], [role='listbox']")) return;
+        if (!target.closest("main")) return;
+        // Space on a selected message is Listen (or nothing where it cannot play), never a space typed into the composer.
+        if (event.key === " " && target.closest("[data-message-row]")) return;
+      }
       composer.current?.focus();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [readOnly]);
+
+  // Opening by switching (⌥↑/⌥↓, the palette, a row of the list, a fresh load) gives the message field the keyboard,
+  // so the next key is the first word (open-focus.ts says when; never on a touch screen). Once per opening: this view
+  // is keyed by its address. A read-only view has no field to type into.
+  const openedReadOnly = useRef(readOnly);
+  useEffect(() => (openedReadOnly.current ? undefined : takeKeyboardOnOpen(() => composer.current?.focus())), []);
+  useEffect(() => (readOnly ? undefined : takeKeyboardFromOwnRow(address, () => composer.current?.focus())), [readOnly, address]);
 
   const recipientDeleted = !group && others.length === 1 && others[0]!.deleted;
   const disabledReason = readOnly
@@ -184,7 +204,11 @@ export function ConversationView({ address }: { address: string }) {
         try {
           applyMessage(queryClient, perspective, await deleteMessage(address, message["message-id"], crypto.randomUUID(), view));
           setDeleting(null);
-          document.querySelector<HTMLElement>(`[data-message-code="${CSS.escape(message["message-id"])}"]`)?.focus({ preventScroll: true });
+          // The keyboard was on the question, which goes: back to the message. Not when it moved on meanwhile (the
+          // deletion shows at once, and the next message may already have been selected): that stays.
+          const row = document.querySelector<HTMLElement>(`[data-message-code="${CSS.escape(message["message-id"])}"]`);
+          const active = document.activeElement;
+          if (!active || active === document.body || row?.contains(active)) row?.focus({ preventScroll: true });
         } catch (failure) {
           queryClient.setQueryData<MessagePages>(messagesKey, data => replaceMessage(data, message));
           notify.error(plainFailure(failure), "The message was not deleted");
@@ -224,10 +248,27 @@ export function ConversationView({ address }: { address: string }) {
 
   const failure = thread.error ? plainFailure(thread.error) : null;
   if (failure && !thread.messages.length && (failure.status === 404 || failure.status === 403)) {
+    // Words for the Carbon who followed an old link or mistyped one: the service's own hint is for the CLI and HTTP
+    // clients ("dm conversations list…"), so it stays out.
+    const invited = failure.code === "invitation_pending";
+    const what = isGroupAddress(address) ? "group" : "conversation";
     return (
-      <Problem layout="inset" icon={<MessagesSquare strokeWidth={1.5} />} title={failure.status === 403 ? "This conversation is not yours to read" : "This conversation is not here"}
-        actions={<ButtonLink href={inboxHref(view)}>Back to your conversations</ButtonLink>}>
-        <p>{failure.message} {failure.hint}</p>
+      <Problem layout="inset" icon={<MessagesSquare strokeWidth={1.5} />}
+        title={invited ? "You are invited to this group" : failure.status === 403 ? `This ${what} is not yours to read` : `This ${what} is not here`}
+        actions={(
+          <>
+            {invited && !view ? <Button onClick={() => openDialog("invitations")}>Open your invitations</Button> : null}
+            <ButtonLink href={inboxHref(view)} variant={invited && !view ? "secondary" : undefined}>Back to your conversations</ButtonLink>
+          </>
+        )}>
+        <p>
+          {invited
+            ? "Accept the invitation to read its messages and write in it."
+            : failure.status === 403
+              ? `You are not in this ${what}, so DM does not show it here.`
+              : <>There is no {what} <code className={styles.problemAddress}>{address}</code> that you are in: the link may be wrong, or you may have left it.</>}
+          {invited ? null : view ? ` ${viewedName(view, viewed, conversation)}'s conversations are in the list.` : " Your conversations are in the list."}
+        </p>
       </Problem>
     );
   }
@@ -257,9 +298,14 @@ export function ConversationView({ address }: { address: string }) {
               This history continues in <Link href={conversationHref(conversation.superseded_by, { view })}>the current conversation</Link>.
             </p>
           ) : null}
+          {/* The thread's one polite region, always there (a region added with its words is often not read): going
+              offline, and what Listen on a message is doing. What it says is drawn elsewhere (the banner, the bubble). */}
+          <span className="sr-only" role="status">{online ? listening : OFFLINE_WORDS}</span>
           {!online ? (
-            <p className={styles.banner} data-tone="offline" role="status">
-              <WifiOff size={14} strokeWidth={1.75} aria-hidden="true" /> You are offline. New messages arrive when you are back; what you send waits and goes out then.
+            <p className={styles.banner} data-tone="offline" aria-hidden="true">
+              <WifiOff size={14} strokeWidth={1.75} aria-hidden="true" />
+              <span className={styles.bannerLong}>{OFFLINE_WORDS}</span>
+              <span className={styles.bannerShort}>Offline: what you send goes out when you are back.</span>
             </p>
           ) : null}
           {failure && !unloaded ? (

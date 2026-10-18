@@ -3,12 +3,15 @@
  * the Briefcase stand-in): several files from the + menu; a paste of several files (and text that stays text); a drop
  * of several files, of a web page's picture (attached as a link) and of a folder (it asks above 20 files); a ~300 MB
  * file prepared (its SHA-256 in the browser), streamed through this website into Briefcase and seen by the other
- * Carbon; cancelling mid-upload, and closing the tab, both leave Briefcase's reservation cancelled. Big files are
- * sparse (no disk), each of a size of its own (so its digest is this run's alone); the stand-in's copy is removed after.
- * Each test makes its own group and asserts only on what it made.
+ * Carbon; cancelling mid-upload, and closing the tab, both leave Briefcase's reservation cancelled. And a fresh
+ * production server of this build, timed from its very first request. Big files are sparse (no disk), each of a size of
+ * its own (so its digest is this run's alone); the stand-in's copy is removed after. Each test makes its own group and
+ * asserts only on what it made.
  */
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, ftruncateSync, mkdirSync, openSync, rmSync } from "node:fs";
+import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { connect, createServer } from "node:net";
 import { join } from "node:path";
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { bytesWords } from "../lib/upload/progress";
@@ -213,9 +216,10 @@ test("drop: several files, a web page's picture (attached as its https link, nev
     await expect(layer).toHaveCount(0);
   };
 
-  // The note names the website's own limit when its operator set one (UPLOADS_MAX_BYTES), else none.
+  // The note names the limit a Carbon meets: the website's own when its operator set a lower one (UPLOADS_MAX_BYTES),
+  // else what Silicon Briefcase usually takes into one Briefcase in a day.
   const config = (await (await page.request.get("/api/uploads/config")).json()) as { max_bytes: number; capped?: boolean };
-  const note = config.capped ? `Up to ${bytesWords(config.max_bytes)} each, folders too` : "Any size, folders too";
+  const note = config.capped && config.max_bytes < 100 * 1024 ** 3 ? `Up to ${bytesWords(config.max_bytes)} each, folders too` : "Up to 100 GB a day, folders too";
   await drop("files", async () => {
     await expect(layer.getByText("Drop files to send them")).toBeVisible();
     await expect(layer.getByText(note)).toBeVisible();
@@ -249,6 +253,50 @@ test("drop: several files, a web page's picture (attached as its https link, nev
   const sent = ((await stored.json()) as { data: { items: Array<{ message: string; attachments: string[] }> } }).data.items.find(message => message.message === `Dropped ${stamp}`);
   expect(sent?.attachments).toContain(`https://images.example.com/cat-${stamp}.png`);
   expect(sent?.attachments.length).toBe(28);
+  expect(errors).toEqual([]);
+  await close();
+});
+
+test("a folder dropped with a loose file: the loose one goes in at once; the question counts the folder's files and names the one left out; Cancel keeps the loose one", async ({ browser }) => {
+  const stamp = Date.now().toString(36);
+  const { page, close } = await twoCarbons(browser, stamp);
+  const errors = watchErrors(page);
+  await page.bringToFront();
+  await page.evaluate(stamp => {
+    const entry = (name: string, text = name) => ({ isFile: true, isDirectory: false, name, file: (done: (file: File) => void) => done(new File([text], name, { type: "text/plain" })) });
+    const children = [...Array.from({ length: 25 }, (_, index) => entry(`page-${stamp}-${String(index + 1).padStart(2, "0")}.txt`)), entry(".DS_Store"), entry(`blank-${stamp}.txt`, "")];
+    const folder = { isFile: false, isDirectory: true, name: `Pages ${stamp}`, createReader: () => { let given = false; return { readEntries: (done: (entries: unknown[]) => void) => { done(given ? [] : children); given = true; } }; } };
+    const loose = new File(["cover"], `cover-${stamp}.txt`, { type: "text/plain" });
+    const data = { types: ["Files"], files: [loose], items: [{ kind: "file", getAsFile: () => null, webkitGetAsEntry: () => folder }, { kind: "file", getAsFile: () => loose, webkitGetAsEntry: () => entry(loose.name) }], getData: () => "" };
+    const main = document.getElementById("main")!;
+    const fire = (type: string, target: Element) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", { value: data });
+      target.dispatchEvent(event);
+    };
+    const scope = window as unknown as { __drop: unknown; __over: number };
+    scope.__drop = data;
+    fire("dragenter", main);
+    scope.__over = window.setInterval(() => fire("dragover", main), 60);
+  }, stamp);
+  await expect(page.locator("[data-drop-layer]").getByText("Drop files to send them")).toBeVisible();
+  await page.evaluate(() => {
+    const scope = window as unknown as { __drop: unknown; __over: number };
+    window.clearInterval(scope.__over);
+    const event = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", { value: scope.__drop });
+    (document.querySelector("[data-drop-layer] button") ?? document.querySelector("[data-drop-layer]")!).dispatchEvent(event);
+  });
+  const question = page.getByRole("group", { name: "Upload the dropped folder's files?" });
+  await expect(question.getByText(`Pages ${stamp} has 25 files (one empty file left out). Upload all of them?`)).toBeVisible();
+  // The loose file was chosen by hand: it is in the tray already, whatever the answer.
+  await expect(tray(page).getByText(`cover-${stamp}.txt`, { exact: true })).toBeVisible();
+  await question.getByRole("button", { name: "Cancel" }).click();
+  await expect(question).toHaveCount(0);
+  await expect(tray(page).locator("[data-tray-item]")).toHaveCount(1);
+  await expect(tray(page).getByText(`cover-${stamp}.txt`, { exact: true })).toBeVisible();
+  // Nothing was taken from the folder, so nothing is said about what it left out.
+  await expect(page.getByText("left out")).toHaveCount(0);
   expect(errors).toEqual([]);
   await close();
 });
@@ -380,3 +428,61 @@ test("a file Briefcase takes minutes to store: the website answers before an ing
   expect(errors).toEqual([]);
   await close();
 });
+
+/** A loopback port nobody listens on right now (the server started next takes it). */
+const freePort = () =>
+  new Promise<number>((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address() as { port: number };
+      probe.close(() => resolve(port));
+    });
+  });
+
+/** Whether something takes connections on the port (a TCP connect only: no HTTP request is made). */
+const listening = (port: number) =>
+  new Promise<boolean>(resolve => {
+    const socket = connect(port, "127.0.0.1");
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => resolve(false));
+  });
+
+test("a fresh production server of this build gives a request's body a day and keeps idle connections 185 s from its very first request, an upload's", async () => {
+  test.setTimeout(90_000);
+  const directory = join(test.info().outputDir, "fresh-server");
+  mkdirSync(directory, { recursive: true });
+  const log = join(directory, "requests.log");
+  const observer = join(directory, "observer.mjs");
+  // Preloaded into the server: what its timings are as each request is handled (after the website's own subscriber).
+  writeFileSync(observer, `import { subscribe } from "node:diagnostics_channel";\nimport { appendFileSync } from "node:fs";\nsubscribe("http.server.request.start", ({ request, server }) => setImmediate(() => appendFileSync(${JSON.stringify(log)}, JSON.stringify({ path: (request.url ?? "").split("?")[0], requestTimeout: server.requestTimeout, keepAliveTimeout: server.keepAliveTimeout }) + "\\n")));\n`);
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const server = spawn("./node_modules/.bin/next", ["start", "--port", String(port)], {
+    env: { ...process.env, PORT: String(port), PUBLIC_URL: base, NEXT_DIST_DIR: process.env.E2E_DIST_DIR || ".next-e2e", NEXT_TELEMETRY_DISABLED: "1", NODE_OPTIONS: `--import=${observer}`, ...(process.env.E2E_SESSION_SECRET ? { SESSION_SECRET: process.env.E2E_SESSION_SECRET } : {}) },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  server.stdout.on("data", chunk => (output += chunk));
+  server.stderr.on("data", chunk => (output += chunk));
+  const exited = new Promise<number | null>(resolve => server.once("exit", code => resolve(code)));
+  try {
+    await expect.poll(() => listening(port), { timeout: 30_000, message: `the server takes connections (${output.slice(-400)})` }).toBe(true);
+    // The very first request it gets is an upload (refused here: no sign-in), as after a deploy with a page left open.
+    const first = await fetch(`${base}/api/uploads?name=a.bin&size=3&sha256=${"0".repeat(64)}`, { method: "POST", body: "abc", headers: { origin: base, "sec-fetch-site": "same-origin", "content-type": "application/octet-stream" } });
+    expect(first.status).toBe(401);
+    await expect.poll(() => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").length : 0)).toBeGreaterThanOrEqual(1);
+    const [seen] = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { path: string; requestTimeout: number; keepAliveTimeout: number });
+    expect(seen).toEqual({ path: "/api/uploads", requestTimeout: 24 * 60 * 60_000, keepAliveTimeout: 185_000 });
+  } finally {
+    // Told to stop, it ends by itself (as docker stop does it, with SIGTERM).
+    server.kill("SIGTERM");
+    const code = await Promise.race([exited, new Promise<"still running">(resolve => setTimeout(() => resolve("still running"), 15_000))]);
+    if (code === "still running") server.kill("SIGKILL");
+    expect(code, output.slice(-400)).toBe(143);
+  }
+});
+

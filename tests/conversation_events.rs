@@ -874,3 +874,54 @@ async fn fan_out_never_waits_on_another_writers_directory_refresh() -> Result<()
     );
     app.close().await
 }
+
+/// A group change locks the conversation without blocking the foreign-key checks of writers
+/// that already hold an account's stream (a receipt or a speech announcement inserting its
+/// Ting handoff, which references the conversation). With `FOR UPDATE` the change waited for
+/// them while they waited for its conversation events: a deadlock.
+#[tokio::test]
+async fn group_changes_do_not_wait_for_writers_that_reference_the_conversation()
+-> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let ada = TestAccount::carbon("a8K", "c:ada");
+    let bob = TestAccount::carbon("Bb2", "c:bob");
+    app.accounts.add_accounts(&[&ada, &bob]).await;
+    app.accounts.live_introspection().await;
+    let ada_token = app.accounts.token(&ada);
+    let group = app
+        .post(
+            "/api/v1/groups",
+            &ada_token,
+            json!({"name": "Lock modes", "member_ids": ["c:bob"]}),
+        )
+        .await?;
+    expect_status(&group, StatusCode::CREATED)?;
+    let id = group.1["id"].as_str().unwrap_or_default().to_owned();
+    let conversation: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM conversation_addresses WHERE public_id = $1")
+            .bind(&id)
+            .fetch_one(app.state.store.pool())
+            .await?;
+    // Another writer's foreign-key check holds KEY SHARE on the conversation row.
+    let mut writer = app.state.store.pool().begin().await?;
+    sqlx::query("SELECT 1 FROM conversations WHERE id = $1 FOR KEY SHARE")
+        .bind(conversation)
+        .execute(&mut *writer)
+        .await?;
+    let version = version(&app, &ada_token, &id).await?;
+    let rename = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.call(
+            Method::PATCH,
+            &format!("/api/v1/groups/{id}"),
+            Some(&ada_token),
+            Some(json!({"name": "Lock modes, renamed"})),
+            &[("if-match", version.to_string())],
+        ),
+    )
+    .await
+    .map_err(|_| "the rename waited for the other writer")??;
+    expect_status(&rename, StatusCode::OK)?;
+    writer.rollback().await?;
+    app.close().await
+}

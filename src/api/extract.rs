@@ -241,6 +241,7 @@ fn custodian_read_only(method: &Method) -> AppError {
             "You can read this conversation because you are custodian of a Silicon in it, but you are not a participant: DM never lets a custodian {method} as its Silicon. Only tombstoning that Silicon's own messages is allowed."
         ),
     )
+    .with_hint("Read it here. To remove one of your Silicon's messages: DELETE …/messages/{message}?for=si:x. To write, use a conversation you are in (message the Silicon directly).")
 }
 
 /// The conversation access the extractor decided for this request.
@@ -564,6 +565,7 @@ fn missing_credential() -> AppError {
         "unauthorized",
         "Send `Authorization: Bearer <Silicon Accounts access token for dm>` (sign in with `dm login`, or through the DM website). Apps acting for an account send `Authorization: Proof <sap_… User verification proof>`.",
     )
+    .with_hint("Sign in first: dm login (dm accounts --json shows how), then repeat the request.")
 }
 
 pub(super) fn presented_credential(headers: &HeaderMap) -> AppResult<(Scheme, SecretString)> {

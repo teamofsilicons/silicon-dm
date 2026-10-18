@@ -163,14 +163,18 @@ function headerUpgrade(authorization) {
       connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': Buffer.from(randomUUID().slice(0, 16)).toString('base64'),
       ...(authorization ? { authorization } : {}),
     } });
-    request.on('upgrade', (response, socket) => {
-      socket.once('data', (data) => {
+    request.on('upgrade', (response, socket, head) => {
+      const first = (data) => {
         const length = data[1] & 0x7f;
         const offset = length === 126 ? 4 : 2;
         const size = length === 126 ? data.readUInt16BE(2) : length;
         resolve({ status: response.statusCode, first: data.subarray(offset, offset + size).toString('utf8') });
         socket.destroy();
-      });
+      };
+      // A frame that came in the same packet as the 101 is handed over as `head`; waiting for
+      // the next one instead read the stand-in's idle close ("\x03\xe8idle") as the first frame.
+      if (head?.length >= 2) first(head);
+      else socket.once('data', (data) => first(head?.length ? Buffer.concat([head, data]) : data));
     });
     request.on('response', (response) => {
       response.resume();

@@ -5,26 +5,29 @@
  * focuses it), invitations when there are any, the conversations (newest activity first, more as you scroll), and the
  * account at the bottom with "Viewing as" for custodians. The sidebar shows it on wide and medium screens; on phones
  * the inbox page shows it as the page itself (`variant="page"`).
+ *
+ * A search looks through every conversation: the rest of the list loads page by page while it is typed (the DM service
+ * has no search of its own), and what it found is said to screen readers ("3 conversations", or none) by a status line
+ * that is always there, so the words are heard when they change.
  */
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { Eye, Mail } from "lucide-react";
 import { SearchField } from "@/components/silicon-ui/search-field/search-field";
 import { Wordmark, BRAND_NAME } from "@/components/foundation/brand/app-mark";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { Button } from "@/components/silicon-ui/button/button";
 import { accountName, conversationTitle, decodeAddress, inboxHref, otherParticipants } from "@/lib/chat/address";
-import { getPresence } from "@/lib/chat/api";
 import { localDraftText, subscribeDrafts } from "@/lib/chat/draft-store";
-import { useConversations, useInvitations } from "@/lib/chat/hooks";
+import { SEARCH_CONVERSATIONS_CAP, useConversations, useInvitations, useLoadEverything } from "@/lib/chat/hooks";
 import { useHydrated } from "@/lib/chat/hydrated";
-import { chatKeys } from "@/lib/chat/keys";
 import { latestPending, useOutbox } from "@/lib/chat/outbox-store";
+import { useParticipantsPresence } from "@/lib/chat/presence";
 import { rowPreview } from "@/lib/chat/preview";
 import type { ConversationSummary } from "@/lib/chat/types";
 import { ApiError } from "@/lib/errors";
+import { useShortcutKeys } from "@/lib/shortcuts/react";
 import { openDialog } from "../dialogs/store";
 import { useChat } from "../shell/chat-context";
 import { useOnline } from "../thread/use-online";
@@ -45,6 +48,13 @@ function haystack(conversation: ConversationSummary, title: string, preview: str
   return [title, conversation.id, conversation.group?.name, ...conversation.participants.flatMap(account => [account.id, account.display_name]), preview].filter(Boolean).join(" ").toLowerCase();
 }
 
+/** '/' pressed where no search field shows (a phone in a conversation): the list's own page focuses its search on arrival. */
+let searchFocusWanted = false;
+
+export function requestSearchFocus(): void {
+  searchFocusWanted = true;
+}
+
 /** The open conversation's address (from the URL), or null on the inbox and settings. */
 export function useOpenAddress(): string | null {
   const params = useParams<{ address?: string }>();
@@ -60,6 +70,21 @@ function useMinuteClock(): Date {
   return now;
 }
 
+/**
+ * What a search found, for screen readers: mounted from the start and filled a moment after the typing stops, so one
+ * sentence is read ("3 conversations", "No conversation matches", "Looking through older conversations"), not one per
+ * key (WCAG 4.1.3).
+ */
+function SearchStatus({ searching, found, looking }: { searching: boolean; found: number; looking: boolean }) {
+  const words = !searching ? "" : found ? `${found} ${found === 1 ? "conversation" : "conversations"}${looking ? ", looking through older ones" : ""}` : looking ? "Looking through older conversations" : "No conversation matches";
+  const [said, setSaid] = useState("");
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSaid(words), words ? 500 : 0);
+    return () => window.clearTimeout(timer);
+  }, [words]);
+  return <span className="sr-only" role="status">{said}</span>;
+}
+
 export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar" | "page" }) {
   const { me, view, viewed, perspective, readOnly } = useChat();
   const list = useConversations(view);
@@ -71,16 +96,27 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
   const [search, setSearch] = useState("");
   const listRef = useRef<HTMLUListElement>(null);
   const sentinel = useRef<HTMLLIElement>(null);
+  const searchField = useRef<HTMLDivElement>(null);
   useSyncExternalStore(subscribeDraftsVersion, () => draftsVersion, () => 0);
+  const newKeys = useShortcutKeys("conversation.new").aria;
+  const invitationKeys = useShortcutKeys("go.invitations").aria;
+
+  useEffect(() => {
+    if (!searchFocusWanted) return;
+    searchFocusWanted = false;
+    searchField.current?.querySelector<HTMLInputElement>("[data-conversation-search]")?.focus();
+  }, []);
 
   const open = useMemo(() => list.items.find(item => item.id === openAddress) ?? null, [list.items, openAddress]);
   const openOther = open && !open.group ? otherParticipants(open, perspective) : [];
   const presenceId = openOther.length === 1 ? openOther[0]!.id : "";
-  const presence = useQuery({ queryKey: chatKeys.presence(presenceId), queryFn: ({ signal }) => getPresence(presenceId, signal), enabled: false });
+  // What the open thread last heard (it polls; the row only reads), with the same rules for activity.
+  const presence = { data: useParticipantsPresence(presenceId ? [presenceId] : [], false).get(presenceId) };
   // Offline, what this tab last heard about someone's presence is stale: the row shows none (as the thread does).
   const online = useOnline();
 
   const searching = search.trim().length > 0;
+  const more = useLoadEverything(view, searching);
   const rows = useMemo(() => {
     const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean);
     if (!words.length) return list.items;
@@ -134,7 +170,7 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
         <NewMenu disabledReason={readOnly ? `You are viewing ${view}'s conversations; go back to yours to start one.` : null} />
       </div>
 
-      <div className={styles.search} role="search" onKeyDown={event => { if (event.key === "ArrowDown") moveFocus(event); }}>
+      <div ref={searchField} className={styles.search} role="search" onKeyDown={event => { if (event.key === "ArrowDown") moveFocus(event); }}>
         <SearchField
           label="Search conversations"
           placeholder="Search"
@@ -153,8 +189,12 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
         />
       </div>
 
+      <SearchStatus searching={searching} found={rows.length} looking={more.looking} />
+      {/* Mounted from the start, so switching to a Silicon's view says it is read only (the banner below is not read out). */}
+      <span className="sr-only" role="status">{view ? `Viewing ${viewed ? accountName(viewed) : view}'s conversations, read only.` : ""}</span>
+
       {view ? (
-        <div className={styles.viewing} role="status">
+        <div className={styles.viewing}>
           <Eye size={16} strokeWidth={1.75} aria-hidden="true" />
           <span className={styles.viewingText}>
             <span>Viewing {viewed ? accountName(viewed) : view}</span>
@@ -167,7 +207,7 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
       {pending ? (
         // The count once, in the badge (as a row's unread count); its name is what it shows, then what the count means
         // ("Invitations 2 waiting": the visible words in order, WCAG 2.5.3).
-        <button type="button" className={styles.invitations} data-sq="surface" onClick={() => openDialog("invitations")} aria-keyshortcuts="G I">
+        <button type="button" className={styles.invitations} data-sq="surface" onClick={() => openDialog("invitations")} aria-keyshortcuts={invitationKeys}>
           <Mail size={18} strokeWidth={1.75} aria-hidden="true" />
           <span className={styles.invitationsLabel}>Invitations</span>
           <span className={styles.badge} data-sq="surface">{pending}<span className="sr-only"> waiting</span></span>
@@ -199,17 +239,19 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
               />
             ))}
             {hasNextPage && !searching ? <li ref={sentinel} className={styles.more} aria-hidden="true">{isFetchingNextPage ? "Loading more…" : ""}</li> : null}
+            {searching && more.looking ? <li className={styles.more} aria-hidden="true">Looking through older conversations…</li> : null}
           </ul>
         ) : searching ? (
           <div className={styles.listState}>
-            <p className={styles.empty}>No conversation matches “{search.trim()}”.</p>
+            <p className={styles.empty}>{more.looking ? "Looking through older conversations…" : `No conversation matches “${search.trim()}”.`}</p>
+            {more.capped ? <p className={styles.empty}>Only the {SEARCH_CONVERSATIONS_CAP} most recent were searched.</p> : null}
             <Button size="sm" variant="ghost" className={styles.quietAction} onClick={() => setSearch("")}>Clear the search</Button>
           </div>
         ) : (
           <div className={styles.listState}>
             <p className={styles.emptyTitle}>{view ? "No conversations yet" : "Nothing here yet"}</p>
             <p className={styles.empty}>{view ? `${view} has not talked with anyone yet.` : "Start a conversation with a Carbon or a Silicon you look after."}</p>
-            {view ? null : <Button size="sm" variant="secondary" onClick={() => openDialog("new-conversation")} aria-keyshortcuts="N">New conversation</Button>}
+            {view ? null : <Button size="sm" variant="secondary" onClick={() => openDialog("new-conversation")} aria-keyshortcuts={newKeys}>New conversation</Button>}
           </div>
         )}
       </nav>
