@@ -34,6 +34,10 @@ metadata and the message you are replying to (`reply_to_message_id`).
   same transaction that stores the message, so a sent message never lingers as a draft on another device. Sending
   something else leaves the draft alone.
 - **Deleting is explicit.** `dm drafts delete`, `DELETE …/draft`, or emptying the field on the website.
+- **The list says whether there is one.** Every conversation summary carries `draft_version`: the version of your
+  draft there, or null when you have none. A client compares it with the version it holds and asks for the draft
+  only when they differ, instead of asking every time (a missing draft answers 404, which a browser logs as an
+  error, and an extra request per conversation opened is a delay you can feel).
 
 ```sh
 dm drafts get c:ada

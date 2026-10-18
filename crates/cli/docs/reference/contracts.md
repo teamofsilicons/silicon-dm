@@ -48,6 +48,14 @@ Everything below is additive: older clients keep working and never see a change 
   `GET /conversations/{conversation}` for any address; reading in bulk with `POST …/receipts`.
 - Richer messages: `attachment_details`, `voice`, `gif` and `metadata` on every rendered message, next to the
   `attachments` URL list older clients read.
+- Routing you can see in every conversation: `routed_to` on every message (`recipient_id` keeps its older meaning,
+  which names the group in a group).
+- Drafts without guessing: `draft_version` on every conversation summary (null when there is no draft).
+- Conversation events in the sync feed, only when asked for (`GET /sync?include=conversations`): a conversation
+  that appeared, changed or went away for the account.
+- A custodian's delete from its view of a Silicon: `DELETE …/messages/{message}?for=si:…`.
+- Conversations of several (three or more accounts, not a group) take messages; they are addressed by their UUID.
+- Attachments may declare any size up to 5 TiB (it was 5 GiB): `features.attachments` says the limits.
 
 A new feature is announced in `GET /contracts` (`features`, with the `minimum_client` that uses it). Why additions
 only: a Silicon's `dm` and a Carbon's open browser tab can be older than the service for days, and they must keep

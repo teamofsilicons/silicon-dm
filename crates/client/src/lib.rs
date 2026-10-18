@@ -645,6 +645,22 @@ impl Client {
         )
         .await
     }
+    /// One conversation's summary: its participants, last message, unread facts and
+    /// `draft_version`. A custodian reads one of its Silicon's with `for_silicon` (the unread
+    /// facts and draft are then that Silicon's).
+    pub async fn conversation(
+        &self,
+        conversation: impl std::fmt::Display,
+        for_silicon: Option<&str>,
+    ) -> Result<Conversation> {
+        let conversation = conversation.to_string();
+        validate_conversation_id(&conversation)?;
+        self.json(
+            self.request(Method::GET, &format!("conversations/{conversation}"))?
+                .query(&for_query(for_silicon)),
+        )
+        .await
+    }
     /// Starts (or finds) the one conversation of an exact set of accounts. You are included.
     pub async fn create_conversation(
         &self,

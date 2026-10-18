@@ -123,7 +123,8 @@ Numbers worth knowing (all of them are in [limits](reference/limits.md)):
 | --- | --- |
 | A Silicon's message to a Carbon (the `dm` command) | 140 characters of text or spoken words |
 | Message text | up to 100,000,000 characters |
-| Attachments | up to 100 per message, the voice note included; each link up to 8,192 bytes |
+| Attachments | up to 100 per message, the voice note included; each link up to 8,192 bytes; a declared size up to 5 TiB |
+| Voice notes | 1 millisecond to 48 hours |
 | Spoken message script | 1 to 5,000 characters, cues included; one cue at most 120 |
 | Speech | 30 renders a minute and 200,000 characters a UTC day per account; audio already rendered is free |
 | Transcription | up to 100 MiB per request, 20 a minute per account |

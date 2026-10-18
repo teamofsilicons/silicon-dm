@@ -2,9 +2,12 @@
 
 /**
  * The tray at run time (the model is ./tray.ts): one tray per account and conversation, kept outside the components so
- * an upload keeps going when you switch to another conversation and is there when you come back. Files upload into
- * your Silicon Briefcase (lib/upload/client.ts), at most three at a time (the rest wait their turn), with their
- * progress in the tray; a failed one can be retried (this tab keeps the File) or removed. What is ready (files already
+ * an upload keeps going when you switch to another conversation and is there when you come back. Files of any size
+ * upload into your Silicon Briefcase (lib/upload/client.ts), at most three at a time (the rest wait their turn), with
+ * their progress in the tray: preparing (the file's SHA-256), then the bytes sent with the speed and the time left
+ * (lib/upload/progress.ts), at most a few updates a second. Removing an item that is on its way cancels it (the
+ * preparation or the transfer stops, and the website's server cancels Briefcase's reservation); a failed one can be
+ * retried (this tab keeps the File, and its digest) or removed. What is ready (files already
  * saved, links, a GIF, a voice note) is also kept in this browser per conversation (`dm:tray:v1:<account>:<address>`),
  * so a reload or another conversation in between loses nothing; sending clears it.
  *
@@ -23,10 +26,15 @@ import { reportActivity } from "@/lib/chat/presence";
 import { readJson, writeJson } from "@/lib/chat/storage";
 import { ApiError } from "@/lib/errors";
 import { browserOnline, uploadFile } from "@/lib/upload/client";
+import { BIG_FILE_BYTES, bytesWords, RateMeter } from "@/lib/upload/progress";
 import { SendLatch, trayState, type SendDecision } from "./send-latch";
 import { keptItems, restoreItems, TRAY_MAX_ITEMS, trayReducer, type TrayAction, type TrayItem } from "./tray";
 
 const MAX_PARALLEL = 3;
+/** A file's progress reaches the tray at most this often (and at every change of stage, and at its end). */
+const PROGRESS_MS = 250;
+/** Files smaller than this are prepared in a blink: the tray never says "Preparing…" for them. */
+const PREPARE_SHOWN_FROM = 16 * 1024 * 1024;
 
 /** Whoever sends a conversation's waiting message (the latch decides when). */
 export interface TraySender {
@@ -95,8 +103,9 @@ function settle(entry: Entry) {
 }
 
 function dispatchTo(entry: Entry, action: TrayAction) {
-  if (action.type === "progress") {
-    // One change per percent: an upload reports progress far more often than anyone can see it move.
+  if (action.type === "progress" && !action.stage) {
+    // One change per percent (a voice note's upload): progress comes far more often than anyone can see it move. A
+    // file's progress (with its stage) is already paced by its upload.
     const item = entry.items.find(candidate => candidate.id === action.id);
     if (item && "progress" in item && Math.floor(item.progress * 100) === Math.floor(Math.max(0, Math.min(1, action.progress)) * 100)) return;
   }
@@ -104,7 +113,7 @@ function dispatchTo(entry: Entry, action: TrayAction) {
   if (next === entry.items) return;
   entry.items = next;
   // Progress never changes what is kept (only ready items are), so it never writes to storage.
-  if (action.type !== "progress") {
+  if (action.type !== "progress" && action.type !== "restart") {
     const kept = keptItems(next);
     writeJson(entry.key, kept.length ? kept : null);
   }
@@ -146,19 +155,50 @@ function upload(entry: Entry, id: string, file: File) {
   const controller = new AbortController();
   running.set(id, controller);
   dispatchTo(entry, { type: "start", id });
-  let shown = -1;
+  const meter = new RateMeter();
+  const preparing = new RateMeter();
+  let shownAt = 0;
+  let shownStage = "";
+  let shownPercent = -1;
+  /**
+   * One render per change worth seeing, at most four a second: a new stage, the start, the end, a new percent, and for
+   * a big file (whose words are bytes, speed and time left) every quarter of a second.
+   */
+  const report = (stage: "preparing" | "sending", done: number, total: number) => {
+    if (controller.signal.aborted) return;
+    const now = performance.now();
+    const timing = stage === "sending" ? meter : preparing;
+    timing.note(done, now);
+    const progress = total > 0 ? Math.min(1, done / total) : 0;
+    const percent = Math.floor(progress * 100);
+    const changed = stage !== shownStage || done >= total || done === 0;
+    if (!changed && (now - shownAt < PROGRESS_MS || (percent === shownPercent && total < BIG_FILE_BYTES))) return;
+    shownAt = now;
+    shownStage = stage;
+    shownPercent = percent;
+    dispatchTo(entry, { type: "progress", id, progress, stage, sent: done, rate: timing.rate(), left: timing.left(total) });
+  };
+  // A file big enough to take a moment says so from the start (its SHA-256 is read before any byte is sent).
+  if (file.size >= PREPARE_SHOWN_FROM) report("preparing", 0, file.size);
   uploadFile(file, {
     name: file.name || "file",
     contentType: file.type || undefined,
     signal: controller.signal,
+    onPrepare: (done, total) => {
+      if (total >= PREPARE_SHOWN_FROM) report("preparing", done, total);
+    },
     onProgress: (sent, total) => {
       // Every byte sent is 100 %: the item then says "Saving…" while the website hands the file to Briefcase.
-      const progress = total > 0 ? Math.min(1, sent / total) : 0;
-      // One render per percent, not one per progress event.
-      if (Math.floor(progress * 100) === Math.floor(shown * 100)) return;
-      shown = progress;
-      dispatchTo(entry, { type: "progress", id, progress });
+      report("sending", sent, total);
       if (sent > 0) reportActivity("uploading_file");
+    },
+    onRestart: () => {
+      meter.reset();
+      shownStage = "";
+      dispatchTo(entry, { type: "restart", id });
+    },
+    onSaving: () => {
+      if (!controller.signal.aborted) dispatchTo(entry, { type: "progress", id, progress: 1, stage: "saving", sent: file.size, rate: null, left: null });
     },
   }).then(
     uploaded => {
@@ -186,20 +226,35 @@ function retryIn(entry: Entry, id: string) {
   pump();
 }
 
+/** The largest file this website takes (GET /api/uploads/config): 0 when not known (the upload itself then says). */
+export interface UploadLimit {
+  maxBytes: number;
+  /** The website operator's own limit (UPLOADS_MAX_BYTES) rather than Silicon Briefcase's 5 TiB. */
+  capped?: boolean;
+}
+
+/** Why a file cannot go, before any byte is read: empty, or larger than the limit. Null when it can. */
+export function refusalOf(file: Pick<File, "size">, limit: UploadLimit): string | null {
+  if (file.size === 0) return "This file is empty (0 bytes), so there is nothing to send. Remove it.";
+  if (limit.maxBytes > 0 && file.size > limit.maxBytes) {
+    return limit.capped
+      ? `It is larger than ${bytesWords(limit.maxBytes)}, the most this DM website takes. Remove it, or share a link to it instead.`
+      : `It is larger than ${bytesWords(limit.maxBytes)}, the most Silicon Briefcase takes in one file. Remove it, or share a link to it instead.`;
+  }
+  return null;
+}
+
 /** Adds files to a tray and starts uploading them. Returns how many fit (TRAY_MAX_ITEMS per message). */
-function addFilesTo(entry: Entry, list: File[], maxBytes: number): number {
+function addFilesTo(entry: Entry, list: File[], limit: UploadLimit): number {
   const room = Math.max(0, TRAY_MAX_ITEMS - entry.items.length);
   const taken = list.slice(0, room);
   for (const file of taken) {
     const id = `file-${crypto.randomUUID()}`;
     const name = file.name || "file";
     const base = { id, kind: "file" as const, name, size: file.size, contentType: file.type || undefined, progress: 0 };
-    if (file.size === 0) {
-      dispatchTo(entry, { type: "add", item: { ...base, status: "failed", error: "This file is empty (0 bytes), so there is nothing to send. Remove it." } });
-      continue;
-    }
-    if (maxBytes > 0 && file.size > maxBytes) {
-      dispatchTo(entry, { type: "add", item: { ...base, status: "failed", error: `It is larger than ${formatMaximum(maxBytes)}, the most this DM takes. Remove it, or share a link to it instead.` } });
+    const refusal = refusalOf(file, limit);
+    if (refusal) {
+      dispatchTo(entry, { type: "add", item: { ...base, status: "failed", error: refusal } });
       continue;
     }
     files.set(id, file);
@@ -209,11 +264,6 @@ function addFilesTo(entry: Entry, list: File[], maxBytes: number): number {
   }
   pump();
   return taken.length;
-}
-
-function formatMaximum(bytes: number): string {
-  const mb = bytes / (1024 * 1024);
-  return mb >= 1024 ? `${Number((mb / 1024).toFixed(1))} GB` : `${Number(mb.toFixed(mb >= 10 ? 0 : 1))} MB`;
 }
 
 /* The window: back online, and leaving the page. ----------------------------------------------------------------- */
@@ -310,7 +360,7 @@ export interface TrayHandle {
   pending: boolean;
   dispatch: (action: TrayAction) => void;
   /** Adds files and uploads them; answers how many fit in this message. */
-  addFiles: (list: File[], maxBytes: number) => number;
+  addFiles: (list: File[], limit: UploadLimit) => number;
   retry: (id: string) => void;
   remove: (id: string) => void;
   /** The message was sent (or the Carbon discarded what it carried): empty, here and in storage. */
@@ -343,7 +393,7 @@ export function trayActions(account: string, address: string, enabled = true): T
     dispatch: action => {
       if (enabled) dispatchTo(entry(), action);
     },
-    addFiles: (list, maxBytes) => (enabled ? addFilesTo(entry(), list, maxBytes) : 0),
+    addFiles: (list, limit) => (enabled ? addFilesTo(entry(), list, limit) : 0),
     retry: id => {
       if (enabled) retryIn(entry(), id);
     },

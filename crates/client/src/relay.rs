@@ -93,6 +93,12 @@ pub enum Operation {
         participant_ids: Vec<String>,
         idempotency_key: String,
     },
+    /// One conversation's summary (DM 0.17).
+    GetConversation {
+        conversation_id: String,
+        #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+        for_account: Option<String>,
+    },
     ListMessages {
         conversation_id: String,
         #[serde(default)]
@@ -381,6 +387,14 @@ impl Operation {
             } => serde_json::to_value(
                 client
                     .create_conversation(participant_ids, idempotency_key)
+                    .await?,
+            )?,
+            Self::GetConversation {
+                conversation_id,
+                for_account,
+            } => serde_json::to_value(
+                client
+                    .conversation(conversation_id, for_account.as_deref())
                     .await?,
             )?,
             Self::ListMessages {

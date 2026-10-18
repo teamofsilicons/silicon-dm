@@ -12,7 +12,7 @@ import { canEditHere } from "@/lib/chat/compose";
 import type { Message } from "@/lib/chat/types";
 import { useShortcutText } from "@/lib/shortcuts/react";
 import { canListen, useListenState, useVoiceAvailability } from "@/lib/voice";
-import { useThreadActions } from "./thread-actions";
+import { useLayer, useThreadActions } from "./thread-actions";
 import styles from "./thread.module.css";
 
 export interface MenuState {
@@ -29,7 +29,10 @@ export function MessageMenu({ state, onClose }: { state: MenuState | null; onClo
   const listen = useListenState(actions.address, message?.["message-id"] ?? "");
   const mine = message ? actions.isMine(message) : false;
   const deleted = !!message?.deleted_at;
+  // (Delete: your own messages; in a custodian's view, the viewed Silicon's: actions.canDelete.)
   const playing = listen.state === "playing" || listen.state === "loading";
+  // While it is open, no message shows its toolbar (one action layer at a time).
+  useLayer(!!state);
   // The menu closes (state null) before its focus is handed back, so the message it was for is kept here.
   const openedFor = useRef<string | null>(null);
   useEffect(() => {
@@ -66,7 +69,7 @@ export function MessageMenu({ state, onClose }: { state: MenuState | null; onClo
         ) : null}
         {message && deleted ? <DropdownMenuItem icon={<Link2 size={16} strokeWidth={1.75} />} shortcut={keys("message.copyLink")} onSelect={() => actions.copyLink(message)}>Copy link</DropdownMenuItem> : null}
         {message ? <DropdownMenuItem icon={<Braces size={16} strokeWidth={1.75} />} shortcut={keys("message.details")} onSelect={() => actions.openDetails(message)}>Message details</DropdownMenuItem> : null}
-        {message && mine && !deleted && !actions.readOnly ? (
+        {message && actions.canDelete(message) ? (
           <>
             <DropdownMenuSeparator />
             <DropdownMenuItem destructive icon={<Trash2 size={16} strokeWidth={1.75} />} shortcut={keys("message.delete")} onSelect={() => actions.requestDelete(message)}>Delete…</DropdownMenuItem>

@@ -42,6 +42,9 @@ pub struct InboxOptions {
     /// Record a delivered receipt for each new message from someone else.
     pub mark_delivered: bool,
     pub limit: Option<u16>,
+    /// Also emit conversation events (`{"type":"conversation","change":…}`): conversations
+    /// that appeared for, changed for or left the account (DM 0.17, `include=conversations`).
+    pub conversations: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -185,6 +188,9 @@ impl LocalRuntime {
                 limit: options.limit,
                 reset: false,
                 wait: options.watch.then_some(wait),
+                include: options
+                    .conversations
+                    .then(|| crate::SYNC_INCLUDE_CONVERSATIONS.to_owned()),
             };
             let page = match self.sync_page(&options.profile, &request).await {
                 Ok(page) => {
@@ -223,8 +229,21 @@ impl LocalRuntime {
             };
             let had_events = !page.events.is_empty();
             for event in &page.events {
+                if event.kind == SyncEventKind::Conversation {
+                    // A conversation changed: there is no message to fetch, and reading the
+                    // conversation is up to the reader (it may be gone: `left`, `removed`).
+                    emit(json!({
+                        "type": "conversation",
+                        "event_id": event.event_id,
+                        "sequence": event.sequence,
+                        "conversation_id": event.conversation_id,
+                        "change": event.change,
+                    }))?;
+                    emitted += 1;
+                    continue;
+                }
                 let mut line = json!({
-                    "type": match event.kind { SyncEventKind::Message => "message", SyncEventKind::MessageStatus => "message_status" },
+                    "type": match event.kind { SyncEventKind::MessageStatus => "message_status", _ => "message" },
                     "event_id": event.event_id,
                     "sequence": event.sequence,
                     "conversation_id": event.conversation_id,

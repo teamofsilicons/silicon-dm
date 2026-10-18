@@ -89,12 +89,13 @@
 .barClose { --sq-r: 9px; --sq-fill: transparent; display: grid; width: 30px; height: 30px; flex: none; place-items: center; border: 0; background: var(--sq-fill); color: var(--text-muted); cursor: pointer; }
 .barClose:hover, .barClose:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); outline: none !important; }
 
-/* The tray: chips that say what each thing is, three to a row in the column; a failed upload takes a whole row for its
+/* The tray: chips that say what each thing is, up to three to a row in the column, sharing the width (a lone item
+   takes all of it, so a long name or a big file's progress has room); a failed upload takes a whole row for its
    reason. Past three rows it scrolls, and fades at the edge where more is hidden. */
 .tray {
   display: grid;
   max-height: 188px;
-  grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(216px, 1fr));
   align-content: start;
   gap: var(--space-2);
   margin-block: 0 var(--space-2);
@@ -275,11 +276,13 @@
 .noteRow { display: flex; align-items: baseline; gap: var(--space-2); margin-top: var(--space-1); }
 .noteRow .note { min-width: 0; margin-top: 0; }
 .noteAction {
+  --sq-r: 7px;
+  --sq-fill: transparent;
   flex: none;
   min-height: 24px;
   border: 0;
   padding: 0 var(--space-1);
-  background: transparent;
+  background: var(--sq-fill);
   color: var(--foreground);
   cursor: pointer;
   font: inherit;
@@ -289,7 +292,9 @@
   text-decoration-color: var(--border-strong);
   text-underline-offset: 3px;
 }
-.noteAction:hover, .noteAction:focus-visible { text-decoration-color: currentColor; }
+.noteAction:hover { text-decoration-color: currentColor; }
+/* The keyboard on one of these answers: a quiet fill inside the kit's accent edge (which follows the squircle). */
+.noteAction:focus-visible { --sq-fill: var(--surface-muted); text-decoration-color: currentColor; }
 
 @media (max-width: 767px) {
   .composer { padding: var(--space-2) var(--space-3) calc(var(--space-2) + env(safe-area-inset-bottom, 0px)); }

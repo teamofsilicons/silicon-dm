@@ -5,7 +5,9 @@
  * and the details panel import:
  *
  *   <VoiceNote>          a voice message: the player (its waveform decoded in the browser) and one line of transcript
- *   <SpeechMessage>      a Silicon's spoken message: its words, then the player with the voice it speaks in
+ *   <SpeechMessage>      a Silicon's spoken message: its words, then the player with the voice it speaks in; with a
+ *                        written caption (the message's words, drawn by the thread above it), the player, then the
+ *                        spoken words as a transcript of one line
  *   <ListenModeToggle>   the thread header's headphones, and "Speaking…" with Stop while Listen mode talks
  *   <ComposerVoice>      the composer's microphone (driven through the composer's bridge, composer/voice-bridge.ts)
  *   <AccountVoiceRow>    an account's voice in the details panel (Preview, Change when allowed)
@@ -21,7 +23,7 @@ import { chatKeys } from "@/lib/chat/keys";
 import { spokenWords } from "@/lib/chat/preview";
 import type { Message, Speech, VoiceNote as VoiceNoteData } from "@/lib/chat/types";
 import { usablePeaks } from "@/lib/voice/peaks";
-import { messageKey, noteInfoOf, noteTrack, prepareNote, speechContent, speechTrack, subscribeNotes, type NoteInfo } from "@/lib/voice/sources";
+import { messageKey, noteDecodable, noteInfoOf, noteTrack, prepareNote, speechContent, speechTrack, subscribeNotes, type NoteInfo } from "@/lib/voice/sources";
 import { useChat } from "../shell/chat-context";
 import { VoicePlayer } from "./player-ui";
 import styles from "./voice.module.css";
@@ -39,11 +41,15 @@ function useCachedMessage(address: string | undefined, code: string | undefined)
 
 const noInfo = () => undefined;
 
-/** A voice note's waveform and length, decoded once the bubble comes near the screen. */
-function useNoteInfo(url: string, element: RefObject<HTMLElement | null>): NoteInfo | undefined {
+/**
+ * A voice note's waveform and length, decoded once the bubble comes near the screen. A long one (`size` past what is
+ * decoded in the browser) is never fetched for that: it streams when played, with flat bars and the length it was sent
+ * with.
+ */
+function useNoteInfo(url: string, element: RefObject<HTMLElement | null>, size: number | null): NoteInfo | undefined {
   const info = useSyncExternalStore(subscribeNotes, () => noteInfoOf(url), noInfo);
   useEffect(() => {
-    if (info) return;
+    if (info || !noteDecodable(size)) return;
     const node = element.current;
     if (!node || typeof IntersectionObserver === "undefined") return;
     const observer = new IntersectionObserver(entries => {
@@ -53,39 +59,51 @@ function useNoteInfo(url: string, element: RefObject<HTMLElement | null>): NoteI
     }, { rootMargin: "240px 0px" });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [url, info, element]);
+  }, [url, info, element, size]);
   return info;
+}
+
+/**
+ * What was said, under a player: one line, and the whole of it on a press (a voice message's transcript, or a spoken
+ * message's words when a written caption is the message).
+ */
+function Transcript({ words }: { words: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <button type="button" className={styles.transcript} dir="auto" aria-expanded={open} onClick={() => setOpen(value => !value)} title={open ? undefined : words}>
+      <span className="sr-only">{open ? "Hide the transcript: " : "Transcript: "}</span>
+      {words}
+    </button>
+  );
 }
 
 export function VoiceNote({ voice, transcript, address, code }: { voice: VoiceNoteData; transcript: string | null; address?: string; code?: string }) {
   const { perspective } = useChat();
   const message = useCachedMessage(address, code);
   const root = useRef<HTMLDivElement>(null);
-  const info = useNoteInfo(voice.url, root);
-  const [open, setOpen] = useState(false);
+  const info = useNoteInfo(voice.url, root, voice.size ?? null);
   const sender = message?.sender ?? null;
   const noun = !sender ? "the voice message" : sameAccount(sender, perspective) ? "your voice message" : `${firstName(sender)}'s voice message`;
   const durationMs = voice.duration_milliseconds ?? info?.durationMs ?? null;
   const track = useMemo(
-    () => noteTrack({ key: address && code ? messageKey(address, code) : `note|${voice.url}`, url: voice.url, title: sender ? accountName(sender) : "Voice message", artwork: sender?.pfp_url, durationMs, origin: "bubble" }),
-    [address, code, voice.url, sender, durationMs],
+    () => noteTrack({ key: address && code ? messageKey(address, code) : `note|${voice.url}`, url: voice.url, size: voice.size ?? null, title: sender ? accountName(sender) : "Voice message", artwork: sender?.pfp_url, durationMs, origin: "bubble" }),
+    [address, code, voice.url, voice.size, sender, durationMs],
   );
   const words = transcript?.trim() ?? "";
   return (
     <div className={styles.note} ref={root}>
       <VoicePlayer track={track} noun={noun} peaks={info?.peaks ?? null} durationMs={durationMs} />
-      {words ? (
-        <button type="button" className={styles.transcript} dir="auto" aria-expanded={open} onClick={() => setOpen(value => !value)} title={open ? undefined : words}>
-          <span className="sr-only">{open ? "Hide the transcript: " : "Transcript: "}</span>
-          {words}
-        </button>
-      ) : null}
+      {words ? <Transcript words={words} /> : null}
     </div>
   );
 }
 
-/** A spoken message shows its words (cues removed) as the message, then the player in the voice pinned on it. */
-export function SpeechMessage({ speech, address, code }: { speech: Speech; address?: string; code?: string }) {
+/**
+ * A spoken message. Without a caption its words (cues removed) are the message, above the player in the voice pinned
+ * on it. With one (`captioned`: the thread draws the message's written words above), the caption is the message: the
+ * player follows it, and the spoken words are its transcript, one line that opens on a press, as a voice message's.
+ */
+export function SpeechMessage({ speech, address, code, captioned = false }: { speech: Speech; address?: string; code?: string; captioned?: boolean }) {
   const { view } = useChat();
   const message = useCachedMessage(address, code);
   const sender = message?.sender ?? null;
@@ -98,8 +116,8 @@ export function SpeechMessage({ speech, address, code }: { speech: Speech; addre
   );
   const voiceName = speech.voice_name ?? speech.voice;
   return (
-    <div className={styles.speech}>
-      <p className={styles.speechWords} dir="auto">{words || "…"}</p>
+    <div className={styles.speech} data-captioned={captioned ? "" : undefined}>
+      {captioned ? null : <p className={styles.speechWords} dir="auto">{words || "…"}</p>}
       <VoicePlayer
         track={track}
         noun={noun}
@@ -110,6 +128,7 @@ export function SpeechMessage({ speech, address, code }: { speech: Speech; addre
         unavailable={track ? null : "this message's address is not known here"}
         chip={<span className={styles.voiceChip} data-sq="surface" title={`Spoken in the voice ${voiceName}`}>{voiceName}</span>}
       />
+      {captioned && words ? <Transcript words={words} /> : null}
     </div>
   );
 }

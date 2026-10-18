@@ -196,7 +196,7 @@ export function useSignOut(): { signOut: () => Promise<void>; pending: boolean }
       response = await fetch("/auth/sign-out", { method: "POST", credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" } });
     } catch (error) {
       setPending(false);
-      throw new ApiError({ status: 0, code: "network_error", message: `Could not reach this site to sign out: ${error instanceof Error ? error.message : String(error)}.`, hint: "Check your connection, then try again." });
+      throw new ApiError({ status: 0, code: "network_error", message: "DM can't reach its service right now, so this browser is still signed in.", hint: "Check your connection, then sign out again.", method: "POST", path: "/auth/sign-out", cause: error });
     }
     if (!response.ok && response.status !== 401) {
       setPending(false);

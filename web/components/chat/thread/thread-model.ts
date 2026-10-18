@@ -9,6 +9,7 @@
 import { accountName, custodianFromRef, firstName, sameAccount, shellQuote } from "@/lib/chat/address";
 import { ApiError } from "@/lib/errors";
 import { compareCodes } from "@/lib/chat/codes";
+import { plainPreview } from "@/lib/chat/markdown";
 import { messageMedia, type MediaKind } from "@/lib/chat/media";
 import { messageGist, spokenWords } from "@/lib/chat/preview";
 import type { OutboxItem } from "@/lib/chat/outbox";
@@ -137,6 +138,16 @@ export function sameMessageVersion(a: Message, b: Message): boolean {
   );
 }
 
+/**
+ * The address a message was routed to (usually an ISI: `release-notes@si:sol`), or null. DM 0.17 says it in
+ * `routed_to` wherever the message is (a group's `recipient_id` is the group); an older service only in
+ * `recipient_id`, and only in a direct conversation.
+ */
+export function routingOf(message: Pick<Message, "recipient_id"> & { routed_to?: string | null }): string | null {
+  if ("routed_to" in message && message.routed_to !== undefined) return message.routed_to;
+  return message.recipient_id?.includes("@") ? message.recipient_id : null;
+}
+
 /* Sends ------------------------------------------------------------------------------------------------------------- */
 
 /**
@@ -250,7 +261,9 @@ export function messageLabel({ sender, mine, time, day, state, edited, message }
   if (message.deleted_at) return mine ? `Your deleted message ${when}` : `Deleted message from ${accountName(sender)} ${when}`;
   const head = mine ? `Your message ${when}` : `Message from ${accountName(sender)} ${when}`;
   const extra = [state, edited ? "edited" : null].filter(Boolean).join(", ");
-  const gist = messageGist(message);
+  // A spoken message with a written caption is its caption, as the bubble shows it (the spoken words follow there).
+  const caption = message.speech && message.message?.trim() ? plainPreview(message.message) : "";
+  const gist = caption || messageGist(message);
   const words = gist.length > 140 ? `${gist.slice(0, 139).trimEnd()}…` : gist;
   return `${head}${extra ? `, ${extra}` : ""}: ${words}`;
 }
@@ -288,7 +301,10 @@ const CHARS_PER_LINE = 58;
 export function estimateBubbleHeight(message: Message): number {
   if (message.deleted_at) return 38;
   let height = 18;
-  const text = message.speech?.script ?? message.message ?? "";
+  // A spoken message shows its caption (and one line of its spoken words) or, without one, its spoken words.
+  const caption = message.speech && message.message?.trim() ? message.message : "";
+  const text = caption || message.speech?.script || message.message || "";
+  if (caption) height += 22;
   if (text) {
     const lines = text.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / CHARS_PER_LINE)), 0);
     height += Math.min(lines, 40) * LINE + (text.includes("```") ? 48 : 0);
@@ -297,7 +313,7 @@ export function estimateBubbleHeight(message: Message): number {
   const media = messageMedia(message).attachments;
   const images = media.filter(item => item.kind === "image").length;
   if (images === 1) height += 236;
-  else if (images > 1) height += images > 2 ? 324 : 162;
+  else if (images > 1) height += images > 2 ? 300 : 150;
   height += media.filter(item => item.kind === "video").length * 206;
   height += media.filter(item => item.kind === "audio" || item.kind === "file").length * 60;
   if (message.gif) height += 210;
@@ -363,6 +379,67 @@ export function toolbarPlacement(input: {
   return { place: "none", compact: false };
 }
 
+/* Photos ------------------------------------------------------------------------------------------------------------ */
+
+/**
+ * The shape (width / height) a lone photo is drawn in: its own, a panorama and a long screenshot included; only one
+ * more extreme than 6:1 or 1:4 is cropped (it would be a sliver).
+ */
+export const photoRatio = (ratio: number) => Math.min(6, Math.max(0.25, ratio));
+
+/** The shape a photo takes in a gallery: its own, a very tall or very wide one cropped a little to keep rows readable. */
+export const galleryRatio = (ratio: number) => Math.min(2.6, Math.max(0.5, ratio));
+
+/** A gallery's nominal width, gap and the row height it aims for (the layout scales with the bubble). */
+const GALLERY_WIDTH = 400;
+const GALLERY_GAP = 3;
+const ROW_TARGET = 170;
+/** Rows thinner than this make a photo hard to read: they cost more. */
+const ROW_FLOOR = 100;
+
+/** Every way to cut `count` photos, in order, into one or two rows of one to three. */
+function galleryCuts(count: number): number[][] {
+  if (count <= 1) return [[count]];
+  if (count === 2) return [[2]];
+  const cuts: number[][] = count <= 3 ? [[count]] : [];
+  for (let first = 1; first < count; first++) {
+    const second = count - first;
+    if (first <= 3 && second <= 3) cuts.push([first, second]);
+  }
+  return cuts;
+}
+
+/**
+ * How a message's photos (the first four; a fifth and more are "+N" on the fourth) are laid out so every photo keeps its
+ * shape: rows of photos that share a height, each as wide as its shape asks (two side by side always; three in a row,
+ * or one over two; two over two, or one over three), choosing the rows that come closest to a comfortable height and
+ * never thin. Returns the photos' indexes, row by row. `ratios` are width / height (galleryRatio applies).
+ */
+export function galleryRows(ratios: number[]): number[][] {
+  const count = Math.min(4, ratios.length);
+  const shapes = ratios.slice(0, count).map(galleryRatio);
+  let best: number[][] = [];
+  let bestCost = Infinity;
+  for (const cut of galleryCuts(count)) {
+    let start = 0;
+    let cost = (cut.length - 1) * 0.1;
+    const rows: number[][] = [];
+    for (const size of cut) {
+      const row = Array.from({ length: size }, (_, offset) => start + offset);
+      const sum = row.reduce((total, index) => total + shapes[index]!, 0);
+      const height = (GALLERY_WIDTH - GALLERY_GAP * (size - 1)) / sum;
+      cost += Math.abs(height - ROW_TARGET) / ROW_TARGET + (height < ROW_FLOOR ? (ROW_FLOOR - height) / 30 : 0);
+      rows.push(row);
+      start += size;
+    }
+    if (cost < bestCost - 1e-9) {
+      best = rows;
+      bestCost = cost;
+    }
+  }
+  return best;
+}
+
 /* Who is in a conversation ------------------------------------------------------------------------------------------ */
 
 /** "3 people": a conversation of several without a name (the details panel lists them under People). */
@@ -374,6 +451,30 @@ export function peopleWords(count: number): string {
 export function namesInWords(names: string[]): string {
   if (names.length <= 1) return names[0] ?? "";
   return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+/**
+ * How a sentence names a conversation: "your conversation with Sol", "Sol's conversation with Wren" (a custodian's
+ * view), "your conversation with Bo and Cy", or a group's name. `whose` is "your" or a Silicon's name with "'s";
+ * `others` are the names of the others in a conversation without a name (none for a group).
+ */
+export function conversationPhrase(input: { whose: string; others: string[]; title: string }): string {
+  return input.others.length ? `${input.whose} conversation with ${namesInWords(input.others)}` : input.title;
+}
+
+/**
+ * When a message was sent, as a sentence says it: "today at 09:55", "yesterday at 09:55", "on Monday, Oct 12 at
+ * 09:55". `day` is its day as the thread's dividers name it (lib/chat/timeline.ts dayLabel).
+ */
+export function sentWhen(time: string, day: string | null | undefined): string {
+  if (!day || day === "Today") return `today at ${time}`;
+  if (day === "Yesterday") return `yesterday at ${time}`;
+  return `on ${day} at ${time}`;
+}
+
+/** Message details' line, in names (the ids follow it): "Sent today at 09:55 by Sol in your conversation with Sol." */
+export function sentSentence(input: { time: string; day: string | null | undefined; by: string; where: string }): string {
+  return `Sent ${sentWhen(input.time, input.day)} by ${input.by} in ${input.where}.`;
 }
 
 /**
@@ -409,13 +510,13 @@ export function pendingMedia(body: Pick<MessageCreate, "attachments" | "voice" |
 /* Copying ----------------------------------------------------------------------------------------------------------- */
 
 /**
- * The text "Copy text" copies: what the bubble shows. A spoken message's words without its cues (then its caption), a
- * message's words, a voice note's transcript, or the links it carries. (The exact script, cues included, is in the
- * message's details.)
+ * The text "Copy text" copies: what the bubble shows, in its order. A spoken message's caption (when it has one: it is
+ * the message) and its spoken words without cues, a message's words, a voice note's transcript, or the links it
+ * carries. (The exact script, cues included, is in the message's details.)
  */
 export function copyableText(message: Message): string {
   if (message.deleted_at) return "";
-  if (message.speech?.script) return [spokenWords(message.speech.script), message.message?.trim()].filter(Boolean).join("\n\n");
+  if (message.speech?.script) return [message.message?.trim(), spokenWords(message.speech.script)].filter(Boolean).join("\n\n");
   return message.message || message.voice_transcript || message.attachments.join("\n");
 }
 

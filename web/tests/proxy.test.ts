@@ -130,12 +130,42 @@ test("a 401 from the service ends the session here too; no session is a 401 with
   assert.equal(mock.calls.length, 0);
 });
 
-test("a service that cannot be reached is a 502 in the kit's error shape", async () => {
+test("a service that cannot be reached is a 502 in the kit's error shape, in a Carbon's words", async () => {
   const mock = mockFetch(() => Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: new Error("connect ECONNREFUSED 127.0.0.1:4261") })));
   restore = mock.restore;
-  const response = await GET(new NextRequest("http://127.0.0.1:4260/api/v1/items", { headers: { cookie: cookieFor(session()) } }));
-  assert.equal(response.status, 502);
-  const body = await response.json();
-  assert.equal(body.error.code, "service_unreachable");
-  assert.match(body.error.message, /could not reach its service for GET \/v1\/items: connect ECONNREFUSED/);
+  const logged: string[] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => void logged.push(args.join(" "));
+  try {
+    const response = await GET(new NextRequest("http://127.0.0.1:4260/api/v1/items?q=secret+words", { headers: { cookie: cookieFor(session()) } }));
+    assert.equal(response.status, 502);
+    const body = await response.json();
+    assert.equal(body.error.code, "service_unreachable");
+    assert.equal(body.error.message, "DM's service is not answering right now.");
+    assert.equal(body.error.hint, "It keeps trying; this usually passes in a moment.");
+    assert.doesNotMatch(JSON.stringify(body), /items|ECONNREFUSED|4261/, "the request and the service's address are not the Carbon's to read");
+    // The log names the request (never its query) and the reason, for whoever runs the site.
+    assert.equal(logged.length, 1);
+    assert.match(logged[0]!, /GET \/v1\/items could not reach the DM service at .*: connect ECONNREFUSED 127\.0\.0\.1:4261/);
+    assert.doesNotMatch(logged[0]!, /secret/);
+  } finally {
+    console.warn = warn;
+  }
+});
+
+test("a browser that goes away mid-request is nobody's problem: nothing is logged", async () => {
+  const mock = mockFetch(() => Promise.reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })));
+  restore = mock.restore;
+  const logged: string[] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => void logged.push(args.join(" "));
+  try {
+    const gone = new AbortController();
+    gone.abort();
+    const response = await GET(new NextRequest("http://127.0.0.1:4260/api/v1/sync?wait=25", { headers: { cookie: cookieFor(session()) }, signal: gone.signal }));
+    assert.equal(response.status, 502);
+    assert.deepEqual(logged, []);
+  } finally {
+    console.warn = warn;
+  }
 });

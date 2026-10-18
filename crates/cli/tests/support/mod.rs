@@ -256,6 +256,26 @@ async fn sync(
     envelope("sync", page)
 }
 
+/// `GET /api/v1/conversations/{conversation}`: a summary, naming the `for` it was asked with.
+async fn conversation(
+    State(shared): State<Shared>,
+    headers: HeaderMap,
+    Path(conversation): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let state = shared.lock().unwrap_or_else(|p| p.into_inner());
+    if caller(&state, &headers).is_none() {
+        return unauthorized();
+    }
+    envelope(
+        "conversation",
+        json!({"id": conversation, "participants": [], "last_message": null, "last_message_status": null,
+            "unread_count": 2, "last_read_message_id": "00a", "draft_version": 3,
+            "seen_for": query.get("for"),
+            "created_at": "2026-10-18T00:00:00Z", "updated_at": "2026-10-18T00:00:00Z"}),
+    )
+}
+
 async fn message(
     State(state): State<Shared>,
     headers: HeaderMap,
@@ -632,6 +652,7 @@ impl Stub {
             .route("/api/v1/accounts", get(discovery))
             .route("/api/v1/me", get(me))
             .route("/api/v1/sync", get(sync))
+            .route("/api/v1/conversations/{conversation}", get(conversation))
             .route(
                 "/api/v1/conversations/{conversation}/messages/{code}",
                 get(message),

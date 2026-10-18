@@ -37,8 +37,8 @@ import { Attachments, GifView } from "./attachments";
 import { MessageContent, ReplyQuote } from "./message-content";
 import { RichText } from "./rich-text";
 import { applyRowTabbing } from "./row-focus";
-import { emojiOnly, estimateBubbleHeight, messageLabel, pendingMedia, plainFailure, sameMessageVersion, toolbarPlacement, type Box, type ToolbarPlace } from "./thread-model";
-import { useInUse, useThreadActions, type InUse, type ValueStore } from "./thread-actions";
+import { emojiOnly, estimateBubbleHeight, messageLabel, pendingMedia, plainFailure, routingOf, sameMessageVersion, toolbarPlacement, type Box, type ToolbarPlace } from "./thread-model";
+import { useInUse, useLayer, useLayerOpen, useThreadActions, type InUse, type ValueStore } from "./thread-actions";
 import { useOnline } from "./use-online";
 import styles from "./thread.module.css";
 
@@ -51,8 +51,10 @@ export interface RowLayout {
 
 function Edited({ message }: { message: Message }) {
   const history = message.history;
+  const [open, setOpen] = useState(false);
+  useLayer(open);
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button type="button" className={styles.metaButton} aria-label={`Edited${message.updated_at ? ` ${fullTime(message.updated_at)}` : ""}. Show the earlier versions`}>Edited</button>
       </PopoverTrigger>
@@ -73,11 +75,16 @@ function Edited({ message }: { message: Message }) {
   );
 }
 
-/** What a message says about itself besides its content (time, Edited, via, ISI, its state), and whether it needs a line. */
+/**
+ * What a message says about itself besides its content (time, Edited, via, the ISI it was routed to, its state), and
+ * whether it needs a line. The routing address is `routed_to` (DM 0.17: in a group too, where `recipient_id` is the
+ * group); an older service only says it in `recipient_id`, in a direct conversation.
+ */
 function metaOf(message: Message) {
-  const isi = isiOf(message.recipient_id);
+  const routed = routingOf(message);
+  const isi = isiOf(routed);
   const edited = !message.deleted_at && (message.history.length > 0 || !!message.updated_at);
-  return { isi, edited, marked: edited || !!message.via_app || !!isi };
+  return { isi, routed, edited, marked: edited || !!message.via_app || !!isi };
 }
 
 /**
@@ -85,15 +92,16 @@ function metaOf(message: Message) {
  * it (Edited, via an app, the ISI it went to), so an edit in the middle of a run is never hidden.
  */
 function Meta({ message, mine, state, full }: { message: Message; mine: boolean; state: MessageState | null; full: boolean }) {
-  const { isi, edited } = metaOf(message);
+  const { isi, routed, edited } = metaOf(message);
+  const target = isi && routed ? routed.slice(isi.length + 1) : "";
   return (
     <div className={styles.meta} data-mine={mine ? "" : undefined}>
       {full ? <time dateTime={message.created_at} title={fullTime(message.created_at)} className={styles.time}>{clockTime(message.created_at)}</time> : null}
       {edited ? <Edited message={message} /> : null}
       {message.via_app ? <span className={styles.metaWord}>via {message.via_app}</span> : null}
       {isi ? (
-        <span className={styles.metaWord} title={`Routed to the ${isi} intent of ${message.recipient_id.slice(isi.length + 1)}`}>
-          → {isi}<span className="sr-only">: routed to the {isi} intent of {message.recipient_id.slice(isi.length + 1)}</span>
+        <span className={styles.metaWord} title={`Routed to the ${isi} intent of ${target}`}>
+          → {isi}<span className="sr-only">: routed to the {isi} intent of {target}</span>
         </span>
       ) : null}
       {full && mine && state ? <StatusTick state={state} size={14} /> : null}
@@ -145,6 +153,9 @@ function Toolbar({ message, mine, name, showTime, selected }: { message: Message
   const listenable = voice.listen && canListen(message);
   const listen = useListenState(actions.address, message["message-id"]);
   const playing = listen.state === "playing" || listen.state === "loading";
+  // A menu, popover, card or dialog opened from a message is the one action layer: the toolbar steps back meanwhile
+  // (it keeps its place, so nothing in the thread moves under the layer).
+  const held = useLayerOpen();
   const self = useRef<HTMLDivElement>(null);
   const placed = useRef<ToolbarPlace | null>(null);
   // Where it goes is measured before it is first painted, each time it shows, and again when the thread's width changes
@@ -207,7 +218,7 @@ function Toolbar({ message, mine, name, showTime, selected }: { message: Message
     actions.openMenu(message, { x: rect.left, y: rect.bottom + 4 });
   };
   return (
-    <div ref={self} className={styles.toolbar} data-sq="surface" role="toolbar" aria-label={`Actions for ${name}'s message`}>
+    <div ref={self} className={styles.toolbar} data-sq="surface" data-held={held ? "" : undefined} role="toolbar" aria-label={`Actions for ${name}'s message`}>
       {showTime ? <time className={styles.toolbarTime} dateTime={message.created_at} title={fullTime(message.created_at)}>{clockTime(message.created_at)}</time> : null}
       {actions.readOnly ? null : <IconAction size="sm" label="Reply" shortcut="message.reply" icon={<CornerUpLeft aria-hidden="true" />} onClick={() => actions.reply(message)} tooltipSide="top" />}
       {mine && !actions.readOnly && canEditHere(message) ? <IconAction size="sm" label="Edit" shortcut="message.edit" icon={<Pencil aria-hidden="true" />} onClick={() => actions.edit(message)} tooltipSide="top" /> : null}
@@ -222,16 +233,18 @@ function Toolbar({ message, mine, name, showTime, selected }: { message: Message
 }
 
 /**
- * "Delete for everyone?", asked in place under your message. Once answered it morphs into Deleting and Deleted over the
- * tombstone; a message deleted elsewhere (another tab, its custodian) before you answered takes the question away.
+ * "Delete for everyone?", asked in place under your message (or, in a custodian's view, under the viewed Silicon's).
+ * Once answered it morphs into Deleting and Deleted over the tombstone; a message deleted elsewhere (another tab, its
+ * custodian) before you answered takes the question away.
  */
 const DeleteQuestion = forwardRef<HTMLDivElement, { message: Message; mine: boolean; deleted: boolean; onCancel: () => void }>(function DeleteQuestion({ message, mine, deleted, onCancel }, ref) {
   const actions = useThreadActions();
   const [answered, setAnswered] = useState(false);
   const gone = deleted && !answered;
+  const code = message["message-id"];
   useEffect(() => {
-    if (gone) actions.cancelDelete();
-  }, [gone, actions]);
+    if (gone) actions.cancelDelete(code);
+  }, [gone, actions, code]);
   if (gone) return null;
   return (
     <div className={styles.confirm} data-mine={mine ? "" : undefined}>
@@ -247,12 +260,13 @@ const DeleteQuestion = forwardRef<HTMLDivElement, { message: Message; mine: bool
         resultTimeout={1200}
         onConfirm={() => actions.confirmDelete(message)}
         onCancel={() => {
-          actions.cancelDelete();
+          actions.cancelDelete(code);
           onCancel();
         }}
         onStateChange={next => {
           if (next === "pending") setAnswered(true);
-          if (next === "idle") actions.cancelDelete();
+          // Back at rest (Deleted shown, or the question closed): only this message's question goes.
+          if (next === "idle") actions.cancelDelete(code);
         }}
       />
     </div>
@@ -314,11 +328,12 @@ export const MessageRow = memo(function MessageRow({ message, first, last, group
   // Controls inside join the Tab order only while the row has the keyboard (row-focus.ts).
   useLayoutEffect(() => applyRowTabbing(row.current, focused));
 
-  // The question takes focus when it appears, so Enter or Escape answers it right away (its buttons may only be there
+  // The question takes focus when it appears, on its Delete (the kit's own choice, data-autofocus), so Enter deletes and
+  // Escape keeps the message right away: Delete, then Enter, as the shortcut promises (its buttons may only be there
   // a frame later).
   useLayoutEffect(() => {
     if (!confirming) return;
-    const button = () => confirmRef.current?.querySelector<HTMLButtonElement>("button:not([disabled])");
+    const button = () => confirmRef.current?.querySelector<HTMLButtonElement>("button[data-autofocus]:not([disabled])") ?? confirmRef.current?.querySelector<HTMLButtonElement>("button:not([disabled])");
     const now = button();
     if (now) {
       now.focus();

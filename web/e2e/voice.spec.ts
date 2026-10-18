@@ -12,6 +12,9 @@
  *   Listen on a Silicon's words; a spoken message: "Preparing audio…", then its waveform; Listen mode speaks what
  *     arrives (in a group of the run's own with Scout, so nothing another run says is spoken there)
  *   Settings → Voice: choosing Scout's voice is what the service says
+ *   a spoken message with a written caption: the caption is the message, then the player, then the spoken words
+ *   a voice message cut off by a reload is kept on disk (OPFS) and offered when the conversation opens again
+ *   a phone: Change opens the voices as a sheet; a playing spoken message keeps its voice's name (one speed button)
  *   axe on the voice surfaces
  */
 import { execFileSync, spawn } from "node:child_process";
@@ -538,6 +541,112 @@ test("Settings → Voice: a sample plays, Scout's voice is chosen and reset, and
   await expect(page.getByRole("switch", { name: "Play spoken messages when they arrive" })).toBeVisible();
   await expect(page.getByRole("group", { name: "Speed" })).toBeVisible();
   await audit(page, "Settings → Listening");
+  expect(errors).toEqual([]);
+  await ada.close();
+});
+
+/* A caption, a recording kept across a reload, a phone ----------------------------------------------------------------- */
+
+test("a spoken message's written caption is the message; its spoken words are the transcript under the player", async ({ browser }) => {
+  const group = await groupWithScout("Caption check");
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = watchErrors(page);
+  await page.goto(`/c/${group}`);
+  await expect(page.getByRole("textbox", { name: /^Message / })).toBeVisible();
+  const caption = `Build time ${stamp()}: 1.8 s`;
+  scoutSays(group, ["--speak", "[warmly] Down to one point eight seconds, from two point four.", "--text", caption]);
+  const spoken = page.locator("article[data-message-code]", { hasText: caption });
+  await expect(spoken).toBeVisible({ timeout: 30_000 });
+  const transcript = spoken.getByRole("button", { name: /^Transcript: Down to one point eight seconds/ });
+  await expect(transcript).toHaveAttribute("aria-expanded", "false");
+  const order = await spoken.evaluate((article, words) => {
+    const captionNode = [...article.querySelectorAll("p")].find(node => node.textContent?.includes(words));
+    const player = article.querySelector("[data-voice-ui]");
+    const said = [...article.querySelectorAll("button")].find(node => node.textContent?.includes("Down to one point eight"));
+    if (!captionNode || !player || !said) return "missing";
+    const follows = (a: Node, b: Node) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    return follows(captionNode, player) && follows(player, said) ? "caption, player, spoken words" : "out of order";
+  }, caption);
+  expect(order).toBe("caption, player, spoken words");
+  await transcript.click();
+  await expect(spoken.getByRole("button", { name: /^Hide the transcript: Down to one point eight seconds/ })).toHaveAttribute("aria-expanded", "true");
+  // Its name, as the log reads it, is its caption.
+  await expect(spoken).toHaveAttribute("aria-label", /^Message from Scout .*: Build time .*: 1\.8 s$/);
+  expect(errors).toEqual([]);
+  await ada.close();
+});
+
+test("a voice message cut off by a reload is kept on disk, offered when its conversation opens again, and sent from there", async ({ browser }) => {
+  const group = await dmApi<{ id: string }>("ada", "POST", "/api/v1/groups", { type: "create_group", data: { name: `Voice kept ${stamp()}`, member_ids: ["c:dmc-bo"] } });
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = watchErrors(page);
+  await page.goto(`/c/${group.id}`);
+  const field = page.getByRole("textbox", { name: /^Message / });
+  await expect(field).toBeVisible();
+  await field.click();
+  await field.press(`${MOD}+Shift+M`);
+  const recording = page.getByRole("group", { name: "Recording a voice message" });
+  await expect(recording.getByRole("timer")).toHaveText(/0:(0[7-9]|1\d)/, { timeout: 20_000 });
+  // Written to this browser's own disk as it records, a few seconds at a time, with a record of what it is.
+  type Kept = { mode: string; bytes: number; store: string };
+  const kept = () => page.evaluate(() => Object.values(JSON.parse(localStorage.getItem("dm:recordings:v1") ?? "{}") as Record<string, unknown>)) as Promise<Kept[]>;
+  await expect.poll(async () => (await kept()).find(take => take.mode === "note")?.bytes ?? 0).toBeGreaterThan(0);
+  expect((await kept()).map(take => take.store)).toEqual(["opfs"]);
+
+  // The page reloads mid-recording: what was written is offered, with how long it is.
+  await page.reload();
+  const offer = page.getByRole("group", { name: "A voice message that was not sent" });
+  await expect(offer).toBeVisible({ timeout: 15_000 });
+  await expect(offer).toContainText(/0:0[4-9] long, recorded today at \d\d:\d\d/);
+  await expect(offer.getByRole("button", { name: "Send" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  type Stored = { items: Array<{ voice: { duration_milliseconds: number } | null }> };
+  await expect.poll(async () => (await dmApi<Stored>("ada", "GET", `/api/v1/conversations/${encodeURIComponent(group.id)}/messages?limit=5`)).items.find(item => item.voice)?.voice?.duration_milliseconds ?? 0, { timeout: 30_000, message: "it went as a voice message" }).toBeGreaterThan(4000);
+  await expect(page.locator("article[data-message-code]").getByRole("button", { name: /^Play your voice message/ })).toBeVisible({ timeout: 30_000 });
+  // Sent: nothing is left on disk.
+  await expect.poll(kept).toEqual([]);
+  expect(errors).toEqual([]);
+  await ada.close();
+});
+
+test("on a phone, Change opens Scout's voices as a sheet; a playing spoken message keeps its voice's name", async ({ browser }) => {
+  const ada = await signedIn(browser, "ada", { viewport: { width: 390, height: 844 } });
+  const page = await ada.newPage();
+  const errors = watchErrors(page);
+  // Ada's own conversation with Scout: its details (a bottom sheet on a phone) show Scout's voice.
+  await page.goto("/c/c:dmc-ada::si:dmc-scout");
+  await page.getByRole("button", { name: "Show details" }).click();
+  await page.getByRole("button", { name: "Change Scout's voice" }).click();
+  const sheet = page.getByRole("dialog", { name: "Scout's voice" });
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByRole("radiogroup", { name: "Scout's voice" })).toBeVisible();
+  const box = await sheet.boundingBox();
+  expect(box && box.x >= 0 && box.x + box.width <= 390, "the sheet stays on the screen").toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(sheet).toHaveCount(0);
+
+  // A spoken message plays: the voice's name stays beside the time; the speed is one button that steps.
+  const group = await groupWithScout("Voice phone");
+  await page.goto(`/c/${group}`);
+  await expect(page.getByRole("textbox", { name: /^Message / })).toBeVisible();
+  const words = `Phone check ${stamp()}`;
+  scoutSays(group, ["--speak", `[cheerfully] ${words} is green, and the voice keeps its name.`]);
+  const spoken = page.locator("article[data-message-code]", { hasText: words });
+  const play = spoken.getByRole("button", { name: /^Play Scout's spoken message, \d+:\d\d/ });
+  await expect(play).toBeVisible({ timeout: 30_000 });
+  await play.click();
+  await expectPlaying(page, `|${await spoken.getAttribute("data-message-code")}`);
+  await expect(spoken.locator("[title^='Spoken in the voice']")).toBeVisible();
+  const speed = spoken.getByRole("button", { name: /^1× playback speed\. Press for 1\.5×/ });
+  await expect(speed).toBeVisible();
+  await speed.click();
+  await expect.poll(() => page.evaluate(() => document.querySelector<HTMLAudioElement>("audio[data-dm-player]")?.playbackRate)).toBe(1.5);
+  await spoken.getByRole("button", { name: /^1\.5× playback speed/ }).click();
+  await spoken.getByRole("button", { name: /^2× playback speed/ }).click();
+  await expect.poll(() => page.evaluate(() => document.querySelector<HTMLAudioElement>("audio[data-dm-player]")?.playbackRate)).toBe(1);
+  await expect(spoken.locator("[title^='Spoken in the voice']")).toBeVisible();
   expect(errors).toEqual([]);
   await ada.close();
 });

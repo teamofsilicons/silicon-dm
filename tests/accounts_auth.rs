@@ -399,6 +399,37 @@ async fn proofs_from_allowed_apps_act_for_the_account_on_their_scopes_only() -> 
         "{via:?}"
     );
 
+    // The sync feed takes dm.messages.read; its conversation events (which conversations the
+    // account is in, invited to, renamed) take dm.conversations.read too.
+    for (proof, include, expected) in [
+        ("sap_readonly_ada", "", StatusCode::OK),
+        (
+            "sap_readonly_ada",
+            "&include=conversations",
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "sap_interface_ada",
+            "&include=conversations",
+            StatusCode::OK,
+        ),
+    ] {
+        let feed = app
+            .call(
+                Method::GET,
+                &format!("/api/v1/sync?reset=true{include}"),
+                None,
+                None,
+                &with_proof(proof),
+            )
+            .await?;
+        assert_eq!(feed.0, expected, "{proof}{include}: {}", feed.1);
+        if expected == StatusCode::FORBIDDEN {
+            assert_eq!(feed.1["error"]["code"], "proof_scope_missing");
+            assert!(feed.1["error"]["hint"].is_string(), "{}", feed.1);
+        }
+    }
+
     // An issuer DM_PROOF_ISSUERS does not list.
     let refused = app
         .call(

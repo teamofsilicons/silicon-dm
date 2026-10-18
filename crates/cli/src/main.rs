@@ -61,11 +61,7 @@ fn main() {
     }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
-        Err(error) => {
-            let code = error.exit_code();
-            let _ = error.print();
-            std::process::exit(code);
-        }
+        Err(error) => std::process::exit(argument_error(&error)),
     };
     // Discovery, docs and signed-out status run before any runtime: no network, no state.
     if let Some(code) = offline(&cli) {
@@ -89,6 +85,149 @@ fn main() {
     let code = runtime.block_on(run_and_report(cli));
     drop(runtime);
     std::process::exit(code);
+}
+
+/// What the argument parser refused. `--help` and `--version` keep the parser's own output (on
+/// standard output, exit 0), and so does a bare command group (its help, exit 2). A mistake is
+/// the CLI's JSON error on standard error, like every other error, so a Silicon reads what to
+/// fix instead of parsing prose: `invalid_arguments` with the parser's words, its tips, the
+/// usage and where the command's help is (exit 2). Nothing is written to standard output.
+fn argument_error(error: &clap::Error) -> i32 {
+    use clap::error::ErrorKind;
+    if matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    ) {
+        let _ = error.print();
+        return error.exit_code();
+    }
+    let compact = std::env::args().any(|argument| argument == "--json");
+    output::print_value_error(&argument_error_json(error), compact);
+    error.exit_code()
+}
+
+fn argument_error_json(error: &clap::Error) -> serde_json::Value {
+    let text = error.render().to_string();
+    // The parser writes its complaint (with any listed values on indented lines), then
+    // blocks of tips, the usage and a pointer to --help, separated by blank lines.
+    let mut blocks = text
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|block| !block.is_empty());
+    let complaint = blocks
+        .next()
+        .unwrap_or("error: the arguments do not fit the command");
+    let mut complaint_lines = complaint.lines().map(str::trim);
+    let mut message = complaint_lines
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches("error:")
+        .trim()
+        .to_owned();
+    let listed: Vec<&str> = complaint_lines.filter(|line| !line.is_empty()).collect();
+    if !listed.is_empty() {
+        message = format!("{} {}", message.trim_end_matches(':'), listed.join(", "));
+        message = message.replacen(" provided ", " provided: ", 1);
+    }
+    let mut tips = Vec::new();
+    let mut usage = None;
+    for line in blocks.flat_map(str::lines).map(str::trim) {
+        if let Some(tip) = line.strip_prefix("tip:") {
+            tips.push(tip.trim().to_owned());
+        } else if let Some(found) = line.strip_prefix("Usage:") {
+            usage = Some(found.trim().to_owned());
+        }
+    }
+    let mut sentence: String = message
+        .chars()
+        .take(1)
+        .flat_map(char::to_uppercase)
+        .collect();
+    sentence.extend(message.chars().skip(1));
+    if !sentence.ends_with('.') {
+        sentence.push('.');
+    }
+    let (command, mut named) = command_path();
+    // Not every refusal prints the usage (a value out of range does not): say it anyway.
+    let usage = usage.unwrap_or_else(|| {
+        let usage = named.render_usage().to_string();
+        usage.trim().trim_start_matches("Usage:").trim().to_owned()
+    });
+    let hint = if command == "dm" {
+        "Run dm --help: it lists every command, with examples.".to_owned()
+    } else {
+        format!(
+            "Run {command} --help for what it takes, with examples; dm --help lists every command."
+        )
+    };
+    serde_json::json!({"error": {
+        "code": "invalid_arguments",
+        "message": sentence,
+        "hint": hint,
+        "details": {"kind": snake_case(&format!("{:?}", error.kind())), "command": command,
+            "usage": usage, "tips": tips},
+    }})
+}
+
+/// The command the arguments name as far as they are commands (`dm messages send`), and
+/// that command: the words after `dm` that are its subcommands, wherever flags (and the
+/// values of flags that take one, such as `--profile NAME`) sit between them.
+fn command_path() -> (String, clap::Command) {
+    use clap::CommandFactory as _;
+    let mut command = Cli::command();
+    // Hands the global flags (--profile, --json…) to every subcommand, so they are known below.
+    command.build();
+    let takes_value = |command: &clap::Command, matches: &dyn Fn(&clap::Arg) -> bool| {
+        command
+            .get_arguments()
+            .any(|arg| matches(arg) && arg.get_action().takes_values())
+    };
+    let mut path = vec!["dm".to_owned()];
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "--" {
+            break;
+        }
+        if let Some(long) = argument.strip_prefix("--") {
+            if !long.contains('=') && takes_value(&command, &|arg| arg.get_long() == Some(long)) {
+                arguments.next();
+            }
+            continue;
+        }
+        if let Some(short) = argument.strip_prefix('-') {
+            let mut letters = short.chars();
+            if let (Some(letter), None) = (letters.next(), letters.next())
+                && takes_value(&command, &|arg| arg.get_short() == Some(letter))
+            {
+                arguments.next();
+            }
+            continue;
+        }
+        let Some(subcommand) = command.find_subcommand(&argument).cloned() else {
+            break;
+        };
+        path.push(subcommand.get_name().to_owned());
+        command = subcommand;
+    }
+    (path.join(" "), command)
+}
+
+/// `UnknownArgument` → `unknown_argument`.
+fn snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (index, character) in name.chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.push(character.to_ascii_lowercase());
+        } else {
+            out.push(character);
+        }
+    }
+    out
 }
 
 /// Commands that never need the network or the state directory. `Some(exit code)` when handled.
@@ -657,6 +796,13 @@ async fn relay_command(
         Command::Conversations { command } => match command {
             Conversations::List { page, for_account } => Operation::ListConversations {
                 page: page.page(),
+                for_account,
+            },
+            Conversations::Show {
+                conversation,
+                for_account,
+            } => Operation::GetConversation {
+                conversation_id: conversation,
                 for_account,
             },
             Conversations::Create { participants } => Operation::CreateConversation {

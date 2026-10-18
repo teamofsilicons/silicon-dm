@@ -19,6 +19,7 @@ import { HoldToConfirm } from "@/components/silicon-ui/hold-to-confirm/hold-to-c
 import { InlineEdit } from "@/components/silicon-ui/inline-edit/inline-edit";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { accountName, custodianWords, firstName, inboxHref, sameAccount } from "@/lib/chat/address";
+import { useConversationEvents } from "@/lib/chat/features";
 import { useGroup } from "@/lib/chat/hooks";
 import { useParticipantsPresence } from "@/lib/chat/presence";
 import type { AccountRef, ConversationSummary, GroupDetails as Group, Presence } from "@/lib/chat/types";
@@ -34,8 +35,13 @@ import { applyGroupToSummaries, summaryDiffers, useGroupActions } from "./group-
 import { copyText, PersonRow, usePersonBasics, type PersonAction } from "./person";
 import styles from "./details.module.css";
 
-/** How often an open panel asks for the group again (members accept, leave, are renamed by another owner). */
+/**
+ * How often an open panel asks for the group again (members accept, leave, are renamed by another owner), when the
+ * sync feed does not say so itself: an older service, or a custodian's view, which is not in your feed. With
+ * conversation events (lib/chat/features.ts) a change arrives at once and the panel only asks again now and then.
+ */
 const REFRESH_MS = 30_000;
+const SAFETY_REFRESH_MS = 120_000;
 /** How many members' presence an open panel follows. */
 const PRESENCE_LIMIT = 24;
 
@@ -136,12 +142,13 @@ export function GroupDetailsPanel({ address, conversation, presence }: { address
   // While the panel shows, the group is asked for again now and then (and when the tab comes back), so members who
   // accepted or left, and another owner's rename, show without reopening it.
   const { refetch } = query;
+  const events = useConversationEvents() && !view;
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void refetch();
-    }, REFRESH_MS);
+    }, events ? SAFETY_REFRESH_MS : REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [refetch]);
+  }, [refetch, events]);
   // What the panel learns (another owner's rename, someone who joined) goes to the thread's header and the list too.
   const queryClient = useQueryClient();
   useEffect(() => {

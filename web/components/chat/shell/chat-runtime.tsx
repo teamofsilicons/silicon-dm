@@ -9,7 +9,7 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { conversationTitle, sameAccount } from "@/lib/chat/address";
+import { conversationTitle, inboxHref, sameAccount } from "@/lib/chat/address";
 import { summariesOf, totalUnread, type ConversationPages } from "@/lib/chat/cache";
 import { useConversations, useInvitations } from "@/lib/chat/hooks";
 import { chatKeys } from "@/lib/chat/keys";
@@ -18,14 +18,15 @@ import { maybeNotify } from "@/lib/chat/notifications";
 import { attachOutbox } from "@/lib/chat/outbox-store";
 import { startPresence } from "@/lib/chat/presence";
 import { attachReceipts, noteDelivered } from "@/lib/chat/receipts";
-import { refreshConversationsSoon, startSync } from "@/lib/chat/sync";
+import { refreshConversationsSoon, startSync, type GoneConversation } from "@/lib/chat/sync";
 import { useUnreadTitle } from "@/lib/chat/title";
+import { notify } from "@/lib/notify";
 import type { Message } from "@/lib/chat/types";
 import { useOpenAddress } from "../sidebar/conversations-pane";
 import { useChat } from "./chat-context";
 
 export function ChatRuntime() {
-  const { me } = useChat();
+  const { me, view } = useChat();
   const queryClient = useQueryClient();
   const router = useRouter();
   const openAddress = useOpenAddress();
@@ -33,9 +34,9 @@ export function ChatRuntime() {
   const accountKey = account.uuid ?? account.id;
 
   // The latest values for the sync loop's callback, which lives longer than one render.
-  const latest = useRef({ openAddress, router });
+  const latest = useRef({ openAddress, router, view });
   useEffect(() => {
-    latest.current = { openAddress, router };
+    latest.current = { openAddress, router, view };
   });
 
   useEffect(() => attachOutbox({ queryClient, me: account }), [queryClient, accountKey]); // eslint-disable-line react-hooks/exhaustive-deps -- the account's key identifies it
@@ -50,14 +51,23 @@ export function ChatRuntime() {
       const title = summary ? conversationTitle(summary, account) : message.sender.display_name || message.sender.id;
       maybeNotify(message, { title, openAddress: latest.current.openAddress, navigate: href => latest.current.router.push(href) });
     };
-    return startSync({ queryClient, me: account, onIncoming });
+    // A conversation you are no longer in leaves the screen too when it is open here: its messages can no longer be read
+    // or answered. Someone else taking you out is said in words; leaving it yourself (another device, another tab) is not.
+    const onConversationGone = ({ id, name, removed }: GoneConversation) => {
+      // In a custodian's view the open conversation is the Silicon's, which your own membership does not change.
+      if (latest.current.openAddress !== id || latest.current.view) return;
+      latest.current.router.push(inboxHref(null));
+      if (removed) notify.info(`You are no longer in ${name}`, "One of its owners took you out of the group. An owner can invite you back.");
+    };
+    return startSync({ queryClient, me: account, onIncoming, onConversationGone });
   }, [queryClient, accountKey]); // eslint-disable-line react-hooks/exhaustive-deps -- as above
 
   // Another tab of this browser started, joined or left a conversation: refresh the list here too.
   useEffect(() => listenForConversationNews(queryClient, accountKey), [queryClient, accountKey]);
 
   // An invitation that goes without this tab answering it was accepted (or declined) somewhere else: a group may have
-  // joined the list. The sync feed carries messages only, so the invitations (asked for every 15 s) are the signal.
+  // joined the list. A service with conversation events says so in the sync feed at once (lib/chat/sync.ts); an older
+  // one carries messages only, and then the invitations (asked for every 15 s) are the signal.
   const invitations = useInvitations(null);
   const invited = useRef<Set<string> | null>(null);
   useEffect(() => {

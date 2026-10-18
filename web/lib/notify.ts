@@ -40,7 +40,7 @@ function show(options: ToastOptions): string {
 }
 
 function titleFor(error: ApiError): string {
-  if (error.isNetwork) return "The service is unreachable";
+  if (error.isNetwork) return "No connection to DM";
   if (error.status === 401) return "You are signed out";
   if (error.status === 403) return "Not allowed";
   if (error.status === 404) return "Not found";

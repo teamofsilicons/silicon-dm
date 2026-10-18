@@ -7,17 +7,24 @@
  * `sync_reset_required` starts again from the head and then refreshes everything. Failures back off (1 s … 30 s) and
  * retry at once when the browser comes back online; a 401 stops the loop (the session keeper signs the Carbon in again).
  *
+ * Conversation events (DM 0.17): when GET /api/v1/contracts announces them, the loop asks for them too
+ * (`include=conversations`), so a conversation created with you, an invitation, a group joined or left on another
+ * device, a rename and a change of members or owners reach the list and the invitations within a second
+ * (planConversationEvents, then applyConversationPlan). Against an older service it reads messages only, and the
+ * invitations' 15 s check and the list's own refresh keep things complete (lib/chat/features.ts).
+ *
  * Only your own account syncs: a custodian's view of a Silicon's conversations refreshes by polling instead
  * (lib/chat/hooks.ts).
  */
 import type { QueryClient } from "@tanstack/react-query";
 import { ApiError } from "@/lib/errors";
-import { getMessage, syncPage } from "./api";
-import { applyMessageToSummaries, upsertMessage, type ConversationPages, type MessagePages } from "./cache";
+import { getContracts, getConversation, getMessage, syncPage } from "./api";
+import { applyMessageToSummaries, dropSummary, replaceSummary, summariesOf, upsertMessage, type ConversationPages, type MessagePages } from "./cache";
+import { offersConversationEvents, setConversationEventsActive } from "./features";
 import { chatKeys } from "./keys";
-import { planEvents, SeenEvents, syncDelay, type MessageRef } from "./sync-plan";
+import { planConversationEvents, planEvents, SeenEvents, syncDelay, type ConversationPlan, type MessageRef } from "./sync-plan";
 import { readText, writeText } from "./storage";
-import type { AccountRef, Message } from "./types";
+import type { AccountRef, ConversationSummary, Message } from "./types";
 import { sameAccount } from "./address";
 
 export interface IncomingInfo {
@@ -25,11 +32,22 @@ export interface IncomingInfo {
   fresh: boolean;
 }
 
+/** A conversation that went from the list because you are no longer in it (conversation events). */
+export interface GoneConversation {
+  id: string;
+  /** Its name as the list had it (a group's name), or its address. */
+  name: string;
+  /** Someone else took you out (`removed`), rather than you leaving it on another device or tab. */
+  removed: boolean;
+}
+
 export interface SyncOptions {
   queryClient: QueryClient;
   me: AccountRef;
   /** A message from someone else arrived or changed (notifications, delivered receipts). */
   onIncoming?: (message: Message, info: IncomingInfo) => void;
+  /** A conversation the list had is gone: you left it elsewhere, or were removed (the shell leaves it if it is open). */
+  onConversationGone?: (gone: GoneConversation) => void;
 }
 
 const WAIT_SECONDS = 25;
@@ -55,6 +73,78 @@ export function refreshConversationsSoon(queryClient: QueryClient): void {
   }, LIST_REFRESH_DELAY_MS));
 }
 
+const invitationRefreshes = new WeakMap<QueryClient, ReturnType<typeof setTimeout>>();
+
+/** Asks for your invitations again, soon and once (a new one, or one answered or withdrawn somewhere else). */
+export function refreshInvitationsSoon(queryClient: QueryClient): void {
+  if (invitationRefreshes.has(queryClient) || listRefreshes.has(queryClient)) return;
+  invitationRefreshes.set(queryClient, setTimeout(() => {
+    invitationRefreshes.delete(queryClient);
+    void queryClient.invalidateQueries({ queryKey: chatKeys.invitations(), exact: true });
+  }, LIST_REFRESH_DELAY_MS));
+}
+
+/** Takes a conversation you are no longer in out of the list, and forgets its details. */
+function dropConversation(queryClient: QueryClient, id: string): void {
+  queryClient.setQueryData<ConversationPages>(chatKeys.conversations(), data => dropSummary(data, id));
+  queryClient.removeQueries({ queryKey: chatKeys.group(id), exact: true });
+  queryClient.removeQueries({ queryKey: chatKeys.conversation(id), exact: true });
+}
+
+/**
+ * A conversation that changed (renamed, described, new members or owners) is asked for again and put in its row, which
+ * keeps its place, and its group details are refreshed where they show (the details panel, the thread's header). One
+ * the list does not have brings a refresh of the list; one that is gone (404, 403) comes out of it. Never throws: what
+ * cannot be asked for now is caught up by the list's next refresh.
+ */
+async function refreshConversation(queryClient: QueryClient, id: string, signal: AbortSignal): Promise<void> {
+  const listed = summariesOf(queryClient.getQueryData<ConversationPages>(chatKeys.conversations())).some(item => item.id === id || item.supersedes?.includes(id));
+  if (!listed) {
+    refreshConversationsSoon(queryClient);
+    return;
+  }
+  try {
+    // pages: 0, so a conversation that is gone is a 404 at once (no walk through the list looking for it).
+    const summary = await getConversation(id, { signal, pages: 0 });
+    queryClient.setQueryData<ConversationPages>(chatKeys.conversations(), data => replaceSummary(data, summary));
+    queryClient.setQueryData<ConversationSummary>(chatKeys.conversation(id), summary);
+    void queryClient.invalidateQueries({ queryKey: chatKeys.group(id), exact: true });
+  } catch (error) {
+    if (signal.aborted) return;
+    const failure = ApiError.from(error);
+    if (failure.status === 404 || failure.status === 403) dropConversation(queryClient, id);
+    else refreshConversationsSoon(queryClient);
+  }
+}
+
+/**
+ * Carries out what a page's conversation events ask for (lib/chat/sync-plan.ts planConversationEvents). Never throws.
+ * `onGone` hears of each conversation that leaves the list here (one this tab already dropped, by leaving it itself,
+ * is not heard of again).
+ */
+export async function applyConversationPlan(queryClient: QueryClient, plan: ConversationPlan, signal: AbortSignal, onGone?: (gone: GoneConversation) => void): Promise<void> {
+  for (const id of plan.drop) {
+    const summary = summariesOf(queryClient.getQueryData<ConversationPages>(chatKeys.conversations())).find(item => item.id === id || item.supersedes?.includes(id));
+    dropConversation(queryClient, id);
+    if (summary) onGone?.({ id: summary.id, name: summary.group?.name || summary.id, removed: plan.removed.includes(id) });
+  }
+  // The list's refresh asks for the invitations too.
+  if (plan.list) refreshConversationsSoon(queryClient);
+  else if (plan.invitations) refreshInvitationsSoon(queryClient);
+  await Promise.all(plan.refresh.map(id => refreshConversation(queryClient, id, signal)));
+}
+
+/** Whether the service offers conversation events in the sync feed; null when it could not be asked (ask again later). */
+async function conversationEventsOffered(signal: AbortSignal): Promise<boolean | null> {
+  try {
+    return offersConversationEvents(await getContracts(signal));
+  } catch (error) {
+    const failure = ApiError.from(error);
+    // An older service without the route, or one that refuses it: messages only. Anything else may pass: ask again.
+    return failure.status === 404 || failure.status === 405 || failure.status === 403 ? false : null;
+  }
+}
+
 /**
  * After a reset the feed starts at the head: whatever was fetched before the head was taken can miss messages that came
  * in between (they are neither in that answer nor after the cursor). So once a reset answers, your conversation list
@@ -68,6 +158,8 @@ export function refetchAfterReset(queryClient: QueryClient, expired: boolean): v
     return;
   }
   void queryClient.invalidateQueries({ queryKey: chatKeys.conversations(), exact: true });
+  // Invitations too: an invitation sent before the head is in neither the answer nor the feed.
+  void queryClient.invalidateQueries({ queryKey: chatKeys.invitations(), exact: true });
   // Your own threads only (a custodian's view of a Silicon is polled, not synced).
   void queryClient.invalidateQueries({ predicate: query => query.queryKey[0] === "dm" && query.queryKey[1] === "messages" && query.queryKey[3] === "" });
 }
@@ -120,6 +212,8 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
   let failures = 0;
   // The history ran out (409): after the next reset everything is fetched again.
   let expired = false;
+  // Conversation events: asked for once the contracts announce them (null until they have answered).
+  let events: boolean | null = null;
 
   const applyRef = async (ref: MessageRef) => {
     try {
@@ -136,14 +230,24 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
 
   while (!signal.aborted) {
     try {
+      if (events === null) {
+        events = await conversationEventsOffered(signal);
+        // On as soon as the service offers them (a long poll may take 25 s to answer the first time), so the slower
+        // checks step back at once; off again if the feed refuses them.
+        setConversationEventsActive(events === true);
+      }
+      const include = events ? "conversations" as const : undefined;
       if (!cursor) {
-        const head = await syncPage({ reset: true, signal });
+        const head = await syncPage({ reset: true, include, signal });
         cursor = head.cursor;
         writeText(cursorKey(account), cursor, "session");
         refetchAfterReset(queryClient, expired);
         expired = false;
       }
-      const page = await syncPage({ cursor, wait: more ? 0 : WAIT_SECONDS, signal });
+      const page = await syncPage({ cursor, wait: more ? 0 : WAIT_SECONDS, include, signal });
+      const plan = planConversationEvents(page.events, seen);
+      await applyConversationPlan(queryClient, plan, signal, options.onConversationGone);
+      for (const id of plan.eventIds) seen.add(id);
       await inPool(planEvents(page.events, seen), FETCH_CONCURRENCY, applyRef);
       cursor = page.cursor;
       writeText(cursorKey(account), cursor, "session");
@@ -153,6 +257,12 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
       if (signal.aborted) break;
       const failure = ApiError.from(error);
       if (failure.status === 401) break;
+      if (failure.status === 422 && events && failure.details.field === "include") {
+        // A service that does not take `include` after all: read messages only, and let the slower checks keep up.
+        events = false;
+        setConversationEventsActive(false);
+        continue;
+      }
       if (failure.status === 409 && failure.code === "sync_reset_required") {
         // Start again from the head; everything is fetched again once the reset has answered (refetchAfterReset).
         cursor = null;
@@ -165,6 +275,7 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
       await sleep(syncDelay(failures), signal);
     }
   }
+  setConversationEventsActive(false);
 }
 
 let running: { account: string; controller: AbortController; users: number } | null = null;

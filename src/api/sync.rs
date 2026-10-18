@@ -9,7 +9,10 @@ use time::OffsetDateTime;
 use super::extract::{ApiJson, ApiPath, ApiQuery, Authenticated};
 use crate::{
     AppError, AppResult,
-    application::{auth::AuthContext, state::AppState},
+    application::{
+        auth::{AuthContext, Credential},
+        state::AppState,
+    },
     domain::{Activity, PageRequest},
     infrastructure::postgres::{PresenceLease, SyncEvent, sync_reset_required},
 };
@@ -28,6 +31,75 @@ pub(super) struct SyncQuery {
     reset: bool,
     /// Seconds to wait for a new event when there is none yet (0 to 30).
     wait: Option<u16>,
+    /// Extra kinds of events, comma-separated: `conversations`. Opt-in, so a client that
+    /// does not know an event kind never receives one.
+    include: Option<String>,
+}
+
+/// The event kinds a client may add with `include`.
+pub(crate) const INCLUDABLE: [&str; 1] = ["conversations"];
+
+/// Whether `include` asks for conversation events; anything it names that DM does not have
+/// is refused, so a typo is not silently a feed without them.
+fn includes_conversations(include: Option<&str>) -> AppResult<bool> {
+    let mut conversations = false;
+    for kind in include
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+    {
+        if kind == "conversations" {
+            conversations = true;
+        } else {
+            let shown: String = kind.chars().take(64).collect();
+            return Err(AppError::invalid(format!(
+                "The sync feed has no event kind \"{shown}\" to include; it can include: {}.",
+                INCLUDABLE.join(", ")
+            ))
+            .with_hint("Ask for conversation events with GET /api/v1/sync?include=conversations; message events always come.")
+            .with_details(serde_json::json!({"field": "include", "valid": INCLUDABLE})));
+        }
+    }
+    Ok(conversations)
+}
+
+/// Conversation events say which conversations the account is in, which it is invited to and
+/// what changed there: what an app acting for the account reads only with
+/// `dm.conversations.read` (the scope `GET /api/v1/conversations` needs). Message events need
+/// `dm.messages.read` alone, which the route itself requires.
+fn require_conversation_scope(state: &AppState, auth: &AuthContext) -> AppResult<()> {
+    const SCOPE: &str = "dm.conversations.read";
+    let Credential::Proof {
+        issuing_app,
+        scopes,
+    } = &auth.credential
+    else {
+        return Ok(());
+    };
+    if !scopes.contains(SCOPE) {
+        return Err(AppError::forbidden(
+            "proof_scope_missing",
+            format!(
+                "The proof from {issuing_app} does not carry the scope {SCOPE} that conversation events (include=conversations) need."
+            ),
+        )
+        .with_hint("Ask for dm.conversations.read with the proof, or read the feed without include=conversations: message events need dm.messages.read only."));
+    }
+    if !state
+        .settings
+        .accounts
+        .proof_issuers
+        .allows(SCOPE, issuing_app)
+    {
+        return Err(AppError::forbidden(
+            "proof_issuer_not_allowed",
+            format!(
+                "DM does not accept {SCOPE} proofs from {issuing_app}, which conversation events (include=conversations) need; its operator lists the apps it accepts in DM_PROOF_ISSUERS."
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -63,6 +135,10 @@ pub(super) async fn events(
     if query.reset && query.cursor.is_some() {
         return Err(AppError::validation("reset cannot be combined with cursor"));
     }
+    let conversations = includes_conversations(query.include.as_deref())?;
+    if conversations {
+        require_conversation_scope(&state, &auth)?;
+    }
     let wait = query.wait.unwrap_or(0);
     if wait > MAX_WAIT_SECONDS {
         return Err(AppError::validation(format!(
@@ -73,7 +149,7 @@ pub(super) async fn events(
     loop {
         // Subscribe before reading, so an event committed in between still wakes us.
         let wakeups = state.sync.subscribe();
-        let page = page(&state, &auth, &query, limit).await?;
+        let page = page(&state, &auth, &query, limit, conversations).await?;
         if !page.events.is_empty()
             || page.has_more
             || query.reset
@@ -96,6 +172,7 @@ async fn page(
     auth: &AuthContext,
     query: &SyncQuery,
     limit: u16,
+    conversations: bool,
 ) -> AppResult<SyncPage> {
     let scope = cursor_scope(auth)?;
     let key = cursor_key(state);
@@ -119,7 +196,7 @@ async fn page(
     } else {
         let scan = state
             .store
-            .sync_events(&auth.actor, after, upper, limit)
+            .sync_events(&auth.actor, after, upper, limit, conversations)
             .await?;
         (scan.events, scan.position, scan.has_more, upper)
     };

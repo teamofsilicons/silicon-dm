@@ -3,12 +3,14 @@
 /**
  * The voice bubble's player (spec §6.6), shared by voice notes and spoken messages: play/pause, a waveform whose bars
  * fill with progress (press or drag on it to seek; ←/→ when it has the keyboard; Space or Enter plays), the time
- * (elapsed / total while it plays), and the speed while it is in use (1×, 1.5×, 2×, kept as the Carbon's default).
+ * (elapsed / total while it plays), and the speed while it is in use (1×, 1.5×, 2×, kept as the Carbon's default). A
+ * Silicon's voice keeps its name beside the time while it plays: where the bubble is too narrow for the three speeds
+ * side by side (a phone, a narrow window), the speed is one small button that steps through them.
  *
  * Calm on purpose: no animated bars, no pulsing; "Preparing audio…" shimmers while the service renders (and stays
  * still under reduced motion), a failure is one quiet line with what to do.
  */
-import { useId, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { LoaderCircle, Pause, Play } from "lucide-react";
 import SegmentedControl from "@/components/silicon-ui/segmented-control/segmented-control";
 import { TextShimmer } from "@/components/silicon-ui/text-shimmer/text-shimmer";
@@ -25,6 +27,9 @@ const BAR_STEP = 4;
 const HEIGHT = 24;
 const FLAT = new Array<number>(BARS).fill(16);
 const SPEED_OPTIONS = SPEEDS.map(speed => ({ value: String(speed), label: `${speed}×` }));
+/** About how wide the three speeds are side by side (Silicon UI's extra-small segmented control), and the line's gap. */
+const SPEEDS_PX = 110;
+const META_GAP_PX = 8;
 
 export interface VoicePlayerProps {
   /** What plays; null when it cannot be played here (then `unavailable` says why). */
@@ -73,6 +78,10 @@ export function VoicePlayer({ track, noun, peaks, durationMs, preparing = false,
   const state = useTrack(track?.key ?? null);
   const [scrub, setScrub] = useState<number | null>(null);
   const dragging = useRef(false);
+  const meta = useRef<HTMLDivElement>(null);
+  const chipSlot = useRef<HTMLSpanElement>(null);
+  const timeText = useRef<HTMLSpanElement>(null);
+  const [narrow, setNarrow] = useState(false);
   const playable = !!track && !unavailable;
   const active = state.status !== "idle" && state.status !== "error";
   const loading = state.status === "loading";
@@ -82,6 +91,23 @@ export function VoicePlayer({ track, noun, peaks, durationMs, preparing = false,
   const progress = scrub ?? (duration ? position / duration : 0);
   const total = durationMs || state.duration ? clockDuration(duration * 1000) : null;
   const time = active && duration ? `${clockDuration(Math.min(position, duration) * 1000)} / ${clockDuration(duration * 1000)}` : total;
+  // Whether the three speeds fit on the line beside the voice's name and the time (as they are drawn), measured only
+  // while it plays (when the speed shows); else one button that steps through them, so the name always stays.
+  useLayoutEffect(() => {
+    const line = meta.current;
+    if (!active || !line) return;
+    const measure = () => {
+      const chip = chipSlot.current?.offsetWidth ?? 0;
+      const time = timeText.current?.offsetWidth ?? 0;
+      setNarrow((chip ? chip + META_GAP_PX : 0) + (time ? time + META_GAP_PX : 0) + SPEEDS_PX > line.clientWidth);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(line);
+    return () => observer.disconnect();
+  }, [active]);
+  const nextSpeed = SPEEDS[(SPEEDS.indexOf(state.rate as PlaybackSpeed) + 1) % SPEEDS.length]!;
 
   const press = () => {
     if (track && playable) toggle(track, { gesture: true });
@@ -190,18 +216,25 @@ export function VoicePlayer({ track, noun, peaks, durationMs, preparing = false,
           <Wave peaks={peaks} progress={progress} flat={!peaks} />
         </div>
       )}
-      <div className={styles.meta}>
-        {chip ? <span className={styles.chipSlot}>{chip}</span> : null}
-        {time && !showFailed ? <span className={styles.time}>{time}</span> : null}
+      <div ref={meta} className={styles.meta}>
+        {chip ? <span ref={chipSlot} className={styles.chipSlot}>{chip}</span> : null}
+        {time && !showFailed ? <span ref={timeText} className={styles.time}>{time}</span> : null}
         {error ? (
           <span className={styles.errorNote} role="status">
             {error.message} {error.hint}
           </span>
         ) : null}
         {active && !loading ? (
-          <span className={styles.speed}>
-            <SegmentedControl size="xs" label="Playback speed" options={SPEED_OPTIONS} value={String(state.rate)} onValueChange={value => setRate(Number(value) as PlaybackSpeed)} />
-          </span>
+          narrow ? (
+            // Its name starts with what it shows ("1×"), then says what a press does.
+            <button type="button" className={styles.speedStep} data-sq="surface" aria-label={`${state.rate}× playback speed. Press for ${nextSpeed}×`} onClick={() => setRate(nextSpeed)}>
+              {state.rate}×
+            </button>
+          ) : (
+            <span className={styles.speed}>
+              <SegmentedControl size="xs" label="Playback speed" options={SPEED_OPTIONS} value={String(state.rate)} onValueChange={value => setRate(Number(value) as PlaybackSpeed)} />
+            </span>
+          )
         ) : null}
       </div>
     </div>

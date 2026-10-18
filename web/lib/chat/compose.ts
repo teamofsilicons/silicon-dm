@@ -4,13 +4,20 @@
  * words (attachments with their details, the voice note and its transcript, the GIF, the reply, the metadata);
  * leaving one out would remove it.
  */
+import { spokenWords } from "./preview";
 import type { AttachmentDetail, DraftAttachment, Message, MessageCreate, Reply } from "./types";
 
+/**
+ * The quote a Waiting reply shows, the same as the service's once it is sent: the message's words, and for a spoken
+ * message its written caption when it has one, else what the voice says (the transcript: the script without its
+ * [cues], which are directions for the voice, not words to read).
+ */
 export function replyPreviewOf(message: Message): Reply {
+  const spoken = message.speech?.script ? spokenWords(message.speech.script) : null;
   return {
     "message-id": message["message-id"],
     sender: message.sender,
-    content: message.deleted_at ? null : { message: message.speech?.script ?? message.message, attachments: message.attachments, voice_transcript: message.voice_transcript },
+    content: message.deleted_at ? null : { message: message.message, attachments: message.attachments, voice_transcript: message.voice_transcript || spoken },
   };
 }
 

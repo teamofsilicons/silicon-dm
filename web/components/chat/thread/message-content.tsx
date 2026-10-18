@@ -3,8 +3,9 @@
 /**
  * The inside of a bubble (spec §6.4): the reply quote (who and one line; pressing it goes to the original, loading
  * older pages when needed), the words (markdown-lite, or large when the message is only one to three emoji), a
- * Silicon's spoken words and a voice message (the voice area's bubbles, given the conversation and the code so they
- * can play), attachments, a GIF, a bundle's originals, or the tombstone of a deleted message.
+ * Silicon's spoken message (its written caption is the message when it has one; else its spoken words are) and a voice
+ * message (the voice area's bubbles, given the conversation and the code so they can play), attachments, a GIF, a
+ * bundle's originals, or the tombstone of a deleted message.
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -102,11 +103,14 @@ export function MessageContent({ message, emoji }: { message: Message; emoji: nu
   const code = message["message-id"];
   const media = messageMedia(message);
   const hasVoiceAttachment = !message.voice && !!message.voice_transcript && media.attachments.some(item => item.kind === "audio");
+  // A spoken message's written caption is the message, as any message's words are: first, with the player under it
+  // and the spoken words as its transcript. Without one, the spoken words are the message's words (SpeechMessage).
+  const captioned = !!message.speech && !!message.message?.trim();
   return (
     <>
       {message.reply ? <ReplyQuote reply={message.reply} /> : null}
-      {message.speech ? <SpeechMessage speech={message.speech} address={actions.address} code={code} /> : null}
       {message.message ? (emoji ? <p className={styles.emoji} data-count={emoji}>{message.message.trim()}</p> : <RichText text={message.message} />) : null}
+      {message.speech ? <SpeechMessage speech={message.speech} address={actions.address} code={code} captioned={captioned} /> : null}
       {message.voice ? <VoiceNote voice={message.voice} transcript={message.voice_transcript} address={actions.address} code={code} /> : null}
       <Attachments items={media.attachments} />
       {hasVoiceAttachment ? <p className={styles.transcriptLine}>{message.voice_transcript}</p> : null}

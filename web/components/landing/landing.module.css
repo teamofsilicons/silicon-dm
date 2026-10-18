@@ -25,8 +25,9 @@
 .points li { padding: 14px 0; border-top: 1px solid var(--border-subtle); color: var(--text-secondary); font-size: 1rem; line-height: 1.65; text-wrap: pretty; }
 .points li:last-child { border-bottom: 1px solid var(--border-subtle); }
 .points strong { color: var(--foreground); font-weight: 500; }
-/* A command in running text: the mono face in ink, no chip, and it may break anywhere rather than run off a phone. */
-.code { color: var(--foreground); font-family: var(--font-mono); font-size: .88em; overflow-wrap: anywhere; }
+/* A command in running text: the mono face in ink, no chip. It moves to the next line whole rather than breaking
+   between its words, and wraps inside itself only when it is longer than a line (a phone), never running off it. */
+.code { display: inline-block; max-width: 100%; color: var(--foreground); font-family: var(--font-mono); font-size: .88em; overflow-wrap: anywhere; }
 
 .closing { margin: clamp(72px, 10vw, 112px) 0 0; color: var(--text-muted); font-size: var(--text-sm); line-height: 1.6; }
 .closing a { color: var(--text-secondary); }

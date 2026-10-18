@@ -13,10 +13,15 @@ export function spokenWords(script: string): string {
   return script.replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-/** What a message is about, in a few words, without who sent it. */
+/**
+ * What a message is about, in a few words, without who sent it. A spoken message is its written caption when it has
+ * one (the thread shows the caption as the message, the spoken words as its transcript), else what the voice says.
+ */
 export function messageGist(message: Message): string {
   if (message.deleted_at) return "This message was deleted";
   if (message.speech?.script) {
+    const caption = plainPreview(message.message ?? "");
+    if (caption) return caption;
     const words = spokenWords(message.speech.script);
     return words ? plainPreview(words) : "Spoken message";
   }
@@ -49,6 +54,6 @@ export function rowPreview(message: Message | null, options: { me: Pick<AccountR
   if (!message) return { who: null, text: "No messages yet", quiet: true };
   const mine = sameAccount(message.sender, options.me);
   const who = mine ? "You" : options.group ? firstName(message.sender) : null;
-  const words = message.deleted_at ? "" : message.speech?.script ? spokenWords(message.speech.script) : plainPreview(message.message ?? "");
+  const words = message.deleted_at ? "" : plainPreview(message.message ?? "") || (message.speech?.script ? spokenWords(message.speech.script) : "");
   return { who, text: messageGist(message), quiet: !words };
 }

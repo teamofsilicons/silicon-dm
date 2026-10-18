@@ -160,6 +160,47 @@ export function applyReadToSummaries(data: ConversationPages | undefined, addres
   return changed ? { ...data, pages } : data;
 }
 
+const isRowOf = (item: ConversationSummary, id: string) => item.id === id || !!item.supersedes?.includes(id);
+
+/**
+ * A fresh copy of one conversation (asked for after a rename, a new member or new owners) put in place of its row,
+ * which keeps its place: nothing was said, so nothing moves. When the row already knows a newer last message than the
+ * copy (one that arrived through the sync feed while the copy was on its way), the row's activity is kept.
+ */
+export function replaceSummary(data: ConversationPages | undefined, summary: ConversationSummary): ConversationPages | undefined {
+  if (!data) return data;
+  let changed = false;
+  const pages = data.pages.map(page => {
+    const at = page.items.findIndex(item => isRowOf(item, summary.id));
+    if (at < 0 || changed) return page;
+    changed = true;
+    const current = page.items[at]!;
+    const mine = current.last_message;
+    const theirs = summary.last_message;
+    const newer = !!mine && (!theirs || compareCodes(code(mine), code(theirs)) > 0);
+    const next: ConversationSummary = newer
+      ? {
+          ...summary,
+          last_message: mine,
+          last_message_status: current.last_message_status,
+          updated_at: current.updated_at,
+          ...(current.unread_count !== undefined ? { unread_count: current.unread_count } : {}),
+          ...(current.last_read_message_id !== undefined ? { last_read_message_id: current.last_read_message_id } : {}),
+        }
+      : summary;
+    const items = page.items.slice();
+    items[at] = next;
+    return { ...page, items };
+  });
+  return changed ? { ...data, pages } : data;
+}
+
+/** The list without one conversation (you left it, or were removed from it). */
+export function dropSummary(data: ConversationPages | undefined, id: string): ConversationPages | undefined {
+  if (!data || !data.pages.some(page => page.items.some(item => isRowOf(item, id)))) return data;
+  return { ...data, pages: data.pages.map(page => ({ ...page, items: page.items.filter(item => !isRowOf(item, id)) })) };
+}
+
 /** Every loaded conversation row, in list order, each once. */
 export function summariesOf(data: ConversationPages | undefined): ConversationSummary[] {
   const seen = new Set<string>();

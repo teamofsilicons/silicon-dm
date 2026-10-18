@@ -3,7 +3,8 @@
 /**
  * The details of a conversation (ⓘ, ⌘.), in one calm column divided by hairlines:
  *
- *   a Carbon    face, name, id (copy), presence, Message
+ *   a Carbon    face, name, id (copy), presence (no "Message" button: the panel is always beside the conversation
+ *               with them, whose composer is right there)
  *   a Silicon   the same, then its custodian, its voice and, for its custodian, its reach (allow-list)
  *   a group     name and description (owners edit them in place), members, add members, invitations, leave
  *   several     the people in it
@@ -12,12 +13,9 @@
  * The shell decides where the panel shows (components/chat/shell/details.tsx); this renders its content only, with
  * no padding or title of its own. A custodian's "Viewing as" view shows everything and changes nothing.
  */
-import { MessageCircle } from "lucide-react";
-import { Button } from "@/components/silicon-ui/button/button";
-import { accountName, custodianWords, directParticipants, firstName, otherParticipants, sameAccount } from "@/lib/chat/address";
+import { accountName, custodianWords, directParticipants, otherParticipants, sameAccount } from "@/lib/chat/address";
 import type { AccountRef, ConversationSummary, Presence } from "@/lib/chat/types";
 import { useChat } from "../shell/chat-context";
-import { useDetails } from "../shell/details";
 import { AddressSection } from "./address-section";
 import { GroupDetailsPanel } from "./group-details";
 import { PersonRow, Profile, usePersonBasics } from "./person";
@@ -33,19 +31,9 @@ function othersOf(conversation: ConversationSummary | undefined, address: string
   return [{ type: other.startsWith("si:") ? "silicon" : "carbon", id: other }];
 }
 
-/** Puts the keyboard in the message field (closing the drawer or sheet the panel is in). */
-function useFocusComposer(): () => void {
-  const details = useDetails();
-  return () => {
-    if (details.mode !== "wide") details.setOpen(false);
-    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("main textarea[data-composer-field]")?.focus());
-  };
-}
-
 export function DetailsPanel({ conversation, address, presence }: { conversation: ConversationSummary | undefined; address: string; presence: Map<string, Presence> }) {
   const { me, view, viewed, perspective, readOnly } = useChat();
   const viewedName = viewed ? accountName(viewed) : view;
-  const focusComposer = useFocusComposer();
   const basics = usePersonBasics();
   const isGroup = address.startsWith("g:") || !!conversation?.group;
   const others = isGroup ? [] : othersOf(conversation, address, perspective);
@@ -53,7 +41,6 @@ export function DetailsPanel({ conversation, address, presence }: { conversation
   // The custodian named in a Silicon's facts is not named again under "who else reads it".
   const named = single?.type === "silicon" ? custodianOf(single, conversation, me) : null;
   const custodians = (conversation?.visible_to_custodians ?? []).filter(custodian => !sameAccount(custodian, me.account) && !(named && named !== "you" && sameAccount(custodian, named)));
-  const blocked = !!conversation?.superseded_by || !!single?.deleted;
 
   return (
     <div className={styles.panel} data-details-panel="">
@@ -61,13 +48,7 @@ export function DetailsPanel({ conversation, address, presence }: { conversation
         <GroupDetailsPanel address={address} conversation={conversation} presence={presence} />
       ) : single ? (
         <>
-          <Profile account={single} presence={presence.get(single.id)}>
-            {readOnly || blocked ? null : (
-              <Button size="sm" onClick={focusComposer} aria-label={`Message ${accountName(single)}`}>
-                <MessageCircle size={16} strokeWidth={1.75} aria-hidden="true" />Message {firstName(single)}
-              </Button>
-            )}
-          </Profile>
+          <Profile account={single} presence={presence.get(single.id)} />
           {single.type === "silicon" ? <SiliconFacts silicon={single} conversation={conversation} me={me} readOnly={readOnly} /> : null}
         </>
       ) : (

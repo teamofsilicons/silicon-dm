@@ -4,7 +4,8 @@
  * Choosing a voice (spec §6.6): Silicon UI radio cards for the five voices, each with its name, its description and a
  * ▶ that plays a sample ("Hi, I'm Scout. This is how I'll sound when you listen to my messages.") in that voice, the
  * default marked. Used by Settings → Voice and by an account's voice in the details panel (Preview, and Change for
- * whoever may change it).
+ * whoever may change it: a popover beside the panel, or on a phone a bottom sheet over the details sheet, since a
+ * popover there has no room).
  *
  * The ▶ buttons sit over the cards but outside the radio group (a button inside a radio would be a control in a
  * control): the radio group keeps one tab stop and its arrow keys, and each sample is its own button after it.
@@ -14,6 +15,7 @@
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LoaderCircle, Pause, Play } from "lucide-react";
+import { BottomSheet } from "@/components/silicon-ui/bottom-sheet/bottom-sheet";
 import { Button } from "@/components/silicon-ui/button/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/silicon-ui/popover/popover";
 import { RadioCards } from "@/components/silicon-ui/radio-cards/radio-cards";
@@ -27,6 +29,7 @@ import { sampleTrack } from "@/lib/voice/sources";
 import { sampleName } from "@/lib/voice/voices";
 import { voiceWords } from "@/lib/voice/words";
 import { useChat } from "../shell/chat-context";
+import { useMediaQuery } from "../shell/use-layout-mode";
 import styles from "./voice.module.css";
 
 /**
@@ -231,16 +234,24 @@ function PreviewButton({ voice, name, who, off }: { voice: Pick<VoiceOption, "ke
   );
 }
 
-/** The Change popover's body: the cards for this account's voice, and Reset to default beside the title. */
-function ChangeVoice({ data, who }: { data: AccountVoice; who: string }) {
+/**
+ * Change's body: the cards for this account's voice, and Reset to default beside the title (in a sheet, which has its
+ * own title, Reset stands alone at the end of that line).
+ */
+function ChangeVoice({ data, who, titled = true }: { data: AccountVoice; who: string; titled?: boolean }) {
   const { me } = useChat();
   const choice = useVoiceChoice(data.account.id, me.account);
+  const reset = <ResetVoiceButton account={data.account} data={data} choice={choice} compact />;
   return (
     <>
-      <div className={styles.popoverHead}>
-        <p className={styles.popoverTitle}>{who}&apos;s voice</p>
-        <ResetVoiceButton account={data.account} data={data} choice={choice} compact />
-      </div>
+      {titled ? (
+        <div className={styles.popoverHead}>
+          <p className={styles.popoverTitle}>{who}&apos;s voice</p>
+          {reset}
+        </div>
+      ) : (
+        <div className={styles.sheetHead}>{reset}</div>
+      )}
       <AccountVoiceChooser account={data.account} data={data} label={`${who}'s voice`} choice={choice} />
     </>
   );
@@ -251,6 +262,9 @@ export function AccountVoiceRow({ account }: { account: string }) {
   const voice = useAccountVoice(account);
   const features = useVoiceFeatures();
   const [open, setOpen] = useState(false);
+  // A phone's details are a bottom sheet already: Change rises as a sheet of its own over it (a popover would run off
+  // the screen there).
+  const narrow = useMediaQuery("(max-width: 767px)");
   useSampleFailures();
   const data = voice.data;
   // The row's own shape while it loads, so the panel does not move when the voice arrives.
@@ -282,7 +296,18 @@ export function AccountVoiceRow({ account }: { account: string }) {
         </span>
         <span className={styles.accountVoiceActions}>
           <PreviewButton voice={data.voice} name={name} who={who} off={features.listen ? null : features.listenReason} />
-          {data.can_change ? (
+          {data.can_change && narrow ? (
+            <BottomSheet
+              open={open}
+              onOpenChange={setOpen}
+              title={`${who}'s voice`}
+              description={`How ${who}'s messages sound when someone listens. Play a sample with ▶.`}
+              detents={[0.74]}
+              trigger={<Button size="sm" variant="ghost" aria-label={`Change ${who}'s voice`}>Change</Button>}
+            >
+              <ChangeVoice data={data} who={who} titled={false} />
+            </BottomSheet>
+          ) : data.can_change ? (
             <Popover open={open} onOpenChange={setOpen}>
               <PopoverTrigger asChild>
                 <Button size="sm" variant="ghost" aria-label={`Change ${who}'s voice`}>Change</Button>

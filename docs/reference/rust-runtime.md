@@ -101,6 +101,7 @@ let options = InboxOptions {
     hydrate: true,
     mark_delivered: false,
     limit: None,
+    conversations: true,
 };
 runtime
     .inbox(&options, |line| { println!("{line}"); Ok(()) }, |notice| eprintln!("{notice}"))
@@ -109,7 +110,8 @@ runtime
 ```
 
 `inbox` long-polls `GET /api/v1/sync`, emits one JSON value per event (with the current message
-when `hydrate`), a `cursor` value after each batch, and saves the cursor per profile after every
+when `hydrate`; with `conversations`, also a `conversation` value when a conversation appears, changes or goes away
+for the account), a `cursor` value after each batch, and saves the cursor per profile after every
 page. Without `watch` it returns a `done` value once nothing is pending. Passing failures are
 retried with a growing pause and reported through the second callback; a `sync_reset_required`
 answer emits a `reset` value and continues from a fresh cursor. `sync_page(profile, &request)`

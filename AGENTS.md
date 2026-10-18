@@ -128,6 +128,11 @@ Accounts stack on this machine (`tests/e2e/README.md`).
 - **Idempotency.** Every change takes an `Idempotency-Key` (8 to 255 visible ASCII characters): the same key and body
   return the original result, a different body under the same key is 409. Clients keep one key per logical change
   across every retry (the CLI's relay, the website's outbox).
+- **Lock order.** A write transaction that refreshes the directory (`refresh_directory_in`: the conversation's
+  partition, then `@accounts`) does it first, before the conversation, group or message rows it changes; the accounts'
+  stream rows come last, locked by delivery and conversation-event inserts in (kind, account) order. A row taken
+  before the directory, or streams in another order, deadlocks against a concurrent send
+  (`tests/conversation_events.rs` races them).
 - **Contract 4 changes are additive only.** New optional fields, new routes, new request types. Never remove, rename or
   change the meaning of a field or route without a new contract version: older CLIs and open browser tabs must keep
   working. Announce a feature in `GET /api/v1/contracts`.
@@ -157,8 +162,9 @@ Accounts stack on this machine (`tests/e2e/README.md`).
 | Task | Start here |
 | --- | --- |
 | Add or change a route | `src/api/router.rs`, then the handler in `src/api/`, the use case in `src/application/`, storage in `src/infrastructure/postgres/` (a new table: a migration in `migrations/` and a grant in `deploy/runtime-grants.sql`); `openapi.yaml`; a test in `tests/` |
+| Tell clients something changed | A message change is an `actor_deliveries` row (the sync feed and Ting); a conversation that appears, changes or goes away for an account is a conversation event (`src/infrastructure/postgres/conversation_events.rs`, written in the same transaction; clients ask for them with `include=conversations`) |
 | Add a CLI command | `crates/cli/src/args.rs` (clap; give it EXAMPLES and NEXT in its help), `crates/cli/src/main.rs`, the client method in `crates/client/src/lib.rs`; a change goes through the relay as a typed `Operation` (`crates/client/src/relay.rs`; a new shape gets a new operation, so older relays leave it queued instead of sending it wrong); tests in `crates/cli/tests/`; `docs/start/cli.md` and `docs/reference/cli.md` (a test in `crates/cli/src/docs.rs` fails until the reference has a row for the command that names every flag), then `python3 scripts/sync-cli-docs.py` |
-| Change the website | `web/AGENTS.md`, `web/components/chat/README.md` (who owns what, the extension points), `web/lib/chat/` for data, `web/lib/shortcuts/registry.ts` for keys (then regenerate `docs/reference/keyboard-shortcuts.md`: `web/tests/docs-shortcuts.test.ts` prints the tables) |
+| Change the website | `web/AGENTS.md`, `web/components/chat/README.md` (the areas and their extension points), `web/lib/chat/` for data, `web/lib/shortcuts/registry.ts` for keys (then regenerate `docs/reference/keyboard-shortcuts.md`: `web/tests/docs-shortcuts.test.ts` prints the tables) |
 | Write or move docs | `docs/` (front matter, the four sections), `scripts/sync-cli-docs.py`, `crates/cli/src/docs.rs`, `docs-site/` |
 | Change speech or voices | `src/domain/speech.rs`, `src/application/speech.rs`, `src/infrastructure/deepgram.rs`, `src/worker/speech.rs`; the CLI's checks in `crates/client/src/speech.rs`; `docs/start/voice.md`, `docs/learn/voices-and-speech.md` |
 | Release | `docs/operations/releasing.md`, then `docs/operations/deployment.md` |

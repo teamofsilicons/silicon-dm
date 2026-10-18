@@ -30,9 +30,12 @@ Each item is a reference, not the message:
  "metadata": {"isi": "deliberate"}}
 ```
 
-`for` is the recipient's permanent uuid. `event` is one of `message.created`,
-`message.updated`, `message.deleted`, `message.delivered`, `message.read`, `message.failed`.
-`metadata.isi` is present only for a Silicon recipient addressed through an ISI route.
+`for` is the recipient's permanent uuid. `conversation_id` is the conversation's address when the update was made
+(`c:ada::si:scout`, `g:launch-week`, or the UUID of a conversation of several); every DM route takes it. `event` is one
+of `message.created`, `message.updated`, `message.deleted`, `message.delivered`, `message.read`, `message.failed`.
+`metadata.isi` is present only for a Silicon recipient addressed through an ISI route. Conversation events (a group
+renamed, an invitation, a member removed) are not handed to Ting; read them from the sync feed with
+`include=conversations` ([receive messages](../start/receiving.md)).
 
 ## Handling a batch
 

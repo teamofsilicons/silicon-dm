@@ -2,21 +2,31 @@
 
 /**
  * The microphone in the browser: getUserMedia + MediaRecorder (Opus in WebM, AAC in MP4 on Safari; lib/voice/recorder.ts
- * picks) and an AnalyserNode for the live level meter. Nothing is recorded before the Carbon asks, the microphone is
- * released the moment the recording stops or is cancelled, and nothing is kept: the recording goes to the Carbon's
- * Briefcase (a voice note) or only to transcription (dictation).
+ * picks) and an AnalyserNode for the live level meter. Nothing is recorded before the Carbon asks, and the microphone is
+ * released the moment the recording stops or is cancelled. The recording goes to the Carbon's Briefcase (a voice note)
+ * or only to transcription (dictation); while it is made, its bytes go to this browser's disk a few seconds at a time
+ * (`keep`, lib/voice/takes.ts), so a recording of hours takes no more memory than one of seconds, and a reload or a
+ * crash does not lose it. When the tab is hidden or closed, what was gathered is written at once.
  *
  * A microphone can go away mid-recording (unplugged, a headset switched off, another app taking it, the permission
  * withdrawn). The recorder then stops by itself; what it recorded until then is kept, and `onInterrupted` says so, so
  * the Carbon decides whether it goes (✓) or not (Esc) instead of losing it.
  */
 import { microphoneProblem, pickRecordingType, type RecorderProblem } from "./recorder";
+import type { Take, TakeInfo } from "./takes";
 
 export interface Recording {
   blob: Blob;
   /** The recording's media type, with its codecs (`audio/webm;codecs=opus`). */
   type: string;
   durationMs: number;
+  /** Where its bytes are kept (lib/voice/takes.ts), to delete once it is uploaded; null when only in memory. */
+  take: Pick<TakeInfo, "id" | "store"> | null;
+}
+
+export interface MicrophoneOptions {
+  /** Where the recording's bytes go as they are recorded (lib/voice/takes.ts startTake); without it, memory. */
+  keep?: (type: string) => Promise<Take>;
 }
 
 export interface MicrophoneSession {
@@ -24,7 +34,7 @@ export interface MicrophoneSession {
   startedAt: number;
   /** The loudness right now, from 0 to 1. */
   level: () => number;
-  /** How many bytes are recorded so far (the upload cap is checked against it). */
+  /** How many bytes are recorded so far (the upload and transcription caps are checked against it). */
   bytes: () => number;
   /** When the microphone went away (performance.now()), or null while it records. */
   interruptedAt: () => number | null;
@@ -49,7 +59,7 @@ export function canRecord(): boolean {
 }
 
 /** Asks for the microphone and starts recording. Rejects with a MicrophoneError that says what to do. */
-export async function openMicrophone(): Promise<MicrophoneSession> {
+export async function openMicrophone(options: MicrophoneOptions = {}): Promise<MicrophoneSession> {
   if (!canRecord()) throw new MicrophoneError(microphoneProblem(window.isSecureContext === false ? "SecurityError" : "unsupported"));
   let stream: MediaStream;
   try {
@@ -90,16 +100,31 @@ export async function openMicrophone(): Promise<MicrophoneSession> {
     }
   }
 
+  // Where the bytes go: this browser's disk (a take), else memory.
+  const take = options.keep ? await options.keep(type || "audio/webm").catch(() => null) : null;
   const chunks: Blob[] = [];
   let size = 0;
   let closed = false;
   let settled = false;
   let failure: string | null = null;
   let interruptedAt: number | null = null;
+  /** The tab is being hidden or closed: the next chunk is written at once (requestData asks for it). */
+  let flushNext = false;
   const interruptions = new Set<() => void>();
+  const onHidden = () => {
+    if (document.visibilityState !== "hidden" || recorder.state !== "recording" || !take) return;
+    flushNext = true;
+    try {
+      recorder.requestData();
+    } catch {
+      take.flush();
+    }
+  };
   const close = () => {
     if (closed) return;
     closed = true;
+    document.removeEventListener("visibilitychange", onHidden);
+    window.removeEventListener("pagehide", onHidden);
     release();
     void context?.close().catch(() => undefined);
   };
@@ -111,8 +136,14 @@ export async function openMicrophone(): Promise<MicrophoneSession> {
   });
   recorder.ondataavailable = event => {
     if (!event.data.size) return;
-    chunks.push(event.data);
     size += event.data.size;
+    if (take) {
+      take.append(event.data, performance.now() - startedAt);
+      if (flushNext) {
+        flushNext = false;
+        take.flush();
+      }
+    } else chunks.push(event.data);
   };
   recorder.onstop = () => {
     close();
@@ -123,7 +154,9 @@ export async function openMicrophone(): Promise<MicrophoneSession> {
     close();
     markStopped();
   };
-  const startedAt = performance.now();
+  let startedAt = performance.now();
+  document.addEventListener("visibilitychange", onHidden);
+  window.addEventListener("pagehide", onHidden);
   for (const track of stream.getAudioTracks()) {
     track.addEventListener("ended", () => {
       if (settled || interruptedAt !== null) return;
@@ -133,9 +166,11 @@ export async function openMicrophone(): Promise<MicrophoneSession> {
     });
   }
   try {
+    startedAt = performance.now();
     recorder.start(1000);
   } catch (error) {
     close();
+    void take?.discard();
     throw new MicrophoneError(microphoneProblem("recording_failed", error instanceof Error ? error.message : undefined));
   }
 
@@ -171,10 +206,13 @@ export async function openMicrophone(): Promise<MicrophoneSession> {
       await Promise.race([stopped, new Promise<void>(resolve => setTimeout(resolve, 4000))]);
       close();
       if (failure && !size) {
+        void take?.discard();
         throw new MicrophoneError(microphoneProblem("recording_failed", failure));
       }
       const recorded = recorder.mimeType || type || "audio/webm";
-      return { blob: new Blob(chunks, { type: recorded }), type: recorded, durationMs: Math.round(endedAt - startedAt) };
+      const durationMs = Math.round(endedAt - startedAt);
+      const blob = take ? await take.finish(durationMs, recorded) : new Blob(chunks, { type: recorded });
+      return { blob, type: recorded, durationMs, take: take && take.store !== "memory" ? { id: take.id, store: take.store } : null };
     },
     cancel: () => {
       settled = true;
@@ -186,6 +224,7 @@ export async function openMicrophone(): Promise<MicrophoneSession> {
         // Already stopped.
       }
       chunks.length = 0;
+      void take?.discard();
       close();
     },
   };

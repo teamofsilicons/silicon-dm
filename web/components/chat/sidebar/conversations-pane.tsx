@@ -27,6 +27,7 @@ import type { ConversationSummary } from "@/lib/chat/types";
 import { ApiError } from "@/lib/errors";
 import { openDialog } from "../dialogs/store";
 import { useChat } from "../shell/chat-context";
+import { useOnline } from "../thread/use-online";
 import { AccountMenu } from "./account-menu";
 import { ConversationRow } from "./conversation-row";
 import { NewMenu } from "./new-menu";
@@ -76,6 +77,8 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
   const openOther = open && !open.group ? otherParticipants(open, perspective) : [];
   const presenceId = openOther.length === 1 ? openOther[0]!.id : "";
   const presence = useQuery({ queryKey: chatKeys.presence(presenceId), queryFn: ({ signal }) => getPresence(presenceId, signal), enabled: false });
+  // Offline, what this tab last heard about someone's presence is stale: the row shows none (as the thread does).
+  const online = useOnline();
 
   const searching = search.trim().length > 0;
   const rows = useMemo(() => {
@@ -117,7 +120,9 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
   };
 
   const pending = invitations.data?.items.length ?? 0;
-  const failure = list.error ? ApiError.from(list.error) : null;
+  // Only a list that never loaded shows its failure: a refresh that fails (the service restarting, a dropped
+  // connection) keeps the conversations on screen, and the sync loop and the next refresh catch up.
+  const failure = list.error && !list.data ? ApiError.from(list.error) : null;
 
   return (
     <div className={styles.pane} data-pane={variant}>
@@ -160,10 +165,12 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
       ) : null}
 
       {pending ? (
+        // The count once, in the badge (as a row's unread count); its name is what it shows, then what the count means
+        // ("Invitations 2 waiting": the visible words in order, WCAG 2.5.3).
         <button type="button" className={styles.invitations} data-sq="surface" onClick={() => openDialog("invitations")} aria-keyshortcuts="G I">
           <Mail size={18} strokeWidth={1.75} aria-hidden="true" />
-          <span className={styles.invitationsLabel}>{pending === 1 ? "1 invitation" : `${pending} invitations`}</span>
-          <span className={styles.badge} data-sq="surface" aria-hidden="true">{pending}</span>
+          <span className={styles.invitationsLabel}>Invitations</span>
+          <span className={styles.badge} data-sq="surface">{pending}<span className="sr-only"> waiting</span></span>
         </button>
       ) : null}
 
@@ -186,7 +193,7 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
                 view={view}
                 current={conversation.id === openAddress}
                 pending={view ? undefined : latestPending(outbox, conversation.id)}
-                presence={conversation.id === openAddress ? presence.data : undefined}
+                presence={online && conversation.id === openAddress ? presence.data : undefined}
                 draft={!hydrated || view || conversation.id === openAddress ? undefined : localDraftText(me.account.uuid ?? me.account.id, conversation.id)}
                 now={hydrated ? now : null}
               />
@@ -196,7 +203,7 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
         ) : searching ? (
           <div className={styles.listState}>
             <p className={styles.empty}>No conversation matches “{search.trim()}”.</p>
-            <Button size="sm" variant="ghost" onClick={() => setSearch("")}>Clear the search</Button>
+            <Button size="sm" variant="ghost" className={styles.quietAction} onClick={() => setSearch("")}>Clear the search</Button>
           </div>
         ) : (
           <div className={styles.listState}>

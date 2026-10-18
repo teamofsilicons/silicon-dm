@@ -19,6 +19,13 @@ import { clearSession, clientHeaders, errorBody, readSession, sameOriginProblem,
 
 export const dynamic = "force-dynamic";
 
+/** Why a request to the service failed, for the log: the network's own code and words when it gives them. */
+function failureReason(error: unknown): string {
+  const cause = error instanceof Error && error.cause && typeof error.cause === "object" ? (error.cause as { code?: unknown; message?: unknown }) : null;
+  const parts = [cause?.code, cause?.message, error instanceof Error ? `${error.name}: ${error.message}` : String(error)];
+  return parts.filter(part => typeof part === "string" && part.trim()).join(", ") || "no reason given";
+}
+
 const PREFIX = "/api/";
 /** A slow upload or report may take a while; nothing waits forever. */
 const UPSTREAM_TIMEOUT_MS = 300_000;
@@ -58,8 +65,12 @@ async function handle(request: NextRequest): Promise<NextResponse> {
       signal,
     } as RequestInit);
   } catch (error) {
-    const reason = error instanceof Error ? (error.cause instanceof Error ? error.cause.message : error.message) : String(error);
-    return json(502, errorBody("service_unreachable", `This site could not reach its service for ${method} /${path}: ${reason}.`, "Wait a moment and try again."), response => {
+    // The operator reads which request failed and why in the log (the path only: a query can hold what someone typed);
+    // the Carbon reads what happened and what to do, in the words a dropped connection gets in the browser. A browser
+    // that went away (a page closed, a long poll given up) is nobody's problem and is not logged.
+    if (!request.signal.aborted) console.warn(`dm: ${method} /${path} could not reach the DM service at ${env.appApiUrl}: ${failureReason(error)}`);
+    const read = method === "GET" || method === "HEAD";
+    return json(502, errorBody("service_unreachable", "DM's service is not answering right now.", read ? "It keeps trying; this usually passes in a moment." : "Wait a moment and try again."), response => {
       if (rotated) writeSession(response, session);
     });
   }

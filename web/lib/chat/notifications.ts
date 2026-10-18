@@ -7,6 +7,7 @@
  */
 import { accountName, conversationHref } from "./address";
 import { plainPreview } from "./markdown";
+import { spokenWords } from "./preview";
 import { chatSettings, updateChatSettings } from "./settings";
 import type { Message } from "./types";
 
@@ -29,10 +30,13 @@ export function disableNotifications(): void {
   updateChatSettings({ notifications: false });
 }
 
-/** What a notification says about a message: the words, or what it carries. */
+/**
+ * What a notification says about a message: the words, or what it carries. A spoken message says its written caption
+ * when it has one (as the thread shows it), else what the voice says, without the [cues].
+ */
 export function messageSummary(message: Message): string {
   if (message.deleted_at) return "This message was deleted";
-  if (message.speech?.script) return plainPreview(message.speech.script.replace(/\[[^\]]*\]/g, " "), 140) || "Spoken message";
+  if (message.speech?.script) return plainPreview(message.message ?? "", 140) || plainPreview(spokenWords(message.speech.script), 140) || "Spoken message";
   const text = plainPreview(message.message ?? "", 140);
   if (text) return text;
   if (message.voice || message.voice_transcript) return message.voice_transcript ? `Voice message: ${plainPreview(message.voice_transcript, 120)}` : "Voice message";

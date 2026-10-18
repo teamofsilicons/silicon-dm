@@ -13,8 +13,8 @@ use crate::{
     AppError, AppResult,
     application::commands::CreateConversationCommand,
     domain::{
-        ActorId, ActorRef, ActorType, Conversation, ConversationAccess, ConversationPage, Cursor,
-        MAX_CONVERSATION_PARTICIPANTS, OrganizationId, PageRequest,
+        ActorId, ActorRef, ActorType, Conversation, ConversationAccess, ConversationChange,
+        ConversationPage, Cursor, MAX_CONVERSATION_PARTICIPANTS, OrganizationId, PageRequest,
     },
 };
 
@@ -270,20 +270,28 @@ impl PostgresStore {
     /// `conversation_superseded` (409) naming the conversation to use instead;
     /// `recipient_deleted` (409).
     pub async fn require_current(&self, conversation_id: Uuid) -> AppResult<()> {
-        let closed: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM conversations c
-                JOIN conversation_participants p ON p.conversation_id = c.id
-                JOIN accounts a ON a.uuid = p.actor_id AND a.status = 'deleted'
-                WHERE c.id = $1 AND NOT c.is_group)",
+        // A direct conversation closes when it has nobody left to talk to: in a two-party one
+        // that is the other account being deleted; a conversation of several goes on while two
+        // of its accounts remain (deleted accounts are no longer delivered to).
+        let (total, live): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE a.status IS DISTINCT FROM 'deleted')
+             FROM conversations c
+             JOIN conversation_participants p ON p.conversation_id = c.id
+             LEFT JOIN accounts a ON a.uuid = p.actor_id
+             WHERE c.id = $1 AND NOT c.is_group",
         )
         .bind(conversation_id)
         .fetch_one(self.pool())
         .await?;
-        if closed {
+        if live < total && live < 2 {
             return Err(AppError::refused(
                 http::StatusCode::CONFLICT,
                 "recipient_deleted",
-                "The other account in this conversation was deleted. Its history stays readable; it takes no new messages.",
+                if total > 2 {
+                    "Every other account in this conversation was deleted. Its history stays readable; it takes no new messages."
+                } else {
+                    "The other account in this conversation was deleted. Its history stays readable; it takes no new messages."
+                },
             ));
         }
         let superseded: Option<String> = sqlx::query_scalar(
@@ -361,6 +369,13 @@ async fn canonical_or_insert_in(
         .await
         .map_err(map_constraint_error)?;
     }
+    // Everyone in it (the creator too, for its other devices) sees the new conversation.
+    super::conversation_events::record_in(
+        transaction,
+        id,
+        &super::conversation_events::each(participants, ConversationChange::Created, &[]),
+    )
+    .await?;
     Ok(id)
 }
 
@@ -566,6 +581,7 @@ impl PostgresStore {
             }
         }
         let mut unread = self.unread_summaries(subject, &conversation_ids).await?;
+        let mut drafts = self.draft_versions(subject, &conversation_ids).await?;
         let mut items = Vec::with_capacity(records.len());
         let mut payload_bytes: usize = 0;
         for record in &records {
@@ -598,6 +614,7 @@ impl PostgresStore {
                 last_read_message_id: summary
                     .last_read_sequence
                     .and_then(silicon_dm_protocol::message_code),
+                draft_version: drafts.remove(&record.id),
                 created_at: record.created_at,
                 updated_at: record.updated_at,
             });

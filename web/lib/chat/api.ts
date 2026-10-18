@@ -124,9 +124,12 @@ export const sendMessage = (address: string, body: MessageCreate, idempotencyKey
 export const editMessage = (address: string, code: string, body: MessageCreate, idempotencyKey: string | true = true) =>
   dm<Message>(messagePath(address, code), { method: "PATCH", body: { type: "message.updated", data: body }, idempotencyKey });
 
-/** Turns a message into a tombstone (yours, or a Silicon's you look after). */
-export const deleteMessage = (address: string, code: string, idempotencyKey: string | true = true) =>
-  dm<Message>(messagePath(address, code), { method: "DELETE", idempotencyKey });
+/**
+ * Turns a message into a tombstone: yours, or a Silicon's you look after. `view` is the Silicon whose conversation a
+ * custodian reads (`?for=si:x`): sent, so the service's refusals name that Silicon.
+ */
+export const deleteMessage = (address: string, code: string, idempotencyKey: string | true = true, view?: string | null) =>
+  dm<Message>(messagePath(address, code), { method: "DELETE", idempotencyKey, query: forQuery(view) });
 
 /** A delivered or read receipt for one message from this device (receipts never move backwards). */
 export const recordReceipt = (address: string, code: string, status: "delivered" | "read", deviceId: string) =>
@@ -202,11 +205,22 @@ export const getPresence = (account: string, signal?: AbortSignal) => dm<Presenc
 
 /* Sync -------------------------------------------------------------------------------------------------------------- */
 
-export const syncPage = (options: { cursor?: string | null; wait?: number; reset?: boolean; limit?: number; signal?: AbortSignal }) =>
+/** `conversations` adds conversation events to the page (DM 0.17, when the contracts announce them). */
+export const syncPage = (options: { cursor?: string | null; wait?: number; reset?: boolean; limit?: number; include?: "conversations"; signal?: AbortSignal }) =>
   dm<SyncPage>("/api/v1/sync", {
-    query: { cursor: options.cursor ?? undefined, wait: options.wait, reset: options.reset ? true : undefined, limit: options.limit },
+    query: { cursor: options.cursor ?? undefined, wait: options.wait, reset: options.reset ? true : undefined, limit: options.limit, include: options.include },
     signal: options.signal,
   });
+
+/** What GET /api/v1/contracts says this service offers; only the parts the website reads. */
+export interface Contracts {
+  features?: {
+    /** Conversation events in the sync feed: `sync_query` is what to add to it (`include=conversations`). */
+    conversation_events?: { sync_query?: string; event_type?: string; changes?: string[]; minimum_client?: string } | null;
+  } & Record<string, unknown>;
+}
+
+export const getContracts = (signal?: AbortSignal) => dm<Contracts>("/api/v1/contracts", { signal });
 
 /* GIFs -------------------------------------------------------------------------------------------------------------- */
 

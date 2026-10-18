@@ -390,6 +390,94 @@ impl Directory<'_> {
             },
         })))
     }
+
+    /// Refuses a conversation of several that `starter` begins with `others` when one of its
+    /// accounts may not reach one of its Silicons. In such a conversation everyone hears
+    /// everyone and no Silicon is asked first (a group's invitation waits for its answer), so
+    /// a Silicon's reach rules must hold for every account in it, not only for the one
+    /// starting it: else an account a Silicon allows could bring in anyone it does not. The
+    /// exception is a Silicon `starter` looks after: putting it there is its custodian's
+    /// choice, as when a custodian adds its Silicon to a group.
+    ///
+    /// # Errors
+    /// `contact_not_allowed` (403) naming the Silicon, the account it does not hear from and
+    /// who can allow it.
+    pub async fn require_reach_among(
+        &self,
+        starter: &ActorRef,
+        others: &[Account],
+    ) -> AppResult<()> {
+        let silicons: Vec<&str> = others
+            .iter()
+            .filter(|account| {
+                account.is_silicon() && account.custodian.as_deref() != Some(starter.id.as_str())
+            })
+            .map(|account| account.uuid.as_str())
+            .collect();
+        if others.len() < 2 || silicons.is_empty() {
+            return Ok(());
+        }
+        let everyone: Vec<&str> = std::iter::once(starter.id.as_str())
+            .chain(others.iter().map(|account| account.uuid.as_str()))
+            .collect();
+        let Some((silicon_uuid, who_uuid)) = self
+            .state
+            .store
+            .first_unreachable_silicon(&silicons, &everyone)
+            .await?
+        else {
+            return Ok(());
+        };
+        let target = others.iter().find(|account| account.uuid == silicon_uuid);
+        let silicon = target
+            .map_or(silicon_uuid.as_str(), Account::display_id)
+            .to_owned();
+        let custodian = match target.and_then(|account| account.custodian.as_deref()) {
+            Some(uuid) => self.current_id(uuid).await?,
+            None => None,
+        };
+        let who = self
+            .current_id(&who_uuid)
+            .await?
+            .unwrap_or_else(|| who_uuid.clone());
+        let started_by = self.current_id(starter.id.as_str()).await?;
+        let ask = custodian.as_deref().unwrap_or("its custodian");
+        let named = custodian.as_deref().map_or_else(
+            || "its custodian".to_owned(),
+            |id| format!("its custodian {id}"),
+        );
+        let allow_for = format!("dm allow add {who} --for {silicon}");
+        Err(AppError::forbidden(
+            "contact_not_allowed",
+            format!(
+                "In a conversation of several everyone hears everyone, and {silicon} hears only from {named}, the custodian's other Silicons and the accounts it allows: {who} is not one of them yet, so this conversation cannot start."
+            ),
+        )
+        .with_hint(format!(
+            "Leave out {who} or {silicon}; or ask {silicon} (dm allow add {who}) or {ask} (the DM website's Settings → Your Silicons' reach, /settings#reach, or {allow_for}) to allow {who}; or start a group and invite {silicon}: its invitation waits for its answer."
+        ))
+        .with_details(serde_json::json!({
+            "silicon": silicon,
+            "custodian": custodian,
+            "requester": who,
+            "started_by": started_by,
+            "allow": {
+                "by_silicon": format!("dm allow add {who}"),
+                "by_custodian": allow_for,
+                "website": "/settings#reach",
+            },
+        })))
+    }
+
+    /// An account's current public id from DM's cache, if it has one.
+    async fn current_id(&self, uuid: &str) -> AppResult<Option<String>> {
+        Ok(self
+            .state
+            .store
+            .stored_account(uuid)
+            .await?
+            .and_then(|stored| stored.current_id))
+    }
 }
 
 /// Where a token issued at `issued` (its `iat`, whole seconds) stands against a sign-in

@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use super::{
     PostgresStore,
+    conversation_events::{self, each, group_invitees_in, group_members_in},
     directory::refresh_directory_in,
     idempotency::{IdempotencyClaim, IdempotencyResult, claim, complete, request_hash},
     map_constraint_error,
@@ -15,8 +16,8 @@ use super::{
 use crate::{
     AppError, AppResult,
     domain::{
-        ActorId, ActorRef, ActorType, Conversation, GroupDetails, GroupSettings, IdempotencyKey,
-        OrganizationId,
+        ActorId, ActorRef, ActorType, Conversation, ConversationChange, GroupDetails,
+        GroupSettings, IdempotencyKey, OrganizationId,
     },
 };
 
@@ -208,6 +209,20 @@ impl PostgresStore {
                 }];
                 everyone.extend(invitees.iter().cloned());
                 invite_in(&mut tx, &partition, id, creator, &everyone).await?;
+                // Members of the new group (the creator, Silicons its custodian added) see it
+                // appear; everyone else invited has an invitation waiting.
+                let events: Vec<(ActorRef, ConversationChange)> = everyone
+                    .iter()
+                    .map(|invitee| {
+                        let change = if invitee.accepted {
+                            ConversationChange::Created
+                        } else {
+                            ConversationChange::Invited
+                        };
+                        (invitee.actor.clone(), change)
+                    })
+                    .collect();
+                conversation_events::record_in(&mut tx, id, &events).await?;
                 complete_group(&mut tx, creator, "groups.create", key, id, 201).await?;
                 id
             }
@@ -239,6 +254,11 @@ impl PostgresStore {
         let mut tx = self.pool().begin().await?;
         lock_group(&mut tx, id).await?;
         if acquired(&mut tx, actor, "groups.update", key, &hash).await? {
+            let (name, description): (String, String) =
+                sqlx::query_as("SELECT name, description FROM groups WHERE conversation_id=$1")
+                    .bind(id)
+                    .fetch_one(&mut *tx)
+                    .await?;
             let changed = sqlx::query("UPDATE groups SET name=$2,description=$3,version=version+1 WHERE conversation_id=$1 AND version=$4")
                 .bind(id).bind(&settings.name).bind(&settings.description).bind(version)
                 .execute(&mut *tx).await?;
@@ -247,6 +267,17 @@ impl PostgresStore {
                     "group version changed; fetch the group and retry with its current version",
                 ));
             }
+            // Members and pending invitees both see the name and the description.
+            let mut readers = group_members_in(&mut tx, id).await?;
+            readers.extend(group_invitees_in(&mut tx, id).await?);
+            let mut events = Vec::new();
+            if name != settings.name {
+                events.extend(each(&readers, ConversationChange::Renamed, &[]));
+            }
+            if description != settings.description {
+                events.extend(each(&readers, ConversationChange::DescriptionChanged, &[]));
+            }
+            conversation_events::record_in(&mut tx, id, &events).await?;
             complete_group(&mut tx, actor, "groups.update", key, id, 200).await?;
         }
         finish_group(&mut tx, id).await?;
@@ -274,8 +305,30 @@ impl PostgresStore {
         if acquired(&mut tx, actor, "groups.invite", key, &hash).await? {
             let anchors: Vec<ActorRef> = invitees.iter().map(|i| i.actor.clone()).collect();
             refresh_directory_in(&mut tx, &partition, &anchors).await?;
+            let before = invitation_statuses_in(&mut tx, id).await?;
             invite_in(&mut tx, &partition, id, actor, &invitees).await?;
             bump(&mut tx, id).await?;
+            // Only what actually changed: a new invitation, or a member who joined at once.
+            let mut events: Vec<(ActorRef, ConversationChange)> = Vec::new();
+            for invitee in &invitees {
+                let change = match (status_of(&before, &invitee.actor), invitee.accepted) {
+                    (None | Some("pending"), true) => ConversationChange::Added,
+                    (None, false) => ConversationChange::Invited,
+                    _ => continue,
+                };
+                events.push((invitee.actor.clone(), change));
+            }
+            if !events.is_empty() {
+                let personal: Vec<ActorRef> =
+                    events.iter().map(|(account, _)| account.clone()).collect();
+                let members = group_members_in(&mut tx, id).await?;
+                events.extend(each(
+                    &members,
+                    ConversationChange::MembersChanged,
+                    &personal,
+                ));
+            }
+            conversation_events::record_in(&mut tx, id, &events).await?;
             complete_group(&mut tx, actor, "groups.invite", key, id, 200).await?;
         }
         finish_group(&mut tx, id).await?;
@@ -303,16 +356,30 @@ impl PostgresStore {
         let mut tx = self.pool().begin().await?;
         lock_group(&mut tx, id).await?;
         if acquired(&mut tx, actor, "groups.uninvite", key, &hash).await? {
+            let before = invitation_statuses_in(&mut tx, id).await?;
+            let mut events: Vec<(ActorRef, ConversationChange)> = Vec::new();
+            let mut owners_changed = false;
             for member in members {
                 sqlx::query("DELETE FROM group_invitations WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3")
                     .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str())
                     .execute(&mut *tx).await?;
-                sqlx::query("DELETE FROM group_owners WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3")
+                owners_changed |= sqlx::query("DELETE FROM group_owners WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3")
                     .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str())
-                    .execute(&mut *tx).await?;
+                    .execute(&mut *tx).await?.rows_affected() > 0;
+                match status_of(&before, member) {
+                    Some("accepted") => events.push((member.clone(), ConversationChange::Removed)),
+                    Some("pending") => {
+                        events.push((member.clone(), ConversationChange::InvitationCancelled));
+                    }
+                    _ => {}
+                }
             }
             require_an_owner(&mut tx, id).await?;
             bump(&mut tx, id).await?;
+            events.extend(
+                changed_for_the_rest(&mut tx, id, !events.is_empty(), owners_changed).await?,
+            );
+            conversation_events::record_in(&mut tx, id, &events).await?;
             complete_group(&mut tx, actor, "groups.uninvite", key, id, 200).await?;
         }
         finish_group(&mut tx, id).await?;
@@ -354,6 +421,21 @@ impl PostgresStore {
         }
         bump(&mut tx, id).await?;
         finish_group(&mut tx, id).await?;
+        let mut events = vec![(
+            invitee.clone(),
+            if accept {
+                ConversationChange::InvitationAccepted
+            } else {
+                ConversationChange::InvitationDeclined
+            },
+        )];
+        let members = group_members_in(&mut tx, id).await?;
+        events.extend(each(
+            &members,
+            ConversationChange::MembersChanged,
+            std::slice::from_ref(invitee),
+        ));
+        conversation_events::record_in(&mut tx, id, &events).await?;
         tx.commit().await.map_err(map_constraint_error)?;
         Ok(())
     }
@@ -371,12 +453,15 @@ impl PostgresStore {
         if left != 1 {
             return Err(AppError::NotFound);
         }
-        sqlx::query("DELETE FROM group_owners WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3")
+        let was_owner = sqlx::query("DELETE FROM group_owners WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3")
             .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str())
-            .execute(&mut *tx).await?;
+            .execute(&mut *tx).await?.rows_affected() > 0;
         require_an_owner(&mut tx, id).await?;
         bump(&mut tx, id).await?;
         finish_group(&mut tx, id).await?;
+        let mut events = vec![(member.clone(), ConversationChange::Left)];
+        events.extend(changed_for_the_rest(&mut tx, id, true, was_owner).await?);
+        conversation_events::record_in(&mut tx, id, &events).await?;
         tx.commit().await.map_err(map_constraint_error)?;
         Ok(())
     }
@@ -402,6 +487,7 @@ impl PostgresStore {
         let mut tx = self.pool().begin().await?;
         lock_group(&mut tx, id).await?;
         if acquired(&mut tx, actor, operation, key, &hash).await? {
+            let mut changed = false;
             for member in members {
                 if promote {
                     let is_member: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM eligible_group_members WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3)")
@@ -414,17 +500,19 @@ impl PostgresStore {
                             "Only members who accepted their invitation can become owners.",
                         ));
                     }
-                    sqlx::query("INSERT INTO group_owners(conversation_id,actor_kind,actor_id,added_by_id) VALUES($1,$2::text::actor_kind,$3,$4) ON CONFLICT DO NOTHING")
+                    changed |= sqlx::query("INSERT INTO group_owners(conversation_id,actor_kind,actor_id,added_by_id) VALUES($1,$2::text::actor_kind,$3,$4) ON CONFLICT DO NOTHING")
                         .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str()).bind(actor.id.as_str())
-                        .execute(&mut *tx).await?;
+                        .execute(&mut *tx).await?.rows_affected() > 0;
                 } else {
-                    sqlx::query("DELETE FROM group_owners WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3")
+                    changed |= sqlx::query("DELETE FROM group_owners WHERE conversation_id=$1 AND actor_kind=$2::text::actor_kind AND actor_id=$3")
                         .bind(id).bind(member.actor_type.as_str()).bind(member.id.as_str())
-                        .execute(&mut *tx).await?;
+                        .execute(&mut *tx).await?.rows_affected() > 0;
                 }
             }
             require_an_owner(&mut tx, id).await?;
             bump(&mut tx, id).await?;
+            let events = changed_for_the_rest(&mut tx, id, false, changed).await?;
+            conversation_events::record_in(&mut tx, id, &events).await?;
             complete_group(&mut tx, actor, operation, key, id, 200).await?;
         }
         finish_group(&mut tx, id).await?;
@@ -478,18 +566,76 @@ impl PostgresStore {
     }
 }
 
-/// Locks the group and returns its storage partition.
+/// Each account's invitation status in a group (`pending` or `accepted`).
+async fn invitation_statuses_in(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> AppResult<Vec<(String, String, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT actor_kind::text, actor_id, status::text FROM group_invitations WHERE conversation_id=$1",
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await?)
+}
+
+fn status_of<'a>(statuses: &'a [(String, String, String)], account: &ActorRef) -> Option<&'a str> {
+    statuses
+        .iter()
+        .find(|(kind, id, _)| kind == account.actor_type.as_str() && id == account.id.as_str())
+        .map(|(_, _, status)| status.as_str())
+}
+
+/// The events of the group's remaining accounts after a change: `members_changed` for the
+/// members, `owners_changed` for members and pending invitees (both see the owners).
+async fn changed_for_the_rest(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    members_changed: bool,
+    owners_changed: bool,
+) -> AppResult<Vec<(ActorRef, ConversationChange)>> {
+    let mut events = Vec::new();
+    if !members_changed && !owners_changed {
+        return Ok(events);
+    }
+    let members = group_members_in(tx, id).await?;
+    if members_changed {
+        events.extend(each(&members, ConversationChange::MembersChanged, &[]));
+    }
+    if owners_changed {
+        events.extend(each(&members, ConversationChange::OwnersChanged, &[]));
+        let invitees = group_invitees_in(tx, id).await?;
+        events.extend(each(&invitees, ConversationChange::OwnersChanged, &[]));
+    }
+    Ok(events)
+}
+
+/// Locks the group and returns its storage partition. The directory's snapshot rows come
+/// first, in the order a send takes them (the conversation's partition, then @accounts),
+/// then the conversation and the group: a send holds the directory while its message waits
+/// for the conversation row, so a group change that locked the row first and then refreshed
+/// the directory (every change records its actor) deadlocked against it.
 async fn lock_group(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> AppResult<OrganizationId> {
     let partition: Option<String> = sqlx::query_scalar(
-        "SELECT c.organization_id FROM conversations c JOIN groups g ON g.conversation_id=c.id WHERE c.id=$1 FOR UPDATE OF c,g",
+        "SELECT c.organization_id FROM conversations c JOIN groups g ON g.conversation_id=c.id WHERE c.id=$1",
     )
     .bind(id)
     .fetch_optional(&mut **tx)
     .await?;
-    partition
+    let partition: OrganizationId = partition
         .ok_or(AppError::NotFound)?
         .parse()
-        .map_err(|error| super::rows::data_error("group partition", error))
+        .map_err(|error| super::rows::data_error("group partition", error))?;
+    refresh_directory_in(tx, &partition, &[]).await?;
+    refresh_directory_in(tx, &OrganizationId::accounts(), &[]).await?;
+    sqlx::query(
+        "SELECT 1 FROM conversations c JOIN groups g ON g.conversation_id=c.id WHERE c.id=$1 FOR UPDATE OF c,g",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(partition)
 }
 
 async fn acquired(

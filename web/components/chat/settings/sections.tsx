@@ -28,7 +28,7 @@ import { AccountAvatar } from "../common/avatars";
 import { listWords } from "../details/silicon-facts";
 import { useShowWhenSet } from "../dialogs/show-when-set";
 import { useChat } from "../shell/chat-context";
-import { PULL_REQUESTS, pullRequestProblem, WEB_VERSION } from "./report";
+import { pullRequestProblem, WEB_VERSION } from "./report";
 import styles from "./settings.module.css";
 
 export { WEB_VERSION };
@@ -177,7 +177,8 @@ export function ReportSection() {
     <form className={styles.stack} noValidate onSubmit={event => { event.preventDefault(); void send(); }}>
       <Textarea id={MESSAGE} label="What happened?" description="What you did, what you expected, and what happened instead." value={message} rows={4} maxLength={20000}
         error={messageProblem ?? undefined} onChange={event => { setMessage(event.target.value); setMessageProblem(null); setSent(null); }} />
-      <Input id={PULL_REQUEST} label="Pull request (optional)" description="A pull request in teamofsilicons/silicon-dm that fixes it, if you made one." placeholder={`${PULL_REQUESTS}123`}
+      {/* The placeholder says what goes in, in words that fit a phone; a whole example link would be cut off there. */}
+      <Input id={PULL_REQUEST} label="Pull request (optional)" description="A pull request in teamofsilicons/silicon-dm that fixes it, if you made one." placeholder="Its link on GitHub"
         value={pr} inputMode="url" autoComplete="off" spellCheck={false} error={prProblem ?? undefined}
         onChange={event => { setPr(event.target.value); setPrProblem(null); }} onBlur={() => setPrProblem(pullRequestProblem(pr))} />
       <p className={styles.note}>The report carries what you write, this website&apos;s version (<span className={styles.whole}>web-{WEB_VERSION}</span>) and your id (<span className={styles.whole}>{account.id}</span>). Nothing else.</p>

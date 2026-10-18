@@ -3,42 +3,88 @@
 /* eslint-disable @next/next/no-img-element -- attachments are the sender's own links (Briefcase files through this website's proxy), shown as they are: no image optimizer. */
 
 /**
- * What a message carries besides words (spec §6.4): photos in a grid that opens a lightbox (← and → between photos,
- * Esc to close, focus back on the photo), a single photo or GIF in its own shape, videos inline, audio files as a
- * small player card, and other files as cards with their name, type, size, Open and Download. A GIF shows its first
- * frame only under reduced motion. A photo or video that does not load becomes a file card, never a broken image.
+ * What a message carries besides words (spec §6.4): photos that keep their shape (one alone at its own shape, height
+ * bounded; two side by side sharing a height; three or four in rows that share a height, thread-model.ts galleryRows)
+ * and open a lightbox (← and → between photos, Esc to close, focus back on the photo), a GIF in its own shape, videos
+ * inline, audio files as a small player card, and other files as cards with their name, type, size, Open and
+ * Download. A GIF shows its first frame only under reduced motion. A photo or video that does not load becomes a file
+ * card, never a broken image.
  *
  * Every address goes through displayUrl() (lib/upload/display.ts): Silicon Briefcase serves files only to its own
  * origin, so the browser loads them through this website.
  */
-import { memo, useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { memo, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type SyntheticEvent } from "react";
 import { useReducedMotion } from "motion/react";
 import { ChevronLeft, ChevronRight, Download, FileArchive, FileText, Film, ImageOff, Music, Pause, Play } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/silicon-ui/dialog/dialog";
 import { clockDuration, fileSize } from "@/lib/chat/format";
 import { attachmentName, safeHttpsUrl, type MediaKind } from "@/lib/chat/media";
+import { readJson, writeJson } from "@/lib/chat/storage";
 import type { AttachmentDetail, Gif } from "@/lib/chat/types";
 import { displayUrl, downloadUrl } from "@/lib/upload/display";
-import { fileNameParts, friendlyType } from "./thread-model";
+import { useLayer } from "./thread-actions";
+import { fileNameParts, friendlyType, galleryRatio, galleryRows, photoRatio } from "./thread-model";
 import styles from "./thread.module.css";
 
 export type ShownAttachment = AttachmentDetail & { kind: MediaKind };
 
-/* Shapes, remembered per address: a photo seen once keeps its shape, so it never changes size on screen again. ----- */
+/*
+ * Shapes (width / height), remembered per address: a picture seen once keeps its shape, so it never changes size on
+ * screen again, and this browser remembers the last few hundred across reloads (`dm:photo-shapes:v1`), so a thread
+ * opened again lays its photos out right away instead of moving when they load.
+ */
 
-const shapes = new Map<string, number>();
-const clamp = (ratio: number) => Math.min(1.9, Math.max(0.62, ratio));
+const SHAPES_KEY = "dm:photo-shapes:v1";
+const SHAPES_KEPT = 400;
+let shapes: Map<string, number> | null = null;
+let shapesVersion = 0;
+let saveTimer = 0;
+const shapeListeners = new Set<() => void>();
 
-function useShape(url: string, fallback: number): [number, (width: number, height: number) => void] {
-  const [ratio, setRatio] = useState(() => shapes.get(url) ?? fallback);
-  const learn = (width: number, height: number) => {
-    if (!width || !height) return;
-    const next = clamp(width / height);
-    shapes.set(url, next);
-    if (Math.abs(next - ratio) / ratio > 0.02) setRatio(next);
-  };
-  return [ratio, learn];
+function shapeMap(): Map<string, number> {
+  if (!shapes) {
+    shapes = new Map();
+    const stored = typeof window === "undefined" ? null : readJson<Record<string, unknown> | null>(SHAPES_KEY, null);
+    for (const [url, ratio] of Object.entries(stored ?? {})) if (typeof ratio === "number" && ratio > 0 && Number.isFinite(ratio)) shapes.set(url, ratio);
+  }
+  return shapes;
 }
+
+/** What a loaded picture says its shape is; every picture of that address follows, and the browser keeps it. */
+function learnShape(url: string, width: number, height: number): void {
+  if (!url || !width || !height) return;
+  const map = shapeMap();
+  const ratio = width / height;
+  const known = map.get(url);
+  if (known && Math.abs(known - ratio) / known < 0.01) return;
+  map.delete(url);
+  map.set(url, ratio);
+  while (map.size > SHAPES_KEPT) map.delete(map.keys().next().value!);
+  shapesVersion += 1;
+  for (const listener of shapeListeners) listener();
+  window.clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(() => writeJson(SHAPES_KEY, Object.fromEntries(map)), 400);
+}
+
+function subscribeShapes(listener: () => void): () => void {
+  shapeListeners.add(listener);
+  return () => shapeListeners.delete(listener);
+}
+
+/** Re-renders when a shape is learned (the version), so a picture takes its shape once it is known. */
+function useShapes(): number {
+  return useSyncExternalStore(subscribeShapes, () => shapesVersion, () => 0);
+}
+
+/** A picture's or video's shape: as learned, else `fallback`, and the function that learns it. */
+function useShape(url: string, fallback: number, clamp: (ratio: number) => number): [number, (width: number, height: number) => void] {
+  useShapes();
+  const ratio = clamp(shapeMap().get(url) ?? fallback);
+  return [ratio, (width, height) => learnShape(url, width, height)];
+}
+
+/** Videos and GIFs: their own shape between a portrait phone video and a wide film. */
+const mediaRatio = (ratio: number) => Math.min(1.9, Math.max(0.62, ratio));
 
 /* One sound at a time: another audio or video on the page starting pauses this one. ------------------------------- */
 
@@ -57,6 +103,7 @@ function usePauseWhenOthersPlay(media: { current: HTMLMediaElement | null }) {
 function Lightbox({ images, index, onIndex, onClose }: { images: ShownAttachment[]; index: number | null; onIndex: (index: number) => void; onClose: () => void }) {
   const image = index === null ? null : images[index] ?? null;
   const count = images.length;
+  useLayer(image !== null);
   const step = (by: number) => {
     if (index === null || count < 2) return;
     onIndex((index + by + count) % count);
@@ -102,31 +149,61 @@ function Lightbox({ images, index, onIndex, onClose }: { images: ShownAttachment
 
 /* Photos ------------------------------------------------------------------------------------------------------------ */
 
+/** The tallest a lone photo is drawn, and the widest. */
+const PHOTO_MAX_HEIGHT = 420;
+const PHOTO_MAX_WIDTH = 360;
+/** A gallery's widest, the tallest one of its rows is drawn (a taller row is cropped), and the gap between photos. */
+const GALLERY_MAX_WIDTH = 400;
+const ROW_MAX_HEIGHT = 280;
+const GAP = 3;
+/** The shape assumed for a picture never seen before, until it loads. */
+const UNKNOWN_RATIO = 4 / 3;
+
+const learnFrom = (url: string) => (event: SyntheticEvent<HTMLImageElement>) => learnShape(url, event.currentTarget.naturalWidth, event.currentTarget.naturalHeight);
+
+/** One photo alone: at its own shape, as wide as the bubble allows, never taller than 420 px (a tall one is narrower). */
 function SinglePhoto({ image, onOpen, onBroken }: { image: ShownAttachment; onOpen: () => void; onBroken: () => void }) {
-  const [ratio, learn] = useShape(image.url, 4 / 3);
+  const [ratio] = useShape(image.url, UNKNOWN_RATIO, photoRatio);
+  // A width in pixels (the bubble's own width follows it; max-width: 100% narrows it on a phone, keeping the shape).
+  const style: CSSProperties = { aspectRatio: ratio, width: `${Math.min(PHOTO_MAX_WIDTH, Math.round(PHOTO_MAX_HEIGHT * ratio))}px` };
   return (
-    <button type="button" className={styles.photo} data-sq="clip" style={{ aspectRatio: ratio }} onClick={onOpen}
+    <button type="button" className={styles.photo} data-sq="clip" style={style} onClick={onOpen}
       aria-label={`Open the photo${image.name ? ` ${image.name}` : ""}`}>
-      <img src={displayUrl(image.url)} alt="" decoding="async" loading="lazy" onLoad={(event: SyntheticEvent<HTMLImageElement>) => learn(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)} onError={onBroken} />
+      <img src={displayUrl(image.url)} alt="" decoding="async" loading="lazy" onLoad={learnFrom(image.url)} onError={onBroken} />
     </button>
   );
 }
 
+/**
+ * Two to four photos (and "+N" on the fourth for more): rows that share a height, each photo as wide as its shape
+ * asks (thread-model.ts galleryRows), so headlines and faces are never cut to a square. A gallery of one row is
+ * narrower rather than cropped when its photos are tall.
+ */
 function Gallery({ images, onOpen, onBroken }: { images: ShownAttachment[]; onOpen: (index: number) => void; onBroken: (url: string) => void }) {
+  useShapes();
   const shown = images.slice(0, 4);
+  const ratios = shown.map(image => galleryRatio(shapeMap().get(image.url) ?? UNKNOWN_RATIO));
+  const rows = galleryRows(ratios);
+  const sums = rows.map(row => row.reduce((total, index) => total + ratios[index]!, 0));
+  const width = rows.length === 1 ? Math.min(GALLERY_MAX_WIDTH, Math.round(ROW_MAX_HEIGHT * sums[0]! + GAP * (rows[0]!.length - 1))) : GALLERY_MAX_WIDTH;
   return (
-    <div className={styles.gallery} data-count={shown.length}>
-      {shown.map((image, index) => {
-        const more = index === 3 && images.length > 4 ? images.length - 4 : 0;
-        // The "+6" over the last tile is part of its name (what is seen is what is said, WCAG 2.5.3).
-        return (
-          <button key={`${image.url}-${index}`} type="button" className={styles.galleryItem} data-sq="clip" onClick={() => onOpen(index)}
-            aria-label={`Open photo ${index + 1} of ${images.length}${image.name ? `, ${image.name}` : ""}${more ? `, +${more} more` : ""}`}>
-            <img src={displayUrl(image.url)} alt="" loading="lazy" decoding="async" onError={() => onBroken(image.url)} />
-            {more ? <span className={styles.galleryMore} aria-hidden="true">+{more}</span> : null}
-          </button>
-        );
-      })}
+    <div className={styles.gallery} data-count={shown.length} style={{ width: `${width}px` }}>
+      {rows.map((row, rowIndex) => (
+        <div key={row.join("-")} className={styles.galleryRow} style={{ aspectRatio: sums[rowIndex] }}>
+          {row.map(index => {
+            const image = shown[index]!;
+            const more = index === 3 && images.length > 4 ? images.length - 4 : 0;
+            // The "+6" over the last tile is part of its name (what is seen is what is said, WCAG 2.5.3).
+            return (
+              <button key={`${image.url}-${index}`} type="button" className={styles.galleryItem} data-sq="clip" style={{ flexGrow: ratios[index] }} onClick={() => onOpen(index)}
+                aria-label={`Open photo ${index + 1} of ${images.length}${image.name ? `, ${image.name}` : ""}${more ? `, +${more} more` : ""}`}>
+                <img src={displayUrl(image.url)} alt="" loading="lazy" decoding="async" onLoad={learnFrom(image.url)} onError={() => onBroken(image.url)} />
+                {more ? <span className={styles.galleryMore} aria-hidden="true">+{more}</span> : null}
+              </button>
+            );
+          })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -135,7 +212,7 @@ function Gallery({ images, onOpen, onBroken }: { images: ShownAttachment[]; onOp
 
 function VideoView({ item, onBroken }: { item: ShownAttachment; onBroken: () => void }) {
   const video = useRef<HTMLVideoElement>(null);
-  const [ratio, learn] = useShape(item.url, 16 / 9);
+  const [ratio, learn] = useShape(item.url, 16 / 9, mediaRatio);
   usePauseWhenOthersPlay(video);
   return (
     <video ref={video} className={styles.video} data-sq="clip" style={{ aspectRatio: ratio }} src={displayUrl(item.url)} controls preload="metadata" playsInline
@@ -274,7 +351,7 @@ export function GifView({ gif }: { gif: Gif }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const safe = safeHttpsUrl(gif.url);
   const url = safe ? displayUrl(safe) : null;
-  const [ratio, learn] = useShape(safe ?? "", 4 / 3);
+  const [ratio, learn] = useShape(safe ?? "", 4 / 3, mediaRatio);
   const moving = choice ?? !reduced;
   const still = !moving;
   useEffect(() => {

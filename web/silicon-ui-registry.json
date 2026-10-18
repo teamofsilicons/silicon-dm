@@ -186,7 +186,8 @@
     },
     "components/silicon-ui/inline-edit/inline-edit.module.css": {
       "registry": "https://ui.teamofsilicons.com/r/inline-edit.json",
-      "sha256": "bc8165b66f02e77d4794098d800e3340563fcd29f11f5cc4473d9dba12645853"
+      "sha256": "c38fb5739e0e33aa66adccb711bb4d364901a43067af698846a35be4019c1f3a",
+      "local_edit": "The slot is `width: max-content` (an absolutely placed box past its container's edge shrank to the room left there, none at the end of a full line, so the pencil drew 2px wide), and the room the line keeps for the actions is the slot's offset plus the buttons (8 + 28 + 4 + 28 = 68px on one line, 8 + 28 = 36px multiline; was 64px and 32px, so Save and Cancel hung 4px past the component and a narrow panel cut them off)."
     },
     "components/silicon-ui/inline-edit/inline-edit.tsx": {
       "registry": "https://ui.teamofsilicons.com/r/inline-edit.json",

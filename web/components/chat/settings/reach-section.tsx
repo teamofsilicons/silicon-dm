@@ -149,7 +149,7 @@ function SiliconReach({ silicon }: { silicon: AccountRef }) {
           <span className={styles.rowDescription}>{silicon.id}</span>
         </span>
       </div>
-      {list.error ? <ErrorAlert error={ApiError.from(list.error)} title={`${name}'s list could not be loaded`} action={<Button size="sm" variant="secondary" onClick={() => void list.refetch()}>Try again</Button>} /> : null}
+      {list.error && !list.data ? <ErrorAlert error={ApiError.from(list.error)} title={`${name}'s list could not be loaded`} action={<Button size="sm" variant="secondary" onClick={() => void list.refetch()}>Try again</Button>} /> : null}
       <ul role="list" className={styles.allowed} aria-label={`Accounts that can reach ${name}`}>
         {allowed.map(entry => <AllowedRow key={entry.account.uuid ?? entry.account.id} entry={entry} onRemove={remove} />)}
         {list.data && !allowed.length ? <li className={styles.quiet}>Nobody else yet: only you and your other Silicons can start a conversation with {name}.</li> : null}

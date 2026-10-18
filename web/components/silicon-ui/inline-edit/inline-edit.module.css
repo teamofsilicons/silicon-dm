@@ -5,8 +5,9 @@
 .root[data-variant="body"] { --pad-y: 5px; --size: var(--text-sm); --leading: round(var(--size) * 1.5, 1px); --weight: 400; --ink: var(--text-secondary); }
 /* Room for the actions is reserved in every state, so the text never rewraps when editing starts. */
 /* The body face at every size here: a heading host keeps its semantics but not the display face. */
-.line { display: block; min-width: 0; margin: 0; padding-inline-end: var(--space-stage); color: var(--ink); font-family: var(--font-body); font-size: var(--size); font-weight: var(--weight); line-height: var(--leading); letter-spacing: var(--tracking-body); }
-.root[data-multiline] .line { padding-inline-end: var(--space-block); }
+/* Local edit: the room is the slot's offset plus the buttons (two 28px side by side, or one above the other), so they never hang past the component's edge. */
+.line { display: block; min-width: 0; margin: 0; padding-inline-end: calc(var(--space-related) + 56px + var(--space-tight)); color: var(--ink); font-family: var(--font-body); font-size: var(--size); font-weight: var(--weight); line-height: var(--leading); letter-spacing: var(--tracking-body); }
+.root[data-multiline] .line { padding-inline-end: calc(var(--space-related) + 28px); }
 .box { position: relative; display: inline-block; max-width: 100%; vertical-align: top; }
 .root[data-multiline] .box { display: block; }
 
@@ -45,7 +46,8 @@ textarea.control { white-space: pre-wrap; overflow-wrap: break-word; }
 .root[data-flash="off"] .frame { transition-duration: var(--duration-considered); }
 
 /* The slot rides on the frame's edge, so it follows the width morph instead of jumping to the new width. */
-.slot { position: absolute; top: 50%; left: calc(100% + var(--space-related)); display: grid; min-height: 28px; margin-top: calc(var(--space-inset) * -1); pointer-events: auto; }
+/* Local edit: max-content, because a box placed past its container's edge shrinks to the room left there, none at the end of a full line (the pencil drew 2px wide). */
+.slot { position: absolute; top: 50%; left: calc(100% + var(--space-related)); display: grid; width: max-content; min-height: 28px; margin-top: calc(var(--space-inset) * -1); pointer-events: auto; }
 .root[data-multiline] .slot { top: 0; left: calc(100% + var(--space-related)); margin-top: calc(var(--pad-y) + var(--leading) / 2 - var(--space-group)); }
 .slotItem { display: grid; grid-area: 1 / 1; min-height: 28px; place-items: center start; }
 .actions { display: flex; gap: var(--space-tight); }

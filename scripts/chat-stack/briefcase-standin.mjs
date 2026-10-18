@@ -24,15 +24,23 @@
 // only apps/{issuer}/ in the account's own drive; parent_path "" is that folder.
 //
 // Files live in BRIEFCASE_STANDIN_DIR (default .dev/briefcase): state.json, blobs/<sha256>, staging/<upload_id>.
-// Test controls: GET /_health, GET /_state, GET|DELETE /_requests,
-//   POST /_faults {"route":"reserve"|"transfer"|"commit"|"status"|"cancel"|"link-access"|"public","status":503,"code":"…","count":1}
+// Transfers stream to disk as they arrive, whatever their size (up to Briefcase's 5 TiB; BRIEFCASE_STANDIN_MAX_BYTES
+// lowers it), hashed on the way, with backpressure: never held in memory. Runs of zero bytes are left as holes in the
+// file (it reads back the same), so a big test file made of zeros costs no disk here.
+// Test controls: GET /_health, GET /_state (uploads with `received` bytes while they arrive), GET|DELETE /_requests,
+//   POST /_faults {"route":"reserve"|"transfer"|"commit"|"status"|"cancel"|"link-access"|"public","status":503,"code":"…","count":1},
+//     with "match":"<text>" only for an upload whose name contains the text (so a test on this shared stand-in never
+//     trips anyone else's), and for "transfer" "delay_ms":N instead of a status: the bytes are taken, then the answer
+//     waits N ms (Briefcase storing a large file before it answers)
+//   DELETE /_files/{sha256}   removes a test file's bytes (and its entries) from the stand-in's disk
 // Requests are logged (method, path, status, sizes; never bodies, proofs or capabilities) to BRIEFCASE_STANDIN_LOG.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { appendFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { open } from 'node:fs/promises';
 import http from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import { Transform } from 'node:stream';
+import { Transform, Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -45,7 +53,8 @@ const ACCOUNTS_API_URL = (process.env.ACCOUNTS_API_URL || '').replace(/\/+$/, ''
 const APP_ID = process.env.BRIEFCASE_APP_ID || 'briefcase';
 const APP_SECRET = process.env.BRIEFCASE_APP_SECRET || '';
 const SITE = (process.env.BRIEFCASE_PUBLIC_SITE_URL || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '');
-const MAX_UPLOAD_BYTES = Number(process.env.BRIEFCASE_STANDIN_MAX_BYTES || 5 * 1024 ** 3);
+// Briefcase's own maximum: 5 TiB per file (its openapi.yaml).
+const MAX_UPLOAD_BYTES = Number(process.env.BRIEFCASE_STANDIN_MAX_BYTES || 5 * 1024 ** 4);
 const RESERVATION_TTL_MS = 24 * 3600_000;
 const SCOPES = ['briefcase.folders.create', 'briefcase.entries.list', 'briefcase.files.read', 'briefcase.entries.trash', 'briefcase.uploads.reserve',
   'briefcase.uploads.commit', 'briefcase.uploads.status', 'briefcase.uploads.cancel', 'briefcase.invitations.create', 'briefcase.link_access.update'];
@@ -101,12 +110,19 @@ function record(entry) {
 }
 
 let faults = [];
-function takeFault(route) {
-  const index = faults.findIndex((fault) => fault.route === route && fault.remaining > 0);
+/** The next fault for a route: one without `match` at the request's start (name null), else one whose `match` is in the name. */
+function takeFault(route, name = null) {
+  const index = faults.findIndex((fault) => fault.route === route && fault.remaining > 0 && (name === null ? !fault.match : !!fault.match && name.includes(fault.match)));
   if (index < 0) return null;
   const fault = faults[index];
   fault.remaining -= 1;
   if (fault.remaining <= 0) faults.splice(index, 1);
+  return fault;
+}
+/** A matching fault inside a route that knows the upload's name: its refusal (a delay is the transfer's own business). */
+function faultFor(route, name) {
+  const fault = takeFault(route, name);
+  if (fault && !fault.delay_ms) throw new Refusal(fault.status, fault.code, fault.message);
   return fault;
 }
 
@@ -226,11 +242,17 @@ async function authorizeProof(req, scope) {
 
 // ------------------------------------------------------------------------------------------------ paths and entries
 
+/** Rust's `str::trim` (Unicode White_Space), which Briefcase's EntryName applies: U+0085 included, U+FEFF not. */
+const RUST_SPACE = '[\\u0009-\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]';
+const rustTrim = (value) => value.replace(new RegExp(`^${RUST_SPACE}+|${RUST_SPACE}+$`, 'gu'), '');
+
+/** Briefcase's EntryName: trimmed, then 1 to 255 bytes of UTF-8 (not characters), no NUL, no slash, not "." or "..". */
 function entryName(name) {
-  if (typeof name !== 'string' || !name.length || [...name].length > 255 || name.includes('/') || name === '.' || name === '..' || /[\u0000-\u001f\u007f]/.test(name) || name.trim() !== name) {
+  const trimmed = typeof name === 'string' ? rustTrim(name) : '';
+  if (!trimmed || Buffer.byteLength(trimmed) > 255 || trimmed.includes('\u0000') || trimmed.includes('/') || trimmed === '.' || trimmed === '..') {
     throw refuse(422, 'invalid_name');
   }
-  return name;
+  return trimmed;
 }
 
 function entryPath(path) {
@@ -320,6 +342,7 @@ async function reserve(req) {
   if (body.content_type.length > 255 || !/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+(\s*;.*)?$/i.test(body.content_type)) throw refuse(422, 'invalid_content_type');
   if (!/^[0-9a-f]{64}$/.test(body.sha256)) throw refuse(422, 'invalid_sha256');
   const name = entryName(body.name);
+  faultFor('reserve', name);
   const parent = destinationFolder(context, body.parent_path);
   const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
   const existing = state.uploads[state.operations[operationKey(context, body.operation_id)]];
@@ -348,6 +371,61 @@ async function reserve(req) {
   return { status: 200, body: { ...statusOf(upload), capability }, headers: { 'cache-control': 'no-store' } };
 }
 
+const ZERO = Buffer.alloc(1024 * 1024);
+function allZero(chunk) {
+  for (let at = 0; at < chunk.length; at += ZERO.length) {
+    const part = chunk.subarray(at, Math.min(chunk.length, at + ZERO.length));
+    if (!part.equals(ZERO.subarray(0, part.length))) return false;
+  }
+  return true;
+}
+
+/**
+ * A file written as the bytes arrive, at their positions: a chunk of zeros is skipped (a hole, which reads back as
+ * zeros), and the end sets the file's length. Backpressure as any Writable: the next chunk is asked for only when this
+ * one is on disk.
+ */
+class SparseFile extends Writable {
+  constructor(path) {
+    super({ highWaterMark: 1024 * 1024 });
+    this.path = path;
+    this.position = 0;
+    this.handle = null;
+  }
+
+  _construct(callback) {
+    open(this.path, 'w', 0o600).then((handle) => {
+      this.handle = handle;
+      callback();
+    }, callback);
+  }
+
+  _write(chunk, _encoding, callback) {
+    const at = this.position;
+    this.position += chunk.length;
+    if (allZero(chunk)) return callback();
+    this.handle.write(chunk, 0, chunk.length, at).then(() => callback(), callback);
+  }
+
+  _final(callback) {
+    this.handle.truncate(this.position).then(() => this.handle.close()).then(() => {
+      this.handle = null;
+      callback();
+    }, callback);
+  }
+
+  _destroy(error, callback) {
+    if (!this.handle) return callback(error);
+    this.handle.close().catch(() => undefined).finally(() => {
+      this.handle = null;
+      callback(error);
+    });
+  }
+}
+
+/** Bytes arriving right now, by upload id (what /_state shows as `received`). */
+const arriving = new Map();
+
 function single(req, name) {
   const index = req.rawHeaders.findIndex((header, i) => i % 2 === 0 && header.toLowerCase() === name);
   if (index < 0) throw refuse(400, 'missing_upload_header');
@@ -371,27 +449,36 @@ async function transfer(req, uploadId) {
   expire(upload);
   if (upload.state !== 'reserved') throw refuse(409, 'delegated_upload_not_reserved');
   if (length !== upload.size) throw refuse(422, 'delegated_upload_manifest_mismatch');
+  const slow = faultFor('transfer', upload.name);
   upload.state = 'receiving';
   save();
+  // Every check passed: now the bytes are wanted (a client that asked Expect: 100-continue sends them on this).
+  req.continueBody?.();
   const staging = join(DIR, 'staging', upload.upload_id);
   const hash = createHash('sha256');
   let received = 0;
+  arriving.set(upload.upload_id, 0);
   try {
     await pipeline(req, new Transform({
       transform(chunk, _encoding, done) {
         received += chunk.length;
+        arriving.set(upload.upload_id, received);
         if (received > upload.size) return done(refuse(413, 'payload_too_large', 'Content exceeds the reservation.'));
         hash.update(chunk);
         return done(null, chunk);
       },
-    }), createWriteStream(staging, { mode: 0o600 }));
+    }), new SparseFile(staging));
   } catch (error) {
     upload.state = 'reserved';
     upload.capability_hash = null; // reconcile through status and a fresh reserve before retrying
+    upload.interrupted_at = new Date().toISOString();
+    upload.received_before_interruption = received;
     rmSync(staging, { force: true });
     save();
     if (error instanceof Refusal) throw error;
     throw refuse(400, 'upload_interrupted', 'The bytes did not arrive completely; check the status and reserve again for a fresh capability.');
+  } finally {
+    arriving.delete(upload.upload_id);
   }
   if (received !== upload.size || hash.digest('hex') !== upload.sha256) {
     upload.state = 'reserved';
@@ -400,16 +487,40 @@ async function transfer(req, uploadId) {
     save();
     throw refuse(422, 'delegated_upload_manifest_mismatch');
   }
+  if (slow?.delay_ms) {
+    // Briefcase stores a large file in its object store before it answers: nothing moves on the connection meanwhile.
+    // A client that goes away meanwhile ends it, as hyper drops the handler of a closed connection.
+    const gone = await new Promise((resolve) => {
+      const closed = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        req.socket.off('close', closed);
+        resolve(false);
+      }, slow.delay_ms);
+      req.socket.once('close', closed);
+    });
+    if (gone) {
+      upload.state = 'reserved';
+      upload.capability_hash = null;
+      upload.interrupted_at = new Date().toISOString();
+      rmSync(staging, { force: true });
+      save();
+      throw refuse(400, 'upload_interrupted', 'The connection closed while the file was being stored.');
+    }
+  }
   upload.state = 'staged';
   upload.capability_hash = null;
   save();
   return { status: 200, body: statusOf(upload) };
 }
 
-function uploadFor(context, operationId) {
+function uploadFor(context, operationId, route) {
   const upload = state.uploads[state.operations[operationKey(context, operationId)]];
   if (!upload) throw refuse(404, 'not_found');
   expire(upload);
+  faultFor(route, upload.name);
   return upload;
 }
 
@@ -418,7 +529,7 @@ async function commit(req) {
   const body = shape(await readJsonBody(req), { operation_id: 'uuid', upload_id: 'uuid' });
   requireOperationId(body.operation_id);
   if (body.upload_id === NIL) throw refuse(422, 'invalid_upload_id');
-  const upload = uploadFor(context, body.operation_id);
+  const upload = uploadFor(context, body.operation_id, 'commit');
   if (upload.upload_id !== body.upload_id.toLowerCase()) throw refuse(404, 'not_found');
   if (upload.state === 'committed') return { status: 200, body: statusOf(upload) };
   if (upload.state !== 'staged') throw refuse(409, 'delegated_upload_not_staged');
@@ -451,7 +562,7 @@ async function status(req) {
   const context = await authorizeProof(req, 'briefcase.uploads.status');
   const body = shape(await readJsonBody(req), { operation_id: 'uuid' });
   requireOperationId(body.operation_id);
-  const upload = uploadFor(context, body.operation_id);
+  const upload = uploadFor(context, body.operation_id, 'status');
   save();
   return { status: 200, body: statusOf(upload) };
 }
@@ -460,7 +571,7 @@ async function cancel(req) {
   const context = await authorizeProof(req, 'briefcase.uploads.cancel');
   const body = shape(await readJsonBody(req), { operation_id: 'uuid' });
   requireOperationId(body.operation_id);
-  const upload = uploadFor(context, body.operation_id);
+  const upload = uploadFor(context, body.operation_id, 'cancel');
   // Cancelling never deletes a committed file.
   if (['reserved', 'receiving', 'staged'].includes(upload.state)) {
     upload.state = 'cancelled';
@@ -497,6 +608,7 @@ async function setLinkAccess(req) {
   const entry = state.entries[body.entry_id.toLowerCase()];
   const appFolder = `apps/${context.issuer}`;
   if (!entry || entry.owner !== context.owner || entry.deleted_at || (!context.firstParty && !entry.path.startsWith(`${appFolder}/`))) throw refuse(404, 'not_found');
+  faultFor('link-access', entry.name);
   const mutation = replay(context, 'link-access', body.operation_id, body);
   if (mutation.kept) return { status: 200, body: linkAccess(entry) };
   if (body.enabled) {
@@ -595,7 +707,7 @@ function publicRead(req, res, ownerSegment, pathSegments, url) {
 async function controls(req, res, url) {
   if (url.pathname === '/_health') return sendJson(res, 200, { ok: true, service: 'briefcase-stand-in', port: PORT, accounts_api_url: ACCOUNTS_API_URL, data_dir: DIR });
   if (url.pathname === '/_state') {
-    const uploads = Object.values(state.uploads).map(({ capability_hash: _hash, request_hash: _request, ...rest }) => rest);
+    const uploads = Object.values(state.uploads).map(({ capability_hash: _hash, request_hash: _request, ...rest }) => (arriving.has(rest.upload_id) ? { ...rest, received: arriving.get(rest.upload_id) } : rest));
     return sendJson(res, 200, { accounts: Object.values(state.accounts), entries: Object.values(state.entries).map((entry) => ({ ...entryView(entry), owner: entry.owner, link: linkAccess(entry) })), uploads });
   }
   if (url.pathname === '/_requests') {
@@ -604,6 +716,21 @@ async function controls(req, res, url) {
       return sendJson(res, 200, { cleared: true });
     }
     return sendJson(res, 200, { count: recent.length, items: recent });
+  }
+  const removal = /^\/_files\/([0-9a-f]{64})$/.exec(url.pathname);
+  if (removal && req.method === 'DELETE') {
+    // A test's big file: its bytes leave the disk, and its entries (and any staging of it) go with them.
+    const sha = removal[1];
+    rmSync(join(DIR, 'blobs', sha), { force: true });
+    let entries = 0;
+    for (const entry of Object.values(state.entries)) {
+      if (entry.sha256 !== sha || entry.deleted_at) continue;
+      entry.deleted_at = new Date().toISOString();
+      entries += 1;
+    }
+    for (const upload of Object.values(state.uploads)) if (upload.sha256 === sha) rmSync(join(DIR, 'staging', upload.upload_id), { force: true });
+    save();
+    return sendJson(res, 200, { removed: sha, entries });
   }
   if (url.pathname === '/_faults') {
     if (req.method === 'GET') return sendJson(res, 200, { faults });
@@ -614,7 +741,10 @@ async function controls(req, res, url) {
     const fault = await readJsonBody(req).catch(() => null);
     const routes = ['reserve', 'transfer', 'commit', 'status', 'cancel', 'link-access', 'folders-create', 'public'];
     if (!fault || !routes.includes(fault.route)) return sendJson(res, 422, { error: { code: 'invalid_route', message: `route must be one of ${routes.join(', ')}.` } });
-    const entry = { route: fault.route, status: fault.status ?? 503, code: fault.code ?? 'dependency_unavailable', message: fault.message ?? 'A fault set with POST /_faults.', remaining: Math.max(1, Number(fault.count ?? 1)) };
+    const match = typeof fault.match === 'string' && fault.match ? fault.match : null;
+    const delay = fault.route === 'transfer' && Number.isInteger(fault.delay_ms) && fault.delay_ms > 0 ? Math.min(fault.delay_ms, 3_600_000) : null;
+    const entry = { route: fault.route, status: fault.status ?? 503, code: fault.code ?? 'dependency_unavailable', message: fault.message ?? 'A fault set with POST /_faults.', remaining: Math.max(1, Number(fault.count ?? 1)), ...(match ? { match } : {}), ...(delay ? { delay_ms: delay } : {}) };
+    if (delay && !match) return sendJson(res, 422, { error: { code: 'match_required', message: 'A delay needs "match" (a text in the upload\'s name), so it slows only that test\'s upload on this shared stand-in.' } });
     faults.push(entry);
     return sendJson(res, 201, { fault: entry, faults });
   }
@@ -637,7 +767,10 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
   const log = (statusCode, extra = {}) => record({ method: req.method, path: url.pathname.replace(/\/content$/, '/{upload_id}/content').replace(/uploads\/[0-9a-f-]{36}\//, 'uploads/'), status: statusCode, ms: Date.now() - started, request_id: requestId, ...extra });
   try {
-    if (url.pathname.startsWith('/_')) return await controls(req, res, url);
+    if (url.pathname.startsWith('/_')) {
+      req.continueBody?.();
+      return await controls(req, res, url);
+    }
     const key = `${req.method} ${url.pathname}`;
     const transferMatch = /^\/api\/v1\/obo\/uploads\/([0-9a-fA-F-]{36})\/content$/.exec(url.pathname);
     const routeName = ROUTES[key]?.[0] ?? (transferMatch ? 'transfer' : url.pathname.startsWith('/api/v1/public/') ? 'public' : null);
@@ -648,6 +781,7 @@ const server = http.createServer(async (req, res) => {
       return log(fault.status, { fault: true });
     }
     if (ROUTES[key]) {
+      req.continueBody?.();
       const answer = await ROUTES[key][1](req);
       sendJson(res, answer.status, answer.body, answer.headers);
       return log(answer.status, { state: answer.body.state });
@@ -683,6 +817,17 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// Expect: 100-continue, as Briefcase answers it (hyper sends 100 Continue only once the handler reads the body): the
+// transfer route makes its checks first, so a refusal from the headers goes out before a byte of the file is sent;
+// every other route continues at once.
+server.on('checkContinue', (req, res) => {
+  req.continueBody = () => {
+    if (req.continued || res.headersSent) return;
+    req.continued = true;
+    res.writeContinue();
+  };
+  server.emit('request', req, res);
+});
 server.requestTimeout = 0;
 server.listen(PORT, '127.0.0.1', () => {
   process.stdout.write(`briefcase stand-in listening on http://127.0.0.1:${PORT} (data ${DIR}, proofs verified at ${ACCOUNTS_API_URL})\n`);

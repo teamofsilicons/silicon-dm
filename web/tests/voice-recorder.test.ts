@@ -62,9 +62,12 @@ test("events out of turn change nothing", () => {
   assert.equal(failed.phase === "error" && failed.problem.code, "microphone_busy");
 });
 
-test("ten minutes at most, with a warning in the last thirty seconds", () => {
-  assert.equal(MAX_RECORDING_MS, 600_000);
+test("a voice message lasts up to 48 hours (no ten-minute cap), with a warning in its last minute", () => {
+  assert.equal(MAX_RECORDING_MS, 48 * 3600 * 1000);
+  assert.equal(WARN_BEFORE_MS, 60_000);
   assert.equal(timeLeftWarning(0), null);
+  assert.equal(timeLeftWarning(10 * 60_000), null);
+  assert.equal(timeLeftWarning(5 * 3600_000), null);
   assert.equal(timeLeftWarning(MAX_RECORDING_MS - WARN_BEFORE_MS - 1), null);
   assert.equal(timeLeftWarning(MAX_RECORDING_MS - 12_000), 12_000);
   assert.equal(timeLeftWarning(MAX_RECORDING_MS + 5000), 0);

@@ -371,6 +371,10 @@ pub struct Message {
     /// How a spoken message sounds; `None` for other messages and on tombstones. Its audio is
     /// [`crate::Client::message_speech`].
     pub speech: Option<Speech>,
+    /// The routing address the sender gave (`release-notes@si:sol`), or `None` when the
+    /// message was not routed (or the service is older than DM 0.17). Unlike
+    /// `content.recipient_id`, which names the group in a group, it is always the route.
+    pub routed_to: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(remote = "Message")]
@@ -414,6 +418,8 @@ struct MessageWire {
     pub gif: Option<Gif>,
     #[serde(skip)]
     pub speech: Option<Speech>,
+    #[serde(default)]
+    pub routed_to: Option<String>,
 }
 /// A rendered field read leniently: a shape this release does not know leaves it empty instead
 /// of making the whole message unreadable.
@@ -497,6 +503,7 @@ impl Serialize for Message {
         value["voice"] = shown(serde_json::to_value(&self.voice).unwrap_or_default());
         value["gif"] = shown(serde_json::to_value(&self.gif).unwrap_or_default());
         value["speech"] = shown(serde_json::to_value(&self.speech).unwrap_or_default());
+        value["routed_to"] = serde_json::to_value(&self.routed_to).unwrap_or_default();
         value["metadata"] = Value::Object(self.content.metadata.clone());
         value.serialize(serializer)
     }
@@ -590,6 +597,11 @@ pub struct Conversation {
     /// The newest message the listed account has read (a message code).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_read_message_id: Option<String>,
+    /// The version of the listed account's draft here (what [`crate::Client::draft`] answers
+    /// as `version`), or `None` when it has none (or the service is older than DM 0.17).
+    /// Always written out (`null` for none), so `dm conversations show` says it either way.
+    #[serde(default)]
+    pub draft_version: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -692,16 +704,28 @@ pub struct SyncRequest {
     /// something new arrives.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait: Option<u16>,
+    /// Extra kinds of events, comma-separated: [`SYNC_INCLUDE_CONVERSATIONS`] adds
+    /// conversation events (DM 0.17). Without it the feed carries message events only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<String>,
 }
+
+/// `include` value for conversation events: conversations that appeared for, changed for or
+/// left the account ([`SyncEventKind::Conversation`]).
+pub const SYNC_INCLUDE_CONVERSATIONS: &str = "conversations";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncEventKind {
     Message,
     MessageStatus,
+    /// A conversation that appeared for, changed for or left the account (only with
+    /// `include=conversations`); `change` says what happened.
+    Conversation,
 }
 
-/// Authoritative reference; fetch the current message under current permissions.
+/// Authoritative reference; fetch the current message (or conversation) under current
+/// permissions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncEvent {
     pub event_id: uuid::Uuid,
@@ -709,7 +733,15 @@ pub struct SyncEvent {
     #[serde(rename = "type")]
     pub kind: SyncEventKind,
     pub conversation_id: String,
+    /// The message's code; empty for a conversation event, which has none (and is written
+    /// out without it, as the service sends it, so nobody fetches a message "").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub message_id: String,
+    /// What happened to the conversation (conversation events only): `created`, `invited`,
+    /// `added`, `invitation_accepted`, `invitation_declined`, `invitation_cancelled`, `left`,
+    /// `removed`, `renamed`, `description_changed`, `members_changed` or `owners_changed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
 }
 
 /// `cursor` remains usable on the last page (keep it); `has_more` binds a fixed scan boundary.

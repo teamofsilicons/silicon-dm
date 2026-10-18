@@ -5,8 +5,9 @@
  * at "--te").
  */
 /* Nothing in the panel can make it scroll sideways (clip); a control that hangs a little past its edge for optical
-   alignment (a ghost button's padding) still paints, in the padding of the place the panel is shown in. */
-.panel { display: grid; min-width: 0; gap: 0; padding-bottom: var(--space-4); overflow-x: clip; overflow-clip-margin: 12px; grid-template-columns: minmax(0, 1fr); }
+   alignment (a ghost button's padding, the frame of a name being edited in place) still paints, in 12px of the place's
+   own padding that the panel takes in and gives back (overflow-clip-margin only works where both axes clip). */
+.panel { display: grid; min-width: 0; gap: 0; margin-inline: -12px; padding: 0 12px var(--space-4); overflow-x: clip; grid-template-columns: minmax(0, 1fr); }
 .section { display: grid; min-width: 0; gap: var(--space-3); border-top: 1px solid var(--border-subtle); padding: var(--space-5) 0; grid-template-columns: minmax(0, 1fr); }
 .panel > .section:first-child, .panel > .profile:first-child { border-top: 0; padding-top: var(--space-3); }
 .sectionHead { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: 36px; margin-block: -6px; }
@@ -67,6 +68,11 @@
 .groupHead .groupName[data-variant] { --size: var(--text-lg); }
 .nameField { min-width: 0; }
 .groupDescription { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
+/* While one of the two is edited, its Save and Cancel stand one above the other at the end of its first line, which puts
+   Cancel over the next field's line: the field being edited is drawn above the other (which would take the tap meant
+   for Cancel), and the other's frame and pencil (always shown on touch screens) step aside until the edit ends. */
+.groupHead [data-variant][data-editing] { z-index: 1; }
+.groupHead:has([data-editing]) [data-variant]:not([data-editing]) button + span { visibility: hidden; }
 .addForm { display: grid; min-width: 0; gap: var(--space-3); padding: var(--space-2) 0 var(--space-3); }
 .formActions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 

@@ -1,6 +1,6 @@
 ---
 title: Wire format
-description: DM's JSON envelopes and shapes under contract 4. Conversations and identifiers, messages and their 0.17 fields (attachment details, voice notes, GIFs, speech, metadata), history and deletion, the sync feed, drafts and retries.
+description: DM's JSON envelopes and shapes under contract 4. Conversations and identifiers, messages and their 0.17 fields (attachment details, voice notes, GIFs, speech, metadata, routing), history and deletion, the sync feed and its conversation events, drafts and retries.
 kind: reference
 order: 68
 related:
@@ -22,11 +22,13 @@ Requests and responses use `{"type":"...","data":{...}}`. Full schemas and examp
 
 A direct conversation's address is its two accounts' current ids joined by `::` (`c:ada::si:scout`); a group's is its id (`g:engineering`, or a three-part id such as `g:tos:engineering` for groups created before contract 4); a conversation of three or more accounts that is not a group, and one kept only for its history, is addressed by its UUID ([identifiers and addresses](../learn/identifiers.md)). Accounts are named `{"type","id","uuid","display_name"?,"pfp_url"?}` with the current id; a Silicon adds `"custodian"`, its custodian named the same way, one level deep (DM 0.17; absent when DM knows no custodian). Message IDs use conversation-local lowercase base36 codes, starting at `000`, padded to three characters and expanding to `1000` after `zzz`. Legacy message/conversation UUID aliases remain accepted. Bundle IDs independently start at `001` in each conversation. A bundle reference is `{"id":"001","role":"display"}` on its summary or `{"id":"001","role":"member"}` on an original message.
 
-Conversation `last_message_status` is `sent`, `delivered`, `read`, or null. Every summary carries `unread_count` (messages from others, not deleted, not bundled away, without a read receipt from the listed account) and `last_read_message_id` (a message code or null). Group delivery/read requires every recipient. `updated_at` advances on messages, edits, deletion and group details/membership changes. Receipts, presence, typing and private drafts do not reorder conversations.
+Conversation `last_message_status` is `sent`, `delivered`, `read`, or null. Every summary carries `unread_count` (messages from others, not deleted, not bundled away, without a read receipt from the listed account), `last_read_message_id` (a message code or null) and, since DM 0.17, `draft_version`: the listed account's draft version there (the `version` `GET …/draft` answers and `If-Match` takes), or null when it has no draft, so a client asks for a draft only when there is one. Group delivery/read requires every recipient. `updated_at` advances on messages, edits, deletion and group details/membership changes. Receipts, presence, typing and private drafts do not reorder conversations.
 
 ## Messages and history
 
-A message contains `message-id`, `conversation_id`, `recipient_id`, `sender`, `message`, `attachments`, `voice_transcript`, `reply`, `bundle`, `history`, `created_at`, `updated_at`, `deleted_at`, `delivered_at` and `read_at`, and since DM 0.17 `attachment_details`, `voice`, `gif`, `speech` and `metadata`. A message an app sent for its sender with a User verification proof also carries `via_app` (the app's id, such as `interface`); it is absent when the sender sent it itself.
+A message contains `message-id`, `conversation_id`, `recipient_id`, `sender`, `message`, `attachments`, `voice_transcript`, `reply`, `bundle`, `history`, `created_at`, `updated_at`, `deleted_at`, `delivered_at` and `read_at`, and since DM 0.17 `attachment_details`, `voice`, `gif`, `speech`, `metadata` and `routed_to`. A message an app sent for its sender with a User verification proof also carries `via_app` (the app's id, such as `interface`); it is absent when the sender sent it itself.
+
+`recipient_id` keeps its first meaning: in a group it is the group's id; in a direct conversation the routing address the sender gave, else the other account; in a conversation of several the routing address, else the conversation's UUID. `routed_to` is the routing address alone (`release-notes@si:sol`, current ids), or null when the sender gave none, in every kind of conversation; read it to show where a message was routed. Routing never changes, and a tombstone keeps it.
 
 Attachments are credential-free HTTPS URLs. Text, an attachment, a voice note, a GIF or speech is required. Attachment-only messages have empty text. Reply content is resolved by the server. Caller-supplied content cannot change sender authority or conversation routing.
 
@@ -82,6 +84,20 @@ Deletion sets `deleted_at` without appending history. Stored history is retained
 deduplicate on `event_id` and fetch the message. `wait` (0 to 30 seconds) holds an empty page open
 until something arrives. 409 `sync_reset_required`: get `?reset=true`, refresh, continue. The
 retired `/api/v1/ws` and `/api/v1/ws/shared` answer 410 `delivery_moved`.
+
+With `include=conversations` (DM 0.17) the same feed also carries conversation events, in the same order and with
+their own `event_id` and `sequence`:
+
+```json
+{"event_id":"0199f2a1-5d0e-7c11-9a43-0c6f9b8e2d11","sequence":42,"type":"conversation","conversation_id":"g:launch-week","change":"renamed"}
+```
+
+`conversation_id` is the conversation's id as `GET /api/v1/conversations` names it; there is no `message_id`.
+`change` is `created`, `invited`, `added`, `invitation_accepted`, `invitation_declined`, `invitation_cancelled`,
+`left`, `removed` (each about your own place in it), or `renamed`, `description_changed`, `members_changed`,
+`owners_changed` (the conversation changed for you). Read the conversation (or `GET /api/v1/invitations`) on any of
+them; after `left` or `removed` it is 404, so drop it. Without `include` these events are skipped and the cursor
+moves past them, so a client that never asks never meets one.
 
 Draft saves use compare-and-swap versions. A stale save returns HTTP 409 with `data.error.code: draft_conflict`, recovery instructions, and the current draft fields in `data`. The save was not applied. Keep local content, resolve against the returned version, and retry explicitly.
 

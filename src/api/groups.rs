@@ -40,11 +40,7 @@ pub(super) async fn get(
     ApiPath(path): ApiPath<GroupPath>,
 ) -> AppResult<Json<Conversation>> {
     if access == ConversationAccess::Invitee {
-        return Err(AppError::refused(
-            StatusCode::FORBIDDEN,
-            "invitation_pending",
-            "You are invited to this group but have not accepted yet: see GET /api/v1/invitations, then POST /api/v1/groups/{group}/accept.",
-        ));
+        return Err(invitation_pending());
     }
     Ok(Json(
         state
@@ -244,6 +240,16 @@ async fn require_manager(state: &AppState, auth: &AuthContext, id: Uuid) -> AppR
     } else {
         Err(not_manager())
     }
+}
+
+/// 403 for an invitee reaching into a group it has not joined yet: what it can do instead.
+pub(super) fn invitation_pending() -> AppError {
+    AppError::refused(
+        StatusCode::FORBIDDEN,
+        "invitation_pending",
+        "You are invited to this group but have not accepted yet, so its messages, drafts and members are not yours to read or write.",
+    )
+    .with_hint("GET /api/v1/invitations (dm groups invitations) shows the invitation; POST /api/v1/groups/{group}/accept (dm groups accept GROUP) joins, with the whole history.")
 }
 
 fn not_manager() -> AppError {

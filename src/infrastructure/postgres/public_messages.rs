@@ -225,6 +225,10 @@ impl PostgresStore {
                 .fetch_optional(self.pool())
                 .await?;
         let public = public.unwrap_or_else(|| conversation.to_string());
+        // The routing address the sender gave (`release-notes@si:sol`), whatever kind of
+        // conversation this is. `recipient_id` keeps its older meaning, which names the group
+        // in a group, so a routed group message is only recognisable by `routed_to`.
+        let routed_to = value["recipient_id"].clone();
         let recipient = if public.starts_with("g:") {
             json!(public)
         } else if !value["recipient_id"].is_null() {
@@ -285,7 +289,7 @@ impl PostgresStore {
         }
         let mut output = json!({
             "message-id":silicon_dm_protocol::message_code(sequence), "conversation_id":public,
-            "recipient_id":recipient, "sender":value["sender"], "message":content["message"],
+            "recipient_id":recipient, "routed_to":routed_to, "sender":value["sender"], "message":content["message"],
             "attachments":content["attachments"], "voice_transcript":content["voice_transcript"],
             "attachment_details":content["attachment_details"], "voice":content["voice"],
             "gif":content["gif"], "speech":content["speech"], "metadata":content["metadata"],

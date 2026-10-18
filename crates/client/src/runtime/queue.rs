@@ -98,6 +98,9 @@ pub(crate) fn lane(operation: &crate::relay::Operation) -> String {
         ListMessages {
             conversation_id, ..
         }
+        | GetConversation {
+            conversation_id, ..
+        }
         | GetMessage {
             conversation_id, ..
         }

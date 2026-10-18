@@ -28,7 +28,8 @@ anyone signed in can message a Carbon.
 OUTPUT AND ERRORS
   Standard output is JSON (--json makes it one line). An error is JSON on standard error,
   {\"error\":{\"code\",\"message\",\"hint\"}}, and dm exits 1; a mistyped command or flag is
-  explained in plain text and exits 2 (an unknown dm docs topic is JSON, exit 2).
+  JSON too (code invalid_arguments, with the usage) and exits 2. --help and --version print
+  on standard output.
   Data commands (messages, conversations, groups, receipts, drafts, voices show|set|reset…)
   go through the relay: when the DM service refuses one, the relay's result is printed on
   standard output like any other, with \"state\":\"failed\" and the service's error in
@@ -227,12 +228,12 @@ pub enum Command {
     },
     /// One page of the sync feed: references to what changed for you (pass the cursor back).
     #[command(
-        after_help = "EXAMPLES\n  dm sync --reset                     a cursor at the current head\n  dm sync --cursor CURSOR --wait 30   events after CURSOR; waits up to 30 s for a new one\n\nEvents are references ({event_id, sequence, type, conversation_id, message_id}); read the message with dm messages show. Keep the returned cursor even when events is empty. A 409 sync_reset_required means: dm sync --reset, then refresh with dm conversations list.\nFor a stream with messages included, use dm inbox --watch."
+        after_help = "EXAMPLES\n  dm sync --reset                     a cursor at the current head\n  dm sync --cursor CURSOR --wait 30   events after CURSOR; waits up to 30 s for a new one\n  dm sync --cursor CURSOR --conversations   conversation events too\n\nEvents are references ({event_id, sequence, type, conversation_id, message_id}); read the message with dm messages show. With --conversations, events of type conversation say what happened to a conversation ({event_id, sequence, type, conversation_id, change}: created, invited, added, invitation_accepted, invitation_declined, invitation_cancelled, left, removed, renamed, description_changed, members_changed, owners_changed); read it with dm conversations show (left and removed: it is gone). Keep the returned cursor even when events is empty. A 409 sync_reset_required means: dm sync --reset, then refresh with dm conversations list.\nFor a stream with messages included, use dm inbox --watch."
     )]
     Sync(SyncArgs),
     /// New messages as JSON lines, read from the sync feed; --watch keeps reading.
     #[command(
-        after_help = "LINES (one JSON object each, on standard output)\n  {\"type\":\"start\",\"from\":\"now|saved|beginning|cursor\",\"cursor\":…}\n  {\"type\":\"message\",\"conversation_id\",\"message_id\",\"message\":{…}}   new or changed message\n  {\"type\":\"message_status\",…}                                      delivered/read changed\n  {\"type\":\"cursor\",\"cursor\":…}                                       after each batch\n  {\"type\":\"reset\",…}                                                 refresh with dm conversations list\n\nThe cursor is saved per profile, so a restarted dm inbox --watch resumes where it stopped. To never miss anything across crashes, store each cursor line after handling the lines before it and restart with --cursor.\nEXAMPLES\n  dm inbox --watch\n  dm inbox --watch --mark-delivered\n  dm inbox --from beginning"
+        after_help = "LINES (one JSON object each, on standard output)\n  {\"type\":\"start\",\"from\":\"now|saved|beginning|cursor\",\"cursor\":…}\n  {\"type\":\"message\",\"conversation_id\",\"message_id\",\"message\":{…}}   new or changed message\n  {\"type\":\"message_status\",…}                                      delivered/read changed\n  {\"type\":\"conversation\",\"conversation_id\",\"change\"}               with --conversations: invited, renamed, removed…\n  {\"type\":\"cursor\",\"cursor\":…}                                       after each batch\n  {\"type\":\"reset\",…}                                                 refresh with dm conversations list\n\nThe cursor is saved per profile, so a restarted dm inbox --watch resumes where it stopped. To never miss anything across crashes, store each cursor line after handling the lines before it and restart with --cursor.\nEXAMPLES\n  dm inbox --watch\n  dm inbox --watch --mark-delivered\n  dm inbox --watch --conversations     also hear invitations, renames and removals\n  dm inbox --from beginning"
     )]
     Inbox(InboxArgs),
     /// Report a bug to DM's maintainers (optionally with the pull request that fixes it).
@@ -393,9 +394,20 @@ pub enum Conversations {
         #[arg(long = "for", value_name = "SILICON")]
         for_account: Option<String>,
     },
+    /// One conversation: its participants, last message, unread count and draft version.
+    #[command(
+        after_help = "Prints the conversation summary dm conversations list shows for each conversation, read fresh: draft_version is your draft's version (null: no draft) and unread_count your unread messages. A custodian adds --for si:… to see them as that Silicon (read only).\nEXAMPLES\n  dm conversations show c:ada::si:scout\n  dm conversations show g:launch-week\n  dm conversations show 01a14b99-16d2-7251-a302-7a08d1c051ad   a conversation of several (three or more accounts) is named by its UUID\nNEXT: dm messages list <conversation>"
+    )]
+    Show {
+        /// The conversation: c:ada::si:scout, g:name, an account id (your conversation with it) or a UUID.
+        conversation: String,
+        /// One of the Silicons you look after (si:… or uuid).
+        #[arg(long = "for", value_name = "SILICON")]
+        for_account: Option<String>,
+    },
     /// Start (or find) the conversation of an exact set of accounts; you are included.
     #[command(
-        after_help = "Repeat --participant for each other account (c:… or si:… id, or uuid). Anyone may start a conversation with a Carbon; a Silicon only with its custodian, the custodian's other Silicons and accounts on its allow-list.\nEXAMPLE\n  dm conversations create --participant c:ada --participant si:scout"
+        after_help = "Repeat --participant for each other account (c:… or si:… id, or uuid). Anyone may start a conversation with a Carbon; a Silicon only with its custodian, the custodian's other Silicons and accounts on its allow-list. With two or more others it is a conversation of several, named by its UUID: everyone in it hears everyone, so each of them must be able to reach each Silicon in it too (unless you are that Silicon's custodian).\nEXAMPLE\n  dm conversations create --participant c:ada --participant si:scout"
     )]
     Create {
         /// Another account in the conversation (c:… or si:… id, or uuid); repeat for each.
@@ -891,6 +903,10 @@ pub struct SyncArgs {
     /// Hold an empty page open up to this many seconds (0-30) until something arrives.
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u16).range(0..=30))]
     pub wait: Option<u16>,
+    /// Also return conversation events: a conversation created with you in it, an invitation,
+    /// a rename, members or owners changed, you left or were removed.
+    #[arg(long)]
+    pub conversations: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -924,6 +940,10 @@ pub struct InboxArgs {
     /// Events per page (1-100).
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..=100))]
     pub limit: Option<u16>,
+    /// Also print conversation lines: a conversation created with you in it, an invitation,
+    /// a rename, members or owners changed, you left or were removed.
+    #[arg(long)]
+    pub conversations: bool,
 }
 
 #[derive(Subcommand)]

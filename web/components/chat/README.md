@@ -53,7 +53,9 @@ path, so `/api/v1/me` is fetched at `/api/api/v1/me`).
 
 ```
 service ──GET /api/v1/sync?wait=25──▶ sync.ts ──getMessage──▶ cache.ts (upsertMessage, applyMessageToSummaries)
-   ▲                                    │  └─ a conversation the list lacks ─▶ refreshConversationsSoon (once per burst)
+   ▲     (&include=conversations)       │  ├─ a conversation the list lacks ─▶ refreshConversationsSoon (once per burst)
+   │                                    │  ├─ conversation events ─▶ planConversationEvents ─▶ applyConversationPlan
+   │                                    │  │     (drop what you left, refresh a changed row in place, list, invitations)
    │                                    └─ onIncoming ─▶ receipts.ts (delivered), notifications.ts
    ├── outbox-store.ts ◀── queueSend (composer): localStorage, one Idempotency-Key per send, Waiting/Failed
    ├── draft-store.ts  ◀── useDraft (composer): localStorage at once, PUT after 1.5 s with If-Match, 409 → merge
@@ -62,19 +64,29 @@ service ──GET /api/v1/sync?wait=25──▶ sync.ts ──getMessage──�
 news.ts ◀▶ this browser's other tabs (BroadcastChannel): a conversation started, joined or left here refreshes theirs
 ```
 
-The service's sync feed carries messages, not conversations. So a new conversation reaches an open list three ways: a
-sync event naming a conversation the list lacks (`sync.ts` `refreshConversationsSoon`), an invitation that vanishes
-without this tab answering it (accepted elsewhere; invitations are asked for every 15 s, `shell/chat-runtime.tsx`),
-and another tab's news (`news.ts` `announceConversationsChanged`, called by `dialogs/open-conversation.ts`, the
-invitations dialog and `details/group-actions.ts`). The list's own refresh every 60 s is only a safety net.
+Conversations reach an open list through the sync feed too. When GET /api/v1/contracts announces
+`features.conversation_events` (DM 0.17), the loop asks for them (`include=conversations`): a conversation created
+with you, an invitation, a group joined (`added`, `invitation_accepted`) or left (`left`, `removed`) on any device, a
+rename, a new description, members or owners. `sync-plan.ts` `planConversationEvents` turns a page of them into what
+to do, the last word on each conversation winning; `sync.ts` `applyConversationPlan` drops what you left at once,
+asks for a changed conversation again and puts it in its row's place (`cache.ts` `replaceSummary`, which keeps a
+newer last message the feed brought meanwhile), and asks for the list or the invitations once per burst. While the
+service offers them (`features.ts` `useConversationEvents`), the invitations are asked for every 60 s instead of 15
+and the group panel every 2 minutes instead of 30 s, as safety nets. Against an older service (or in a custodian's view,
+which is not in your feed) the website keeps its three slower signals: a message in a conversation the list lacks
+(`refreshConversationsSoon`), an invitation that vanishes without this tab answering it (accepted elsewhere;
+`shell/chat-runtime.tsx`), and another tab's news (`news.ts` `announceConversationsChanged`, called by
+`dialogs/open-conversation.ts`, the invitations dialog and `details/group-actions.ts`). The list's own refresh every
+60 s is a safety net either way, and a refresh that fails keeps what was loaded on screen.
 
 | Module | What |
 | --- | --- |
 | `types.ts` | The service's shapes. 0.17 fields are optional (`speech`, `voice`, `gif`, `attachment_details`, `metadata`, `unread_count`, `last_read_message_id`, `me.speech`, a Silicon's `custodian`), so the website works against an older service too. |
-| `api.ts` | One typed function per route the website uses. `getConversation` falls back to the group route or the list on an older service. |
-| `hooks.ts` | `useMe`, `useConversations` (infinite; a view polls every 10 s), `useConversation`, `useMessages` (newest page first; `messages` oldest first), `useInvitations` (15 s), `useGroup`, `useAllowList`. |
+| `api.ts` | One typed function per route the website uses. `getConversation` falls back to the group route or the list on an older service; `getContracts` says what the service offers (read once by the sync loop). |
+| `hooks.ts` | `useMe`, `useConversations` (infinite; a view polls every 10 s), `useConversation`, `useMessages` (newest page first; `messages` oldest first), `useInvitations` (15 s; 60 s while conversation events flow), `useGroup`, `useAllowList`. |
 | `cache.ts` | Pure cache updates: merge (a deletion is never undone, receipts never go back), upsert in order, a row moves up with its preview, time and unread count, read results, unread totals. |
-| `sync-plan.ts`, `sync.ts` | Dedupe on `event_id`, one fetch per message, cursor in sessionStorage, 409 → `reset=true` and refresh everything, backoff 1 s → 30 s, wakes on `online`, stops on 401; `refreshConversationsSoon`. One loop per tab. |
+| `sync-plan.ts`, `sync.ts` | Dedupe on `event_id`, one fetch per message, conversation events (`planConversationEvents`, `applyConversationPlan`), cursor in sessionStorage, 409 → `reset=true` and refresh everything, backoff 1 s → 30 s, wakes on `online`, stops on 401; `refreshConversationsSoon`, `refreshInvitationsSoon`. One loop per tab. |
+| `features.ts` | Whether conversation events reach this tab (`offersConversationEvents` reads the contracts; `useConversationEvents`). |
 | `news.ts` | Conversation news between this browser's tabs. |
 | `outbox.ts`, `outbox-store.ts` | The send state machine (pure, tested) and its runner: 5 automatic attempts while online (1, 2, 4, 8 s apart), offline attempts don't count, Retry/Discard, per-conversation order, a Web Lock per item across tabs. |
 | `drafts.ts`, `draft-store.ts` | The draft merge (pure, tested) and its runner: one request per opening, a 404 is "no draft". |
@@ -88,8 +100,10 @@ invitations dialog and `details/group-actions.ts`). The list's own refresh every
 
 Kept in the browser: `dm:outbox:v1:<account>`, `dm:draft:v1:<account>:<address>`, `dm:tray:v1:<account>:<address>`,
 `dm:settings:v1`, `dm:shortcuts:v1`, `dm:voices:v1`, `dm:voice-cache:v1` (the index of Cache Storage
-`dm-voice-v1:<fingerprint>`); in sessionStorage `dm:sync-cursor:v1:<account>` and `dm:device:v1`. Between tabs:
-BroadcastChannel `dm:conversations:v1:<account>`, Web Locks per outbox item, `dm-listen:<address>` and `dm-listen-voice`.
+`dm-voice-v1:<fingerprint>`), `dm:photo-shapes:v1`, `dm:recordings:v1` (recordings in progress; their segments in the
+origin's private file system under `dm-recordings/`, else IndexedDB `dm-recordings`); in sessionStorage `dm:sync-cursor:v1:<account>` and `dm:device:v1`. Between tabs:
+BroadcastChannel `dm:conversations:v1:<account>`, Web Locks per outbox item, `dm-listen:<address>`, `dm-listen-voice`
+and `dm-recording:<id>`.
 
 ## The keyboard (lib/shortcuts)
 
@@ -122,13 +136,13 @@ ticks, `IconAction` (an icon button with its keys in the tooltip).
 ### Thread (`thread/**`)
 | File | What |
 | --- | --- |
-| `conversation-view.tsx` | Owns the conversation, its messages and the outbox; opens at the first unread. Provides `ThreadActions` (stable for the visit) and `ThreadPeople`. The offline banner, the load-failure state, the custodian view's note. |
+| `conversation-view.tsx` | Owns the conversation, its messages and the outbox; opens at the first unread. Provides `ThreadActions` (stable for the visit) and `ThreadPeople`. The offline banner, the load-failure state, the custodian view's note (it says whose messages may be deleted there). |
 | `message-list.tsx` | `role="log"`, `aria-live="polite"`. Rows added above the old top come in quietly (only new messages from others are read out). The reading position is anchored to the first message on screen; a 140-row window for long threads; older pages load within 1600 px of the top; "Jump to latest ↓ (n)"; `#code` links and reply jumps (`thread-model` `locateCode`); one IntersectionObserver for receipts; message keys. |
-| `message-row.tsx`, `thread-actions.tsx` | `MessageRow` (memoized on `sameMessageVersion`): the bubble, meta (time, state, Edited, via, ISI), Listen, delete asked in place. The toolbar shows on the one message in use (`thread-actions` InUse store, set by the message list: a selection by keyboard or tap wins over a hover, and hover counts only on devices that hover), placed by `thread-model` `toolbarPlacement`: beside the bubble (or compact), under a selected message in the thread's flow, over its top edge only where nothing is drawn, or not at all. `PendingRow` draws a Waiting or Failed send as the message will look (`pendingMedia`). |
-| `message-content.tsx`, `attachments.tsx`, `rich-text.tsx` | Reply quote, text, speech and voice notes (with address and code), photos (grid, lightbox), video, files, GIFs (pausable), bundles, tombstones. Every attachment address goes through `displayUrl`, downloads through `downloadUrl`. |
+| `message-row.tsx`, `thread-actions.tsx` | `MessageRow` (memoized on `sameMessageVersion`): the bubble, meta (time, state, Edited, via, ISI), Listen, delete asked in place (the question focuses Delete: Enter deletes, Esc keeps). One message is in use at a time (`thread-actions` InUse store, set by the message list): a selection, by keyboard or a tap (a finger, or any click under 768 px), wins over a hover, hover counts only on devices that hover and never in the phone layout, and focus moving within the selected row (its ⋯) keeps the selection. Its toolbar is placed by `thread-model` `toolbarPlacement`: beside the bubble, beside it without the time (compact), under a selected message in the thread's flow, over its top edge only where nothing is drawn, or not at all; a hover never moves the thread. One action layer at a time: `ThreadActions.layers` counts what is open over the thread (the message menu, the Edited popover, Message details, the lightbox through `useLayer(open)`; account cards through one MutationObserver on `data-hover-card`; `useLayerOpen()` reads it), and while one is, the message in use stays as it is and its toolbar is hidden in place (`visibility: hidden`, so nothing moves). `canDelete`: your own messages, and in a custodian's view the viewed Silicon's own (`deleteMessage(…, view)` sends `?for=si:x`); `cancelDelete(code)` takes the question back. `PendingRow` draws a Waiting or Failed send as the message will look (`pendingMedia`: its pictures, voice and files from the tray). |
+| `message-content.tsx`, `attachments.tsx`, `rich-text.tsx` | Reply quote, text, speech and voice notes (with address and code; a spoken message with a written caption shows the caption first, then the player and the spoken words as a one-line transcript), photos at their own shape (one alone up to 360 × 420 px, `photoRatio`; two to four in rows of one height, `thread-model` `galleryRows` and `galleryRatio`; shapes remembered in `dm:photo-shapes:v1` so a reopened thread does not move) with the lightbox, video, files, GIFs (pausable), bundles, tombstones. Every attachment address goes through `displayUrl`, downloads through `downloadUrl`. |
 | `message-menu.tsx`, `message-details-dialog.tsx` | One menu for the thread; Message details (Silicon UI JSON viewer, the link, the `dm` commands from `messageCommands`, laid out by `details/cli.ts` `layoutCommand`). |
 | `thread-header.tsx`, `thread-beginning.tsx`, `account-card.tsx` | The status line (presence, activity, "N members" or "3 people"), Listen mode, details, ⋯ (copy the address, link, CLI command; Mark as read); the top of history; a person's hover card in groups. |
-| `row-focus.ts`, `thread-model.ts` | Roving Tab order (`data-row-tab`, `data-row-keep-tab`); pure logic, tested in `tests/thread-model.test.ts`. |
+| `row-focus.ts`, `thread-model.ts`, `use-online.ts` | Roving Tab order (`data-row-tab`, `data-row-keep-tab`); pure logic, tested in `tests/thread-model.test.ts`: among it `plainFailure` (a failure where nothing answered, or the answer said nothing, in a Carbon's words; its code and status kept so what branches on them still works), `routingOf` (`routed_to`, or an older service's `recipient_id` with an `@`), `messageLabel` (a row's name: sender, time, the caption or words), `sentSentence` and `conversationPhrase` (Message details: "Sent today at 09:55 by Sol in your conversation with Sol."; the conversation view passes `where`). `useOnline`: no presence is shown while this browser is offline. |
 
 Rows carry `data-message-row`, `data-message-code`, `data-conversation`, `data-sender-id`, `data-status` (and
 `data-row-key`, `data-active`, `data-fresh`, `data-highlight`, `data-deleted`); keep them, and each row an `article`
@@ -143,19 +157,34 @@ account and conversation outside React, so uploads and a waiting send survive a 
 `link-bar.tsx`, `gif-picker.tsx`, slash commands (`slash.ts`, `slash-menu.tsx`: `/gif`, `/upload`, `/link`, `/voice`,
 `/dictate`), `paste.ts`, `drop-overlay.tsx`, `uploads-config.ts`. `voice-bridge.ts` is the contract with the voice area.
 
-Uploads are the website's job (the DM service only stores links). `POST /api/uploads?name=` streams the body to a temp
-file with its SHA-256 and the `UPLOADS_MAX_BYTES` cap, then saves it into the Carbon's own Briefcase (`apps/dm/`) as DM
-acting for the Carbon (a User verification proof per upload, a fresh proof token per Briefcase request, revoked after),
-and answers `{url, name, content_type, size}`. Its rules: same-origin writes only (`cross_site_request`), at most 6
-uploads per account at once (429 `too_many_uploads`), file names cleaned of control and direction characters, a sign-in
-in its last 30 s answers 401 `session_refresh_needed` (the page renews and resends). `GET /api/uploads/config` says
-whether uploads are on and why not. `GET|HEAD /api/uploads/file?url=` is the only way the browser loads Briefcase's
-bytes (they come with `Cross-Origin-Resource-Policy: same-origin`): only the configured Briefcase's public files, Range
-passed through, inline only for raster images, audio, video and PDF, everything else `application/octet-stream` as an
-attachment, always `nosniff` and a sandbox CSP, so an uploaded file can never run as DM. Client side, `lib/upload/client.ts`
-(`uploadFile` waits while offline and resends a transfer cut by a lost connection) and `lib/upload/display.ts`
-(`displayUrl`: Briefcase links through the proxy; this tab's own pictures, audio and video from local bytes, never
-other types, since a `blob:` URL is DM's origin).
+Uploads are the website's job (the DM service only stores links), of any size: up to Silicon Briefcase's 5 TiB a file,
+or the operator's lower `UPLOADS_MAX_BYTES` (`GET /api/uploads/config` says which, and whether uploads work here and why
+not), from every entry point (the + menu, `⇧⌘U`, `/upload`, paste, drag and drop, voice notes). A drop brings files,
+the files inside folders (`lib/upload/drop.ts`; hidden ones left out), and a picture or link dragged from a web page as
+its link (never fetched by DM's server). The path a file takes:
+
+1. **Preparing** (`lib/upload/hash.ts`, `sha256.ts`): its SHA-256, read in slices in a Web Worker (WebCrypto at once up
+   to 8 MiB), remembered per file so a file sent again is not read twice; Briefcase reserves an upload by its size and
+   digest.
+2. **Sending** (`lib/upload/client.ts` `uploadFile`): `POST /api/uploads?name=…&size=…&sha256=…` with the File itself as
+   the body, through XMLHttpRequest (it streams from disk with the exact Content-Length, and reports progress).
+   Offline it waits; a connection lost on the way sends the file again from its first byte.
+3. **Saving** (`app/api/uploads/route.ts`, `lib/server/briefcase.ts`): the website's server pipes the bytes into the
+   Carbon's own Briefcase (`apps/dm/`) as they arrive, never holding them on disk or in memory: as DM acting for the
+   Carbon (a User verification proof per upload, a fresh proof token per Briefcase request, revoked after), reserve,
+   transfer with the exact Content-Length, commit, link; a failure anywhere cancels the reservation. Node's 5-minute
+   request deadline is lifted for this route only (`liftRequestDeadline`). It answers `{url, name, content_type, size}`.
+
+Its rules: same-origin writes only (`cross_site_request`), at most 6 uploads per account at once (429
+`too_many_uploads`; a tab sends 3 at a time, the rest wait in the tray), file names cleaned of control and direction
+characters, a sign-in in its last 30 s answers 401 `session_refresh_needed` (the page renews and sends again), and it
+never logs a file's name or bytes. The tray shows each file's stage, bytes, speed and time left, with Cancel (at most
+100 items, DM's own limit for a message; folders bringing more than 20 files ask first). `GET|HEAD /api/uploads/file?url=` is the only way the browser loads
+Briefcase's bytes (they come with `Cross-Origin-Resource-Policy: same-origin`): only the configured Briefcase's public
+files, Range passed through, inline only for raster images, audio, video and PDF, everything else
+`application/octet-stream` as an attachment, always `nosniff` and a sandbox CSP, so an uploaded file can never run as
+DM. `lib/upload/display.ts` `displayUrl`: Briefcase links through the proxy; this tab's own pictures, audio and video
+from local bytes, never other types, since a `blob:` URL is DM's origin.
 
 ### Voice (`voice/**`, `lib/voice/**`)
 `lib/voice/index.ts` is the public face: `useVoiceAvailability` (what works and why not), `useListenMode`,
@@ -164,12 +193,20 @@ other types, since a `blob:` URL is DM's origin).
 `sources.ts` (speech fetched once with If-None-Match, a 64 MB memory LRU and per-account Cache Storage, voice notes
 decoded into peaks), `listen-mode.ts` + `queue.ts` (one tab speaks per conversation through a Web Lock, Listen here
 moves it; tabs on different conversations take turns; it holds while you type or record; a deleted message stops),
-`recorder.ts` + `microphone.ts` (recording keeps what a vanished microphone recorded), `availability.ts`,
+`recorder.ts` + `microphone.ts` (recording keeps what a vanished microphone recorded), `takes.ts` (a voice message up
+to 48 hours, `recorder.ts` `MAX_RECORDING_MS`, with `limitWarning` and `limitReached`: written as it is recorded to the
+origin's private file system (`dm-recordings/<id>/`), else IndexedDB (`dm-recordings`), else memory, in segments every
+5 s growing to 60 s, listed in `dm:recordings:v1` and held by the Web Lock `dm-recording:<id>` until it is deleted, so
+after a reload or a crash the composer offers to send what was recorded, or throw it away; deleted once sent, and for
+another account or after signing out; transcribed only up to `/me` `speech.limits.transcribe_max_bytes`,
+`availability.ts` `transcribeMaxBytes`), `sources.ts` `noteDecodable` (a long note streams through `<audio>` instead of
+being downloaded and decoded whole),
+`availability.ts`,
 `account-voices.ts`, `voices.ts` (the default rule and the sample line), `words.ts` (`voiceWords`: every voice failure
 a Carbon reads, in their words),
 `peaks.ts`, `wav.ts`, `lru.ts`. Components: `voice-parts.tsx` (`VoiceNote`, `SpeechMessage`, and re-exports),
 `player-ui.tsx`, `listen-mode-toggle.tsx`, `composer-voice.tsx` (the microphone and its recording bar),
-`voice-picker.tsx` (radio cards with ▶ samples, `AccountVoiceRow`), `settings-parts.tsx` (Settings → Voice and
+`voice-picker.tsx` (radio cards with ▶ samples, in a popover, or a bottom sheet under 768 px; `AccountVoiceRow`), `settings-parts.tsx` (Settings → Voice and
 Listening). `data-voice-ui` marks every voice surface.
 
 ### Details, dialogs, settings (`details/**`, `dialogs/**`, `settings/**`)
@@ -196,12 +233,14 @@ run `python3 scripts/sync-cli-docs.py` from the repository root.
 Vendored from https://ui.teamofsilicons.com/r/<name>.json, each file's sha256 in `silicon-ui-registry.json`
 (`tests/kit-manifest.test.ts` checks every one). Compose the kit's parts rather than editing them; when a file must
 change, keep the edit small, record its new hash and a `local_edit` saying what and why (today: shortcut-recorder's
-"Esc", json-viewer's tree item names, hold-to-confirm's painted fill text).
+"Esc", json-viewer's tree item names, hold-to-confirm's painted fill text, inline-edit's room for its actions).
 
 ## Extension points
 
 - **A message action**: add it to `ThreadActions` (`conversation-view.tsx`), the toolbar (`message-row.tsx`), the menu
   (`message-menu.tsx`) and a `useShortcut` in `message-list.tsx`, with its entry in `lib/shortcuts/registry.ts`.
+- **A layer opened from a message** (a menu, a popover, a dialog): `useLayer(open)` (`thread-actions.tsx`), so the
+  toolbar steps away while it is open.
 - **A shortcut**: an entry in `registry.ts`, a `useShortcut` where it acts, then paste the tables
   `tests/docs-shortcuts.test.ts` prints into `docs/reference/keyboard-shortcuts.md` and sync the docs. A shortcut that
   only works in some places says why with `setShortcutAvailability`.
@@ -229,9 +268,11 @@ The browser tests (`e2e/*.spec.ts`, Playwright) run against the local chat stack
 Accounts, dm-api on 4521, stand-ins for Deepgram on 4540, Briefcase on 4541 and Giphy on 4543, four Carbons and six
 Silicons). `accounts.setup.ts` takes two Carbons from the stack's identity pool (ada is "carbon", bo is "friend"), so
 no email code is spent; `support.ts` signs each test in with "Continue as". The specs: `product` (two Carbons end to
-end, a report), `thread`, `composer`, `voice` (Chrome's fake microphone fed a WAV), `details`, `sync` (conversations
-that start elsewhere), `shell` (toasts never cover the composer), `a11y` (axe WCAG 2.2 A/AA on every page and the
-run's own conversation), `public`, `session`, `refresh`.
+end, a report), `thread`, `composer`, `uploads` (every way in, large files, cancelling), `voice` (Chrome's fake
+microphone fed a WAV), `details`, `sync` (conversations that start, change or end elsewhere: with conversation events,
+and with the contracts held without them for the older signals), `shell` (toasts never cover the composer; on a phone,
+a tall dialog keeps its actions and a rename in place keeps Save and Cancel), `a11y` (axe WCAG 2.2 A/AA on every page
+and the run's own conversation), `public`, `session`, `refresh`.
 
 - **One run per port.** `pnpm test:e2e` builds into `.next-e2e` and serves on 4530. Parallel runs take a port of their
   own from 4700–4749 and a build directory of their own: `E2E_PORT=4712 E2E_DIST_DIR=.next-e2e-<name> pnpm exec

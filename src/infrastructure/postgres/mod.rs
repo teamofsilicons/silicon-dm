@@ -3,6 +3,7 @@
 mod accounts;
 mod allow_list;
 mod bundles;
+mod conversation_events;
 mod conversations;
 mod delivery;
 mod directory;

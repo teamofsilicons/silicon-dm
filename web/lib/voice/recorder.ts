@@ -8,7 +8,9 @@
  *                    └─denied─▶ error   └─cancel (Esc) ─▶ idle            any step ─failed─▶ error ─dismiss─▶ idle
  *                                                                        error (dictation) ─retranscribe─▶ transcribing
  *
- * A recording stops by itself at MAX_RECORDING_MS (and sends, as ✓ would), with a warning from WARN_BEFORE_MS before.
+ * A voice message stops by itself at MAX_RECORDING_MS, 48 hours (the longest voice message DM takes), and sends as ✓
+ * would, with a warning from WARN_BEFORE_MS before; its bytes never sit in memory meanwhile (lib/voice/takes.ts). A
+ * dictation stops when it reaches what DM transcribes at once (the composer checks its size).
  */
 
 export type RecordMode = "note" | "dictate";
@@ -43,10 +45,12 @@ export type RecorderEvent =
   | { type: "retranscribe" }
   | { type: "dismiss" };
 
-/** Ten minutes: the longest voice note or dictation. */
-export const MAX_RECORDING_MS = 10 * 60_000;
+/** 48 hours: the longest voice message DM takes (its contract's limit on a voice note's duration_milliseconds). */
+export const MAX_RECORDING_MS = 48 * 3600_000;
 /** The warning shows this long before the end. */
-export const WARN_BEFORE_MS = 30_000;
+export const WARN_BEFORE_MS = 60_000;
+/** Transcription takes at most this many bytes when the service does not say (DM_TRANSCRIBE_MAX_BYTES' default). */
+export const DEFAULT_TRANSCRIBE_MAX_BYTES = 100 * 1024 * 1024;
 
 export const IDLE_RECORDER: RecorderState = { phase: "idle" };
 
@@ -86,6 +90,35 @@ export const recorderBusy = (state: RecorderState) => state.phase === "asking" |
 export function timeLeftWarning(elapsedMs: number, maxMs = MAX_RECORDING_MS, warnMs = WARN_BEFORE_MS): number | null {
   const left = maxMs - elapsedMs;
   return left <= warnMs ? Math.max(0, left) : null;
+}
+
+/** Why a recording is about to stop by itself: its length (48 hours), or its size (what uploads or transcription take). */
+export interface RecordingLimit {
+  leftMs: number;
+  reason: "duration" | "size";
+}
+
+/**
+ * When the recording stops by itself, once that is within the warning: at MAX_RECORDING_MS, or when it reaches
+ * `maxBytes` (a dictation: what DM transcribes at once; a voice message: the largest upload, when there is one), read
+ * from how fast it has grown so far. Null while neither is near.
+ */
+export function limitWarning(input: { elapsedMs: number; bytes: number; maxBytes?: number | null; maxMs?: number; warnMs?: number }): RecordingLimit | null {
+  const maxMs = input.maxMs ?? MAX_RECORDING_MS;
+  const warnMs = input.warnMs ?? WARN_BEFORE_MS;
+  let found: RecordingLimit | null = null;
+  const byTime = maxMs - input.elapsedMs;
+  if (byTime <= warnMs) found = { leftMs: Math.max(0, byTime), reason: "duration" };
+  if (input.maxBytes && input.bytes > 0 && input.elapsedMs >= 1000) {
+    const bySize = (input.maxBytes - input.bytes) / (input.bytes / input.elapsedMs);
+    if (bySize <= warnMs && (!found || bySize < found.leftMs)) found = { leftMs: Math.max(0, bySize), reason: "size" };
+  }
+  return found;
+}
+
+/** Whether a recording must stop now: 48 hours, or (nearly: 97 %, so the last chunks still fit) `maxBytes`. */
+export function limitReached(input: { elapsedMs: number; bytes: number; maxBytes?: number | null; maxMs?: number }): boolean {
+  return input.elapsedMs >= (input.maxMs ?? MAX_RECORDING_MS) || (!!input.maxBytes && input.bytes >= input.maxBytes * 0.97);
 }
 
 /**

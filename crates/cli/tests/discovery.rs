@@ -122,7 +122,7 @@ fn the_help_says_where_a_refused_data_command_prints() {
     let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
     for promise in [
         "An error is JSON on standard error",
-        "a mistyped command or flag is explained in plain text and exits 2",
+        "a mistyped command or flag is JSON too (code invalid_arguments, with the usage) and exits 2",
         "when the DM service refuses one, the relay's result is printed on standard output like any other, with \"state\":\"failed\" and the service's error in response.error, and dm exits 1",
     ] {
         assert!(
@@ -130,4 +130,65 @@ fn the_help_says_where_a_refused_data_command_prints() {
             "dm --help should say: {promise}\n{help}"
         );
     }
+}
+
+/// A mistyped command or flag is the CLI's JSON error on standard error (exit 2), with the
+/// parser's words, the usage and the command whose help to read; standard output stays empty.
+/// Help and version keep the parser's output on standard output.
+#[test]
+fn argument_errors_are_json_on_standard_error() {
+    let (code, stdout, stderr) = clean_streams(&["messages", "send", "c:ada", "--frob", "1"]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    let error: Value = serde_json::from_str(&stderr).expect("JSON on standard error");
+    assert_eq!(error["error"]["code"], "invalid_arguments");
+    assert_eq!(
+        error["error"]["message"],
+        "Unexpected argument '--frob' found."
+    );
+    assert_eq!(error["error"]["details"]["kind"], "unknown_argument");
+    assert_eq!(error["error"]["details"]["command"], "dm messages send");
+    assert!(
+        error["error"]["details"]["tips"][0]
+            .as_str()
+            .is_some_and(|tip| tip.contains("--from")),
+        "{error}"
+    );
+    assert!(
+        error["error"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.starts_with("Run dm messages send --help")),
+        "{error}"
+    );
+    let (code, _, stderr) = clean_streams(&["--json", "conversations", "show"]);
+    assert_eq!(code, Some(2));
+    assert_eq!(
+        stderr.trim().lines().count(),
+        1,
+        "one line with --json: {stderr}"
+    );
+    let error: Value = serde_json::from_str(&stderr).expect("JSON");
+    assert_eq!(
+        error["error"]["message"],
+        "The following required arguments were not provided: <CONVERSATION>."
+    );
+    assert_eq!(
+        error["error"]["details"]["usage"],
+        "dm conversations show <CONVERSATION>"
+    );
+    let (code, _, stderr) = clean_streams(&["sync", "--wait", "99"]);
+    assert_eq!(code, Some(2));
+    let error: Value = serde_json::from_str(&stderr).expect("JSON");
+    assert_eq!(error["error"]["details"]["kind"], "value_validation");
+    assert_eq!(error["error"]["details"]["command"], "dm sync");
+    // Help and the version are not errors.
+    let (code, stdout, stderr) = clean_streams(&["sync", "--help"]);
+    assert_eq!(code, Some(0));
+    assert!(
+        stdout.contains("--conversations") && stderr.is_empty(),
+        "{stdout}"
+    );
+    let (code, stdout, _) = clean_streams(&["--version"]);
+    assert_eq!(code, Some(0));
+    assert!(stdout.starts_with("dm "), "{stdout}");
 }

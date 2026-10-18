@@ -97,7 +97,7 @@ test("two Carbons talk: a conversation, live delivery, a reply, an edit, a draft
   await captureViews(page, "group");
 
   await friend.goto("/c");
-  await friend.getByRole("button", { name: /invitations?$/ }).click();
+  await friend.getByRole("button", { name: /^Invitations \d+ waiting$/ }).click();
   const invitations = friend.getByRole("dialog", { name: "Invitations" });
   await invitations.locator("li", { hasText: `Working notes ${stamp}` }).getByRole("button", { name: "Accept", exact: true }).click();
   await expect(friend).toHaveURL(/\/c\/g:working-notes/);

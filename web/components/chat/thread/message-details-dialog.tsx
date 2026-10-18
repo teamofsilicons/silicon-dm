@@ -1,21 +1,26 @@
 "use client";
 
 /**
- * Message details (I): the message exactly as the service returns it (Silicon UI's JSON viewer: search, copy a value
- * or its path), its link, and the CLI commands that work for it (show it, reply to it, save it as speech; in a
- * custodian's view only what a custodian may do), each ready to copy and laid out for the width the dialog has (a
- * phone's included), so the block never scrolls sideways. What a Carbon sees here is what a Silicon reads with
- * `dm messages show`.
+ * Message details (I): who sent it, when and where, in names, with the ids under them; the message exactly as the
+ * service returns it (Silicon UI's JSON viewer: search, copy a value or its path), its link, and the CLI commands that
+ * work for it (show it, reply to it, save it as speech; in a custodian's view only what a custodian may do), each
+ * ready to copy and laid out for the width the dialog has (a phone's included), so the block never scrolls sideways.
+ * What a Carbon sees here is what a Silicon reads with `dm messages show`.
+ *
+ * On a phone nothing is cut: the link wraps, the JSON viewer shows every key and value whole (a long line scrolls
+ * sideways inside it) and grows with what is open, so the dialog is the one thing that scrolls up and down.
  */
 import { useLayoutEffect, useState } from "react";
 import { CopyButton } from "@/components/silicon-ui/copy-button/copy-button";
 import { CodeBlock } from "@/components/silicon-ui/code-block/code-block";
 import { Dialog, DialogContent } from "@/components/silicon-ui/dialog/dialog";
 import { JsonViewer } from "@/components/silicon-ui/json-viewer/json-viewer";
-import { messageUrl } from "@/lib/chat/address";
-import { fullTime } from "@/lib/chat/format";
+import { accountName, messageUrl } from "@/lib/chat/address";
+import { clockTime, fullTime } from "@/lib/chat/format";
+import { dayLabel } from "@/lib/chat/timeline";
 import type { Message } from "@/lib/chat/types";
-import { messageCommands } from "./thread-model";
+import { useLayer, useThreadActions } from "./thread-actions";
+import { messageCommands, sentSentence } from "./thread-model";
 import styles from "./thread.module.css";
 
 let canvas: HTMLCanvasElement | null = null;
@@ -57,21 +62,35 @@ function Commands({ code }: { code: (width: number) => string }) {
   );
 }
 
-export function MessageDetailsDialog({ message, address, view, onClose }: { message: Message | null; address: string; view: string | null; onClose: () => void }) {
+/**
+ * `where` names the conversation as a sentence does ("your conversation with Sol", "Launch week": thread-model.ts
+ * conversationPhrase); the sender is "you" when it is the signed-in Carbon.
+ */
+export function MessageDetailsDialog({ message, address, view, where, onClose }: { message: Message | null; address: string; view: string | null; where: string; onClose: () => void }) {
+  const actions = useThreadActions();
   const code = message?.["message-id"] ?? "";
   const link = message && typeof window !== "undefined" ? messageUrl(window.location.origin, address, code, view) : "";
+  useLayer(!!message);
+  const sentence = message
+    ? sentSentence({ time: clockTime(message.created_at), day: dayLabel(new Date(message.created_at)), by: actions.isSelf(message.sender) ? "you" : accountName(message.sender), where })
+    : undefined;
   return (
     <Dialog open={!!message} onOpenChange={open => { if (!open) onClose(); }}>
-      <DialogContent title={message ? `Message ${code}` : "Message"} description={message ? `Sent ${fullTime(message.created_at)} by ${message.sender.id} in ${address}.` : undefined} className={styles.detailsDialog}>
+      <DialogContent title={message ? `Message ${code}` : "Message"} description={sentence} className={styles.detailsDialog}>
         {message ? (
           <div className={styles.detailsBody}>
+            {/* The same, as agents and the CLI name it: the sender's id, the conversation's address, the exact time. */}
+            <p className={styles.detailsIds}>
+              <code>{message.sender.id}</code> in <code>{address}</code> <span aria-hidden="true">·</span>{" "}
+              <time dateTime={message.created_at}>{fullTime(message.created_at)}</time>
+            </p>
             <div className={styles.detailsLink} data-sq="surface">
               <span className={styles.detailsLabel}>Link</span>
               <code className={styles.detailsValue}>{link}</code>
               <CopyButton value={link} label="Copy link" iconOnly variant="plain" />
             </div>
             <Commands code={width => messageCommands(address, message, view, width)} />
-            <JsonViewer data={message} rootName="message" defaultExpandDepth={1} label={`Message ${code} as JSON`} maxHeight={320} />
+            <JsonViewer data={message} rootName="message" defaultExpandDepth={1} label={`Message ${code} as JSON`} maxHeight={320} className={styles.detailsJson} />
           </div>
         ) : null}
       </DialogContent>

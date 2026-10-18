@@ -178,10 +178,12 @@ impl FromRequestParts<AppState> for Authenticated {
                 let (id, access) =
                     super::access::resolve_conversation_path(state, &context, &value, create)
                         .await?;
-                if access == ConversationAccess::Invitee
-                    || (access == ConversationAccess::Custodian
-                        && parts.method != Method::GET
-                        && parts.method != Method::DELETE)
+                if access == ConversationAccess::Invitee {
+                    return Err(super::groups::invitation_pending());
+                }
+                if access == ConversationAccess::Custodian
+                    && parts.method != Method::GET
+                    && parts.method != Method::DELETE
                 {
                     if silicon_dm_protocol::http_type(parts.method.as_str(), parts.uri.path())
                         == "receipts"

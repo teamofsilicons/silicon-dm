@@ -9,9 +9,10 @@
  * typed is ever lost. While typing, the others see "typing…".
  *
  * What goes with the words sits in the tray above the field (./tray.ts, kept per conversation by ./tray-store.ts):
- * files from the + menu (Upload a file, ⌘⇧U), a paste or a drop (./drop-overlay.tsx) upload into the Carbon's Silicon
- * Briefcase with their progress; links (Add a link); a GIF (./gif-picker.tsx); the microphone's voice note (the voice
- * area, through ./voice-bridge.ts). Enter while a file still uploads sends as soon as it is done ("Sends when … is
+ * files of any size from the + menu (Upload a file, ⌘⇧U), /upload, a paste or a drop (./drop-overlay.tsx; a dropped
+ * folder brings its files, and asks first when they are many) upload into the Carbon's Silicon Briefcase with their
+ * progress; links (Add a link, or a link or picture dragged from a web page); a GIF (./gif-picker.tsx); the microphone's
+ * voice note (the voice area, through ./voice-bridge.ts). Enter while a file still uploads sends as soon as it is done ("Sends when … is
  * uploaded", with Cancel beside it, and Esc), even if the Carbon opens another conversation meanwhile: the wish is the tray store's, and
  * this composer leaves its words behind when it goes. A failed upload holds the message until it is retried or
  * removed, so nothing is left out silently. Slash commands at the start of the field (./slash.ts): /gif, /voice,
@@ -29,6 +30,7 @@ import { localDraftText, useDraft } from "@/lib/chat/draft-store";
 import type { DraftHint } from "@/lib/chat/drafts";
 import { chatKeys } from "@/lib/chat/keys";
 import { plainPreview } from "@/lib/chat/markdown";
+import { messageGist } from "@/lib/chat/preview";
 import { queueSend } from "@/lib/chat/outbox-store";
 import { reportActivity } from "@/lib/chat/presence";
 import { applyMessage } from "@/lib/chat/sync";
@@ -36,6 +38,7 @@ import type { AccountRef, Gif, Message } from "@/lib/chat/types";
 import { ApiError } from "@/lib/errors";
 import { notify, notifyError } from "@/lib/notify";
 import { provideShortcuts, useShortcut, useShortcutKeys } from "@/lib/shortcuts/react";
+import { foldersWords, leftOutWords, readDrop, type DropSnapshot } from "@/lib/upload/drop";
 import { useVoiceAvailability } from "@/lib/voice";
 import { IconAction } from "../common/icon-action";
 import { plainFailure } from "../thread/thread-model";
@@ -48,7 +51,7 @@ import { filesToAttach } from "./paste";
 import { blockedWords, itemName, waitingWords } from "./send-latch";
 import { runSlash, slashOptions, type SlashContext } from "./slash";
 import { optionId, SlashMenu } from "./slash-menu";
-import { TRAY_MAX_ITEMS, trayFailed, trayPayload, type TrayItem } from "./tray";
+import { ASK_ABOVE_FILES, TRAY_MAX_ITEMS, trayFailed, trayPayload, type TrayItem } from "./tray";
 import { useBrowserOnline, useTray, type TraySender } from "./tray-store";
 import { TrayView } from "./tray-view";
 import { uploadsOffReason, useUploadsConfig } from "./uploads-config";
@@ -113,6 +116,9 @@ export function shortName(name: string, max = 14): string {
   return `${(space >= 4 ? head.slice(0, space) : name.slice(0, max)).trimEnd()}…`;
 }
 
+/** What the + menu, a paste and a drop say during an edit: attachments go with a new message. */
+const ATTACH_AFTER_EDIT = "Finish or cancel the edit first: attachments go with a new message.";
+
 /** What a screen reader hears when uploads finish: one sentence for a burst of files, each failure with its reason. */
 function uploadedWords(uploaded: TrayItem[]): string {
   if (!uploaded.length) return "";
@@ -158,6 +164,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const uploads = useUploadsConfig();
   const uploadsOff = uploadsOffReason(uploads);
   const maxBytes = uploads?.max_bytes ?? 0;
+  const capped = uploads?.capped === true;
   const voice = useVoiceAvailability();
   const online = useBrowserOnline();
   const [editing, setEditing] = useState<Message | null>(null);
@@ -165,6 +172,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [link, setLink] = useState<{ prefill: string } | null>(null);
   const [gif, setGif] = useState<{ query: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /** A drop of folders with many files waits for a yes (a folder's contents were never seen). */
+  const [question, setQuestion] = useState<{ words: string; action: string; files: File[] } | null>(null);
+  const questionYes = useRef<HTMLButtonElement>(null);
   const [announcement, setAnnouncement] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
@@ -299,7 +309,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       say(uploadsOff);
       return;
     }
-    const taken = tray.addFiles(list, maxBytes);
+    const taken = tray.addFiles(list, { maxBytes, capped });
     if (taken < list.length) say(`${list.length - taken === 1 ? "One file was" : `${list.length - taken} files were`} left out: a message carries up to ${TRAY_MAX_ITEMS} attachments. Send these first.`);
     focus();
   };
@@ -308,6 +318,63 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     tray.dispatch({ type: "add", item: { id: `link-${crypto.randomUUID()}`, kind: "link", url, status: "ready" } });
     setLink(null);
     focus();
+  };
+
+  /**
+   * A drop: files go to the tray, a folder's files too (more than a few ask first), a link or a web page's picture is
+   * attached as a link; anything that cannot go is said, so a drop is never silently nothing.
+   */
+  const takeDrop = async (snapshot: DropSnapshot) => {
+    if (!enabled) return;
+    const dropped = await readDrop(snapshot);
+    const sayings = [...dropped.problems];
+    const { files, links } = dropped;
+    // Attachments go with a new message, so nothing joins a tray hidden behind an edit (the + menu says the same).
+    if (editing && (files.length || links.length || dropped.folders.length)) {
+      say(ATTACH_AFTER_EDIT);
+      return;
+    }
+    const empty = dropped.folders.filter(folder => folder.files === 0);
+    if (empty.length) sayings.push(`${foldersWords(empty)} ${empty.length === 1 ? "has" : "have"} no files to send${empty.some(folder => folder.hidden || folder.empty) ? " (hidden and empty files are left out)" : ""}.`);
+    const left = leftOutWords(dropped.folders.filter(folder => folder.files > 0));
+    if (left) sayings.push(left);
+    if (files.length && uploadsOff) {
+      sayings.push(uploadsOff);
+      files.length = 0;
+    }
+    for (const url of links) addLink(url);
+    const fromFolders = dropped.folders.reduce((sum, folder) => sum + folder.files, 0);
+    if (fromFolders > 0 && files.length > ASK_ABOVE_FILES) {
+      const full = dropped.folders.filter(folder => folder.files > 0);
+      const room = Math.max(0, TRAY_MAX_ITEMS - tray.current().length);
+      const count = Math.min(room, files.length);
+      const many = dropped.folders.some(folder => folder.truncated) ? `more than ${files.length.toLocaleString("en-US")}` : files.length.toLocaleString("en-US");
+      if (!count) sayings.push(`This message already carries ${TRAY_MAX_ITEMS} attachments, the most it takes. Send it first.`);
+      else {
+        setQuestion({
+          words: count < files.length
+            ? `${foldersWords(full)} ${full.length === 1 ? "has" : "have"} ${many} files, and a message carries up to ${TRAY_MAX_ITEMS} attachments. Upload the first ${count}?`
+            : `${foldersWords(full)} ${full.length === 1 ? "has" : "have"} ${many} files. Upload all of them?`,
+          action: `Upload ${count} files`,
+          files: files.slice(0, count),
+        });
+      }
+    } else if (files.length) {
+      addFiles(files);
+    }
+    if (sayings.length) say(sayings.join(" "));
+  };
+
+  // The question takes the keyboard when it is asked (Enter answers yes, Esc no).
+  useEffect(() => {
+    if (question) questionYes.current?.focus();
+  }, [question]);
+
+  const answerQuestion = (yes: boolean) => {
+    const asked = question;
+    setQuestion(null);
+    if (yes && asked) addFiles(asked.files);
+    else focus();
   };
 
   const pickGif = (chosen: Gif) => {
@@ -447,15 +514,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
   });
   useShortcut("composer.upload", () => {
-    if (editing) return false;
-    openFilePicker();
+    if (editing) say(ATTACH_AFTER_EDIT);
+    else openFilePicker();
   }, enabled);
 
   if (disabledReason) {
     return (
       <div className={styles.composer} data-composer="" data-disabled="">
         <p className={styles.disabled} role="note">{disabledReason}</p>
-        <DropOverlay blocked={disabledReason} maxBytes={maxBytes} onFiles={() => undefined} />
+        <DropOverlay blocked={disabledReason} maxBytes={maxBytes} onDrop={() => undefined} />
       </div>
     );
   }
@@ -475,7 +542,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <CornerUpLeft size={15} strokeWidth={1.75} aria-hidden="true" />
           <span className={styles.barText}>
             <span className={styles.barTitle}>Replying to {replyTarget ? (sameAccount(replyTarget.sender, me) ? "yourself" : accountName(replyTarget.sender)) : `message ${draft.replyTo}`}</span>
-            {replyTarget ? <span className={styles.barLine}>{replyTarget.deleted_at ? "This message was deleted" : plainPreview(replyTarget.speech?.script ?? replyTarget.message ?? replyTarget.voice_transcript ?? "", 120) || "Attachment"}</span> : null}
+            {/* What the message is about, as its row and its quote say it: a spoken message's caption, else its words without
+                cues; a photo, a voice note, a GIF in words. */}
+            {replyTarget ? <span className={styles.barLine}>{messageGist(replyTarget)}</span> : null}
           </span>
           <button type="button" className={styles.barClose} data-sq="surface" onClick={() => { draft.setReplyTo(null); focus(); }} aria-label="Cancel the reply"><X size={16} strokeWidth={1.9} aria-hidden="true" /></button>
         </div>
@@ -547,11 +616,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   }
                 }}
                 onPaste={event => {
-                  if (editing) return;
                   const pasted = filesToAttach(event.clipboardData);
                   if (!pasted.length) return;
                   event.preventDefault();
-                  addFiles(pasted);
+                  // Words paste into an edit as usual; files would go with a new message, so they wait for one.
+                  if (editing) say(ATTACH_AFTER_EDIT);
+                  else addFiles(pasted);
                 }}
               />
               <button
@@ -597,18 +667,36 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           addFiles(chosen);
         }}
       />
-      {pending ? (
+      {question ? (
+        <div
+          className={styles.noteRow}
+          role="group"
+          aria-label="Upload the dropped folder's files?"
+          onKeyDown={event => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopPropagation();
+            answerQuestion(false);
+          }}
+        >
+          <p className={styles.note} data-tone="pending" id={`${listId}-question`}>{question.words}</p>
+          {/* Focused when asked: a screen reader reads the question with it. */}
+          <button ref={questionYes} type="button" className={styles.noteAction} data-sq="surface" aria-describedby={`${listId}-question`} onClick={() => answerQuestion(true)}>{question.action}</button>
+          <button type="button" className={styles.noteAction} data-sq="surface" aria-keyshortcuts="Escape" onClick={() => answerQuestion(false)}>Cancel</button>
+        </div>
+      ) : pending ? (
         <div className={styles.noteRow}>
           <p className={styles.note} data-tone="pending" role="status">{waitingWords(items, online)}</p>
           {/* Esc does the same; a phone has no Esc, so the wish can be taken back by touch too. */}
-          <button type="button" className={styles.noteAction} aria-label="Cancel sending" aria-keyshortcuts="Escape" title="Cancel sending (Esc)" onClick={cancelWaiting}>Cancel</button>
+          <button type="button" className={styles.noteAction} data-sq="surface" aria-label="Cancel sending" aria-keyshortcuts="Escape" title="Cancel sending (Esc)" onClick={cancelWaiting}>Cancel</button>
         </div>
       ) : notice ? (
         <p className={styles.note} role="status">{notice}</p>
       ) : null}
       {draft.save === "offline" ? <p className={styles.note} role="status">Offline: your draft is kept in this browser and saves when you are back.</p> : null}
       <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
-      <DropOverlay blocked={uploadsOff} maxBytes={maxBytes} onFiles={addFiles} />
+      {/* During an edit the layer says why nothing can be dropped (attachments go with a new message) before the drop. */}
+      <DropOverlay blocked={editing ? ATTACH_AFTER_EDIT : null} filesOff={uploadsOff} maxBytes={maxBytes} capped={capped} onDrop={snapshot => void takeDrop(snapshot)} />
     </div>
   );
 });

@@ -143,6 +143,8 @@
 .listState { display: grid; justify-items: start; gap: var(--space-2); padding: var(--space-6) var(--space-3); }
 .emptyTitle { color: var(--foreground); font-weight: 500; }
 .empty { color: var(--text-muted); font-size: var(--text-sm); text-wrap: pretty; }
+/* A ghost button's words line up with the sentence above it; its padding (the hover fill) hangs into the margin. */
+.quietAction.quietAction { margin-inline-start: calc(-1 * var(--space-group)); }
 
 .skeletonRow { display: flex; height: 66px; align-items: center; gap: 12px; padding: 10px; }
 .skeletonRow > span:first-child { --sq-r: 30%; width: 42px; height: 42px; flex: none; background: var(--surface-muted); }
@@ -153,7 +155,14 @@
 @keyframes pane-pulse { 50% { opacity: .55; } }
 
 .foot { display: flex; flex: none; align-items: center; justify-content: space-between; gap: var(--space-2); border-top: 1px solid var(--border-subtle); padding: var(--space-2) var(--space-3) calc(var(--space-2) + env(safe-area-inset-bottom, 0px)); }
-.foot > :first-child { min-width: 0; }
+.foot > :first-child { min-width: 0; flex: 0 1 auto; }
+/* The account button (Silicon UI's user menu) keeps its name beside the photo on phones too: the kit shows only the
+   photo under 640 px, which suits a crowded top bar, and this bar has room. A long name ends in an ellipsis first. */
+.account.account { min-width: 0; flex: 0 1 auto; }
+@media (max-width: 639px) {
+  .account.account[data-name] { padding-right: var(--space-3); }
+  .account[data-name] > span:nth-child(2), .account[data-name] > svg { display: block; }
+}
 
 .viewAs {
   --sq-r: 10px;

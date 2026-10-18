@@ -216,6 +216,9 @@ impl PostgresStore {
                 }
             }
             if !announcements.is_empty() {
+                // Rows take each sender's stream lock as they are inserted: in (kind, account)
+                // order, as every other writer takes them, so concurrent writers never wait on
+                // each other in a cycle; each sender still hears in message order.
                 let delivery_ids: Vec<Uuid> =
                     announcements.iter().map(|_| Uuid::now_v7()).collect();
                 let kinds: Vec<&str> = announcements
@@ -246,7 +249,7 @@ impl PostgresStore {
                            d.message_id, d.receipt_id, d.status::message_status
                     FROM unnest($3::uuid[], $4::text[], $5::text[], $6::uuid[], $7::uuid[], $8::text[])
                         WITH ORDINALITY AS d(id, kind, sender, message_id, receipt_id, status, position)
-                    ORDER BY d.position
+                    ORDER BY d.kind::actor_kind, d.sender, d.position
                     "#,
                 )
                 .bind(partition.as_str())

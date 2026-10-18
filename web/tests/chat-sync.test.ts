@@ -1,16 +1,18 @@
 /**
  * Sync events applied to the cached state (lib/chat/sync-plan.ts, lib/chat/cache.ts): each message fetched once, put
  * where it belongs, the conversation's row updated in place (preview, time, unread, order), never moving backwards; a
- * conversation the list does not have refreshes the list once per burst.
+ * conversation the list does not have refreshes the list once per burst; conversation events (DM 0.17) refresh, drop or
+ * add rows and the invitations, the last word on each conversation winning.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyMessageToSummaries, applyReadToSummaries, findMessage, mergeMessage, messagesOldestFirst, statusOf, totalUnread, unreadOf, upsertMessage, type ConversationPages, type MessagePages } from "../lib/chat/cache";
+import { applyMessageToSummaries, applyReadToSummaries, dropSummary, findMessage, mergeMessage, messagesOldestFirst, replaceSummary, statusOf, summariesOf, totalUnread, unreadOf, upsertMessage, type ConversationPages, type MessagePages } from "../lib/chat/cache";
 import { compareCodes } from "../lib/chat/codes";
 import { QueryClient } from "@tanstack/react-query";
 import { chatKeys } from "../lib/chat/keys";
-import { applyMessage, refetchAfterReset, refreshConversationsSoon } from "../lib/chat/sync";
-import { planEvents, SeenEvents, syncDelay } from "../lib/chat/sync-plan";
+import { offersConversationEvents } from "../lib/chat/features";
+import { applyConversationPlan, applyMessage, refetchAfterReset, refreshConversationsSoon } from "../lib/chat/sync";
+import { planConversationEvents, planEvents, SeenEvents, syncDelay } from "../lib/chat/sync-plan";
 import type { AccountRef, ConversationSummary, Message, SyncEvent } from "../lib/chat/types";
 
 const ada: AccountRef = { type: "carbon", id: "c:ada", uuid: "u-ada", display_name: "Ada" };
@@ -167,11 +169,101 @@ test("after a reset the list and your own threads are fetched again; after an ex
   queryClient.invalidateQueries = (async (filters?: Parameters<QueryClient["invalidateQueries"]>[0]) => {
     for (const query of queryClient.getQueryCache().findAll(filters)) asked.push(JSON.stringify(query.queryKey));
   }) as QueryClient["invalidateQueries"];
+  queryClient.setQueryData(chatKeys.invitations(), { items: [] });
   // A new tab's first reset: what it fetched before the head may lack messages that came in meanwhile.
   refetchAfterReset(queryClient, false);
-  assert.deepEqual(asked.sort(), [JSON.stringify(chatKeys.conversations()), JSON.stringify(chatKeys.messages(CONV))].sort(), "your list and threads, not a custodian's view (it is polled)");
+  assert.deepEqual(asked.sort(), [JSON.stringify(chatKeys.conversations()), JSON.stringify(chatKeys.invitations()), JSON.stringify(chatKeys.messages(CONV))].sort(), "your list, invitations and threads, not a custodian's view (it is polled)");
   asked.length = 0;
   refetchAfterReset(queryClient, true);
-  assert.equal(asked.length, 4, "an expired history refreshes everything");
+  assert.equal(asked.length, 5, "an expired history refreshes everything");
+  queryClient.clear();
+});
+
+const change = (event_id: string, sequence: number, conversation_id: string, what: string): SyncEvent => ({ event_id, sequence, type: "conversation", conversation_id, change: what });
+
+test("conversation events: the list for what joined it, the invitations for theirs, a fresh copy for what changed, out for what you left", () => {
+  const events: SyncEvent[] = [
+    change("c1", 1, "g:new", "created"),
+    change("c2", 2, "g:asked", "invited"),
+    { event_id: "m1", sequence: 3, type: "message", conversation_id: "g:new", message_id: "000" },
+    change("c3", 4, "g:renamed", "renamed"),
+    change("c4", 5, "g:renamed", "members_changed"),
+    // Removed, then added back: the last word wins, it stays (and the list is asked for again).
+    change("c5", 6, "g:back", "removed"),
+    change("c6", 7, "g:back", "added"),
+    // Left on another device: out of the list, and a later change to it is not asked for.
+    change("c8", 9, "g:left", "renamed"),
+    change("c7", 8, "g:left", "left"),
+    // A change this website does not know yet: ask for the conversation again.
+    change("c9", 10, "g:pinned", "pinned"),
+  ];
+  const seen = new SeenEvents();
+  const plan = planConversationEvents(events, seen);
+  assert.deepEqual(plan.drop, ["g:left"]);
+  assert.deepEqual(plan.removed, [], "g:back was removed, then added back; g:left was left");
+  assert.deepEqual(plan.refresh, ["g:renamed", "g:pinned"]);
+  assert.equal(plan.list, true);
+  assert.equal(plan.invitations, true);
+  assert.deepEqual(plan.eventIds, ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"], "in the order they happened");
+  // Messages are planned as before, and conversation events are never fetched as messages.
+  assert.deepEqual(planEvents(events, seen).map(ref => ref.eventIds), [["m1"]]);
+  for (const id of plan.eventIds) seen.add(id);
+  assert.deepEqual(planConversationEvents(events, seen), { drop: [], removed: [], refresh: [], list: false, invitations: false, eventIds: [] }, "nothing again once applied");
+  // Taken out by someone else: dropped, and said so (the shell tells the Carbon why the conversation went).
+  const out = planConversationEvents([change("r1", 1, "g:out", "members_changed"), change("r2", 2, "g:out", "removed")], new SeenEvents());
+  assert.deepEqual([out.drop, out.removed, out.refresh], [["g:out"], ["g:out"], []]);
+
+  // An invitation answered or withdrawn touches the invitations only; one accepted brings the group into the list.
+  assert.deepEqual(planConversationEvents([change("d1", 1, "g:x", "invitation_declined"), change("d2", 2, "g:y", "invitation_cancelled")], new SeenEvents()), { drop: [], removed: [], refresh: [], list: false, invitations: true, eventIds: ["d1", "d2"] });
+  const accepted = planConversationEvents([change("e1", 1, "g:x", "invitation_accepted")], new SeenEvents());
+  assert.equal(accepted.list && accepted.invitations, true);
+});
+
+test("the contracts announce conversation events in the shape the website reads", () => {
+  assert.equal(offersConversationEvents({ features: { conversation_events: { minimum_client: "0.17.0", sync_query: "include=conversations", event_type: "conversation", changes: ["created"] } } }), true);
+  assert.equal(offersConversationEvents({ features: {} }), false, "an older service");
+  assert.equal(offersConversationEvents({ features: { conversation_events: { sync_query: "include=everything" } } }), false, "a query this website does not know");
+  assert.equal(offersConversationEvents(null), false);
+});
+
+test("a fresh copy of a conversation keeps its row's place, and the row's newer activity; a left one comes out", () => {
+  const older = summary("g:a", message("001", scout, { conversation_id: "g:a" }));
+  const data = list(summary(CONV, message("005", scout)), older, summary("g:b", null));
+  const renamed = { ...older, group: { name: "Renamed", description: "", owners: [] } };
+  const replaced = replaceSummary(data, renamed)!;
+  assert.deepEqual(summariesOf(replaced).map(item => item.id), [CONV, "g:a", "g:b"], "nothing moves");
+  assert.equal(summariesOf(replaced)[1]!.group?.name, "Renamed");
+  // The row learnt of message 002 from the feed while the copy (still at 001) was on its way: 002 stays.
+  const ahead = list(summary("g:a", message("002", scout, { conversation_id: "g:a" }), { unread_count: 2 }));
+  const kept = summariesOf(replaceSummary(ahead, { ...renamed, unread_count: 1 }))[0]!;
+  assert.equal(kept.last_message?.["message-id"], "002");
+  assert.equal(kept.unread_count, 2);
+  assert.equal(kept.group?.name, "Renamed");
+  assert.equal(replaceSummary(data, summary("g:unknown", null)), data, "a conversation the list lacks changes nothing");
+  assert.deepEqual(summariesOf(dropSummary(data, "g:a")).map(item => item.id), [CONV, "g:b"]);
+  assert.equal(dropSummary(data, "g:unknown"), data);
+});
+
+test("a plan drops what you left at once, asks for the list or the invitations once, and an unlisted change asks for the list", async () => {
+  const queryClient = new QueryClient();
+  queryClient.setQueryData(chatKeys.conversations(), list(summary(CONV, message("001", scout)), summary("g:left", null)));
+  queryClient.setQueryData(chatKeys.group("g:left"), { id: "g:left" });
+  const asked: string[] = [];
+  queryClient.invalidateQueries = (async (filters?: { queryKey?: readonly unknown[] }) => {
+    asked.push(JSON.stringify(filters?.queryKey));
+  }) as QueryClient["invalidateQueries"];
+  const signal = new AbortController().signal;
+  const gone: unknown[] = [];
+  await applyConversationPlan(queryClient, { drop: ["g:left", "g:never-listed"], removed: ["g:left"], refresh: [], list: false, invitations: true, eventIds: ["x"] }, signal, item => gone.push(item));
+  assert.deepEqual(summariesOf(queryClient.getQueryData<ConversationPages>(chatKeys.conversations())).map(item => item.id), [CONV], "out at once");
+  assert.equal(queryClient.getQueryData(chatKeys.group("g:left")), undefined, "its details are forgotten");
+  assert.deepEqual(gone, [{ id: "g:left", name: "g:left", removed: true }], "heard of once, and only what the list had");
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.deepEqual(asked, [JSON.stringify(chatKeys.invitations())], "the invitations only");
+  asked.length = 0;
+  // A rename of a group the list does not have yet (joined a moment ago): the list is asked for again, with the invitations.
+  await applyConversationPlan(queryClient, { drop: [], removed: [], refresh: ["g:not-yet"], list: false, invitations: false, eventIds: ["y"] }, signal);
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.deepEqual(asked, [JSON.stringify(chatKeys.conversations()), JSON.stringify(chatKeys.invitations())]);
   queryClient.clear();
 });

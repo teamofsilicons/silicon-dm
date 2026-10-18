@@ -87,6 +87,9 @@ pub(super) async fn looked_after(
                 "You are not the custodian of {}; `for` only works for Silicons you look after.",
                 account.display_id()
             ),
+        )
+        .with_hint(
+            "Drop for to act as yourself. GET /api/v1/me (dm whoami) lists the Silicons you look after in custodian_of.",
         ));
     }
     Ok(account.actor())
@@ -136,29 +139,38 @@ pub(super) async fn edit_message(
         .store
         .revise_message(
             &context.actor,
-            Reviser::Sender,
+            Reviser::Participant,
             path.conversation_id,
             path.message_id,
             &key,
             Some(input),
             speech,
+            None,
         )
         .await
         .map(Json)
 }
 
-/// Tombstones a message: its sender, or the custodian of the Silicon that sent it.
+/// `DELETE …/messages/{message}[?for=si:x]`: tombstones a message. Its sender may, and so
+/// may the custodian of the Silicon that sent it, whether or not the custodian is in the
+/// conversation; with `for` (a custodian's view of its Silicon) only that Silicon's messages.
 pub(super) async fn delete_message(
     State(state): State<AppState>,
     Authenticated(context): Authenticated,
     access: ConversationAccess,
     ApiPath(path): ApiPath<MessagePath>,
+    ApiQuery(query): ApiQuery<ForQuery>,
     Idempotency(key): Idempotency,
 ) -> AppResult<Json<Message>> {
     let reviser = match access {
-        ConversationAccess::Participant => Reviser::Sender,
-        ConversationAccess::Custodian => Reviser::CustodianOfSender,
+        ConversationAccess::Participant => Reviser::Participant,
+        ConversationAccess::Custodian => Reviser::Custodian,
         ConversationAccess::Invitee => return Err(AppError::NotFound),
+    };
+    let silicon = match &query.for_account {
+        Some(selector) => Some(looked_after(&state, &context, selector).await?)
+            .filter(|silicon| *silicon != context.actor),
+        None => None,
     };
     state
         .store
@@ -170,6 +182,7 @@ pub(super) async fn delete_message(
             &key,
             None,
             None,
+            silicon.as_ref(),
         )
         .await
         .map(Json)

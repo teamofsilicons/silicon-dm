@@ -41,7 +41,8 @@ test("settings: uploads are off without BRIEFCASE_API_URL (and say why), https o
   // Carbons read that uploads are not set up; the operator's log says which setting.
   assert.equal(off.enabled ? "" : off.reason, "Uploads are not set up on this DM website yet.");
   assert.match(off.enabled ? "" : off.problem, /BRIEFCASE_API_URL is not set/);
-  assert.equal(off.maxBytes, 200 * 1024 * 1024);
+  assert.equal(off.maxBytes, 5 * 1024 ** 4, "no limit of the website's own: Silicon Briefcase's 5 TiB per file");
+  assert.equal(off.capped, false);
   const live = enabled({ BRIEFCASE_API_URL: "https://api.briefcase.teamofsilicons.com/api/v1/" });
   assert.equal(live.apiBase, "https://api.briefcase.teamofsilicons.com", "a trailing /api/v1 is the same API");
   assert.equal(live.publicBase, live.apiBase);
@@ -49,6 +50,11 @@ test("settings: uploads are off without BRIEFCASE_API_URL (and say why), https o
   assert.equal(stand.apiBase, "http://127.0.0.1:4541");
   assert.equal(stand.publicBase, "https://127.0.0.1:4541", "DM takes https links only: a plain-http stand-in is written as https");
   assert.equal(stand.maxBytes, 1000);
+  assert.equal(stand.capped, true, "UPLOADS_MAX_BYTES is the operator's own limit");
+  const huge = enabled({ BRIEFCASE_API_URL: API, UPLOADS_MAX_BYTES: String(10 * 1024 ** 4) });
+  assert.equal(huge.maxBytes, 5 * 1024 ** 4, "a limit above Briefcase's own changes nothing");
+  assert.equal(huge.capped, false);
+  assert.equal(enabled({ BRIEFCASE_API_URL: API, UPLOADS_MAX_BYTES: " " }).capped, false, "an empty setting is no setting");
   for (const bad of ["http://briefcase.example.com", "ftp://x", "not a url", "https://user:pw@x.test", "https://x.test/?a=1", "http://admin:s3cret@briefcase.example.com"]) {
     const settings = uploadsSettings({ BRIEFCASE_API_URL: bad });
     assert.equal(settings.enabled, false, bad);
@@ -68,8 +74,10 @@ test("settings: uploads are off without BRIEFCASE_API_URL (and say why), https o
 });
 
 test("GET /api/uploads/config says whether uploads work, and why not: in a Carbon's words, the setting only in the log", async () => {
-  assert.deepEqual(await config().json(), { enabled: true, max_bytes: 209715200 });
-  applyTestEnv({ BRIEFCASE_API_URL: undefined });
+  assert.deepEqual(await config().json(), { enabled: true, max_bytes: 5497558138880, capped: false });
+  applyTestEnv({ BRIEFCASE_API_URL: API, UPLOADS_MAX_BYTES: "1073741824" });
+  assert.deepEqual(await config().json(), { enabled: true, max_bytes: 1073741824, capped: true });
+  applyTestEnv({ BRIEFCASE_API_URL: undefined, UPLOADS_MAX_BYTES: undefined });
   const logged: string[] = [];
   const warn = console.warn;
   console.warn = (...words: unknown[]) => {
@@ -77,7 +85,7 @@ test("GET /api/uploads/config says whether uploads work, and why not: in a Carbo
   };
   try {
     const off = (await config().json()) as Record<string, unknown>;
-    assert.deepEqual(off, { enabled: false, reason: "Uploads are not set up on this DM website yet.", max_bytes: 209715200 });
+    assert.deepEqual(off, { enabled: false, reason: "Uploads are not set up on this DM website yet.", max_bytes: 5497558138880, capped: false });
     await config().json();
   } finally {
     console.warn = warn;

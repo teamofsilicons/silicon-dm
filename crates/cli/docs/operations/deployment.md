@@ -117,15 +117,38 @@ in Silicon Briefcase. Its settings are in [configuration](../reference/configura
 
 | Path | Required handling |
 | --- | --- |
-| `POST /api/uploads` | The request body is the file itself: allow bodies up to `UPLOADS_MAX_BYTES` (200 MiB by default) without buffering them, and an idle timeout long enough for the website to pass the file on to Briefcase after the last byte arrives (the shared load balancer's 180 seconds cover ordinary files; a 200 MiB file on a slow link to Briefcase can take longer) |
+| `POST /api/uploads` | The request body is the file itself, of any size up to Briefcase's 5 TiB: no body limit and no request buffering (the website pipes the bytes on to Briefcase as they arrive; a proxy that buffers first holds the whole file and delays every byte), and no deadline for the whole request. An ordinary idle timeout is enough (60 seconds or more): bytes flow the whole time, and the website answers within about 20 seconds of the last one (see below). With nginx: `client_max_body_size 0; proxy_request_buffering off; proxy_http_version 1.1;` on that location, with `proxy_read_timeout` and `proxy_send_timeout` of at least 60 s |
+| `GET`, `DELETE /api/uploads/saving` | A file the website is still saving into Briefcase: each `GET` waits up to 25 seconds for the outcome (allow 60), `DELETE` cancels it |
+| `GET`, `HEAD /api/uploads/config` | Small JSON; whether uploads are on, and the largest file |
 | `GET`, `HEAD /api/uploads/file` | Streams the files of messages (photos, audio, video) from Briefcase: keep `Range`, `If-Range` and `If-None-Match` on the way in and `206`, `Content-Range`, `Accept-Ranges` and `ETag` on the way out, never buffer or cache them (they are `Cache-Control: private`), and keep the website's `Content-Security-Policy: sandbox` and `nosniff` |
 | every page | Keep the website's own headers, in particular `Permissions-Policy: camera=(), microphone=(self), …`: voice notes and dictation need the microphone, and an edge that sends `microphone=()` instead turns them off |
 | `/api/…` (the proxy) | As the service's routes above: the sync long-poll holds 45 s, speech answers within 200 s, transcription uploads up to `DM_TRANSCRIBE_MAX_BYTES` within 10 minutes |
 | `/auth/callback` | Registered at Silicon Accounts as `PUBLIC_URL/auth/callback` before traffic moves |
 
-The website keeps one replica (its session refresh uses an in-process cache), and changing `SESSION_SECRET` signs
-every browser out. `web.yaml` does not set `BRIEFCASE_API_URL` yet, so uploads stay off in production (the website
+The website keeps one replica (its session refresh uses an in-process cache, and a file it is still saving into
+Briefcase lives in its memory: with several, a Carbon's requests must reach the same one), and changing `SESSION_SECRET`
+signs every browser out. `web.yaml` does not set `BRIEFCASE_API_URL` yet, so uploads stay off in production (the website
 says so and offers links instead) until it is set, which also needs Briefcase's side below.
+
+**Uploads and the website's server.** An upload holds two connections for as long as its bytes take: the browser's, and
+the website's own to Briefcase. Nothing is written to the website's disk and its memory stays bounded (measured on a
+production build: a 6 GiB upload at 2 GB/s took a fresh server from 107 to 291 MB, three more at once added nothing, and
+at 100 MB/s it does not move; a request to a page can make it hold at most 1 MB), so the task's size does not limit a
+file: 512 MB is plenty. Node ends a request whose body is still arriving after five minutes; the website lifts that
+deadline itself on its own server (headers must still arrive within 60 seconds), so the limits that remain are the
+ingress's and Briefcase's:
+
+- **Idle timeouts.** Bytes flow the whole time a file is sent. After the last byte, Briefcase checks the file's digest
+  and stores it before it answers, and for a large file that takes minutes with nothing moving. A load balancer would
+  cut the browser's request after its idle timeout (production's: 180 seconds) and the file would be lost, so the
+  website answers the browser within 20 seconds of the last byte instead (`202`, with an id), keeps saving, and the
+  page asks `GET /api/uploads/saving` until it has the link, each ask waiting up to 25 seconds. No timeout in front
+  of the website needs raising. The website's own request to Briefcase does wait in silence, up to 45 minutes: what
+  Briefcase's ingress allows after the last byte (its nginx: 900 seconds on the transfer route) bounds the largest
+  file, with Briefcase's own limits below. The website stops a transfer where nothing moves for 5 minutes.
+- **Briefcase's own limits.** Its upload deadline (`BRIEFCASE_UPLOAD_TIMEOUT_SECONDS`, 900 seconds by default) bounds
+  how long one file may take from its first byte to its answer, and its temporary disk holds each file while it is
+  checked: Briefcase's operators size both for the files they expect ([Limits](../reference/limits.md#the-dm-command-and-the-website)).
 
 ### Uploads: the Briefcase side
 
@@ -135,8 +158,9 @@ receiving app `briefcase` with the scopes `briefcase.uploads.reserve`, `briefcas
 `briefcase.uploads.status`, `briefcase.uploads.cancel` and `briefcase.link_access.update`, and Briefcase checks it.
 Production Briefcase accepts those proofs only from the apps its `BRIEFCASE_PROOF_ISSUERS` lists for each scope: until
 it lists `dm` for all five, uploads answer 503 `briefcase_not_allowed` and the website offers links instead. Then set
-`BRIEFCASE_API_URL` on the website (and `UPLOADS_MAX_BYTES` if 200 MiB is not right) and check an upload, a voice note
-and a photo in a message end to end.
+`BRIEFCASE_API_URL` on the website (and `UPLOADS_MAX_BYTES` only if you want a limit below Briefcase's 5 TiB) and
+check an upload, a voice note and a photo in a message end to end, then one large file (a few gigabytes) to see the
+ingress timeouts above hold.
 
 ## Decisions for the Carbon
 
@@ -148,7 +172,10 @@ makes them; nothing in this repository makes them by itself.
   key, within the per-account limits in [configuration](../reference/configuration.md#speech).
 - **Uploads into Briefcase.** List `dm` in production Briefcase's `BRIEFCASE_PROOF_ISSUERS` for the five upload scopes
   above, then set `BRIEFCASE_API_URL` on the website. DM can then write into every Carbon's Briefcase, only under
-  `apps/dm/` and only with that Carbon's own sign-in.
+  `apps/dm/` and only with that Carbon's own sign-in, files of any size up to Briefcase's 5 TiB.
+
+The Carbon turned both on for DM 0.17 (18 October 2026): speech with a Deepgram key, and uploads with `dm` on
+Briefcase's issuer list. Turning either off again is the Carbon's decision too.
 
 ## Acceptance after a deployment
 
@@ -163,7 +190,10 @@ makes them; nothing in this repository makes them by itself.
 6. `POST /v1/apps/dm/webhook/test` at Silicon Accounts arrives (`dm.accounts_webhook_receipts`).
 7. GIF trending and search work with the configured key.
 8. With uploads on: on the website, attach a photo and record a voice note; both arrive, play and open from the
-   other Carbon's browser (`GET /api/uploads/config` answers `enabled: true`).
+   other Carbon's browser (`GET /api/uploads/config` answers `enabled: true`, `capped: false` unless you set
+   `UPLOADS_MAX_BYTES`). Then send a file of a few gigabytes: it prepares, shows its speed and time left, arrives,
+   and opens through the website (its download is streamed with `Range`). A file large enough that Briefcase takes
+   more than 20 seconds to store it (tens of gigabytes) says "Saving… this can take a few minutes" and then arrives.
 9. Record the image digest, migration version and observed outcomes (no secrets).
 
 ## Client release

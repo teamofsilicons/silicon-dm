@@ -17,6 +17,9 @@ pub async fn sync(local: &LocalRuntime, profile: &str, args: SyncArgs) -> Result
         limit: args.limit,
         reset: args.reset,
         wait: args.wait,
+        include: args
+            .conversations
+            .then(|| silicon_dm_client::SYNC_INCLUDE_CONVERSATIONS.to_owned()),
     };
     Ok(serde_json::to_value(
         local.sync_page(profile, &request).await?,
@@ -45,6 +48,7 @@ pub async fn inbox(
         hydrate: !args.references_only,
         mark_delivered: args.mark_delivered,
         limit: args.limit,
+        conversations: args.conversations,
     };
     let run = local.inbox(
         &options,

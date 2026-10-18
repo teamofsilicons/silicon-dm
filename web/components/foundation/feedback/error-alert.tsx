@@ -12,7 +12,7 @@ import styles from "./error-alert.module.css";
 
 export function ErrorAlert({ error, title, action }: { error: Pick<ApiErrorInit, "message" | "hint" | "requestId" | "status">; title?: string; action?: ReactNode }) {
   return (
-    <Alert tone="danger" title={title ?? (error.status === 0 ? "The service could not be reached" : "That did not work")}>
+    <Alert tone="danger" title={title ?? (error.status === 0 ? "No connection to DM" : "That did not work")}>
       <span className={styles.body}>
         {readableTimes([error.message, error.hint].filter(Boolean).join(" "))}
         {error.requestId ? <span className={styles.reference}>Request {error.requestId}</span> : null}

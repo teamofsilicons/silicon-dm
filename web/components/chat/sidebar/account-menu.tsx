@@ -16,6 +16,7 @@ import { chordCaps, chordsOf } from "@/lib/shortcuts/keys";
 import { useShortcuts } from "@/lib/shortcuts/react";
 import { openDialog } from "../dialogs/store";
 import { useChat } from "../shell/chat-context";
+import styles from "./sidebar.module.css";
 
 export function AccountMenu() {
   const { account, accountsUrl } = useChat();
@@ -32,6 +33,7 @@ export function AccountMenu() {
       user={{ name: account.display_name || account.id, email: account.id, plan: kindNoun(account.kind), avatarSrc: account.pfp_url ?? undefined }}
       showTheme={false}
       showName
+      className={styles.account}
       align="start"
       onSignOut={async () => {
         try {

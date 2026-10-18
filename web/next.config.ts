@@ -67,7 +67,11 @@ const nextConfig: NextConfig = {
   // `next dev` answers its dev assets to localhost only by default; a local stack is also opened on 127.0.0.1.
   allowedDevOrigins: ["127.0.0.1", "localhost"],
   experimental: {
-    proxyClientMaxBodySize: "128mb",
+    // How much of a request's body Next copies into memory for proxy.ts, which runs on pages only: never on /api/
+    // (uploads of any size stream through app/api/uploads untouched; proxy.ts's matcher and tests/upload-paths.test.ts).
+    // No page reads a body (there are no server actions), so this only bounds what a POST to a page can make the server
+    // hold: at 128 MB, three such requests from anyone moved a server by 450 MB (production gives it 512 MB).
+    proxyClientMaxBodySize: "1mb",
     proxyTimeout: 90_000,
     ...(distDir === ".next" ? {} : { turbopackFileSystemCacheForBuild: false }),
   },

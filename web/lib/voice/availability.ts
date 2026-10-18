@@ -15,7 +15,9 @@ import type { VoiceCatalog } from "@/lib/chat/types";
 import { getUploadsConfig, type UploadsConfig } from "@/lib/upload/client";
 import { useSessionView } from "@/lib/client/session";
 import { canRecord } from "./microphone";
+import { DEFAULT_TRANSCRIBE_MAX_BYTES } from "./recorder";
 import { clearPersistedVoice, setVoiceCacheOwner } from "./sources";
+import { forgetTakes } from "./takes";
 
 /** The catalog as the service sends it (`enabled` is false when it has no speech provider). */
 export type Catalog = VoiceCatalog & { enabled?: boolean };
@@ -98,6 +100,8 @@ export interface VoiceFeatures {
   uploadsReason: string | null;
   /** The largest upload, in bytes (0 when unknown). */
   maxUploadBytes: number;
+  /** The largest recording DM transcribes at once (`/api/v1/me` speech.limits.transcribe_max_bytes), in bytes. */
+  transcribeMaxBytes: number;
   /** Still finding out (the uploads check has not answered). */
   checking: boolean;
   /** This browser can record (false on the server and until hydration). */
@@ -108,14 +112,21 @@ export const SPEECH_OFF = "Speech is not set up on this DM service, so listening
 const NO_MICROPHONE = "This browser cannot record audio. Use a recent Chrome, Edge, Firefox or Safari.";
 
 /**
- * The voice cache belongs to the signed-in account: set its owner (another account's persisted audio is deleted), and
- * forget it when this browser signs out.
+ * The voice cache and the recordings kept on disk belong to the signed-in account: set the owner (another account's
+ * persisted audio and recordings are deleted), and forget them when this browser signs out.
  */
+/** Whose recordings were last tidied on this page (many components read the features; once per account is enough). */
+let takesOwner: string | null = null;
+
 function useVoiceCacheOwner(account: string | null): void {
   const session = useSessionView();
   const signedIn = useRef(false);
   useEffect(() => {
-    if (account) setVoiceCacheOwner(account);
+    if (!account) return;
+    setVoiceCacheOwner(account);
+    if (takesOwner === account) return;
+    takesOwner = account;
+    void forgetTakes(account);
   }, [account]);
   // Layout effect: signing out leaves the page right away, and this runs before it does.
   useLayoutEffect(() => {
@@ -123,8 +134,17 @@ function useVoiceCacheOwner(account: string | null): void {
     else if (signedIn.current) {
       signedIn.current = false;
       clearPersistedVoice();
+      takesOwner = null;
+      void forgetTakes(null);
     }
   }, [session.signedIn]);
+}
+
+/** What `/api/v1/me` says of speech's limits (DM 0.17); read defensively, since an older service sends none. */
+function transcribeLimit(speech: unknown): number {
+  const limits = speech && typeof speech === "object" ? (speech as { limits?: { transcribe_max_bytes?: unknown } }).limits : undefined;
+  const bytes = Number(limits?.transcribe_max_bytes);
+  return Number.isFinite(bytes) && bytes > 0 ? bytes : DEFAULT_TRANSCRIBE_MAX_BYTES;
 }
 
 export function useVoiceFeatures(): VoiceFeatures {
@@ -158,6 +178,7 @@ export function useVoiceFeatures(): VoiceFeatures {
     dictateReason,
     uploadsReason: uploadsOn || uploads.isPending ? null : uploads.data?.reason?.trim() || null,
     maxUploadBytes: uploads.data?.max_bytes ?? 0,
+    transcribeMaxBytes: transcribeLimit(me?.speech),
     checking: uploads.isPending,
     microphone,
   };

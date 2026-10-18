@@ -74,6 +74,9 @@ function InvitationRow({ invitation }: { invitation: Invitation }) {
 
   const by = invitation.invited_by ?? invitation.owners[0] ?? null;
   const who = viewedName ?? "you";
+  // Who and when on one line (the separator glued to the words before it, so a line that wraps never starts with one,
+  // and the time whole), the group's address under them.
+  const invited = by ? `${accountName(by)} invited ${who}` : `Invited ${who}`;
   return (
     <li ref={row} className={styles.invitation} data-invitation={invitation.conversation_id}>
       <GroupAvatar name={invitation.name} size="header" decorative />
@@ -81,15 +84,20 @@ function InvitationRow({ invitation }: { invitation: Invitation }) {
         <p className={styles.invitationName}>{invitation.name}</p>
         {invitation.description ? <p className={styles.invitationDescription}>{invitation.description}</p> : null}
         <p className={styles.invitationMeta}>
-          {by ? `${accountName(by)} invited ${who}` : `Invited ${who}`}
-          {invitation.invited_at ? <> · <time dateTime={invitation.invited_at} title={fullTime(invitation.invited_at)}>{formatRelative(invitation.invited_at)}</time></> : null}
-          {" · "}<span className={styles.mono}>{invitation.conversation_id}</span>
+          {invitation.invited_at ? (
+            <>
+              {`${invited}\u00a0·`}{" "}
+              <time className={styles.nowrap} dateTime={invitation.invited_at} title={fullTime(invitation.invited_at)}>{formatRelative(invitation.invited_at)}</time>
+            </>
+          ) : invited}
         </p>
+        <p className={styles.invitationMeta}><span className={styles.mono}>{invitation.conversation_id}</span></p>
       </div>
       <div className={styles.invitationActions}>
         <Button size="sm" variant="ghost" loading={busy === "decline"} disabled={!!busy} onClick={() => void decline()}
           aria-label={readOnly ? `Decline ${invitation.name} for ${viewedName}` : `Decline ${invitation.name}`}>Decline</Button>
-        {readOnly ? null : <Button size="sm" variant="secondary" loading={busy === "accept"} disabled={!!busy} onClick={() => void accept()}>Accept</Button>}
+        {/* Joining is what an invitation is for: Accept is the row's one primary action. */}
+        {readOnly ? null : <Button size="sm" loading={busy === "accept"} disabled={!!busy} onClick={() => void accept()}>Accept</Button>}
       </div>
       {error ? <div className={styles.invitationError}><ErrorAlert error={error} /></div> : null}
     </li>
@@ -106,14 +114,15 @@ export function InvitationsDialog({ open }: { open: boolean }) {
       <DialogContent title="Invitations"
         description={view ? `Groups ${name} is invited to. You may decline for it; only ${name} can accept.` : "Groups you are invited to. Joining shows you their whole history."}
         className={styles.dialog} onCloseAutoFocus={returnFocus}>
-        {invitations.error ? <ErrorAlert error={ApiError.from(invitations.error)} title="Invitations could not be loaded" action={<Button size="sm" variant="secondary" onClick={() => void invitations.refetch()}>Try again</Button>} /> : null}
+        {/* A failed refresh keeps what was loaded (it is asked for again soon); only a list never loaded says why. */}
+        {invitations.error && !invitations.data ? <ErrorAlert error={ApiError.from(invitations.error)} title="Invitations could not be loaded" action={<Button size="sm" variant="secondary" onClick={() => void invitations.refetch()}>Try again</Button>} /> : null}
         {items.length ? (
           <ul role="list" className={styles.invitations} aria-label={`${items.length} ${items.length === 1 ? "invitation" : "invitations"}`}>
             {items.map(invitation => <InvitationRow key={invitation.conversation_id} invitation={invitation} />)}
           </ul>
         ) : invitations.isPending ? (
           <p className={styles.quiet} role="status">Looking for invitations…</p>
-        ) : invitations.error ? null : (
+        ) : invitations.error && !invitations.data ? null : (
           <p className={styles.quiet} role="status">No invitations are waiting. When someone invites {name ?? "you"} to a group, it shows here.</p>
         )}
       </DialogContent>

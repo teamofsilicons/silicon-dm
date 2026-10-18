@@ -28,7 +28,7 @@ reached only by accounts it allows so that strangers cannot put it to work.
 | Message text | 1 to 100,000,000 Unicode characters | 422 `validation_error` |
 | Attachments, the voice note included | 100 per message | 422 `validation_error` |
 | An attachment's link | `https`, without credentials, at most 8,192 bytes | 422 `validation_error` |
-| An attachment's declared size, name, type | 5 GiB; 1 to 1,024 characters; 1 to 255 bytes | 422 `validation_error` |
+| An attachment's declared size, name, type | 5 TiB (Silicon Briefcase's largest file); 1 to 1,024 characters; 1 to 255 bytes | 422 `validation_error` |
 | A voice note's duration | 1 millisecond to 48 hours | 422 `validation_error` |
 | A GIF | `provider_id` 1 to 255 bytes; `https` URLs of at most 8,192 bytes; a title of at most 1,000 characters | 422 `validation_error` |
 | Accounts in one conversation | 100, you included | 422 `validation_error` |
@@ -37,7 +37,7 @@ reached only by accounts it allows so that strangers cannot put it to work.
 | A page of messages or conversations | `limit` 1 to 100, default 50 | 422 `validation_error` |
 
 Attachments are links: DM stores the link, never the file, so the size of a file is the business of wherever it lives.
-The website uploads a Carbon's files into the Carbon's own Silicon Briefcase.
+The website uploads a Carbon's files into the Carbon's own Silicon Briefcase, of any size Briefcase takes (below).
 
 ## Spoken messages, listening and transcription
 
@@ -105,5 +105,20 @@ A spoken message is charged when it is sent: over a limit, the send is refused w
 | `dm messages transcribe` download | https only (plain http only from this machine), at most 100 MiB |
 | The website's outbox | 5 automatic attempts while online: at once, then after 1, 2, 4 and 8 seconds (with a little jitter); offline attempts do not count |
 | The website's draft save | about 1.5 seconds after you stop typing |
-| A file uploaded on the website | 200 MiB (`UPLOADS_MAX_BYTES`), saved in your own Silicon Briefcase (413 `file_too_large`) |
+| A file uploaded on the website | Any size up to 5 TiB, Silicon Briefcase's largest file; the website has no limit of its own unless its operator sets one (`UPLOADS_MAX_BYTES`). Either way 413 `file_too_large`, said in the tray before a byte moves |
+| Preparing a file in the browser | Its SHA-256 is read first (Briefcase reserves a file by its size and digest): about 250 to 300 MB a second in Chromium, so a gigabyte takes about four seconds; files up to 8 MiB at once |
 | Uploads one account runs at once on a website server | 6 (429 `too_many_uploads`, `Retry-After: 5`); the composer uploads 3 at a time from one conversation |
+| Files in one message from the tray | 100, DM's own limit (a dropped folder with more than 20 asks first; its hidden and empty files are left out, and counted) |
+| A transfer that stops moving | 5 minutes without a byte either way, then it stops (408 `upload_stalled`) and the reservation is cancelled |
+| After a file's last byte | Briefcase checks it and stores it before it answers, which takes minutes for the largest files. After 20 seconds without that answer the website answers the browser at once (202) and keeps saving; the page asks `GET /api/uploads/saving` until it has the link, each ask waiting up to 25 seconds, so no connection is silent for long. The website waits up to 45 minutes for Briefcase |
+| A file being saved that nobody asks about | Cancelled after 10 minutes (a closed page cancels it at once, as it goes): nothing would use it. Its outcome is kept for 15 minutes |
+| A file's name | Cut to fit Silicon Briefcase's 255 bytes of UTF-8 with the 23 the website puts before it (a time and a random part), keeping its extension and whole characters; control and direction-changing characters are taken out |
+| A transfer cut by a lost connection | Starts again from its first byte when the browser is back online (at most 5 times); the tray says so |
+
+The website holds no file: the bytes pass from the browser through its server into Briefcase as they arrive, with no
+temporary disk and the server's memory bounded whatever the size (a 6 GiB upload at 2 GB/s took a fresh server from
+107 to 291 MB, three more at once added nothing, and at 100 MB/s it does not move).
+Briefcase's own limits then apply, set by its operators: 100 GiB of uploads a drive a UTC day (429 `briefcase_limit`),
+the drive's storage (507 `briefcase_full`), at most 32 unfinished uploads a drive (429 `briefcase_busy`), and the time
+one upload may take from its first byte to Briefcase's answer (`BRIEFCASE_UPLOAD_TIMEOUT_SECONDS`, 900 seconds by
+default: at 100 Mbit/s that carries about 10 GB, so the largest files need Briefcase's operators to raise it).

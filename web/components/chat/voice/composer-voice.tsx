@@ -11,17 +11,27 @@
  * the caret; nothing is uploaded. When uploads are off the microphone dictates only, and says why.
  *
  * The others see "recording a voice message…" (or "typing…" while dictating); Listen mode holds its tongue meanwhile,
- * and anything else playing pauses (the microphone would hear it). A recording stops by itself at ten minutes (and
- * sends), with a warning thirty seconds before. If the microphone goes away mid-recording, what was recorded waits in
- * the bar for ✓ or Esc.
+ * and anything else playing pauses (the microphone would hear it). A voice message may last 48 hours (it stops by
+ * itself there, and sends, with a warning a minute before): its bytes go to this browser's disk as they are recorded
+ * (lib/voice/takes.ts), never all into memory, and the upload reads them from there. It is transcribed when it fits
+ * what DM transcribes at once (`/api/v1/me` speech.limits, 100 MB by default, about four hours); a longer one goes
+ * without a transcript and says so. A dictation stops when it reaches that size. If the microphone goes away
+ * mid-recording, what was recorded waits in the bar for ✓ or Esc.
+ *
+ * A voice message cut off by a reload, a crash or a closed tab (or whose upload never finished) is still on disk: when
+ * its conversation opens again, the bar offers to send it or throw it away (Esc: later). One for another conversation
+ * is told once, in a toast with a way there.
  */
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, Mic, X } from "lucide-react";
 import { TextShimmer } from "@/components/silicon-ui/text-shimmer/text-shimmer";
+import { conversationHref } from "@/lib/chat/address";
 import { transcribe } from "@/lib/chat/api";
-import { clockDuration, fileSize } from "@/lib/chat/format";
+import { clockDuration, clockTime, fileSize } from "@/lib/chat/format";
+import { dayLabel } from "@/lib/chat/timeline";
 import { reportActivity } from "@/lib/chat/presence";
 import { ApiError } from "@/lib/errors";
 import { notify, notifyError } from "@/lib/notify";
@@ -34,10 +44,13 @@ import { ensureUploadsConfig } from "@/lib/voice/availability";
 import { pause as pausePlayback, playerState } from "@/lib/voice/player";
 import { rememberNote } from "@/lib/voice/sources";
 import { canRecord, MicrophoneError, openMicrophone, type MicrophoneSession, type Recording } from "@/lib/voice/microphone";
+import { claimTake, deleteTake, loadTake, startTake, unsentTakes, type TakeInfo } from "@/lib/voice/takes";
 import { voiceWords } from "@/lib/voice/words";
-import { baseType, IDLE_RECORDER, MAX_RECORDING_MS, microphoneProblem, noteFileName, recorderBusy, recorderReducer, timeLeftWarning, WARN_BEFORE_MS, type RecordMode, type RecorderEvent, type RecorderProblem, type RecorderState } from "@/lib/voice/recorder";
+import { baseType, IDLE_RECORDER, limitReached, limitWarning, microphoneProblem, noteFileName, recorderBusy, recorderReducer, type RecordMode, type RecorderEvent, type RecorderProblem, type RecorderState } from "@/lib/voice/recorder";
 import { IconAction } from "../common/icon-action";
 import type { ComposerVoiceBridge } from "../composer/voice-bridge";
+import { useChat } from "../shell/chat-context";
+import { sentWhen } from "../thread/thread-model";
 import styles from "./voice.module.css";
 
 /** Twelve seconds of level history (as much as the bar is wide shows; older levels slide out on the left). */
@@ -73,9 +86,17 @@ async function uploadRecording(blob: Blob, options: Parameters<typeof uploadFile
 }
 
 /**
- * After ✓ on a voice message: a tray item at once, then the upload and the transcription side by side, then ready
- * (the composer sends it) or failed (with the reason). A recording is never lost to a failed upload: the toast that says
- * so offers Try again, which uploads the same recording again.
+ * A recording small enough to show from this tab's own bytes is read into memory before it is uploaded: the copies
+ * the thread keeps of your own upload (lib/upload/display.ts, lib/voice/sources.ts) then never point at files on disk
+ * that are deleted once it is sent. A larger one is uploaded straight from disk (nothing keeps it here).
+ */
+const LOCAL_COPY_BYTES = 24 * 1024 * 1024;
+
+/**
+ * After ✓ on a voice message (or Send on one left behind): a tray item at once, then the upload and the transcription
+ * side by side, then ready (the composer sends it) or failed (with the reason). A recording is never lost to a failed
+ * upload: the toast that says so offers Try again, which uploads the same recording again, and its bytes stay on disk
+ * (offered again after a reload) until it is uploaded.
  */
 async function handOver(bridge: ComposerVoiceBridge, recording: Recording, voice: VoiceAvailability, replaces?: string): Promise<void> {
   const id = `voice-${typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36)}`;
@@ -85,18 +106,34 @@ async function handOver(bridge: ComposerVoiceBridge, recording: Recording, voice
   bridge.sendWhenReady();
   if (!recording.blob.size) {
     bridge.dispatchTray({ type: "fail", id, error: "Nothing was recorded: the microphone gave no sound. Check the microphone, then record again." });
+    if (recording.take) void deleteTake(recording.take);
     return;
   }
   if (voice.maxUploadBytes && recording.blob.size > voice.maxUploadBytes) {
     const problem = { message: `The voice message is ${fileSize(recording.blob.size)}; uploads here take at most ${fileSize(voice.maxUploadBytes)}.`, hint: "Record a shorter one." };
     bridge.dispatchTray({ type: "fail", id, error: describe(problem) });
+    // It can never go: not kept to be offered again.
+    if (recording.take) void deleteTake(recording.take);
     return;
+  }
+  let blob = recording.blob;
+  if (recording.take && blob.size <= LOCAL_COPY_BYTES) {
+    try {
+      blob = new Blob([await blob.arrayBuffer()], { type: blob.type || recording.type });
+    } catch {
+      // Read from disk as it uploads instead.
+    }
   }
   reportActivity("transcribing_voice");
   const name = noteFileName(recording.type);
-  let heard = !voice.transcripts;
-  const words = voice.transcripts
-    ? transcribe(recording.blob, { contentType: type })
+  // Transcribed when DM takes it at once (100 MB by default); a longer one goes without its words, and says why.
+  const transcribable = voice.transcripts && blob.size <= voice.transcribeMaxBytes;
+  if (voice.transcripts && !transcribable) {
+    notify.info("Sent without a transcript", `It is ${fileSize(blob.size)}, and DM transcribes recordings of up to ${fileSize(voice.transcribeMaxBytes)} (about four hours of speech). It plays in full.`);
+  }
+  let heard = !transcribable;
+  const words = transcribable
+    ? transcribe(blob, { contentType: type })
         .then(result => result.transcript.trim() || null)
         .catch((error: unknown) => {
           const failure = ApiError.from(error);
@@ -109,20 +146,22 @@ async function handOver(bridge: ComposerVoiceBridge, recording: Recording, voice
         })
     : Promise.resolve(null);
   try {
-    const file = await uploadRecording(recording.blob, {
+    const file = await uploadRecording(blob, {
       name,
       contentType: type,
       onProgress: (sent, total) => bridge.dispatchTray({ type: "progress", id, progress: total ? sent / total : 0 }),
     });
-    // Its own bubble draws and plays from the recording at once; nothing is downloaded again.
-    rememberNote(file.url, recording.blob);
+    // Saved in Briefcase: the copy on this browser's disk is not needed any more.
+    if (recording.take) void deleteTake(recording.take);
+    // Its own bubble draws and plays from the recording at once; nothing is downloaded again (a long one streams).
+    rememberNote(file.url, blob);
     // Saved; only its words are still coming: the tray says "Transcribing…" instead of a full progress bar.
     if (!heard) bridge.dispatchTray({ type: "transcribing", id });
     const transcript = await words;
     bridge.dispatchTray({
       type: "ready",
       id,
-      voice: { permanent_url: file.url, name: file.name, content_type: file.content_type || type, size: file.size, duration_milliseconds: recording.durationMs },
+      voice: { permanent_url: file.url, name: file.name, content_type: file.content_type || type, size: file.size, duration_milliseconds: Math.max(1, Math.round(recording.durationMs)) },
       ...(transcript ? { transcript } : {}),
     });
   } catch (error) {
@@ -141,9 +180,20 @@ function setStyle(node: HTMLElement, name: "width" | "minHeight" | "transform", 
   if (node.style[name] !== value) node.style[name] = value;
 }
 
+/** Recordings left behind that this page already offered or told of (each once per page). */
+const offeredTakes = new Set<string>();
+
+/** "12:04 long, recorded today at 09:15": what a recording left behind is. */
+const takeWords = (take: TakeInfo) => `${clockDuration(take.durationMs)} long, recorded ${sentWhen(clockTime(take.startedAt), dayLabel(new Date(take.startedAt)))}`;
+
 export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
   const voice = useVoiceAvailability();
   const queryClient = useQueryClient();
+  const router = useRouter();
+  const { me } = useChat();
+  const account = me.account.uuid ?? me.account.id;
+  /** A voice message left behind for this conversation, offered in the bar: Send, or Throw away (Esc: later). */
+  const [offer, setOffer] = useState<TakeInfo | null>(null);
   const [state, dispatchState] = useReducer(recorderReducer, IDLE_RECORDER);
   // The same state machine, mirrored synchronously, so a double press or a key repeat cannot start twice.
   const machine = useRef<RecorderState>(IDLE_RECORDER);
@@ -163,15 +213,22 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
   const root = useRef<HTMLSpanElement>(null);
   const overlay = useRef<HTMLDivElement>(null);
   const primary = useRef<HTMLButtonElement>(null);
-  const latest = useRef({ bridge, voice });
+  const latest = useRef({ bridge, voice, account });
   const dictateKeys = useShortcutKeys("composer.dictate");
   const { shortcuts, platform } = useShortcuts();
   const busy = recorderBusy(state);
-  const open = busy || state.phase === "error";
+  const offering = !!offer && !busy && state.phase !== "error";
+  const open = busy || state.phase === "error" || offering;
 
   useEffect(() => {
-    latest.current = { bridge, voice };
+    latest.current = { bridge, voice, account };
   });
+
+  /** Lets go of a dictation kept for Try again, and of its recording on disk. */
+  const dropKept = useCallback(() => {
+    if (kept.current?.take) void deleteTake(kept.current.take);
+    kept.current = null;
+  }, []);
 
   const release = useCallback(() => {
     attempt.current += 1;
@@ -209,7 +266,7 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
       return;
     }
     const mine = ++attempt.current;
-    kept.current = null;
+    dropKept();
     mode.current = wanted;
     setLevels([]);
     setInterrupted(false);
@@ -220,7 +277,9 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
     const playing = playerState();
     if ((playing.status === "playing" || playing.status === "loading") && playing.origin !== "queue") pausePlayback();
     try {
-      const opened = await openMicrophone();
+      // The recording's bytes go to this browser's disk as they come (lib/voice/takes.ts): a voice message of hours
+      // takes no more memory than one of seconds, and a reload does not lose it.
+      const opened = await openMicrophone({ keep: type => startTake({ account: latest.current.account, address: current.address, mode: wanted, type }) });
       if (attempt.current !== mine) {
         opened.cancel();
         return;
@@ -235,16 +294,16 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
       holdListening("recording", false);
       dispatch({ type: "denied", problem: error instanceof MicrophoneError ? error.problem : microphoneProblem("recording_failed", error instanceof Error ? error.message : undefined) });
     }
-  }, [dictateKeys.text, dispatch, queryClient]);
+  }, [dictateKeys.text, dispatch, queryClient, dropKept]);
 
   const cancel = useCallback(() => {
     release();
-    kept.current = null;
+    dropKept();
     setInterrupted(false);
     dispatch({ type: "cancel" });
     reportActivity(null);
     latest.current.bridge?.focusField();
-  }, [release, dispatch]);
+  }, [release, dispatch, dropKept]);
 
   /** Dictation's second half: the recording's words, typed at the caret. */
   const transcribeDictation = useCallback(async (recording: Recording, mine: number) => {
@@ -255,6 +314,8 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
       const result = await transcribe(recording.blob, { contentType: baseType(recording.type) });
       if (attempt.current !== mine) return;
       const words = result.transcript.trim();
+      // A dictation's recording only ever goes to transcription: it leaves this browser's disk once heard.
+      if (recording.take) void deleteTake(recording.take);
       if (!words) {
         dispatch({ type: "failed", problem: { code: "nothing_heard", message: "No words were heard in the recording.", hint: "Speak a little closer to the microphone, then try again." } });
         return;
@@ -265,8 +326,10 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
     } catch (error) {
       if (attempt.current !== mine) return;
       const failure = ApiError.from(error);
-      // What was said is not lost to a failure that may pass: Try again sends the same recording.
+      // What was said is not lost to a failure that may pass: Try again sends the same recording (kept on disk until
+      // then); otherwise it goes.
       if (passing(failure)) kept.current = recording;
+      else if (recording.take) void deleteTake(recording.take);
       const words = voiceWords(failure, "dictate");
       dispatch({ type: "failed", problem: { code: words.code, message: words.message, hint: words.hint } });
     } finally {
@@ -312,15 +375,16 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
       void transcribeDictation(recording, attempt.current);
       return;
     }
-    kept.current = null;
+    dropKept();
     if (machine.current.phase === "error") void start(machine.current.mode);
-  }, [dispatch, start, transcribeDictation]);
+  }, [dispatch, start, transcribeDictation, dropKept]);
 
   const dismiss = useCallback(() => {
-    kept.current = null;
+    // A dictation kept for Try again is not wanted any more.
+    dropKept();
     dispatch({ type: "dismiss" });
     latest.current.bridge?.focusField();
-  }, [dispatch]);
+  }, [dispatch, dropKept]);
 
   // The composer's /voice and /dictate start the same flows as ⌘⇧M and ⌘⇧D.
   useEffect(() => {
@@ -336,8 +400,10 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
     void start("dictate");
   }, !!bridge && voice.dictate && !busy);
 
-  // While recording: the time, the meter, presence, and the limits (ten minutes, the upload cap).
+  // While recording: the time, the meter, presence, and the limits (48 hours; a voice message's upload cap when there
+  // is one, a dictation's transcription size).
   const phase = state.phase;
+  const [bytes, setBytes] = useState(0);
   useEffect(() => {
     if (phase !== "recording") return;
     const timer = setInterval(() => {
@@ -347,12 +413,65 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
       const level = opened.level();
       dispatch({ type: "tick", elapsedMs, level });
       setLevels(previous => [...previous.slice(1 - METER_BARS), level]);
+      setBytes(opened.bytes());
       reportActivity(mode.current === "note" ? "recording_voice" : "typing");
-      const cap = latest.current.voice.maxUploadBytes;
-      if (elapsedMs >= MAX_RECORDING_MS || (mode.current === "note" && cap && opened.bytes() >= cap * 0.97)) void finish();
+      const features = latest.current.voice;
+      if (limitReached({ elapsedMs, bytes: opened.bytes(), maxBytes: mode.current === "note" ? features.maxUploadBytes : features.transcribeMaxBytes })) void finish();
     }, TICK_MS);
     return () => clearInterval(timer);
   }, [phase, finish, dispatch]);
+
+  // A voice message left behind (a reload, a crash, an upload that never finished): this conversation's is offered in
+  // the bar; another conversation's is told once, with a way there. Only where it could go now (uploads on).
+  const address = bridge?.address ?? null;
+  const canOffer = !!bridge && !bridge.disabledReason && voice.notes;
+  useEffect(() => {
+    if (!address || !canOffer) return;
+    let cancelled = false;
+    void unsentTakes(account).then(takes => {
+      if (cancelled) return;
+      const here = takes.find(take => take.address === address && !offeredTakes.has(take.id));
+      if (here) {
+        offeredTakes.add(here.id);
+        setOffer(here);
+      }
+      for (const take of takes) {
+        if (take.address === address || offeredTakes.has(take.id)) continue;
+        offeredTakes.add(take.id);
+        const toast = notify.info("A voice message was not sent", `${takeWords(take)}. Open its conversation to send it or throw it away.`);
+        notify.update(toast, { duration: 15_000, action: { label: "Open", onClick: () => router.push(conversationHref(take.address)) } });
+      }
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [address, canOffer, account, router]);
+
+  const sendOffer = useCallback(async () => {
+    const take = offer;
+    const current = latest.current.bridge;
+    if (!take || !current) return;
+    setOffer(null);
+    current.focusField();
+    claimTake(take);
+    const blob = await loadTake(take);
+    if (!blob || !blob.size) {
+      void deleteTake(take);
+      notify.error({ status: 0, code: "recording_lost", message: "The recording could not be read from this browser's storage.", hint: "It may have been cleared with the site's data. Record it again." }, "The voice message was not sent");
+      return;
+    }
+    void handOver(current, { blob, type: take.type, durationMs: take.durationMs, take }, latest.current.voice);
+  }, [offer]);
+  const throwOffer = useCallback(() => {
+    const take = offer;
+    setOffer(null);
+    latest.current.bridge?.focusField();
+    if (take) void deleteTake(take);
+  }, [offer]);
+  const laterOffer = useCallback(() => {
+    setOffer(null);
+    latest.current.bridge?.focusField();
+  }, []);
 
   // Keys while the bar is open: Esc cancels (or closes a problem); Enter, or the shortcut that started it, stops and
   // sends; Tab stays among the bar's buttons. A dialog or menu opened meanwhile keeps its own keys.
@@ -371,7 +490,8 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        if (phase === "error") dismiss();
+        if (offering) laterOffer();
+        else if (phase === "error") dismiss();
         else cancel();
       } else if (phase === "recording" && ((event.key === "Enter" && !(target instanceof HTMLButtonElement)) || sameShortcut(event))) {
         event.preventDefault();
@@ -388,12 +508,13 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [open, phase, cancel, dismiss, finish, platform, shortcuts]);
+  }, [open, phase, cancel, dismiss, finish, platform, shortcuts, offering, laterOffer]);
 
-  // The keyboard goes to the bar's main button (✓ while recording, Try again on a problem).
+  // The keyboard goes to the bar's main button (✓ while recording, Try again on a problem, Send on a recording left
+  // behind).
   useEffect(() => {
-    if (phase === "recording" || phase === "error" || phase === "asking") primary.current?.focus({ preventScroll: true });
-  }, [phase]);
+    if (phase === "recording" || phase === "error" || phase === "asking" || offering) primary.current?.focus({ preventScroll: true });
+  }, [phase, offering]);
 
   // The bar sits exactly over the composer's row, its bottom on the row's bottom so a taller bar (a problem with its
   // hint) grows upward, never off screen. Followed every frame: the keyboard on a phone moves the row.
@@ -421,7 +542,9 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
   const dictating = state.phase !== "idle" && state.mode === "dictate";
   const what = dictating ? "Dictating" : "Recording a voice message";
   const elapsed = state.phase === "recording" || state.phase === "stopping" || state.phase === "transcribing" ? state.elapsedMs : 0;
-  const left = state.phase === "recording" && !interrupted ? timeLeftWarning(elapsed) : null;
+  const limit = state.phase === "recording" && !interrupted ? limitWarning({ elapsedMs: elapsed, bytes, maxBytes: dictating ? voice.transcribeMaxBytes : voice.maxUploadBytes }) : null;
+  const left = limit?.leftMs ?? null;
+  const why = limit?.reason === "size" ? (dictating ? "it is as much as DM transcribes at once" : "it is as large as uploads here can be") : "48 hours is the longest voice message";
   const sendWords = dictating ? "inserts what it heard" : "sends what it recorded";
 
   let button;
@@ -442,7 +565,18 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
     button = <IconAction label="Record a voice message" icon={<Mic strokeWidth={1.75} aria-hidden="true" />} unavailable={voice.notesReason ?? voice.reason} tooltipSide="top" />;
   }
 
-  const bar = open ? (
+  const bar = offering && offer ? (
+    <div ref={overlay} className={styles.recorder} data-sq="surface" data-voice-ui="" data-phase="offer" role="group" aria-label="A voice message that was not sent">
+      <div className={styles.problem} role="status">
+        <span className={styles.offerTitle}>A voice message you recorded was not sent</span>
+        <span className={styles.problemHint}>{`${takeWords(offer)}. Send it now, or throw it away.`}</span>
+      </div>
+      <div className={styles.problemActions}>
+        <button type="button" className={styles.textButton} data-sq="surface" onClick={throwOffer}>Throw away</button>
+        <button type="button" ref={primary} className={`${styles.textButton} ${styles.offerSend}`} data-sq="surface" onClick={() => void sendOffer()} aria-keyshortcuts="Enter">Send</button>
+      </div>
+    </div>
+  ) : open ? (
     <div ref={overlay} className={styles.recorder} data-sq="surface" data-voice-ui="" data-phase={state.phase} data-interrupted={interrupted ? "" : undefined} role="group" aria-label={state.phase === "error" ? "The microphone" : what}>
       {state.phase === "error" ? (
         <>
@@ -486,7 +620,7 @@ export function ComposerVoice({ bridge }: { bridge?: ComposerVoiceBridge }) {
                 )}
                 {left !== null ? <span className={styles.warning} aria-hidden="true">{`${Math.ceil(left / 1000)} s left`}</span> : null}
                 {/* Said once when the warning starts (the countdown itself is for the eyes). */}
-                <span className="sr-only" role="status">{left !== null ? `${Math.round(WARN_BEFORE_MS / 1000)} seconds left: at ${clockDuration(MAX_RECORDING_MS)} the recording stops and ${dictating ? "its words are inserted" : "it is sent"}.` : ""}</span>
+                <span className="sr-only" role="status">{left !== null ? `Less than a minute left: the recording stops then (${why}) and ${dictating ? "its words are inserted" : "it is sent"}.` : ""}</span>
               </>
             )}
           </div>

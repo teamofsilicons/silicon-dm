@@ -631,7 +631,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
   useShortcut("message.edit", () => { const message = currentMessage(); if (usable(message) && actions.isMine(message!) && canEditHere(message!)) actions.edit(message!); });
   useShortcut("message.copy", () => { const message = currentMessage(); if (message && !message.deleted_at) actions.copyText(message); });
   useShortcut("message.copyLink", () => { const message = currentMessage(); if (message) actions.copyLink(message); });
-  useShortcut("message.delete", () => { const message = currentMessage(); if (usable(message) && actions.isMine(message!)) actions.requestDelete(message!); });
+  useShortcut("message.delete", () => { const message = currentMessage(); if (message && actions.canDelete(message)) actions.requestDelete(message); });
   useShortcut("message.details", () => { const message = currentMessage(); if (message) actions.openDetails(message); });
   useShortcut("message.listen", () => { const message = currentMessage(); if (message && voice.listen && canListen(message)) actions.listen(message); });
   useShortcut("message.jumpLatest", () => { scrollToBottom(); focusLast(); });
@@ -678,12 +678,39 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
    */
   const hovered = useRef<string | null>(null);
   const selected = useRef<string | null>(null);
+  const layers = actions.layers;
   const publishInUse = useCallback(() => {
+    // While a layer opened from a message is open (its menu, a popover, a card, a dialog), the message in use stays as
+    // it is: no other toolbar shows. What the pointer and the keyboard did meanwhile counts once it closes.
+    if (layers.get() > 0) return;
     const key = selected.current ?? hovered.current;
     const next = key ? { key, selected: selected.current !== null } : null;
     const now = inUse.get();
     if (now?.key !== next?.key || now?.selected !== next?.selected) inUse.set(next);
-  }, [inUse]);
+  }, [inUse, layers]);
+  useEffect(() => layers.subscribe(() => {
+    if (layers.get() === 0) publishInUse();
+  }), [layers, publishInUse]);
+  // An account card (Silicon UI's hover card) says it is open only on its trigger (data-hover-card): one observer for
+  // the thread counts it as a layer while one is open.
+  useEffect(() => {
+    const list = log.current;
+    if (!list || typeof MutationObserver === "undefined") return;
+    let held = false;
+    const check = () => {
+      const open = !!list.querySelector('[data-hover-card="open"]');
+      if (open === held) return;
+      held = open;
+      layers.set(Math.max(0, layers.get() + (open ? 1 : -1)));
+    };
+    const observer = new MutationObserver(check);
+    // Rows coming and going count too: a card whose trigger left the thread is closed.
+    observer.observe(list, { subtree: true, childList: true, attributes: true, attributeFilter: ["data-hover-card"] });
+    return () => {
+      observer.disconnect();
+      if (held) layers.set(Math.max(0, layers.get() - 1));
+    };
+  }, [layers]);
   const select = useCallback((key: string | null) => {
     if (selected.current === key) return;
     selected.current = key;
@@ -706,6 +733,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
   const onFocusIn = (event: FocusEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
     const row = target.closest<HTMLElement>("[data-message-row]");
+    // Within the selected message (its toolbar's ⋯, its player) the selection stays: a phone focuses what is tapped,
+    // and letting go there would take the toolbar away under the finger before its button is pressed.
+    if (row && selected.current !== null && row.dataset.rowKey === selected.current) return;
     select(row && (lastInput.keyboard || (tapped() && target === row)) ? row.dataset.rowKey ?? null : null);
   };
   // A tap on a message's words selects it, even where the browser does not focus what is tapped.

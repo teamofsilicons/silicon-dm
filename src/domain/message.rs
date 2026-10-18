@@ -560,7 +560,9 @@ fn validate_attachment_metadata(
     size: Option<u64>,
 ) -> Result<(), &'static str> {
     if size.is_some_and(|size| size > MAX_ATTACHMENT_BYTES) {
-        return Err("an attachment may not exceed 5 GiB");
+        return Err(
+            "an attachment's declared size may not exceed 5 TiB (5,497,558,138,880 bytes, the largest file Silicon Briefcase stores)",
+        );
     }
     if permanent_url.scheme() != "https"
         || permanent_url.host_str().is_none()

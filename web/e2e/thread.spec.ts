@@ -14,6 +14,11 @@
  *   a custodian's view: only the commands a custodian may run (show, listen --for), never a send
  *   one toolbar at a time, never over another message (beside it; under the message tapped on a phone)
  *   a conversation of several: "3 people"; opening a conversation asks for its draft at most once
+ *   one action layer at a time: a menu, the Edited popover or an account card puts the toolbar away (a phone's ⋯ too)
+ *   photos keep their shape: one alone, two side by side sharing a height
+ *   Message details in names (who, when, where) with the ids under them; nothing cut on a phone
+ *   offline, nobody is said to be online
+ *   a message routed to an intent says so in a group; a custodian deletes the viewed Silicon's own messages, nothing else
  */
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -35,9 +40,11 @@ const tokenOf = (who: string) => {
   return tokens.get(who)!;
 };
 
-/** A photo for made-up https addresses, served by the test (no internet). */
-const photo = (label: string, fill: string) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600"><rect width="100%" height="100%" fill="${fill}"/><text x="40" y="560" font-family="sans-serif" font-size="48">${label}</text></svg>`;
+/** A photo for made-up https addresses, served by the test (no internet): 800 × 600, or the size its name says (…-1600x900-…). */
+const photo = (label: string, fill: string) => {
+  const [, width = "800", height = "600"] = /(\d+)x(\d+)/.exec(label) ?? [];
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="${fill}"/><text x="40" y="${Number(height) - 40}" font-family="sans-serif" font-size="48">${label}</text></svg>`;
+};
 
 async function signedIn(browser: Browser, who: string): Promise<BrowserContext> {
   const cookie = JSON.parse(helper("cookie", who)) as { name: string; value: string; httpOnly?: boolean; sameSite?: "Lax" | "Strict" | "None" };
@@ -87,7 +94,7 @@ function threadErrors(page: Page): () => string[] {
 const toolbars = (page: Page) =>
   page.evaluate(() =>
     [...document.querySelectorAll<HTMLElement>("[role='toolbar']")]
-      .filter(node => !node.hidden && node.getBoundingClientRect().width > 0)
+      .filter(node => !node.hidden && node.getBoundingClientRect().width > 0 && getComputedStyle(node).visibility !== "hidden")
       .map(node => {
         const row = node.closest("article");
         const box = node.getBoundingClientRect();
@@ -545,7 +552,7 @@ test("a conversation of several says how many people it has; opening it asks for
 
 /* A custodian's view ---------------------------------------------------------------------------------------------- */
 
-test("a custodian's view offers only what a custodian may do: read, and listen for the Silicon", async ({ browser }) => {
+test("a custodian's view offers only what a custodian may do: read, listen for the Silicon (and delete its messages)", async ({ browser }) => {
   // Bo and Scout talk (Scout allows Bo); Ada looks after Scout.
   const conversation = await dmApi<{ id: string }>("bo", "POST", "/api/v1/conversations", { type: "create_conversation", data: { participant_ids: ["si:dmc-scout"] } });
   const words = `From Scout to Bo ${stamp()}`;
@@ -573,6 +580,217 @@ test("a custodian's view offers only what a custodian may do: read, and listen f
   await page.getByRole("menuitem", { name: "Copy the CLI command" }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(`dm messages list ${conversation.id}`);
 
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
+/* One action layer at a time --------------------------------------------------------------------------------------- */
+
+test("one action layer at a time: a menu, the Edited popover or an account card puts the toolbar away", async ({ browser }) => {
+  const group = await newGroup("Thread layers");
+  const words = `Layers ${stamp()}`;
+  const first = await send("bo", group, { message: `${words} draft` });
+  await dmApi("bo", "PATCH", `/api/v1/conversations/${encodeURIComponent(group)}/messages/${first["message-id"]}`, { type: "message.updated", data: { message: `${words} final` } });
+  const after = `After ${stamp()}`;
+  await send("bo", group, { message: after });
+
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  await page.goto(`/c/${group}`);
+  const edited = page.locator(`article[data-message-code="${first["message-id"]}"]`);
+  await expect(edited).toBeVisible();
+  const shown = async () => (await toolbars(page)).map(bar => bar.row);
+
+  // The pointer on the edited message: its toolbar. Edited opens its history: the toolbar steps back meanwhile.
+  await edited.locator("[data-sq='surface']").first().hover();
+  await expect.poll(shown).toEqual([expect.stringContaining(`${words} final`)]);
+  await edited.getByRole("button", { name: /^Edited/ }).click();
+  await expect(page.getByRole("dialog").filter({ hasText: "Before the last edit" })).toBeVisible();
+  await expect.poll(shown).toEqual([]);
+  await page.keyboard.press("Escape");
+  await expect.poll(shown).toHaveLength(1);
+
+  // The menu (right click) is the one layer: no toolbar shows while it is open.
+  await row(page, after).locator("[data-sq='surface']").first().click({ button: "right" });
+  await expect(page.getByRole("menu", { name: "Message actions" })).toBeVisible();
+  await expect.poll(shown).toEqual([]);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu", { name: "Message actions" })).toHaveCount(0);
+
+  // An account card (Bo's name) is one too.
+  await page.mouse.move(5, 5);
+  await edited.getByRole("button", { name: "Bo Okafor", exact: true }).hover();
+  await expect(page.getByRole("tooltip")).toContainText("c:dmc-bo");
+  await expect.poll(shown).toEqual([]);
+  await page.mouse.move(5, 5);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+  // A phone: a tapped message's ⋯ opens its menu (the selection holds), and the toolbar keeps its place, unseen.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await edited.locator("[data-sq='surface']").first().click({ position: { x: 16, y: 10 } });
+  await expect.poll(shown).toEqual([expect.stringContaining(`${words} final`)]);
+  await edited.getByRole("button", { name: "More actions" }).click();
+  await expect(page.getByRole("menu", { name: "Message actions" })).toBeVisible();
+  await expect.poll(shown).toEqual([]);
+  await expect(edited.locator("[role='toolbar']")).toHaveAttribute("data-held", "");
+  await page.keyboard.press("Escape");
+  await expect.poll(shown).toEqual([expect.stringContaining(`${words} final`)]);
+
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
+/* Photos keep their shape -------------------------------------------------------------------------------------------- */
+
+test("photos keep their shape: one alone at its own, two side by side sharing a height", async ({ browser }) => {
+  const group = await newGroup("Thread shapes");
+  const alone = `One wide ${stamp()}`;
+  const pair = `A pair ${stamp()}`;
+  await send("bo", group, { message: alone, attachments: ["https://img.example.test/shape-1600x900-wide.svg"] });
+  await send("bo", group, { message: pair, attachments: ["https://img.example.test/shape-1600x900-left.svg", "https://img.example.test/shape-900x1200-right.svg"] });
+
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  await page.goto(`/c/${group}`);
+  const boxes = async (text: string) =>
+    row(page, text).locator("button[aria-label^='Open']").evaluateAll(buttons => buttons.map(button => {
+      const rect = button.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    }));
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await expect.poll(async () => {
+      const [photo] = await boxes(alone);
+      return photo ? Math.round((photo.width / photo.height) * 100) / 100 : 0;
+    }, { message: `at ${width}: one photo at its own shape (16:9)` }).toBeCloseTo(16 / 9, 1);
+    await expect.poll(async () => {
+      const [left, right] = await boxes(pair);
+      if (!left || !right) return "not drawn";
+      const same = Math.abs(left.height - right.height) <= 1;
+      const shapes = [left.width / left.height, right.width / right.height];
+      return same && Math.abs(shapes[0]! - 16 / 9) < 0.08 && Math.abs(shapes[1]! - 0.75) < 0.05 ? "kept" : JSON.stringify({ left, right });
+    }, { message: `at ${width}: two side by side, one height, each its own shape` }).toBe("kept");
+  }
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
+/* Message details in names ------------------------------------------------------------------------------------------ */
+
+test("Message details say who, when and where in names, with the ids under them; nothing is cut on a phone", async ({ browser }) => {
+  const group = await newGroup("Thread details");
+  const name = (await dmApi<{ group: { name: string } }>("ada", "GET", `/api/v1/groups/${encodeURIComponent(group)}`)).group.name;
+  const words = `Details ${stamp()}`;
+  const sent = await send("bo", group, { message: words, attachments: ["https://img.example.test/a-photo.svg"] });
+
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  await page.goto(`/c/${group}`);
+  const message = page.locator(`article[data-message-code="${sent["message-id"]}"]`);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await message.focus();
+    await page.keyboard.press("i");
+    const details = page.getByRole("dialog", { name: `Message ${sent["message-id"]}` });
+    await expect(details).toContainText(new RegExp(`Sent today at \\d\\d:\\d\\d by Bo Okafor in ${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.`));
+    await expect(details).toContainText(`c:dmc-bo in ${group}`);
+    // Every key and value whole (a long line scrolls inside the viewer); on a phone the viewer grows, so the dialog
+    // alone scrolls up and down.
+    const cut = await details.locator("[role='tree']").evaluate(tree => [...tree.querySelectorAll<HTMLElement>("[class*='__key'], [class*='__value']")].filter(node => node.scrollWidth > node.clientWidth + 1).map(node => node.textContent));
+    if (width === 390) {
+      expect(cut, "nothing cut on a phone").toEqual([]);
+      expect(await details.locator("[role='tree']").evaluate(tree => tree.scrollHeight <= tree.clientHeight + 1), "no scroll inside the dialog's scroll").toBe(true);
+    }
+    await page.keyboard.press("Escape");
+    await expect(details).toHaveCount(0);
+  }
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
+/* Offline ------------------------------------------------------------------------------------------------------------- */
+
+test("offline, the header stops saying who is online and says it waits for the network", async ({ browser }) => {
+  const direct = await dmApi<{ id: string }>("ada", "POST", "/api/v1/conversations", { type: "create_conversation", data: { participant_ids: ["c:dmc-bo"] } });
+  const device = `e2e-offline-${stamp()}`;
+  await dmApi("bo", "PUT", `/api/v1/presence/devices/${device}`, { type: "renew_presence", data: { activity: null } });
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  try {
+    await page.goto(`/c/${direct.id}`);
+    const status = page.locator("header").filter({ has: page.getByRole("heading", { level: 1 }) }).locator("p").first();
+    await expect(status).toContainText("online", { timeout: 20_000 });
+    await ada.setOffline(true);
+    await expect(status).toHaveText("waiting for the network");
+    await ada.setOffline(false);
+    await expect(status).toContainText("online", { timeout: 20_000 });
+    await expect(status).not.toContainText("waiting");
+  } finally {
+    await dmApi("bo", "DELETE", `/api/v1/presence/devices/${device}`).catch(() => undefined);
+  }
+  // Offline, the page's own requests fail on purpose; what a Carbon would mind is checked above.
+  expect(errors().filter(error => !/Failed to fetch|ERR_INTERNET_DISCONNECTED|network/i.test(error))).toEqual([]);
+  await ada.close();
+});
+
+/* Routing and a custodian's delete ----------------------------------------------------------------------------------- */
+
+test("a message routed to an intent says so in a group; a custodian deletes the viewed Silicon's own messages only", async ({ browser }) => {
+  // Bo's group with Ada, her Silicon Scout and his Silicon Atlas; Scout routes one message to Atlas's notes intent.
+  const created = await dmApi<{ id: string }>("bo", "POST", "/api/v1/groups", { type: "create_group", data: { name: `Thread custody ${stamp()}`, member_ids: ["c:dmc-ada", "si:dmc-scout", "si:dmc-atlas"] } });
+  const group = created.id;
+  for (const who of ["ada", "scout", "atlas"]) await dmApi(who, "POST", `/api/v1/groups/${encodeURIComponent(group)}/accept`).catch(() => undefined);
+  const mark = stamp();
+  const one = await send("scout", group, { message: `Scout one ${mark}` });
+  await send("scout", group, { message: `Scout routed ${mark}`, recipient_id: "notes@si:dmc-atlas" });
+  const three = await send("scout", group, { message: `Scout three ${mark}` });
+  await send("atlas", group, { message: `Atlas here ${mark}` });
+
+  // Bo reads the routing in the group.
+  const bo = await signedIn(browser, "bo");
+  const friend = await bo.newPage();
+  const friendErrors = threadErrors(friend);
+  await friend.goto(`/c/${group}`);
+  await expect(row(friend, `Scout routed ${mark}`)).toContainText("→ notes");
+  await expect(row(friend, `Scout routed ${mark}`)).toContainText("routed to the notes intent of si:dmc-atlas");
+  expect(friendErrors()).toEqual([]);
+  await bo.close();
+
+  // Ada, viewing as Scout (she is in the group herself too): Delete on Scout's messages, never on another's.
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  await page.goto(`/c/${group}?for=si:dmc-scout`);
+  await expect(page.getByText(/You can delete Scout.s own messages/)).toBeVisible();
+  const menuOn = async (text: string) => {
+    await row(page, text).locator("[data-sq='surface']").first().click({ button: "right" });
+    const items = (await page.getByRole("menuitem").allInnerTexts()).map(item => item.split("\n")[0]);
+    await page.keyboard.press("Escape");
+    return items;
+  };
+  expect(await menuOn(`Atlas here ${mark}`)).not.toContain("Delete…");
+  expect(await menuOn(`Scout one ${mark}`)).toContain("Delete…");
+  await row(page, `Scout one ${mark}`).locator("[data-sq='surface']").first().click({ button: "right" });
+  await page.getByRole("menuitem", { name: /^Delete/ }).click();
+  await expect(row(page, `Scout one ${mark}`).getByText("Delete for everyone?")).toBeVisible();
+  // The question has the keyboard on Delete: Enter deletes.
+  await page.keyboard.press("Enter");
+  await expect(page.locator(`article[data-message-code="${one["message-id"]}"]`)).toHaveAttribute("data-deleted", "");
+  // The Delete key on a selected message of Scout's asks the same; on Atlas's it does nothing.
+  await page.locator(`article[data-message-code="${three["message-id"]}"]`).focus();
+  await page.keyboard.press("Delete");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(`article[data-message-code="${three["message-id"]}"]`)).toHaveAttribute("data-deleted", "");
+  await row(page, `Atlas here ${mark}`).focus();
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(300);
+  await expect(page.getByText("Delete for everyone?")).toHaveCount(0);
+  const tombstones = (await dmApi<{ items: Array<{ "message-id": string; deleted_at: string | null }> }>("bo", "GET", `/api/v1/conversations/${encodeURIComponent(group)}/messages?limit=10`)).items.filter(item => item.deleted_at).map(item => item["message-id"]);
+  expect(tombstones.sort()).toEqual([one["message-id"], three["message-id"]].sort());
   expect(errors()).toEqual([]);
   await ada.close();
 });

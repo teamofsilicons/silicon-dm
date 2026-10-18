@@ -91,14 +91,14 @@ under a file lock ([runtime](rust-runtime.md)).
 | Area | Methods |
 | --- | --- |
 | Discovery | `accounts`, `contracts`, `me`, `delivery` |
-| Conversations | `conversations`, `conversations_for(page, Some("si:scout"))` (custodian), `create_conversation` |
+| Conversations | `conversations`, `conversations_for(page, Some("si:scout"))` (custodian), `conversation(id, for_silicon)` (one summary), `create_conversation` |
 | Messages | `send_message` (also to an account id), `send_to_recipient` (`POST /messages`), `messages`, `message`, `edit_message`, `delete_message` |
 | Receipts | `record_receipt` (one message), `read_up_to(conversation, up_to)`, `receipts_up_to(conversation, up_to, status)` |
 | Voices and speech | `voices`, `voice(account)`, `set_voice(account, voice, key)`, `reset_voice(account)`, `render_speech(script, voice)`, `message_speech(conversation, message, for_silicon)`, `transcribe(bytes, content_type, language)` |
 | Drafts and bundles | `draft`, `put_draft`, `delete_draft`, `create_bundle`, `bundle` |
 | Groups | `groups`, `group`, `create_group`, `update_group`, `invite_group_members`, `remove_group_members`, `add_group_owners`, `remove_group_owners`, `invitations`, `accept_invitation`, `decline_invitation`, `leave_group` |
 | Allow-lists | `allow_list`, `allow`, `disallow` (each with an optional Silicon for its custodian) |
-| Updates | `sync(&SyncRequest { cursor, limit, reset, wait })`, `sync_reset` |
+| Updates | `sync(&SyncRequest { cursor, limit, reset, wait, include })`, `sync_reset`; `include: Some(SYNC_INCLUDE_CONVERSATIONS.into())` adds conversation events (`SyncEventKind::Conversation`, with `change`) |
 | Presence and GIFs | `presence`, `renew_presence`, `close_presence`, `gifs` |
 | Other | `report` |
 
@@ -118,8 +118,9 @@ What 0.17 added (every field is optional on the wire, so the client reads older 
 | Model | Fields |
 | --- | --- |
 | `MessageCreate` | `speech: Option<SpeechInput>`; `SpeechInput { script, voice }` (`voice` `None`: the sender's voice) |
-| `Message` | `speech` (`{voice, voice_name, script, model, status, duration_milliseconds, peaks}`), `voice`, `gif`, `attachment_details` |
-| `Conversation` | `unread_count`, `last_read_message_id` |
+| `Message` | `speech` (`{voice, voice_name, script, model, status, duration_milliseconds, peaks}`), `voice`, `gif`, `attachment_details`, `routed_to` (the routing address the sender gave, or `None`) |
+| `Conversation` | `unread_count`, `last_read_message_id`, `draft_version` (your draft's version, `None` when there is none) |
+| `SyncRequest`, `SyncEvent` | `include` (`SYNC_INCLUDE_CONVERSATIONS`); `SyncEventKind::Conversation` events carry `change` and an empty `message_id` |
 | `Actor` | `custodian: Option<Box<Actor>>` (a Silicon's custodian) |
 | `SignInDiscovery`, `Me` | `speech` (`enabled`, models, `voices_path`, limits; `Me` adds your voice) |
 | `VoiceCatalog` | `model`, `enabled`, `items: Vec<Voice>`, `default_rule`; `get(key)`, `keys()` |

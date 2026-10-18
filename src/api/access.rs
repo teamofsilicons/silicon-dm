@@ -236,7 +236,8 @@ async fn recipient_conversation(
 
 /// Starts (or resolves) a direct conversation between the caller and `others`, applying
 /// the reach rules to a conversation that does not exist yet: Silicons only hear from
-/// their circle and their allow-list, and every account has a first-contact budget.
+/// their circle and their allow-list (in a conversation of several, that holds for every
+/// account in it), and every account has a first-contact budget.
 ///
 /// # Errors
 /// `contact_not_allowed`, `first_contact_limit`, or storage failures.
@@ -264,6 +265,11 @@ pub(crate) async fn start_conversation(
             .require_may_reach(&context.actor, other)
             .await?;
     }
+    // With two or more others, each of them talks to each Silicon too.
+    state
+        .directory()
+        .require_reach_among(&context.actor, others)
+        .await?;
     if let Some(wait) = state
         .store
         .first_contact_wait(&context.actor, FIRST_CONTACTS_PER_HOUR)

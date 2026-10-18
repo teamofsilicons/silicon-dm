@@ -26,7 +26,7 @@ the exact commands and each identity's CLI environment. Read it instead of hard-
 | Deepgram stand-in | `http://127.0.0.1:4540` | `POST /v1/listen` and `ws://…/v1/agent/converse`. See below. |
 | Briefcase stand-in | `http://127.0.0.1:4541` | Delegated uploads and public links. See below. |
 | Giphy stand-in | `http://127.0.0.1:4543` | dm-api's GIF trending and search (`DM_GIPHY_API_BASE_URL`): six popular GIFs with Giphy's own https media URLs; an unknown word such as `zzz` finds nothing. |
-| Ting stand-in | `http://127.0.0.1:4522` | Only with `up.sh --ting` (`scripts/dev_ting_stub.py`, as the app `ting`). It predates DM's current Ting contract (DM sends its proofs as `Bearer`, the stand-in reads `Proof`), so enrolment is refused there; DM's sync feed is the default transport and needs no Ting. |
+| Ting stand-in | `http://127.0.0.1:4522` | Only with `up.sh --ting` (`scripts/dev_ting_stub.py`, as the app `ting`). It verifies DM's User verification proofs with the local Accounts stack (sent as `Bearer`, naming the account by its uuid, scope `subscriptions.register`), so enrolment works there; it also takes the older forms. DM's sync feed stays the default transport and needs no Ting. |
 | dm relay | `127.0.0.1:4542` | The CLI's shared relay for every identity home, in `.dev/relay` (never `~/.silicon-dm/relay`). |
 | Website | dev `4520`, Playwright build `4530` | `up.sh` writes `web/.env.local`; `up.sh --web` also runs `next dev` on 4520. |
 

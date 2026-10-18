@@ -37,6 +37,10 @@ pub struct Conversation {
     /// Code of the newest message the listed account has read, if any.
     #[serde(default)]
     pub last_read_message_id: Option<String>,
+    /// Version of the listed account's draft here (what `GET …/draft` answers and `If-Match`
+    /// takes), or null when it has none: a client asks for the draft only when there is one.
+    #[serde(default)]
+    pub draft_version: Option<i64>,
     /// Creation time.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -64,4 +68,73 @@ pub enum ConversationAccess {
     Custodian,
     /// Invited to the group and not yet a member: may see the group's settings only.
     Invitee,
+}
+
+/// What happened to a conversation for one account: a conversation event in that account's
+/// sync feed (`GET /api/v1/sync?include=conversations`). Events name the conversation and the
+/// change only; clients read the conversation itself with their own permissions.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ConversationChange {
+    /// A conversation was created with the account in it (it created it, or it is a member
+    /// of a new group). Pending invitees of a new group get `Invited` instead.
+    Created,
+    /// The account has a new pending invitation to a group.
+    Invited,
+    /// The account was made a member of a group without accepting (its custodian added it).
+    Added,
+    /// The account accepted its invitation (on any device): the group is in its list now.
+    InvitationAccepted,
+    /// The account (or its custodian) declined its invitation.
+    InvitationDeclined,
+    /// An owner withdrew the account's pending invitation.
+    InvitationCancelled,
+    /// The account left the group (on any device).
+    Left,
+    /// The account was taken out of the group (by an owner, or by its custodian).
+    Removed,
+    /// The group's name changed.
+    Renamed,
+    /// The group's description changed.
+    DescriptionChanged,
+    /// Someone joined, left, was removed or invited, or an invitation was answered or withdrawn.
+    MembersChanged,
+    /// Owners were added or removed.
+    OwnersChanged,
+}
+
+impl ConversationChange {
+    /// Every change, in the order the docs list them.
+    pub const ALL: [Self; 12] = [
+        Self::Created,
+        Self::Invited,
+        Self::Added,
+        Self::InvitationAccepted,
+        Self::InvitationDeclined,
+        Self::InvitationCancelled,
+        Self::Left,
+        Self::Removed,
+        Self::Renamed,
+        Self::DescriptionChanged,
+        Self::MembersChanged,
+        Self::OwnersChanged,
+    ];
+
+    /// The wire name (`change` in a conversation event).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Invited => "invited",
+            Self::Added => "added",
+            Self::InvitationAccepted => "invitation_accepted",
+            Self::InvitationDeclined => "invitation_declined",
+            Self::InvitationCancelled => "invitation_cancelled",
+            Self::Left => "left",
+            Self::Removed => "removed",
+            Self::Renamed => "renamed",
+            Self::DescriptionChanged => "description_changed",
+            Self::MembersChanged => "members_changed",
+            Self::OwnersChanged => "owners_changed",
+        }
+    }
 }

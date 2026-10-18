@@ -65,7 +65,10 @@ conversation, whoever starts it and from wherever.
 - **A group** is addressed by its id, `g:{name-slug}`: **Product Design** becomes `g:product-design`, then
   `g:product-design-2` and `-3` if taken. The id never changes when the group is renamed. Groups created before
   DM 0.15 keep their three-part ids (such as `g:tos:product-design`); both forms are accepted everywhere.
-- **A conversation of three or more accounts that is not a group** is addressed by its UUID.
+- **A conversation of three or more accounts that is not a group** (a conversation of several) is addressed by its
+  UUID, which never changes: its `id`, every message's `conversation_id`, sync events and Ting references all name
+  it so, and every route takes it. Joining several ids with `::` would make an address that changes with each of
+  them and grows with every participant; the UUID does neither.
 - **A conversation kept for its history** is addressed by its UUID. When the same set of accounts ended up with more
   than one conversation (identities from before Silicon Accounts that were later linked, for example), the older ones
   are kept, read only: they are not listed, the canonical conversation names them in `supersedes`, and sending into

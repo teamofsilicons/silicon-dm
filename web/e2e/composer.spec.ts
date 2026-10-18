@@ -218,7 +218,8 @@ test("slash commands: /gif finds GIFs the keyboard picks, /link adds a link, /up
   const again = page.waitForEvent("filechooser");
   await field.press(`${mod}+Shift+U`);
   await (await again).setFiles([]);
-  await page.getByRole("button", { name: `Remove plan-${stamp}.pdf` }).click();
+  // Remove (or Cancel, while it still uploads) takes it out of the tray.
+  await page.getByRole("button", { name: new RegExp(`^(Remove|Cancel) plan-${stamp}\\.pdf$`) }).click();
   await expect(tray(page)).toHaveCount(0);
 
   // Esc closes the list and leaves the text: Enter then sends it as it is.

@@ -315,7 +315,7 @@ function composeStack({ apps, ting, secretsKept, state, pool, tingOn }) {
     },
     website: {
       app_id: 'dm', dev_url: URLS.webDev, e2e_url: URLS.webE2e, env_file: PATHS.webEnv, session_secret: secretsKept.website_session_secret,
-      cookie_name: 'dm_session', redirect_uris: DM_REDIRECTS, uploads: { briefcase_api_url: URLS.briefcase, max_bytes: 200 * 1024 * 1024 },
+      cookie_name: 'dm_session', redirect_uris: DM_REDIRECTS, uploads: { briefcase_api_url: URLS.briefcase, max_bytes: null },
     },
     relay: { home: PATHS.relay, port: PORTS.relay },
     identities: {
@@ -506,7 +506,10 @@ async function ensureStandIn(name, state, env) {
 
 // ------------------------------------------------------------------------------------------------ the website
 
-const MANAGED_WEB_KEYS = ['APP_ID', 'APP_SECRET', 'ACCOUNTS_URL', 'ACCOUNTS_API_URL', 'APP_API_URL', 'SESSION_SECRET', 'PUBLIC_URL', 'EXTRA_IMG_ORIGINS', 'BRIEFCASE_API_URL', 'UPLOADS_MAX_BYTES', 'MOCK_MESSAGING_URL'];
+const MANAGED_WEB_KEYS = ['APP_ID', 'APP_SECRET', 'ACCOUNTS_URL', 'ACCOUNTS_API_URL', 'APP_API_URL', 'SESSION_SECRET', 'PUBLIC_URL', 'EXTRA_IMG_ORIGINS', 'BRIEFCASE_API_URL', 'MOCK_MESSAGING_URL'];
+// Written by earlier versions of the stack and removed on the next up: the website has no upload cap of its own now
+// (Briefcase's 5 TiB applies), so a line left here would cap every local website at 200 MiB.
+const RETIRED_WEB_KEYS = ['UPLOADS_MAX_BYTES'];
 
 function writeWebEnv(apps, secretsKept) {
   const values = {
@@ -519,7 +522,6 @@ function writeWebEnv(apps, secretsKept) {
     PUBLIC_URL: URLS.webDev,
     EXTRA_IMG_ORIGINS: URLS.mockIris,
     BRIEFCASE_API_URL: URLS.briefcase,
-    UPLOADS_MAX_BYTES: String(200 * 1024 * 1024),
     MOCK_MESSAGING_URL: URLS.mockMessaging,
   };
   const header = [
@@ -532,7 +534,7 @@ function writeWebEnv(apps, secretsKept) {
     for (const line of readFileSync(PATHS.webEnv, 'utf8').split('\n')) {
       if (header.includes(line)) continue;
       const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
-      if (match && MANAGED_WEB_KEYS.includes(match[1])) continue;
+      if (match && (MANAGED_WEB_KEYS.includes(match[1]) || RETIRED_WEB_KEYS.includes(match[1]))) continue;
       kept.push(line);
     }
   }

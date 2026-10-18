@@ -46,7 +46,7 @@ function Reach({ silicon }: { silicon: AccountRef }) {
   return (
     <div className={styles.fact}>
       <span className={styles.factLabel}>Reach</span>
-      <p className={styles.text}>{list.error ? `${name}'s allow-list could not be loaded.` : words ?? "Looking up who may reach it…"}</p>
+      <p className={styles.text}>{words ?? (list.error ? `${name}'s allow-list could not be loaded.` : "Looking up who may reach it…")}</p>
       <Link className={styles.factLink} href={`/settings?silicon=${encodeURIComponent(silicon.id)}#reach`}>
         Change who can reach {name}<ArrowRight size={14} strokeWidth={1.75} aria-hidden="true" />
       </Link>

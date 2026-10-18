@@ -52,7 +52,7 @@ Read on the server at request time (a missing or malformed value stops the serve
 | `PUBLIC_URL` | This site's origin; `{PUBLIC_URL}/auth/callback` is registered at Silicon Accounts |
 | `EXTRA_IMG_ORIGINS`, `EXTRA_ORIGINS` | More profile-photo origins; another explicitly trusted origin of this site |
 | `BRIEFCASE_API_URL` | Silicon Briefcase's API origin, where this website saves a Carbon's files and voice notes (https; plain http only for a stand-in on this machine). Unset: uploads are off, the + menu and the microphone say so, and links, GIFs and dictation still work |
-| `UPLOADS_MAX_BYTES` | The largest file this website takes, in bytes (default 209715200, 200 MiB); a larger one is refused before any byte is sent |
+| `UPLOADS_MAX_BYTES` | Optional: the largest file this website takes, in bytes, for an operator who wants a limit of their own (a larger one is refused before any byte is sent). Unset, the only limit is Silicon Briefcase's, 5 TiB a file; files pass through without being held on disk or in memory |
 
 Production uses https and Secure cookies. Uploads in production also need Briefcase to accept DM's proofs for its
 upload scopes.

@@ -15,7 +15,7 @@ import { Problem } from "@/components/foundation/feedback/problem";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { ButtonLink } from "@/components/foundation/button-link";
 import { Button } from "@/components/silicon-ui/button/button";
-import { conversationHref, conversationKind, conversationTitle, directParticipants, inboxHref, isGroupAddress, messageUrl, otherParticipants, sameAccount, type ConversationKind } from "@/lib/chat/address";
+import { accountName, conversationHref, conversationKind, conversationTitle, directParticipants, inboxHref, isGroupAddress, messageUrl, otherParticipants, sameAccount, type ConversationKind } from "@/lib/chat/address";
 import { deleteMessage } from "@/lib/chat/api";
 import { draftHint, type DraftHint } from "@/lib/chat/drafts";
 import { replaceMessage, upsertMessage, type MessagePages } from "@/lib/chat/cache";
@@ -26,7 +26,7 @@ import { useParticipantsPresence } from "@/lib/chat/presence";
 import { markAllRead, noteDelivered } from "@/lib/chat/receipts";
 import { applyMessage } from "@/lib/chat/sync";
 import { useTitle } from "@/lib/chat/title";
-import type { AccountRef, Message } from "@/lib/chat/types";
+import type { AccountRef, Message, Presence } from "@/lib/chat/types";
 import { notify } from "@/lib/notify";
 import { useShortcutScope } from "@/lib/shortcuts/react";
 import { toggleListen } from "@/lib/voice";
@@ -40,13 +40,15 @@ import { MessageList, type MessageListHandle } from "./message-list";
 import { MessageMenu, type MenuState } from "./message-menu";
 import { ThreadBeginning } from "./thread-beginning";
 import { ThreadHeader } from "./thread-header";
-import { custodianOf, findFirstUnread, plainFailure, unreadBeyondLoaded, viewedName, type Busy, type FirstUnread } from "./thread-model";
-import { copyableText, ThreadActionsProvider, ThreadPeopleProvider, type ThreadActions, type ThreadPeople } from "./thread-actions";
+import { conversationPhrase, custodianOf, findFirstUnread, plainFailure, unreadBeyondLoaded, viewedName, type Busy, type FirstUnread } from "./thread-model";
+import { copyableText, ThreadActionsProvider, ThreadPeopleProvider, valueStore, type ThreadActions, type ThreadPeople } from "./thread-actions";
 import { useOnline } from "./use-online";
 import styles from "./thread.module.css";
 
 /** Older pages loaded on opening so the thread can open at the first unread message. */
 const UNREAD_PAGES = 4;
+/** Nobody's presence, while this browser is offline. */
+const NO_PRESENCE: Map<string, Presence> = new Map();
 
 async function copy(text: string, what: string) {
   try {
@@ -93,7 +95,10 @@ export function ConversationView({ address }: { address: string }) {
 
   // Presence of the others only (a group with nobody else yet lists you as its "others").
   const presenceIds = useMemo(() => (readOnly ? [] : others.filter(account => !sameAccount(account, perspective)).slice(0, 8).map(account => account.id)), [others, readOnly, perspective]);
-  const presence = useParticipantsPresence(presenceIds, !!conversation && !readOnly);
+  const heard = useParticipantsPresence(presenceIds, !!conversation && !readOnly);
+  // Offline here, nobody's presence is known: what was last heard would go on saying "online" (or "typing…") for
+  // someone who has long gone. The header says the browser waits for the network instead; it asks again once back.
+  const presence = online ? heard : NO_PRESENCE;
   // Who is busy, as a value that only changes when someone starts or stops (presence polls make a new map each time).
   const busySignature = others.map(account => `${account.id}:${presence.get(account.id)?.activity ?? ""}`).join("|");
   const busy = useMemo<Busy[]>(
@@ -148,13 +153,15 @@ export function ConversationView({ address }: { address: string }) {
 
   const recipientDeleted = !group && others.length === 1 && others[0]!.deleted;
   const disabledReason = readOnly
-    ? `You are reading ${viewedName(view, viewed, conversation)}'s conversation as its custodian. It is read only: nothing is sent or marked read for it.`
+    ? `You are reading ${viewedName(view, viewed, conversation)}'s conversation as its custodian: nothing is sent or marked read for it. You can delete ${viewedName(view, viewed, conversation)}'s own messages.`
     : conversation?.superseded_by
       ? "This conversation is kept for its history. Write in the current one."
       : recipientDeleted
         ? "This account was deleted. The conversation stays for its history."
         : null;
 
+  // Layers opened from messages (menus, popovers, cards, dialogs): while one is open, no toolbar shows.
+  const layers = useMemo(() => valueStore(0), []);
   const actions = useMemo<ThreadActions>(() => {
     const messagesKey = chatKeys.messages(address, view);
     return {
@@ -167,13 +174,15 @@ export function ConversationView({ address }: { address: string }) {
       edit: message => composer.current?.edit(message),
       copyText: message => void copy(copyableText(message), "Text"),
       copyLink: message => void copy(messageUrl(window.location.origin, address, message["message-id"], view), "Link"),
+      // In a custodian's view the viewed Silicon's own messages are deletable (DELETE …?for=si:x); nothing else is.
+      canDelete: message => !message.deleted_at && sameAccount(message.sender, perspective) && (!readOnly || !!view),
       requestDelete: message => setDeleting(message["message-id"]),
-      cancelDelete: () => setDeleting(null),
+      cancelDelete: code => setDeleting(current => (code === undefined || current === code ? null : current)),
       confirmDelete: async message => {
         const tombstone: Message = { ...message, message: null, attachments: [], attachment_details: [], voice_transcript: null, reply: null, history: [], deleted_at: new Date().toISOString(), voice: null, gif: null, speech: null };
         queryClient.setQueryData<MessagePages>(messagesKey, data => upsertMessage(data, tombstone));
         try {
-          applyMessage(queryClient, perspective, await deleteMessage(address, message["message-id"], crypto.randomUUID()));
+          applyMessage(queryClient, perspective, await deleteMessage(address, message["message-id"], crypto.randomUUID(), view));
           setDeleting(null);
           document.querySelector<HTMLElement>(`[data-message-code="${CSS.escape(message["message-id"])}"]`)?.focus({ preventScroll: true });
         } catch (failure) {
@@ -197,8 +206,9 @@ export function ConversationView({ address }: { address: string }) {
       retrySend,
       discardSend,
       focusComposer: () => composer.current?.focus(),
+      layers,
     };
-  }, [address, view, readOnly, perspective, me.account, queryClient, startConversation]);
+  }, [address, view, readOnly, perspective, me.account, queryClient, startConversation, layers]);
 
   const people = useMemo<ThreadPeople>(() => ({
     conversation,
@@ -223,6 +233,13 @@ export function ConversationView({ address }: { address: string }) {
   }
 
   const name = group ? title : others[0] ? (others[0].display_name?.split(/\s+/)[0] ?? others[0].id) : title;
+  // How sentences name this conversation ("your conversation with Sol", "Sol's conversation with Wren", "Launch week").
+  const named = !group || !!conversation?.group || isGroupAddress(address);
+  const where = conversationPhrase({
+    whose: view ? `${viewedName(view, viewed, conversation)}'s` : "your",
+    others: named && group ? [] : others.filter(account => !sameAccount(account, perspective)).map(accountName),
+    title,
+  });
   // Whether the service has a draft here, as the conversation list says (once the thread loaded without one: ask).
   const hint: DraftHint = conversation ? draftHint(conversation) : conversationError || thread.isSuccess || thread.isError ? "unknown" : "pending";
   const empty = thread.isSuccess && !thread.messages.length && !pending.length;
@@ -232,7 +249,7 @@ export function ConversationView({ address }: { address: string }) {
     <ThreadActionsProvider value={actions}>
       <ThreadPeopleProvider value={people}>
         <section className={styles.thread} aria-labelledby="thread-title">
-          <ThreadHeader address={address} view={view} title={title} kind={kind} conversation={conversation} others={others} presence={presence} busy={busy}
+          <ThreadHeader address={address} view={view} title={title} kind={kind} conversation={conversation} others={others} presence={presence} busy={busy} offline={!online && !readOnly}
             onCopy={(text, what) => void copy(text, what)}
             onMarkRead={!readOnly && conversation ? () => void markAllRead([conversation]) : null} />
           {conversation?.superseded_by ? (
@@ -276,7 +293,7 @@ export function ConversationView({ address }: { address: string }) {
           <Composer ref={composer} address={address} name={name} messages={thread.messages} me={perspective} disabledReason={disabledReason} draftHint={hint} onSent={onSent} onSelectLast={onSelectLast} onLeave={onLeave} />
         </section>
         <MessageMenu state={menu} onClose={() => setMenu(null)} />
-        <MessageDetailsDialog message={detailsFor} address={address} view={view} onClose={() => setDetailsFor(null)} />
+        <MessageDetailsDialog message={detailsFor} address={address} view={view} where={where} onClose={() => setDetailsFor(null)} />
         <DetailsPortal title={isGroupAddress(address) ? "Group details" : "Details"}>
           <DetailsPanel conversation={conversation} address={address} presence={presence} />
         </DetailsPortal>

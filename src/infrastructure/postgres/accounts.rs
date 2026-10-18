@@ -11,7 +11,7 @@ use super::{PostgresStore, map_constraint_error};
 use crate::{
     AppResult,
     application::ports::AccountLookup,
-    domain::{Account, ActorType},
+    domain::{Account, ActorType, ConversationChange},
 };
 
 /// One cached account with its bookkeeping.
@@ -464,6 +464,37 @@ impl PostgresStore {
         .fetch_one(self.pool())
         .await?)
     }
+
+    /// The first (Silicon, account) pair in which the account may not reach the Silicon
+    /// unasked ([`Self::may_reach_silicon`] for every pair of `silicons` × `accounts` at once,
+    /// in their order), or `None` when every account may reach every Silicon.
+    ///
+    /// # Errors
+    /// Propagates database failures.
+    pub async fn first_unreachable_silicon(
+        &self,
+        silicons: &[&str],
+        accounts: &[&str],
+    ) -> AppResult<Option<(String, String)>> {
+        Ok(sqlx::query_as(
+            "SELECT t.id, o.id
+             FROM unnest($1::text[]) WITH ORDINALITY AS t(id, position)
+             LEFT JOIN accounts s ON s.uuid = t.id
+             CROSS JOIN unnest($2::text[]) WITH ORDINALITY AS o(id, position)
+             WHERE o.id <> t.id
+               AND s.custodian_uuid IS DISTINCT FROM o.id
+               AND NOT EXISTS (SELECT 1 FROM accounts x WHERE x.uuid = o.id AND x.kind = 'silicon'
+                               AND x.custodian_uuid IS NOT NULL AND x.custodian_uuid = s.custodian_uuid)
+               AND NOT EXISTS (SELECT 1 FROM silicon_contact_allowances a
+                               WHERE a.silicon_id = t.id AND a.allowed_id = o.id)
+             ORDER BY t.position, o.position
+             LIMIT 1",
+        )
+        .bind(silicons)
+        .bind(accounts)
+        .fetch_optional(self.pool())
+        .await?)
+    }
 }
 
 /// Whether `id` is a well-formed public id (`c:handle` / `si:handle`).
@@ -595,6 +626,22 @@ impl PostgresStore {
         .bind(uuid)
         .fetch_all(&mut *transaction)
         .await?;
+        // Every conversation the account is in (or invited to) changes for the others: it
+        // shows the account as deleted, and a group may have lost an owner. A group's
+        // participant rows outlive membership, so groups count by their invitations (a group
+        // the account left long ago does not change now).
+        let affected: Vec<(uuid::Uuid, bool)> = sqlx::query_as(
+            "SELECT conversation_id, bool_or(owner) FROM (
+                SELECT p.conversation_id, false AS owner FROM conversation_participants p
+                JOIN conversations c ON c.id = p.conversation_id
+                WHERE p.actor_id = $1 AND NOT c.is_group
+                UNION ALL SELECT conversation_id, false FROM group_invitations WHERE actor_id = $1
+                UNION ALL SELECT conversation_id, true FROM group_owners WHERE actor_id = $1
+             ) mine GROUP BY conversation_id ORDER BY conversation_id",
+        )
+        .bind(uuid)
+        .fetch_all(&mut *transaction)
+        .await?;
         sqlx::query("DELETE FROM group_owners WHERE actor_id = $1")
             .bind(uuid)
             .execute(&mut *transaction)
@@ -606,6 +653,30 @@ impl PostgresStore {
         for group in groups {
             super::groups::ensure_owner_in(&mut transaction, group).await?;
         }
+        let mut events = Vec::new();
+        for (conversation, was_owner) in affected {
+            for account in
+                super::conversation_events::participants_in(&mut transaction, conversation).await?
+            {
+                events.push((
+                    conversation,
+                    account.clone(),
+                    ConversationChange::MembersChanged,
+                ));
+                if was_owner {
+                    events.push((conversation, account, ConversationChange::OwnersChanged));
+                }
+            }
+            if was_owner {
+                for account in
+                    super::conversation_events::group_invitees_in(&mut transaction, conversation)
+                        .await?
+                {
+                    events.push((conversation, account, ConversationChange::OwnersChanged));
+                }
+            }
+        }
+        super::conversation_events::record_many_in(&mut transaction, &events).await?;
         transaction.commit().await?;
         Ok(())
     }

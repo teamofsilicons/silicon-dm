@@ -1,7 +1,7 @@
 /** The thread's pure decisions (components/chat/thread/thread-model.ts). */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { activityStatus, arrivedSends, busyWords, copyableText, custodianOf, cutAtWord, emojiOnly, estimateBubbleHeight, fileNameParts, findFirstUnread, friendlyType, locateCode, messageCommands, messageLabel, namesInWords, pendingMedia, peopleWords, plainFailure, toolbarPlacement, unreachableWords, unreadBeyondLoaded, unseenCount, viewedName } from "../components/chat/thread/thread-model";
+import { activityStatus, arrivedSends, busyWords, conversationPhrase, copyableText, custodianOf, cutAtWord, emojiOnly, estimateBubbleHeight, fileNameParts, findFirstUnread, friendlyType, galleryRatio, galleryRows, locateCode, messageCommands, messageLabel, namesInWords, pendingMedia, peopleWords, photoRatio, plainFailure, routingOf, sentSentence, sentWhen, toolbarPlacement, unreachableWords, unreadBeyondLoaded, unseenCount, viewedName } from "../components/chat/thread/thread-model";
 import type { AccountRef, ConversationSummary, Message } from "../lib/chat/types";
 import { ApiError } from "../lib/errors";
 
@@ -78,6 +78,11 @@ test("a message's accessible name: who, when, its state and its words", () => {
   assert.equal(messageLabel({ sender: ada, mine: true, time: "22:17", state: "Read", edited: true, message: message("001", ada, "thanks") }), "Your message at 22:17, Read, edited: thanks");
   assert.equal(messageLabel({ sender: bo, mine: false, time: "22:18", message: message("002", bo, "x", { deleted_at: "2026-10-17T10:00:00Z", message: null }) }), "Deleted message from Bo Okafor at 22:18");
   assert.equal(messageLabel({ sender: bo, mine: false, time: "22:19", message: message("003", bo, "", { attachments: ["https://img.example/a.png"] }) }), "Message from Bo Okafor at 22:19: Photo");
+  // A spoken message is named by its caption when it has one (the bubble shows the caption as the message), else by
+  // its spoken words.
+  const speech = { voice: "mark", script: "[warmly] Down to one point eight seconds.", status: "ready" as const };
+  assert.equal(messageLabel({ sender: scout, mine: false, time: "22:20", message: message("004", scout, "Build time: 1.8 s", { speech }) }), "Message from Scout at 22:20: Build time: 1.8 s");
+  assert.equal(messageLabel({ sender: scout, mine: false, time: "22:21", message: message("005", scout, "", { speech }) }), "Message from Scout at 22:21: Down to one point eight seconds.");
 });
 
 test("a Silicon's custodian: yours, the one listed outside the conversation, or the one other Carbon in it", () => {
@@ -226,10 +231,10 @@ test("a send in the outbox shows what it carries as a sent message would", () =>
   assert.deepEqual(pendingMedia({}), { attachments: [], voice: null, gif: null });
 });
 
-test("Copy text copies what the bubble shows: a spoken message's words without cues, then its caption", () => {
+test("Copy text copies what the bubble shows: a spoken message's caption (the message), then its words without cues", () => {
   const speech = { voice: "mark", script: "[warmly] Morning. [short pause] The build is green.", status: "ready" as const };
   assert.equal(copyableText(message("000", scout, "", { speech })), "Morning. The build is green.");
-  assert.equal(copyableText(message("001", scout, "Release notes", { speech })), "Morning. The build is green.\n\nRelease notes");
+  assert.equal(copyableText(message("001", scout, "Release notes", { speech })), "Release notes\n\nMorning. The build is green.");
   assert.equal(copyableText(message("002", bo, "plain words")), "plain words");
   assert.equal(copyableText(message("003", bo, "", { voice_transcript: "a note" })), "a note");
   assert.equal(copyableText(message("004", bo, "x", { deleted_at: "2026-10-17T10:00:00Z" })), "");
@@ -277,4 +282,49 @@ test("failures the thread and the composer show: the service's words, or plain w
   assert.equal(plainFailure(refused), refused, "the service's own words stay");
   // An outbox error is a plain object; it reads the same.
   assert.equal(plainFailure({ status: 0, code: "network_error", message: "Could not reach this site for POST /api/v1/…" }, false).message, "DM could not be reached.");
+});
+
+test("Message details say who sent a message, when and where, in names", () => {
+  assert.equal(conversationPhrase({ whose: "your", others: ["Sol"], title: "Sol" }), "your conversation with Sol");
+  assert.equal(conversationPhrase({ whose: "Sol's", others: ["Wren"], title: "Wren" }), "Sol's conversation with Wren");
+  assert.equal(conversationPhrase({ whose: "your", others: ["Bo Okafor", "Cy Varga"], title: "Bo Okafor, Cy Varga" }), "your conversation with Bo Okafor and Cy Varga");
+  assert.equal(conversationPhrase({ whose: "your", others: [], title: "Launch week" }), "Launch week");
+  assert.equal(sentWhen("09:55", "Today"), "today at 09:55");
+  assert.equal(sentWhen("09:55", null), "today at 09:55");
+  assert.equal(sentWhen("23:10", "Yesterday"), "yesterday at 23:10");
+  assert.equal(sentWhen("08:00", "Monday, Oct 12"), "on Monday, Oct 12 at 08:00");
+  assert.equal(sentSentence({ time: "09:55", day: "Today", by: "Sol", where: "your conversation with Sol" }), "Sent today at 09:55 by Sol in your conversation with Sol.");
+  assert.equal(sentSentence({ time: "10:02", day: "Yesterday", by: "you", where: "Launch week" }), "Sent yesterday at 10:02 by you in Launch week.");
+});
+
+test("photos keep their shape: rows that share a height, never thin, two always side by side", () => {
+  // Two: side by side, whatever their shapes.
+  assert.deepEqual(galleryRows([1.6, 1.6]), [[0, 1]]);
+  assert.deepEqual(galleryRows([0.75, 1.78]), [[0, 1]]);
+  // Three wide ones: one over two (a row of three would be too thin to read); three tall ones: one row.
+  assert.deepEqual(galleryRows([1.6, 1.6, 1.6]), [[0], [1, 2]]);
+  assert.deepEqual(galleryRows([0.75, 0.75, 0.75]), [[0, 1, 2]]);
+  // Four wide: two over two; a wide one and three tall: one over three.
+  assert.deepEqual(galleryRows([1.6, 1.6, 1.6, 1.6]), [[0, 1], [2, 3]]);
+  assert.deepEqual(galleryRows([1.6, 0.75, 0.75, 0.75]), [[0], [1, 2, 3]]);
+  // More than four: the first four are laid out (the fourth says +N).
+  assert.deepEqual(galleryRows([1.6, 1.6, 1.6, 1.6, 1.6, 1.6]), [[0, 1], [2, 3]]);
+  assert.deepEqual(galleryRows([1.2]), [[0]]);
+  // Extreme shapes are cropped a little, never laid out as slivers.
+  assert.equal(galleryRatio(8), 2.6);
+  assert.equal(galleryRatio(0.1), 0.5);
+  assert.equal(photoRatio(1.6), 1.6);
+  assert.equal(photoRatio(4), 4);
+  assert.equal(photoRatio(0.1), 0.25);
+  assert.equal(photoRatio(9), 6);
+});
+
+test("the address a message was routed to: routed_to (in a group too), else an older service's recipient_id", () => {
+  // DM 0.17: in a group the recipient is the group; routed_to names the ISI.
+  assert.equal(routingOf({ recipient_id: "g:launch-week", routed_to: "release-notes@si:sol" }), "release-notes@si:sol");
+  // Not routed: null, even when a direct conversation's recipient is an account.
+  assert.equal(routingOf({ recipient_id: "c:mira", routed_to: null }), null);
+  // An older service: only a direct conversation's recipient_id says it.
+  assert.equal(routingOf({ recipient_id: "standup@si:wren" }), "standup@si:wren");
+  assert.equal(routingOf({ recipient_id: "g:launch-week" }), null);
 });

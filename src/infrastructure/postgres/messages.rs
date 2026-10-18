@@ -935,7 +935,15 @@ pub(crate) async fn notify_actor_in(
     transaction: &mut Transaction<'_, Postgres>,
     actor: &ActorRef,
 ) -> AppResult<()> {
-    let payload = serde_json::json!({ "account": actor.id.as_str() }).to_string();
+    notify_account_in(transaction, actor.id.as_str()).await
+}
+
+/// [`notify_actor_in`] for an account named by its storage key.
+pub(crate) async fn notify_account_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    account: &str,
+) -> AppResult<()> {
+    let payload = serde_json::json!({ "account": account }).to_string();
     sqlx::query("SELECT pg_notify('dm_delivery', $1)")
         .bind(payload)
         .execute(&mut **transaction)

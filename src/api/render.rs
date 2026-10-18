@@ -301,8 +301,18 @@ fn visit(value: &mut Value, visitor: &mut impl FnMut(&mut Slot<'_>)) {
                     visitor(&mut Slot::Field(object, field));
                 }
             }
-            for field in ["sender_id", "recipient_id"] {
-                if let Some(address) = object.get_mut(field).filter(|value| value.is_string()) {
+            // A message's `recipient_id` in a group, or in a conversation of several that was
+            // not routed, is the conversation's own id: it names no account, so it is never
+            // looked up (an unknown uuid would cost a round trip to Silicon Accounts).
+            let conversation = object
+                .get("conversation_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            for field in ["sender_id", "recipient_id", "routed_to"] {
+                if let Some(address) = object
+                    .get_mut(field)
+                    .filter(|value| value.is_string() && value.as_str() != conversation.as_deref())
+                {
                     visitor(&mut Slot::Address(address));
                 }
             }
@@ -310,7 +320,7 @@ fn visit(value: &mut Value, visitor: &mut impl FnMut(&mut Slot<'_>)) {
                 if USER_CONTENT.contains(&key.as_str())
                     || matches!(
                         key.as_str(),
-                        "actor_id" | "member_id" | "sender_id" | "recipient_id"
+                        "actor_id" | "member_id" | "sender_id" | "recipient_id" | "routed_to"
                     )
                 {
                     continue;
@@ -356,6 +366,27 @@ fn conversation_summary(value: &mut Value) {
 mod tests {
     use super::*;
     use crate::domain::ActorType;
+
+    #[test]
+    fn a_conversations_own_id_is_never_taken_for_an_account() {
+        let conversation = "01a14b99-16d2-7251-a302-7a08d1c051ad";
+        let mut value = serde_json::json!({"items": [
+            {"conversation_id": conversation, "recipient_id": conversation, "routed_to": null},
+            {"conversation_id": "g:launch-week", "recipient_id": "g:launch-week",
+                "routed_to": "release-notes@K1E"},
+        ]});
+        let mut addresses = Vec::new();
+        visit(&mut value, &mut |slot| {
+            if let Slot::Address(address) = slot {
+                addresses.push(address.as_str().unwrap_or_default().to_owned());
+            }
+        });
+        assert_eq!(
+            addresses,
+            ["release-notes@K1E"],
+            "only the route names an account"
+        );
+    }
 
     #[test]
     fn a_custodian_dm_has_not_cached_is_named_by_its_uuid() {

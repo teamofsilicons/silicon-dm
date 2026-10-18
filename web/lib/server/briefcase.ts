@@ -6,35 +6,39 @@
  *   BRIEFCASE_API_URL   Briefcase's API origin (https://api.briefcase.teamofsilicons.com). Unset: uploads are off, and
  *                       GET /api/uploads/config says so (links and GIFs still work). Plain http only for a stand-in on
  *                       this machine.
- *   UPLOADS_MAX_BYTES   the largest file this website takes, in bytes [209715200, 200 MiB]
+ *   UPLOADS_MAX_BYTES   optional: the largest file this website takes, in bytes, for an operator who wants a limit of
+ *                       their own. Unset, the only limit is Briefcase's: 5 TiB per file.
  *
- * One upload (POST /api/uploads), in this order:
+ * Files of any size pass through without being held: no temp file, no buffer. Briefcase reserves an upload by its size
+ * and SHA-256 and checks the digest as the bytes arrive, so the browser hashes the file first (lib/upload/hash.ts) and
+ * sends `POST /api/uploads?name=…&size=…&sha256=…` with the file as the body and its exact Content-Length. Then:
  *   1. Accounts POST /v1/proofs/user-verification (Basic APP_ID:APP_SECRET, subject_token = the session's access token,
  *      receiving_app briefcase, the five upload scopes, 600 s tokens, an Idempotency-Key). It comes first, while the
  *      access token is surely valid: the proof then lives on its own refresh token, however long the bytes take.
- *   2. the bytes into a temp file, with their SHA-256 and the size cap (Briefcase wants both before the transfer)
- *   3. Briefcase POST /api/v1/obo/uploads/reserve {operation_id, parent_path "", name, content_type, size, sha256}
- *   4. PUT /api/v1/obo/uploads/{upload_id}/content with X-Briefcase-Upload-Capability, the exact Content-Length (a
- *      file-backed Blob, never chunked) and no Authorization
- *   5. POST /api/v1/obo/uploads/commit {operation_id, upload_id}
- *   6. POST /api/v1/obo/link-access {operation_id, entry_id, enabled: true}: anyone with the link can view
- *   7. Accounts POST /v1/proofs/revoke {proof_id}, and the temp file is removed, whatever happened.
+ *   2. Briefcase POST /api/v1/obo/uploads/reserve {operation_id, parent_path "", name, content_type, size, sha256}
+ *   3. PUT /api/v1/obo/uploads/{upload_id}/content with X-Briefcase-Upload-Capability, no Authorization, and the same
+ *      exact Content-Length: the browser's body is piped into it as it arrives (node:http, so the length is the
+ *      header's and never chunked, and a slow side slows the other: memory stays flat whatever the size)
+ *   4. POST /api/v1/obo/uploads/commit {operation_id, upload_id}
+ *   5. POST /api/v1/obo/link-access {operation_id, entry_id, enabled: true}: anyone with the link can view
+ *   6. Accounts POST /v1/proofs/revoke {proof_id}, whatever happened.
  * Every Briefcase request carries a proof token never sent before (Briefcase's rule: a spent proof is never retried); a
- * request that failed on the way is repeated once with a fresh token and the same operation, which Briefcase answers
- * idempotently. Briefcase keeps one file per path, so each upload gets a name of its own (a time and a random part
- * before the file's name).
+ * JSON request that failed on the way is repeated once with a fresh token and the same operation, which Briefcase
+ * answers idempotently. The bytes cannot be sent twice (they were the browser's, as they went by): a transfer that broke
+ * is reconciled through its status, and anything not finished is cancelled with a proof of its own, so no reservation is
+ * left behind when the browser goes away, the connection breaks or Briefcase refuses. Briefcase keeps one file per path,
+ * so each upload gets a name of its own (a time and a random part before the file's name).
  *
  * The link: Briefcase's public inline URL, /api/v1/public/{owner uuid}/apps/dm/{name}?view=inline. Briefcase answers
  * those bytes with Cross-Origin-Resource-Policy: same-origin, so the browser loads them through GET /api/uploads/file
  * (this module's `publicFileTarget` and `fileResponseHeaders` decide what that proxy may fetch and how it answers).
  *
- * Nothing here logs a file's contents, its name, a token or a proof.
+ * Nothing here logs a file's contents, its name, a token, a proof or a capability.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { createWriteStream, openAsBlob } from "node:fs";
-import { rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { subscribe } from "node:diagnostics_channel";
+import http, { type IncomingHttpHeaders } from "node:http";
+import https from "node:https";
 import { Readable, Transform } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { pipeline } from "node:stream/promises";
@@ -45,13 +49,17 @@ import { errorBody } from "./session";
 /* Settings                                                                                                            */
 /* ------------------------------------------------------------------------------------------------------------------ */
 
-export const DEFAULT_UPLOADS_MAX_BYTES = 200 * 1024 * 1024;
+/** The largest file Silicon Briefcase takes (its openapi.yaml: 5 TiB). The upper bound of every upload here. */
+export const BRIEFCASE_MAX_BYTES = 5 * 1024 ** 4;
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 export type UploadsSettings =
   | {
       enabled: true;
+      /** The largest file taken: UPLOADS_MAX_BYTES when set (never above Briefcase's), else Briefcase's 5 TiB. */
       maxBytes: number;
+      /** Whether that is an operator's limit (UPLOADS_MAX_BYTES) rather than Briefcase's own. */
+      capped: boolean;
       /** Where this server calls Briefcase (no trailing slash): the origin, and a path prefix if it has one. */
       apiBase: string;
       /** What links in messages start with. The same as apiBase, except a plain-http stand-in on this machine: DM's
@@ -63,7 +71,7 @@ export type UploadsSettings =
    * operator would need. `problem` is the operator's: which setting, what is wrong with it (never its value); the
    * website's server logs it once (app/api/uploads/config/route.ts), and docs/reference/configuration.md has the rest.
    */
-  | { enabled: false; maxBytes: number; reason: string; problem: string };
+  | { enabled: false; maxBytes: number; capped: boolean; reason: string; problem: string };
 
 /** What Carbons read while this website has no Briefcase to upload to. */
 export const UPLOADS_NOT_SET_UP = "Uploads are not set up on this DM website yet.";
@@ -72,14 +80,18 @@ export const UPLOADS_MISCONFIGURED = "Uploads are not working on this DM website
 
 /** Reads BRIEFCASE_API_URL and UPLOADS_MAX_BYTES (at request time, like every setting of this site). */
 export function uploadsSettings(source: Record<string, string | undefined> = process.env): UploadsSettings {
-  const maxRaw = source.UPLOADS_MAX_BYTES?.trim();
-  const maxBytes = maxRaw ? Number(maxRaw) : DEFAULT_UPLOADS_MAX_BYTES;
+  const capRaw = source.UPLOADS_MAX_BYTES?.trim();
+  const cap = capRaw ? Number(capRaw) : null;
+  const validCap = cap === null || (Number.isSafeInteger(cap) && cap > 0);
+  // A limit above Briefcase's own changes nothing: Briefcase's applies.
+  const maxBytes = validCap && cap !== null ? Math.min(cap, BRIEFCASE_MAX_BYTES) : BRIEFCASE_MAX_BYTES;
+  const capped = validCap && cap !== null && cap < BRIEFCASE_MAX_BYTES;
   // Neither the reason nor the problem repeats a setting's value: the problem goes to logs, and a mistaken value could
   // carry credentials.
-  const off = (problem: string) => ({ enabled: false as const, maxBytes: Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : 0, reason: UPLOADS_MISCONFIGURED, problem: `Uploads are off: ${problem}` });
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) return off("UPLOADS_MAX_BYTES is not a whole number of bytes (209715200 is 200 MB).");
+  const off = (problem: string) => ({ enabled: false as const, maxBytes, capped, reason: UPLOADS_MISCONFIGURED, problem: `Uploads are off: ${problem}` });
+  if (!validCap) return off("UPLOADS_MAX_BYTES is not a whole number of bytes (leave it unset for no limit of the website's own; 1073741824 is 1 GiB).");
   const raw = source.BRIEFCASE_API_URL?.trim();
-  if (!raw) return { enabled: false, maxBytes, reason: UPLOADS_NOT_SET_UP, problem: "Uploads are off: BRIEFCASE_API_URL is not set, so this website has no Silicon Briefcase to save files and voice messages into. Links and GIFs still work." };
+  if (!raw) return { enabled: false, maxBytes, capped, reason: UPLOADS_NOT_SET_UP, problem: "Uploads are off: BRIEFCASE_API_URL is not set, so this website has no Silicon Briefcase to save files and voice messages into. Links and GIFs still work." };
   let url: URL;
   try {
     url = new URL(raw);
@@ -92,10 +104,37 @@ export function uploadsSettings(source: Record<string, string | undefined> = pro
   // Accept the API's base either way: "https://api.example" or "https://api.example/api/v1".
   const path = url.pathname.replace(/\/+$/, "").replace(/\/api\/v1$/, "");
   const apiBase = `${url.origin}${path}`;
-  return { enabled: true, maxBytes, apiBase, publicBase: loopbackHttp ? `https://${url.host}${path}` : apiBase };
+  return { enabled: true, maxBytes, capped, apiBase, publicBase: loopbackHttp ? `https://${url.host}${path}` : apiBase };
 }
 
 export type EnabledUploads = Extract<UploadsSettings, { enabled: true }>;
+
+/* ------------------------------------------------------------------------------------------------------------------ */
+/* Node's request deadline                                                                                             */
+/* ------------------------------------------------------------------------------------------------------------------ */
+
+/**
+ * Node's HTTP server ends a request whose body is still arriving after `requestTimeout` (300 s by default), answering
+ * 408: at a home connection's 100 Mbit/s that is under 4 GB. Next creates its server with Node's defaults and has no
+ * setting for it, so this lifts it on the server that takes this website's uploads, through the `http.server.request.
+ * start` diagnostics channel (whose message carries the server), the first time a request for /api/uploads… arrives:
+ * the browser always asks GET /api/uploads/config before it uploads, and production servers load this module at start.
+ * The guard against slow headers (`headersTimeout`, 60 s) stays; a body that stops moving is the upload's own stall
+ * timeout's business (below) and the ingress's idle timeout's.
+ */
+const LIFTED = Symbol.for("dm.uploads.request-deadline");
+
+export function liftRequestDeadline(): void {
+  const scope = globalThis as { [LIFTED]?: boolean };
+  if (scope[LIFTED]) return;
+  scope[LIFTED] = true;
+  subscribe("http.server.request.start", message => {
+    const { request, server } = message as { request?: { url?: string }; server?: http.Server };
+    if (server && server.requestTimeout !== 0 && request?.url?.startsWith("/api/uploads")) server.requestTimeout = 0;
+  });
+}
+
+liftRequestDeadline();
 
 /* ------------------------------------------------------------------------------------------------------------------ */
 /* Failures in the words a Carbon reads                                                                                */
@@ -128,19 +167,33 @@ export class UploadFailure extends Error {
   }
 }
 
+const KB = 1024;
+const MB = 1024 * KB;
+const GB = 1024 * MB;
+const TB = 1024 * GB;
+
+/** "640 KB", "12 MB", "4.8 GB", "5 TB" (a decimal only under 10). */
 export const formatBytes = (bytes: number) => {
-  if (bytes >= 1024 * 1024 * 1024) return `${Number((bytes / 1024 ** 3).toFixed(1))} GB`;
-  if (bytes >= 1024 * 1024) return `${Number((bytes / 1024 ** 2).toFixed(1))} MB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${bytes} bytes`;
+  const [unit, size] = bytes >= TB ? ["TB", TB] as const : bytes >= GB ? ["GB", GB] as const : bytes >= MB ? ["MB", MB] as const : bytes >= KB ? ["KB", KB] as const : ["bytes", 1] as const;
+  const value = bytes / size;
+  return `${size === 1 || value >= 10 ? Math.round(value) : Number(value.toFixed(1))} ${unit}`;
 };
 
-export const tooLarge = (maxBytes: number) =>
-  new UploadFailure(413, "file_too_large", `The file is larger than ${formatBytes(maxBytes)}, the most this DM website takes.`, "Make it smaller, or share a link to it instead (+ → Add a link).");
+export const tooLarge = (maxBytes: number, capped: boolean) =>
+  new UploadFailure(
+    413,
+    "file_too_large",
+    capped ? `The file is larger than ${formatBytes(maxBytes)}, the most this DM website takes.` : `The file is larger than ${formatBytes(maxBytes)}, the most Silicon Briefcase takes in one file.`,
+    capped ? "Make it smaller, or share a link to it instead (+\u00a0→\u00a0Add a link)." : "Split it into smaller files, or share a link to it instead (+\u00a0→\u00a0Add a link).",
+  );
+
+/** The page that sent this upload is older than this website (it does not hash files first): it reloads. */
+export const pageOutdated = () =>
+  new UploadFailure(409, "page_outdated", "This page is older than the DM website, so it cannot upload this way.", "Reload the page, then send the file again.");
 
 /**
  * Uploads one account may have on this server at once. A tab sends three at a time (the composer's tray), so this
- * leaves room for two tabs, and keeps one browser from filling this server's temporary disk with files in parallel.
+ * leaves room for two tabs; each holds a connection to the browser and one to Briefcase for as long as its bytes take.
  */
 export const MAX_UPLOADS_PER_ACCOUNT = 6;
 const uploadsInFlight = new Map<string, number>();
@@ -166,23 +219,48 @@ export const tooManyUploads = () =>
 const unavailable = (who: "Silicon Briefcase" | "Silicon Accounts", retryAfter?: number) =>
   new UploadFailure(503, who === "Silicon Briefcase" ? "briefcase_unavailable" : "accounts_unavailable", `${who} did not answer, so the file was not saved.`, "Try again in a moment.", retryAfter);
 
+/** The browser went away (or stopped sending) before the last byte: nothing was saved, and nobody is listening. */
+export const interrupted = () =>
+  new UploadFailure(400, "upload_interrupted", "The file did not arrive completely, so nothing was saved.", "Check the connection, then send it again (a file starts again from its first byte).");
+
 /* ------------------------------------------------------------------------------------------------------------------ */
-/* The file: name, type, bytes                                                                                         */
+/* The file: name, type, size, digest                                                                                  */
 /* ------------------------------------------------------------------------------------------------------------------ */
 
-const BRIEFCASE_NAME_MAX = 255;
-/** "20261017-153212-k3f9a2-": what storedName puts before the file's own name. */
+/** Briefcase's longest entry name, in bytes of UTF-8 (its EntryName: 255 bytes, not characters). */
+const BRIEFCASE_NAME_MAX_BYTES = 255;
+/** "20261017-153212-k3f9a2-": what storedName puts before the file's own name (ASCII: a byte a character). */
 const PREFIX_LENGTH = 23;
 const STORED = /^\d{8}-\d{6}-[0-9a-z]{6}-(.+)$/;
 
-/** Shortens a name to `max` characters, keeping its extension. */
-function shorten(name: string, max: number): string {
-  const characters = [...name];
-  if (characters.length <= max) return name;
+const utf8 = new TextEncoder();
+const bytesOf = (text: string) => utf8.encode(text).length;
+
+/** The characters a person sees (a letter with its accents, an emoji with its modifiers), so a cut never splits one. */
+function graphemes(text: string): string[] {
+  if (typeof Intl.Segmenter !== "function") return [...text];
+  return Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text), part => part.segment);
+}
+
+/**
+ * Shortens a name to at most `maxBytes` bytes of UTF-8, keeping its extension and whole characters. Bytes, not
+ * characters: Briefcase measures names that way, so a name in Japanese or Hindi (three bytes a character) or with emoji
+ * (four) is cut where Briefcase would refuse it, not after.
+ */
+function shorten(name: string, maxBytes: number): string {
+  if (bytesOf(name) <= maxBytes) return name;
   const dot = name.lastIndexOf(".");
   const extension = dot > 0 && name.length - dot <= 16 ? name.slice(dot) : "";
-  const stem = [...name.slice(0, name.length - extension.length)].slice(0, max - [...extension].length).join("").trimEnd();
-  return `${stem}${extension}`;
+  const room = maxBytes - bytesOf(extension);
+  let stem = "";
+  let used = 0;
+  for (const part of graphemes(name.slice(0, name.length - extension.length))) {
+    const size = bytesOf(part);
+    if (used + size > room) break;
+    stem += part;
+    used += size;
+  }
+  return `${stem.trimEnd()}${extension}`;
 }
 
 /**
@@ -192,14 +270,16 @@ function shorten(name: string, max: number): string {
 const INVISIBLE_DIRECTION = /[؜‎‏‪-‮⁦-⁩]/g;
 
 /**
- * The name a person sees: the file's own name with folders, control characters, invisible direction changes and runs
- * of spaces taken out, short enough that Briefcase takes it with storedName's prefix. Null when nothing usable is left.
+ * The name a person sees: the file's own name with folders, control characters (C0 and C1: Briefcase trims U+0085 as
+ * a space, which would leave the link naming a file it does not have), invisible direction changes and runs of spaces
+ * taken out, short enough in bytes that Briefcase takes it with storedName's prefix. Null when nothing usable is left.
  */
 export function cleanFileName(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const name = raw.normalize("NFC").replace(/[\u0000-\u001f\u007f]/g, "").replace(INVISIBLE_DIRECTION, "").replace(/[\\/]/g, "-").replace(/\s+/g, " ").trim();
+  const name = raw.normalize("NFC").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").replace(INVISIBLE_DIRECTION, "").replace(/[\\/]/g, "-").replace(/\s+/g, " ").trim();
   if (!name || name === "." || name === "..") return null;
-  return shorten(name, BRIEFCASE_NAME_MAX - PREFIX_LENGTH);
+  const short = shorten(name, BRIEFCASE_NAME_MAX_BYTES - PREFIX_LENGTH);
+  return short && short !== "." && short !== ".." ? short : null;
 }
 
 /** Briefcase keeps one file per path, so every upload gets a name of its own: when, a random part, then its name. */
@@ -233,58 +313,61 @@ export function contentTypeFor(header: string | null | undefined, name: string):
   return byName ?? "application/octet-stream";
 }
 
-export interface ReceivedFile {
-  path: string;
+/** What the browser says about the file it is sending: its size and SHA-256 (from the query), checked. */
+export interface Declared {
   size: number;
   sha256: string;
 }
 
 /**
- * Streams the request's body into a temp file (0600) with its SHA-256, stopping at `maxBytes` (413). The file is
- * removed again when anything goes wrong; on success the caller removes it.
+ * The size and digest the browser declared, and the request's own framing: an exact Content-Length equal to the size
+ * (Briefcase takes exactly that many bytes and no chunked transfer), never a compressed body.
  */
-export async function receiveFile(body: ReadableStream<Uint8Array> | null, maxBytes: number, signal?: AbortSignal): Promise<ReceivedFile> {
-  if (!body) throw new UploadFailure(422, "file_empty", "The upload carried no file.", "Choose a file and try again.");
-  const path = join(tmpdir(), `dm-upload-${randomUUID()}`);
-  const hash = createHash("sha256");
-  let size = 0;
-  const meter = new Transform({
-    transform(chunk: Buffer, _encoding, done) {
-      size += chunk.length;
-      if (size > maxBytes) return done(tooLarge(maxBytes));
-      hash.update(chunk);
-      done(null, chunk);
-    },
-  });
-  try {
-    await pipeline(Readable.fromWeb(body as unknown as NodeReadableStream<Uint8Array>), meter, createWriteStream(path, { mode: 0o600 }), signal ? { signal } : {});
-  } catch (error) {
-    await rm(path, { force: true });
-    if (error instanceof UploadFailure) throw error;
-    throw new UploadFailure(400, "upload_interrupted", "The file did not arrive completely, so nothing was saved.", "Check the connection, then try again.");
+export function declaredFile(query: URLSearchParams, headers: Headers, settings: { maxBytes: number; capped: boolean }): Declared | UploadFailure {
+  const sizeRaw = query.get("size");
+  const sha256 = query.get("sha256")?.toLowerCase() ?? "";
+  if (sizeRaw === null && !query.has("sha256")) return pageOutdated();
+  if (!sizeRaw || !/^\d{1,16}$/.test(sizeRaw)) return new UploadFailure(400, "invalid_size", "The upload did not say the file's size in bytes: POST /api/uploads?name=…&size=<bytes>&sha256=<hex>.", "Reload the page, then send the file again.");
+  if (!/^[0-9a-f]{64}$/.test(sha256)) return new UploadFailure(400, "invalid_digest", "The upload did not carry the file's SHA-256 (64 hex characters), which Silicon Briefcase checks the bytes against.", "Reload the page, then send the file again.");
+  const size = Number(sizeRaw);
+  if (size === 0) return new UploadFailure(422, "file_empty", "This file is empty (0 bytes), so there is nothing to send.", "Choose another file.");
+  if (size > settings.maxBytes) return tooLarge(settings.maxBytes, settings.capped);
+  if (headers.get("transfer-encoding") || !headers.has("content-length")) {
+    return new UploadFailure(411, "length_required", "The upload did not say its exact length (it was sent in chunks), and Silicon Briefcase takes a file only with its exact length.", "Send the file itself as the body, with its Content-Length (a browser does this by itself).");
   }
-  if (size === 0) {
-    await rm(path, { force: true });
-    throw new UploadFailure(422, "file_empty", "This file is empty (0 bytes), so there is nothing to send.", "Choose another file.");
+  if (headers.get("content-length") !== sizeRaw) {
+    return new UploadFailure(400, "size_mismatch", "The upload's length is not the size it declared for the file.", "Send the file again.");
   }
-  return { path, size, sha256: hash.digest("hex") };
+  const encoding = headers.get("content-encoding");
+  if (encoding && encoding.toLowerCase() !== "identity") return new UploadFailure(415, "encoded_body", "The upload's body was compressed, and the file must arrive as its own bytes.", "Send the file itself, uncompressed.");
+  return { size, sha256 };
 }
 
-/** Reads and drops what is left of a body (at most `limit` bytes), so a refusal reaches a browser that is still sending. */
-export async function drain(body: ReadableStream<Uint8Array> | null, limit: number): Promise<void> {
-  if (!body) return;
+/**
+ * After a refusal answered before the body was read: keeps reading (and dropping) what the browser still sends for a
+ * moment, so that it hears the answer rather than a closed connection, then lets go (the connection closes). Never
+ * the whole of a big file.
+ */
+export function discardBody(body: ReadableStream<Uint8Array> | null, limit: { bytes: number; ms: number } = { bytes: 32 * MB, ms: 10_000 }): void {
+  if (!body || body.locked) return;
   const reader = body.getReader();
-  let read = 0;
-  try {
-    while (read <= limit) {
-      const { done, value } = await reader.read();
-      if (done) return;
-      read += value.byteLength;
+  const stop = () => void reader.cancel().catch(() => undefined);
+  const timer = setTimeout(stop, limit.ms);
+  void (async () => {
+    let read = 0;
+    try {
+      while (read < limit.bytes) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        read += value.byteLength;
+      }
+      stop();
+    } catch {
+      // The browser went away: nothing left to answer.
+    } finally {
+      clearTimeout(timer);
     }
-    await reader.cancel();
-  } catch {
-    // The browser went away: nothing left to answer.
-  }
+  })();
 }
 
 /* ------------------------------------------------------------------------------------------------------------------ */
@@ -316,15 +399,18 @@ const errorOf = (answer: Answer) => {
   return { code: typeof error?.code === "string" ? error.code : "", message: typeof error?.message === "string" ? error.message : "" };
 };
 
+function parseBody(text: string): Record<string, unknown> | null {
+  try {
+    const value: unknown = text ? JSON.parse(text) : null;
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function readAnswer(response: Response): Promise<Answer> {
   const text = await response.text().catch(() => "");
-  let body: Record<string, unknown> | null = null;
-  try {
-    body = text ? (JSON.parse(text) as Record<string, unknown>) : null;
-  } catch {
-    body = null;
-  }
-  return { status: response.status, body, headers: response.headers };
+  return { status: response.status, body: parseBody(text), headers: response.headers };
 }
 
 /** One call to the Accounts API with this app's credentials; a network failure is tried once more with the same key. */
@@ -353,7 +439,7 @@ function proofRefused(answer: Answer): UploadFailure {
     return new UploadFailure(401, "signed_out", "Your sign-in at DM no longer lets it act for you, so the file was not saved.", "Sign in again, then send the file again.");
   }
   if (["unknown_receiving_app", "receiving_app_disabled"].includes(code)) {
-    return new UploadFailure(503, "briefcase_unavailable", `Silicon Briefcase is not available to DM right now (Silicon Accounts: ${code}).`, "Send a link instead (+ → Add a link), or try again later.");
+    return new UploadFailure(503, "briefcase_unavailable", `Silicon Briefcase is not available to DM right now (Silicon Accounts: ${code}).`, "Send a link instead (+\u00a0→\u00a0Add a link), or try again later.");
   }
   if (["invalid_app_credentials", "app_credentials_required", "app_disabled"].includes(code)) {
     return new UploadFailure(503, "uploads_misconfigured", "This DM website could not prove itself to Silicon Accounts, so uploads are not working.", "Send a link instead; this site's maintainers need to check APP_ID and APP_SECRET.");
@@ -365,13 +451,14 @@ function proofRefused(answer: Answer): UploadFailure {
 function proofEnded(answer: Answer): UploadFailure {
   if (answer.status === 0 || answer.status >= 500) return unavailable("Silicon Accounts");
   const { code } = errorOf(answer);
-  return new UploadFailure(409, "permission_ended", `DM's permission to save this file ended before it was saved${code ? ` (${code})` : ""}.`, "Send the file again.");
+  return new UploadFailure(409, "permission_ended", `DM's permission to save this file ended before it was saved${code ? ` (${code})` : ""}.`, "Sign in again if you signed out, then send the file again.");
 }
 
 /**
  * A User verification proof for one upload: DM acting for the signed-in Carbon at Briefcase. `fresh()` hands out a
  * proof token that was never sent before (the issued one while it has a minute left, then one new token per call), and
- * keeps only the newest refresh token (a used one presented again would end the proof).
+ * keeps only the newest refresh token (a used one presented again would end the proof). A proof lives as long as the
+ * Carbon's sign-in, so a transfer of any length can still be committed after its last byte.
  */
 export class UploadProof {
   readonly id: string;
@@ -418,12 +505,10 @@ export class UploadProof {
 }
 
 /* ------------------------------------------------------------------------------------------------------------------ */
-/* Briefcase                                                                                                           */
+/* Briefcase: the JSON routes                                                                                          */
 /* ------------------------------------------------------------------------------------------------------------------ */
 
 const BRIEFCASE_TIMEOUT_MS = 60_000;
-/** The byte transfer may take long (up to the size cap on a slow uplink between servers). */
-const TRANSFER_TIMEOUT_MS = 15 * 60_000;
 
 const transient = (status: number) => status === 0 || status === 408 || status === 425 || status === 500 || status === 502 || status === 503 || status === 504;
 
@@ -446,13 +531,16 @@ export function briefcaseRefused(answer: Answer, step: string): UploadFailure {
   if (transient(answer.status)) return unavailable("Silicon Briefcase", retryAfterOf(answer));
   const { code, message } = errorOf(answer);
   if (["proof_issuer_not_allowed", "proof_scope_missing", "proof_kind_not_accepted"].includes(code)) {
-    return new UploadFailure(503, "briefcase_not_allowed", "Silicon Briefcase does not accept files from DM yet.", "Send a link instead (+ → Add a link). Briefcase's operators allow DM in BRIEFCASE_PROOF_ISSUERS.");
+    return new UploadFailure(503, "briefcase_not_allowed", "Silicon Briefcase does not accept files from DM yet.", "Send a link instead (+\u00a0→\u00a0Add a link). Briefcase's operators allow DM in BRIEFCASE_PROOF_ISSUERS.");
   }
   if (answer.status === 507) return new UploadFailure(507, "briefcase_full", "Your Silicon Briefcase is full, so the file was not saved.", "Free some space in Silicon Briefcase, then try again.");
   if (answer.status === 429) {
     return new UploadFailure(429, "briefcase_limit", "You reached today's upload allowance in Silicon Briefcase.", "It resets at 00:00 UTC; until then, send a link instead.", retryAfterOf(answer));
   }
-  if (answer.status === 413) return new UploadFailure(413, "file_too_large", "Silicon Briefcase does not take a file this large.", "Make it smaller, or share a link to it instead (+ → Add a link).");
+  if (code === "delegated_upload_staging_limit_exhausted") {
+    return new UploadFailure(429, "briefcase_busy", "Silicon Briefcase is still holding other unfinished uploads of yours, so it did not take another one.", "Wait for your other uploads to finish (or remove them), then retry this one.", 30);
+  }
+  if (answer.status === 413) return new UploadFailure(413, "file_too_large", "Silicon Briefcase does not take a file this large.", "Split it into smaller files, or share a link to it instead (+\u00a0→\u00a0Add a link).");
   if (answer.status === 401) {
     return new UploadFailure(502, "briefcase_refused", `Silicon Briefcase did not accept DM's permission to act for you (${code || "HTTP 401"}).`, "Sign in again, then send the file again.");
   }
@@ -480,18 +568,184 @@ async function delegated(settings: EnabledUploads, proof: UploadProof, route: st
     });
     if (answer.status === 200 || answer.status === 201) return answer;
     if (!transient(answer.status)) break;
+    if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 500));
   }
   throw briefcaseRefused(answer, step);
 }
 
-/** The bytes, with the reservation's capability alone: no Authorization, the exact Content-Length (a file-backed Blob). */
-async function transfer(settings: EnabledUploads, file: ReceivedFile, uploadId: string, capability: string): Promise<Answer> {
-  const blob = await openAsBlob(file.path, { type: "application/octet-stream" });
-  return briefcaseFetch(`${settings.apiBase}/api/v1/obo/uploads/${encodeURIComponent(uploadId)}/content`, {
-    method: "PUT",
-    headers: { "X-Briefcase-Upload-Capability": capability, "Content-Type": "application/octet-stream", Accept: "application/json" },
-    body: blob,
-  }, TRANSFER_TIMEOUT_MS);
+/* ------------------------------------------------------------------------------------------------------------------ */
+/* Briefcase: the bytes                                                                                                */
+/* ------------------------------------------------------------------------------------------------------------------ */
+
+export interface TransferTiming {
+  /** How long nothing may move (no byte from the browser, none taken by Briefcase) before the transfer stops. */
+  stallMs: number;
+  /** After the last byte, how long Briefcase may take to answer (it checks the digest and stores the file first). */
+  answerMs: number;
+  /** How long to wait for Briefcase's "100 Continue" before sending the bytes anyway (a proxy may never pass one on). */
+  continueMs: number;
+}
+
+export const TRANSFER_TIMING: TransferTiming = { stallMs: 5 * 60_000, answerMs: 45 * 60_000, continueMs: 1_500 };
+
+export type TransferOutcome =
+  /** Briefcase answered (200 with the upload staged, or a refusal). `started`: whether any byte was sent. */
+  | { kind: "answered"; answer: Answer; received: number; started: boolean }
+  /** The browser went away, or its body ended or broke before the last byte. */
+  | { kind: "browser_gone"; received: number }
+  /** Nothing moved for `stallMs`. */
+  | { kind: "stalled"; received: number }
+  /** The connection to Briefcase broke, or its answer did not come in time: where the upload stands is unknown. */
+  | { kind: "lost"; received: number };
+
+const answerHeaders = (headers: IncomingHttpHeaders) => {
+  const out = new Headers();
+  for (const [name, value] of Object.entries(headers)) if (typeof value === "string") out.set(name, value);
+  return out;
+};
+
+/**
+ * Pipes the browser's body into Briefcase's transfer route: one PUT with the reservation's capability alone, the exact
+ * Content-Length (node:http sends the header as given and never switches to chunks; `strictContentLength` makes it
+ * refuse to send a byte more or less), and backpressure end to end (a slow Briefcase slows the browser; a slow browser,
+ * Briefcase). Exactly `size` bytes must pass; more or fewer is the browser's failure.
+ *
+ * The request asks `Expect: 100-continue` and sends the bytes on Briefcase's 100 (or after `continueMs` without one):
+ * a refusal decided from the headers (the reservation gone, its time too short) then arrives before a byte has left,
+ * instead of being lost to a connection Briefcase closes while the bytes still pour in; and the browser's body is not
+ * touched until then, so the website can still answer the browser in words. Resolves with what happened; never rejects.
+ * `onSent` is told when the last byte has gone (the browser's body is all read; Briefcase is checking and storing it).
+ */
+export function sendBytes(url: string, capability: string, size: number, body: ReadableStream<Uint8Array>, signal?: AbortSignal, timing: TransferTiming = TRANSFER_TIMING, onSent?: () => void): Promise<TransferOutcome> {
+  return new Promise(resolve => {
+    const target = new URL(url);
+    const transport = target.protocol === "https:" ? https : http;
+    let received = 0;
+    let settled = false;
+    let answering = false;
+    let browserFailed = false;
+    let source: Readable | null = null;
+    let sentAll = false;
+    let lastMove = Date.now();
+    const outgoing = transport.request(target, {
+      method: "PUT",
+      // A connection of its own for as long as the bytes take.
+      agent: false,
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-length": String(size),
+        "x-briefcase-upload-capability": capability,
+        accept: "application/json",
+        expect: "100-continue",
+      },
+    });
+    // On every outgoing message since Node 18.10 (its types list it only for responses).
+    (outgoing as http.ClientRequest & { strictContentLength: boolean }).strictContentLength = true;
+
+    const settle = (outcome: TransferOutcome) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      clearInterval(watch);
+      clearTimeout(waitForContinue);
+      if (outcome.kind !== "answered" || !sentAll) {
+        source?.destroy();
+        outgoing.destroy();
+      }
+      resolve(outcome);
+    };
+    const onAbort = () => settle({ kind: "browser_gone", received });
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    // The stall watch: while bytes are on their way, nothing moving for stallMs ends the transfer; after the last byte,
+    // Briefcase has answerMs to answer.
+    const watch = setInterval(() => {
+      const quiet = Date.now() - lastMove;
+      if (!sentAll && quiet > timing.stallMs) settle({ kind: "stalled", received });
+      else if (sentAll && !answering && quiet > timing.answerMs) settle({ kind: "lost", received });
+    }, Math.max(50, Math.min(5_000, timing.stallMs / 4)));
+    watch.unref?.();
+
+    outgoing.on("response", response => {
+      answering = true;
+      // An answer before the last byte is a refusal: stop taking what the browser sends.
+      if (!sentAll) source?.destroy();
+      const chunks: Buffer[] = [];
+      let length = 0;
+      response.on("data", (chunk: Buffer) => {
+        if (length < 64 * KB) {
+          chunks.push(chunk);
+          length += chunk.length;
+        }
+      });
+      response.on("end", () => settle({ kind: "answered", received, started: source !== null, answer: { status: response.statusCode ?? 0, body: parseBody(Buffer.concat(chunks).toString("utf8")), headers: answerHeaders(response.headers) } }));
+      response.on("error", () => settle({ kind: "lost", received }));
+    });
+    outgoing.on("error", () => {
+      if (!answering) settle(browserFailed ? { kind: "browser_gone", received } : { kind: "lost", received });
+    });
+    // Writes Briefcase takes count as movement too (a slow Briefcase is not a stall while it keeps taking bytes).
+    outgoing.on("drain", () => {
+      lastMove = Date.now();
+    });
+
+    const start = () => {
+      if (source || settled || answering) return;
+      clearTimeout(waitForContinue);
+      lastMove = Date.now();
+      const from = Readable.fromWeb(body as unknown as NodeReadableStream<Uint8Array>);
+      source = from;
+      from.on("error", () => {
+        browserFailed = true;
+      });
+      const meter = new Transform({
+        transform(chunk: Buffer, _encoding, done) {
+          received += chunk.length;
+          lastMove = Date.now();
+          if (received > size) {
+            browserFailed = true;
+            return done(new Error("more bytes than the upload declared"));
+          }
+          done(null, chunk);
+        },
+        flush(done) {
+          if (received === size) return done();
+          browserFailed = true;
+          done(new Error("fewer bytes than the upload declared"));
+        },
+      });
+      pipeline(from, meter, outgoing).then(
+        () => {
+          sentAll = true;
+          lastMove = Date.now();
+          if (!settled) onSent?.();
+        },
+        () => {
+          if (answering || settled) return;
+          settle(browserFailed || signal?.aborted ? { kind: "browser_gone", received } : { kind: "lost", received });
+        },
+      );
+    };
+    outgoing.on("continue", start);
+    const waitForContinue = setTimeout(start, timing.continueMs);
+    if (signal?.aborted) return onAbort();
+    outgoing.flushHeaders();
+  });
+}
+
+/** Briefcase's refusal of the bytes themselves, as the browser hears it. */
+function transferRefused(answer: Answer): UploadFailure {
+  const { code } = errorOf(answer);
+  if (code === "delegated_upload_manifest_mismatch") {
+    return new UploadFailure(409, "file_changed", "The file's bytes are not the ones prepared for it: it changed on its way or after it was chosen, so it was not saved.", "Choose the file again and send it.");
+  }
+  if (code === "delegated_upload_insufficient_lifetime") {
+    return new UploadFailure(503, "briefcase_unavailable", "Silicon Briefcase's reservation for this file ran out of time before the bytes could start.", "Send the file again.");
+  }
+  if (code === "delegated_upload_not_reserved" || answer.status === 404) {
+    return new UploadFailure(503, "briefcase_unavailable", "Silicon Briefcase was no longer waiting for this file's bytes (its reservation had closed), so it was not saved.", "Send the file again.");
+  }
+  return briefcaseRefused(answer, "transfer");
 }
 
 const encodeSegment = (segment: string) => encodeURIComponent(segment).replace(/%3A/gi, ":");
@@ -513,63 +767,232 @@ function pathFromLink(link: unknown, name: string): string[] | null {
   }
 }
 
-export interface PublishInput {
+export interface SaveInput {
   settings: EnabledUploads;
   proof: UploadProof;
-  file: ReceivedFile;
   /** The stored name (storedName). */
   name: string;
   contentType: string;
+  /** What the browser declared (declaredFile). */
+  file: Declared;
+  /** The browser's body: the file's bytes, piped through as they arrive. */
+  body: ReadableStream<Uint8Array>;
+  /**
+   * Aborts when the browser goes away, or when the save is cancelled or abandoned after its last byte (the reason is
+   * then the UploadFailure the browser would hear: `cancelled`, `abandoned`).
+   */
+  signal?: AbortSignal;
   /** The Carbon's account uuid: links name the owner by uuid, which never changes (an id can). */
   owner: string;
   appId: string;
+  timing?: TransferTiming;
+  /** Told when the browser's last byte has gone to Briefcase (POST /api/uploads may then answer 202 and let it save). */
+  onTransferred?: () => void;
 }
 
+/** Why a save was stopped by this website (cancelled, abandoned), when the abort says; else null (the browser left). */
+const stopReason = (signal: AbortSignal | undefined) => (signal?.aborted && signal.reason instanceof UploadFailure ? signal.reason : null);
+
 /**
- * Reserve → transfer → commit → link-access. A reservation that cannot be finished is cancelled (best effort); a
- * transfer that failed on the way is reconciled through its status and tried once more with a new capability.
+ * Reserve → transfer (the browser's bytes piped through) → commit → link-access. Whatever stops it before the commit
+ * (the browser leaving, a stall, a refusal, Briefcase out of reach) cancels the reservation with a proof token of its
+ * own, so nothing is left reserved; a transfer whose outcome is unknown is first reconciled through its status (the
+ * bytes may all have arrived).
  */
-export async function publishToBriefcase(input: PublishInput): Promise<{ url: string }> {
-  const { settings, proof, file, name, contentType, owner, appId } = input;
+export async function saveToBriefcase(input: SaveInput): Promise<{ url: string }> {
+  const { settings, proof, name, contentType, file, owner, appId } = input;
   const operation = randomUUID();
   const manifest = { operation_id: operation, parent_path: "", name, content_type: contentType, size: file.size, sha256: file.sha256 };
-  let committed = false;
   let reserved = false;
+  let committed = false;
   try {
-    let upload = (await delegated(settings, proof, "uploads/reserve", manifest, "reserve")).body as UploadState;
+    const reservation = (await delegated(settings, proof, "uploads/reserve", manifest, "reserve")).body as UploadState;
     reserved = true;
-    for (let attempt = 0; upload.state === "reserved" || upload.state === "receiving"; attempt++) {
-      if (!upload.upload_id) throw briefcaseRefused({ status: 502, body: null, headers: new Headers() }, "reserve");
-      const sent = upload.capability ? await transfer(settings, file, upload.upload_id, upload.capability) : null;
-      if (sent?.status === 200) {
-        upload = { ...upload, ...(sent.body as UploadState) };
-        continue;
-      }
-      if (sent && !transient(sent.status) && sent.status !== 409) throw briefcaseRefused(sent, "transfer");
-      if (attempt >= 1) throw briefcaseRefused(sent ?? { status: 503, body: null, headers: new Headers() }, "transfer");
-      // Uncertain: ask where it stands, and reserve again (the same manifest) for a new capability if it still waits.
-      upload = (await delegated(settings, proof, "uploads/status", { operation_id: operation }, "status")).body as UploadState;
-      if (upload.state === "reserved") upload = (await delegated(settings, proof, "uploads/reserve", manifest, "reserve")).body as UploadState;
+    if (reservation.state !== "reserved" || !reservation.upload_id || !reservation.capability) {
+      throw new UploadFailure(502, "briefcase_refused", `Silicon Briefcase did not open the upload (it is ${reservation.state ?? "in an unknown state"}).`, "Try again.");
     }
+    const transferUrl = `${settings.apiBase}/api/v1/obo/uploads/${encodeURIComponent(reservation.upload_id)}/content`;
+    const outcome = await sendBytes(transferUrl, reservation.capability, file.size, input.body, input.signal, input.timing, input.onTransferred);
+    let upload: UploadState = reservation;
+    if (outcome.kind === "browser_gone") throw stopReason(input.signal) ?? interrupted();
+    if (outcome.kind === "answered") {
+      if (outcome.answer.status !== 200) throw transferRefused(outcome.answer);
+      upload = { ...reservation, ...(outcome.answer.body as UploadState | null) };
+    } else {
+      // The connection to Briefcase broke or went quiet: every byte may still have arrived. Ask where it stands.
+      upload = (await delegated(settings, proof, "uploads/status", { operation_id: operation }, "status")).body as UploadState;
+      if (upload.state !== "staged" && upload.state !== "committed") {
+        throw outcome.kind === "stalled"
+          ? new UploadFailure(408, "upload_stalled", "The upload stalled: nothing moved for five minutes, so it was stopped and nothing was saved.", "Check the connection, then send the file again (it starts again from its first byte).")
+          : new UploadFailure(503, "briefcase_unavailable", "Silicon Briefcase stopped taking the file part way, so it was not saved.", "Try again in a moment (the file starts again from its first byte).", 5);
+      }
+    }
+    // A browser that left while the last bytes were checked (or a save cancelled or abandoned meanwhile): nothing would
+    // use the file, so it is not published.
+    if (input.signal?.aborted) throw stopReason(input.signal) ?? interrupted();
     if (upload.state === "staged") {
-      upload = (await delegated(settings, proof, "uploads/commit", { operation_id: operation, upload_id: upload.upload_id }, "commit")).body as UploadState;
+      upload = (await delegated(settings, proof, "uploads/commit", { operation_id: operation, upload_id: upload.upload_id ?? reservation.upload_id }, "commit")).body as UploadState;
     }
     if (upload.state !== "committed" || !upload.published_entry_id) {
       throw new UploadFailure(502, "briefcase_refused", `Silicon Briefcase did not publish the file (it is ${upload.state ?? "in an unknown state"}).`, "Try again.");
     }
     committed = true;
-    const link = (await delegated(settings, proof, "link-access", { operation_id: randomUUID(), entry_id: upload.published_entry_id, enabled: true }, "link")).body as { url?: unknown; effective?: unknown };
-    if (link.effective !== true) {
-      throw new UploadFailure(502, "briefcase_refused", "Silicon Briefcase saved the file but did not open a link to it.", "Try again; the file stays in your Briefcase under apps/dm.");
+    // The file is saved from here on: a failure now is about its link, and says so (never "not saved").
+    const linkFailed = (why: UploadFailure | null) =>
+      new UploadFailure(why?.status === 503 || why?.status === 429 ? why.status : 502, why?.code === "briefcase_unavailable" ? "briefcase_unavailable" : "briefcase_refused", "Silicon Briefcase saved the file but did not open a link to it, so it was not added to the message.", "Try again (it uploads again); this copy stays in your Briefcase under apps/dm.", why?.retryAfter);
+    let link: { url?: unknown; effective?: unknown };
+    try {
+      link = (await delegated(settings, proof, "link-access", { operation_id: randomUUID(), entry_id: upload.published_entry_id, enabled: true }, "link")).body as { url?: unknown; effective?: unknown };
+    } catch (error) {
+      throw linkFailed(error instanceof UploadFailure ? error : null);
     }
+    if (link.effective !== true) throw linkFailed(null);
     return { url: publicFileUrl(settings, owner, pathFromLink(link.url, name) ?? ["apps", appId, name]) };
   } catch (error) {
     if (reserved && !committed) {
-      // An abandoned reservation is cancelled with a proof of its own; cancelling never touches a published file.
+      // An abandoned reservation is cancelled with a proof token of its own; cancelling never touches a published file.
       await delegated(settings, proof, "uploads/cancel", { operation_id: operation }, "cancel").catch(() => undefined);
     }
     throw error;
   }
+}
+
+/* ------------------------------------------------------------------------------------------------------------------ */
+/* Saving after the last byte (POST /api/uploads answers 202; GET|DELETE /api/uploads/saving)                          */
+/* ------------------------------------------------------------------------------------------------------------------ */
+
+/**
+ * After a file's last byte, Briefcase checks it and stores it before it answers: for a large file that takes minutes,
+ * with nothing moving on either connection. An ingress cuts a request that stays silent for its idle timeout
+ * (production's load balancer: 180 s) and the browser would hear 504 for a file that was about to be saved, so POST
+ * /api/uploads never waits silently that long: when Briefcase has not answered `holdMs` after the last byte, it answers
+ * 202 with an id and the save goes on here, holding the account's upload slot and the proof until it ends. The browser
+ * then asks GET /api/uploads/saving?id=… (each ask waits up to `waitMs` for the outcome) until it has the link; DELETE
+ * cancels the save, and a page that goes away sends that DELETE as it goes. One nobody asks about for `abandonMs` (a
+ * browser that crashed) is cancelled too, as a transfer is when its browser goes away: nothing would use the file. The
+ * wait is long because the bytes are all at Briefcase by then: a laptop closed for a few minutes, or a phone changing
+ * networks, still gets its file. An outcome is kept for `keepMs`, longer than that. All of it lives in this server's
+ * memory, so one website process takes a Carbon's uploads (production runs one; with several, keep a Carbon on one).
+ */
+export const SAVING_TIMING = { holdMs: 20_000, waitMs: 25_000, abandonMs: 10 * 60_000, keepMs: 15 * 60_000 };
+
+/** What the browser gets for a saved file: the link a message carries, and what the website saved it as. */
+export interface SavedUpload {
+  url: string;
+  name: string;
+  content_type: string;
+  size: number;
+}
+
+export type SavingOutcome = { kind: "saving" } | { kind: "saved"; upload: SavedUpload } | { kind: "failed"; failure: UploadFailure };
+
+interface Saving {
+  owner: string;
+  outcome: SavingOutcome;
+  stop: AbortController;
+  /** Resolves once the outcome is known. */
+  known: Promise<void>;
+  /** Asks waiting right now, and when the last one ended (or the 202 went). */
+  asking: number;
+  seenAt: number;
+}
+
+/** The browser cancelled the file while Briefcase was storing it. */
+export const cancelled = () => new UploadFailure(409, "upload_cancelled", "The upload was cancelled, so the file was not saved.", "Send it again if you still want it in the message.");
+
+/** Nobody asked about the save for a while (the page was closed, or lost this website): nothing would use the file. */
+export const abandoned = () =>
+  new UploadFailure(409, "upload_abandoned", "This page stopped asking about the file while it was being saved (it was closed, or lost its connection), so the file was not kept.", "Send it again (it starts again from its first byte).");
+
+/** A save this server does not know: it restarted, the outcome is older than it keeps, or it is another account's. */
+export const unknownSaving = () =>
+  new UploadFailure(404, "upload_unknown", "This website no longer knows that upload: it restarted while saving the file, or the upload ended a while ago.", "Send the file again (it starts again from its first byte).");
+
+const SAVINGS = Symbol.for("dm.uploads.savings");
+/** By id. On the global object, so a module loaded twice (a dev server's reload, two route bundles) shares it. */
+const savings: Map<string, Saving> = ((globalThis as { [SAVINGS]?: Map<string, Saving> })[SAVINGS] ??= new Map());
+
+/**
+ * Keeps a save going after POST /api/uploads answered 202: `work` is saveToBriefcase's, `stop` aborts it (cancel,
+ * abandoned). Answers the id the browser asks about. Nothing here logs the file's name.
+ */
+export function keepSaving(owner: string, work: Promise<SavedUpload>, stop: AbortController, timing = SAVING_TIMING): string {
+  const id = randomUUID();
+  const entry: Saving = { owner, outcome: { kind: "saving" }, stop, asking: 0, seenAt: Date.now(), known: Promise.resolve() };
+  // The tab that stopped asking: cancelled, as a transfer is when its browser goes away.
+  const watch = setInterval(() => {
+    if (entry.outcome.kind === "saving" && entry.asking === 0 && Date.now() - entry.seenAt > timing.abandonMs) stop.abort(abandoned());
+  }, Math.max(20, Math.min(5_000, timing.abandonMs / 4)));
+  watch.unref?.();
+  entry.known = work.then(
+    upload => {
+      entry.outcome = { kind: "saved", upload };
+    },
+    error => {
+      // Something of this website's own broke (never a file's name or bytes in the line); refusals are the browser's.
+      if (!(error instanceof UploadFailure)) console.error(`upload failed while saving: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`);
+      entry.outcome = { kind: "failed", failure: UploadFailure.from(error) };
+    },
+  ).finally(() => {
+    clearInterval(watch);
+    setTimeout(() => {
+      if (savings.get(id) === entry) savings.delete(id);
+    }, timing.keepMs).unref?.();
+  });
+  savings.set(id, entry);
+  return id;
+}
+
+/** The save `id` of `owner`, or null (unknown here, or another account's: the same answer, so ids reveal nothing). */
+const savingOf = (id: string, owner: string) => {
+  const entry = savings.get(id);
+  return entry && entry.owner === owner ? entry : null;
+};
+
+/** Waits up to `waitMs` for the outcome of a save (the browser's ask), then says where it stands; null when unknown. */
+export async function askSaving(id: string, owner: string, waitMs: number, signal?: AbortSignal): Promise<SavingOutcome | null> {
+  const entry = savingOf(id, owner);
+  if (!entry) return null;
+  if (entry.outcome.kind === "saving" && waitMs > 0 && !signal?.aborted) {
+    entry.asking += 1;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        entry.known,
+        new Promise<void>(resolve => {
+          timer = setTimeout(resolve, waitMs);
+          onAbort = resolve;
+          signal?.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+      entry.asking -= 1;
+      entry.seenAt = Date.now();
+    }
+  } else {
+    entry.seenAt = Date.now();
+  }
+  return entry.outcome;
+}
+
+/**
+ * Cancels a save (the browser's DELETE): the transfer to Briefcase stops and its reservation is cancelled. Waits up to
+ * `waitMs` for that, then says where it stands ("saved" when it had already finished: the file stays in the Carbon's
+ * Briefcase, with no message using it). Null when unknown.
+ */
+export async function cancelSaving(id: string, owner: string, waitMs = 5_000): Promise<SavingOutcome | null> {
+  const entry = savingOf(id, owner);
+  if (!entry) return null;
+  if (entry.outcome.kind === "saving") {
+    entry.stop.abort(cancelled());
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([entry.known, new Promise<void>(resolve => (timer = setTimeout(resolve, waitMs)))]);
+    clearTimeout(timer);
+  }
+  return entry.outcome;
 }
 
 /* ------------------------------------------------------------------------------------------------------------------ */

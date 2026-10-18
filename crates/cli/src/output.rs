@@ -134,3 +134,13 @@ pub fn print_error(error: &anyhow::Error, compact: bool) {
     };
     eprintln!("{}", text.unwrap_or_else(|_| format!("{error:#}")));
 }
+
+/// An error already in the `{"error": …}` shape, on standard error.
+pub fn print_value_error(value: &Value, compact: bool) {
+    let text = if compact {
+        serde_json::to_string(value)
+    } else {
+        serde_json::to_string_pretty(value)
+    };
+    eprintln!("{}", text.unwrap_or_else(|_| value.to_string()));
+}

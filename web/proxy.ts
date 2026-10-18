@@ -93,7 +93,9 @@ export const config = {
   matcher: [
     {
       // Route handlers (the BFF under /api and /auth, the agent files, the icons and the social image) and static files
-      // set their own headers.
+      // set their own headers. Uploads (POST /api/uploads, files of any size) depend on this exclusion: Next copies a
+      // request's body into memory for the paths a proxy runs on (up to experimental.proxyClientMaxBodySize), so the
+      // proxy must never run on /api/ (tests/upload-paths.test.ts checks it with Next's own matcher).
       source: "/((?!api/|auth/|_next/static|_next/image|fonts/|favicon\\.ico|icon|apple-icon|og\\.png|robots\\.txt|sitemap\\.xml|llms\\.txt|llms-full\\.txt|manifest\\.webmanifest).*)",
     },
   ],

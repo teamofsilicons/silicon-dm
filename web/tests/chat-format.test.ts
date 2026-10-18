@@ -48,6 +48,11 @@ test("a row's line: You:, a sender's first name in groups, and what a message ca
   assert.equal(messageGist(base({ gif: { provider_id: "g1", url: "https://media.giphy.com/x.gif" }, attachments: ["https://media.giphy.com/x.gif"] })), "GIF");
   assert.equal(messageGist(base({ deleted_at: "2026-10-17T10:00:00Z", message: null })), "This message was deleted");
   assert.equal(messageGist(base({ speech: { voice: "mark", script: "[excited] It works!", status: "ready" } })), "It works!");
+  // With a written caption the caption is the message (the spoken words are its transcript), in the row as in the thread.
+  const captioned = base({ message: "Your morning in one minute", speech: { voice: "mark", script: "[warmly] Good morning, Mira. Three things today.", status: "ready" } });
+  assert.equal(messageGist(captioned), "Your morning in one minute");
+  assert.deepEqual(rowPreview(captioned, { me: ada, group: false }), { who: null, text: "Your morning in one minute", quiet: false });
+  assert.equal(rowPreview(base({ speech: { voice: "mark", script: "[sighs]", status: "ready" } }), { me: ada, group: false }).quiet, true, "nothing to read: quieter");
   assert.equal(spokenWords("[whispers]quietly[/whispers] now"), "quietly now");
   assert.deepEqual(rowPreview(null, { me: ada, group: false }), { who: null, text: "No messages yet", quiet: true });
 });
@@ -81,6 +86,16 @@ test("an edit carries everything the message keeps; a reply preview quotes it", 
   });
   assert.equal(canEditHere(base({ speech: { voice: "mark", script: "hi", status: "ready" } })), false, "spoken messages are edited with the CLI");
   assert.deepEqual(replyPreviewOf(base({ message: "quoted" })).content, { message: "quoted", attachments: [], voice_transcript: null });
+});
+
+test("a reply's quote of a spoken message: its caption, else the spoken words without cues (as the service quotes it)", () => {
+  const speech = { voice: "mark", script: "[cheerfully] Done. [short pause] Thursday at three.", status: "ready" as const };
+  assert.deepEqual(replyPreviewOf(base({ speech })).content, { message: "", attachments: [], voice_transcript: "Done. Thursday at three." });
+  // The service's own transcript wins when the message carries it.
+  assert.equal(replyPreviewOf(base({ speech, voice_transcript: "Done. Thursday at three." })).content?.voice_transcript, "Done. Thursday at three.");
+  // A written caption is the message, as the bubble shows it; the spoken words stay its transcript.
+  assert.deepEqual(replyPreviewOf(base({ speech, message: "The plan for Thursday" })).content, { message: "The plan for Thursday", attachments: [], voice_transcript: "Done. Thursday at three." });
+  assert.equal(replyPreviewOf(base({ speech, deleted_at: "2026-10-17T10:00:00Z" })).content, null);
 });
 
 test("addresses: readable links, direct pairs, titles and kinds, ISI, shell quoting", () => {

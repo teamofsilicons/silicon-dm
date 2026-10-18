@@ -4,9 +4,12 @@
 
 /**
  * The tray on screen: what goes with the next message, above the field. Each item says what it is (name, type, size),
- * how far its upload is (Silicon UI's Progress, named after the file), and has Remove; a failed upload spreads to a
- * full row with the reason in words and Retry. Pictures show a thumbnail, links their address, a GIF its still frame
- * under reduced motion. Nothing here is hover-only: Remove and Retry are always there and reachable by Tab.
+ * how far its upload is (Silicon UI's Progress, named after the file, with words under it: "Preparing… 40%" while the
+ * file is read for its digest, then "Uploading 42%", or for a big file "1.2 of 4.8 GB · 23 MB/s · 3 min left", then
+ * "Saving…"), and has Remove (Cancel while it uploads: the transfer stops and Briefcase's reservation is cancelled); a
+ * failed upload spreads to a full row with the reason in words and Retry. Pictures show a thumbnail, links their
+ * address, a GIF its still frame under reduced motion. Nothing here is hover-only: Cancel, Remove and Retry are always
+ * there and reachable by Tab. A lone item takes the whole width; more share it.
  *
  * A long name is cut in its middle, so its end and its extension stay readable ("quarterly-repo…mvcrw8v7.pdf"); the
  * whole name is the item's title and what a screen reader hears. Many items scroll inside the tray, which fades at an
@@ -21,7 +24,7 @@ import { clockDuration, fileSize } from "@/lib/chat/format";
 import { displayUrl } from "@/lib/upload/display";
 import { gifStill } from "./gif-picker";
 import { nameParts } from "./name-parts";
-import type { TrayItem } from "./tray";
+import { fileProgressWords, type TrayItem } from "./tray";
 import styles from "./composer.module.css";
 
 /** "PDF", "PNG image", "MP4 video", or the extension, or "File". */
@@ -55,9 +58,11 @@ function FileIcon({ contentType }: { contentType?: string }) {
   return <FileText {...props} />;
 }
 
-function RemoveButton({ name, onRemove }: { name: string; onRemove: () => void }) {
+function RemoveButton({ name, onRemove, cancels = false }: { name: string; onRemove: () => void; cancels?: boolean }) {
+  // While it uploads, the same button cancels the upload (and says so).
+  const label = cancels ? `Cancel ${name}` : `Remove ${name}`;
   return (
-    <button type="button" className={styles.chipRemove} data-sq="surface" data-tray-remove="" onClick={onRemove} aria-label={`Remove ${name}`} title={`Remove ${name}`}>
+    <button type="button" className={styles.chipRemove} data-sq="surface" data-tray-remove="" onClick={onRemove} aria-label={label} title={cancels ? `Cancel the upload of ${name}` : label}>
       <X size={14} strokeWidth={2} aria-hidden="true" />
     </button>
   );
@@ -125,15 +130,15 @@ function TrayEntry({ item, preview, reduced, online, retryable, onRemove, onRetr
   const percent = Math.round(item.progress * 100);
   const image = item.kind === "file" && (item.contentType ?? "").startsWith("image/") ? preview ?? (item.url ? displayUrl(item.url) : undefined) : undefined;
   // Every byte sent: the website is handing the file to Silicon Briefcase (it says so instead of a long "99 %").
-  const progressWords = !online ? "Uploads when online" : percent >= 100 ? "Saving…" : `Uploading ${percent}%`;
+  const voiceWords = !online ? "Uploads when online" : percent >= 100 ? "Saving…" : `Uploading ${percent}%`;
   // A voice note whose bytes are saved waits only for its words: it says so (the shimmer stays still under reduced motion).
   const transcribing = item.kind === "voice" && uploading && !!item.transcribing;
   const meta = transcribing
     ? <TextShimmer>Transcribing…</TextShimmer>
     : item.kind === "voice"
-      ? uploading ? (!online || percent > 0 ? progressWords : "Getting it ready…") : item.voice?.duration_milliseconds ? clockDuration(item.voice.duration_milliseconds) : "Voice message"
+      ? uploading ? (!online || percent > 0 ? voiceWords : "Getting it ready…") : item.voice?.duration_milliseconds ? clockDuration(item.voice.duration_milliseconds) : "Voice message"
       : uploading
-        ? !online ? progressWords : item.queued ? "Waiting to upload…" : progressWords
+        ? fileProgressWords(item, online)
         : [kindWords(item.name, item.contentType), fileSize(item.size)].filter(Boolean).join(" · ");
   const showProgress = uploading && online && !transcribing && !(item.kind === "file" && item.queued);
   return (
@@ -156,7 +161,7 @@ function TrayEntry({ item, preview, reduced, online, retryable, onRemove, onRetr
           <span>Retry</span>
         </button>
       ) : null}
-      <RemoveButton name={name} onRemove={onRemove} />
+      <RemoveButton name={name} onRemove={onRemove} cancels={uploading && item.kind === "file"} />
     </li>
   );
 }

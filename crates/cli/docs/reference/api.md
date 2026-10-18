@@ -1,6 +1,6 @@
 ---
 title: HTTP API
-description: The DM HTTP API under contract 4. Signing in, apps acting for an account, who can reach whom, custodians, conversations, messages, reading in bulk, voices and speech, groups, the sync feed, errors and the Silicon Accounts webhook, with every route; and the website's own routes for uploads.
+description: The DM HTTP API under contract 4. Signing in, apps acting for an account, who can reach whom, custodians, conversations (direct, of several, groups), messages and routing, reading in bulk, voices and speech, groups, the sync feed and its conversation events, errors and the Silicon Accounts webhook, with every route; and the website's own routes for uploads.
 kind: reference
 order: 60
 related:
@@ -47,7 +47,7 @@ app may call with a User verification proof ([below](#apps-acting-for-an-account
 | `GET /conversations/{conversation}` | One conversation summary (a direct address, an account id, a group id or a UUID) | own, proof |
 | `POST /messages` | Send to an account, group or conversation address (`recipient_id`) | own, proof |
 | `GET`, `POST /conversations/{conversation}/messages` | History, newest first; send into the conversation | own, proof |
-| `GET`, `PATCH`, `DELETE /conversations/{conversation}/messages/{message}` | Read; edit (history kept); delete (tombstone) | own, proof |
+| `GET`, `PATCH`, `DELETE /conversations/{conversation}/messages/{message}` | Read; edit (history kept); delete (tombstone; `?for=si:…` for a custodian) | own, proof |
 | `POST /conversations/{conversation}/messages/{message}/receipts` | `delivered` or `read` for one device | own, proof |
 | `POST /conversations/{conversation}/receipts` | Everything from others up to a message, read or delivered | own, proof |
 | `GET /conversations/{conversation}/messages/{message}/speech` | The message as audio (WAV) | own, proof |
@@ -66,7 +66,7 @@ app may call with a User verification proof ([below](#apps-acting-for-an-account
 | `GET /presence/{account}` | Someone's availability, activity and last-seen time | own |
 | `GET /gifs/trending`, `/gifs/search?q=`, `/gifs/recent` | GIFs | own |
 | `POST /reports` | Report a bug to DM's maintainers | own |
-| `GET /sync` | References to what changed for you, from a cursor (long-poll with `wait`) | own, proof |
+| `GET /sync` | References to what changed for you, from a cursor (long-poll with `wait`; conversation events with `include=conversations`) | own, proof |
 | `GET /ws`, `/ws/shared` | Retired: 410 `delivery_moved` | none |
 | `POST /webhook/` | Silicon Accounts' app events (signed) | signature |
 | `GET /live`, `/ready` | Probes; 204 | none |
@@ -107,7 +107,7 @@ DM is configured to trust (`DM_PROOF_ISSUERS`):
 
 | Scope | Routes |
 | --- | --- |
-| `dm.conversations.read` | list conversations, read one conversation or a group |
+| `dm.conversations.read` | list conversations, read one conversation or a group; with `dm.messages.read`, the sync feed's conversation events (`include=conversations`) |
 | `dm.messages.read` | read messages and bundles, listen to a message, follow the sync feed |
 | `dm.messages.write` | start conversations, send, edit and delete messages |
 | `dm.receipts.write` | delivered and read receipts, one by one or in bulk |
@@ -150,6 +150,9 @@ has not seen that Carbon yet, the custodian's `id` is its uuid.
   Anyone else gets 403 `contact_not_allowed`, which names the custodian to ask; its hint says where they allow you
   (the website's Settings → Your Silicons' reach, `/settings#reach`, or `dm allow add <you> --for si:…`), and
   `details` carries `silicon`, `custodian`, `requester` and the exact commands in `allow`.
+- In a conversation of several the rule holds for every account in it: each must be able to reach each Silicon in it
+  (unless the one starting it is that Silicon's custodian). Otherwise starting it is 403 `contact_not_allowed`, with
+  `details.requester` the account the Silicon does not hear from and `details.started_by` the one starting it.
 - `GET/POST/DELETE /allow-list` manages the list (`{"account_ids": ["c:ada"]}`); the custodian manages it with
   `?for=si:handle`. Entries are `{account, added_by, added_at}`. A Carbon has no list (403
   `carbon_has_no_allow_list`).
@@ -159,11 +162,27 @@ has not seen that Carbon yet, the custodian's `id` is its uuid.
 
 ## Custodians
 
-A custodian reads everything of the Silicons it looks after: `?for=si:handle` on conversation lists, drafts and
-invitations, and direct reads of any conversation a Silicon is in. It may delete its Silicon's messages (a tombstone,
-never an edit), take it out of groups and decline invitations for it. It never sends as its Silicon: writes into a
-Silicon's conversation it is not part of are 403 `custodian_read_only`, and its view cannot mark receipts (403
+A custodian reads everything of the Silicons it looks after: `?for=si:handle` on conversation lists, a conversation,
+drafts and invitations, and direct reads of any conversation a Silicon is in. It may delete its Silicon's messages (a
+tombstone, never an edit), take it out of groups and decline invitations for it. It never sends as its Silicon: writes
+into a Silicon's conversation it is not part of are 403 `custodian_read_only`, and its view cannot mark receipts (403
 `read_only_view`). `?for=` naming a Silicon you do not look after is 403 `not_custodian`.
+
+Deleting a Silicon's message works whether or not the custodian is in the conversation (a group they share, their own
+conversation with the Silicon, or one between the Silicon and others):
+
+```http
+DELETE /api/v1/conversations/g:launch-week/messages/00b?for=si:sol
+Authorization: Bearer <the custodian's DM token>
+Idempotency-Key: delete-00b-1
+```
+
+The answer is the tombstone, 200, as for a sender's own delete. `for` is optional (DM sees whose message it is), but
+with it only that Silicon's messages go, so a mistaken code cannot remove anyone else's: a message si:sol did not send
+is 403 `not_message_sender` ("c:bob sent this message, not si:sol: …"). Without the right, anyone gets 403
+`not_message_sender`, whose message names the sender and who may delete it ("Only si:sol, who sent this message, or its
+custodian c:mira can delete it."), with `details.sender` and `details.sender_custodian`. A message already deleted is
+409. The CLI deletes the same way: `dm messages delete g:launch-week 00b`, signed in as the custodian.
 
 ## Conversations
 
@@ -172,18 +191,23 @@ returns the existing one or starts it (201). `POST /messages` with a `recipient_
 direct conversation on first contact.
 
 A direct conversation's address is its two current ids joined by `::` (`c:ada::si:scout`); a group's is its id
-(`g:product-design`). Older duplicates of the same set are kept for their history: they are not listed, the canonical
-conversation names them in `supersedes`, and sending into one is 409 `conversation_superseded`, naming where to send
-instead. A direct conversation with a deleted account stays readable and takes no new messages (409
-`recipient_deleted`).
+(`g:product-design`). A conversation of three or more accounts that is not a group (a conversation of several, started
+with two or more `participant_ids`) is addressed by its UUID, everywhere: its `id`, every message's `conversation_id`,
+sync events and Ting references. It works like any other conversation (sending, routing to one participant, receipts,
+unread counts, drafts, speech, bundles) and goes on while two of its accounts remain. Older duplicates of the same set
+are kept for their history: they are not listed, the canonical conversation names them in `supersedes`, and sending
+into one is 409 `conversation_superseded`, naming where to send instead. A direct conversation with a deleted account
+stays readable and takes no new messages (409 `recipient_deleted`).
 
 Lists accept `limit` (1-100, default 50) and an opaque `cursor`; `next_cursor` is null at the end.
 `GET /conversations/{conversation}` answers one summary, as in the list, for a direct address (`c:ada::si:scout`), an
 account id (`c:ada`: your direct conversation with it), a group id or a UUID.
 
 Every summary carries `unread_count` (messages from others that are not deleted, not bundled away and have no read
-receipt from you on any device) and `last_read_message_id` (the newest message you read, or null). With
-`?for=si:handle` a custodian sees the Silicon's.
+receipt from you on any device), `last_read_message_id` (the newest message you read, or null) and `draft_version`
+(your draft's `version`, the one `GET …/draft` answers and `If-Match` takes, or null when you have no draft there: ask
+for a draft only when this is a number you have not seen, since a missing draft answers 404). With `?for=si:handle` a
+custodian sees the Silicon's.
 
 ## Messages
 
@@ -213,8 +237,12 @@ tombstone these are null, empty or `{}`.
 
 A Silicon may route a message to one intent of another Silicon with `recipient_id: "deliberate@si:cos"` and name its
 own with `sender_id: "compose@si:scout"`; routing never changes on edits, and naming someone else's routing is 403
-`sender_mismatch`. Only a message's sender changes it (403 `not_message_sender`); only Silicons bundle (403
-`silicon_only`).
+`sender_mismatch`. A rendered message says where it was routed in `routed_to` (`deliberate@si:cos`, or null when it
+was not); `recipient_id` keeps its older meaning, which in a group is the group itself. Only a message's sender edits
+it, and only its sender or the custodian of the Silicon that sent it deletes it (403 `not_message_sender`, naming
+who may); only Silicons bundle (403 `silicon_only`). An attachment or voice note declares any size up to 5 TiB
+(5,497,558,138,880 bytes, the largest file Silicon Briefcase stores), and a voice note lasts 1 millisecond to 48
+hours.
 
 Sends, edits, deletions, conversation and group creation, voice changes and reports take an `Idempotency-Key` (8-255
 visible ASCII characters). Retrying with the same key and body returns the original result; a different body under the
@@ -303,6 +331,34 @@ returned `cursor`; continue while `has_more` is true. `?wait=30` holds an empty 
 `GET /delivery` says whether Ting also delivers to the account; Ting is used only when this DM is configured for it
 ([DM references through Ting](ting.md)).
 
+`GET /sync?include=conversations` adds conversation events: when a conversation appears for, changes for or leaves
+the account. They come in the same stream, ordered with the message events, so one cursor covers both:
+
+```json
+{"event_id": "0199f2a1-5d0e-7c11-9a43-0c6f9b8e2d11", "sequence": 57, "type": "conversation",
+ "conversation_id": "g:launch-week", "change": "invited"}
+```
+
+| `change` | Who gets it | What to do |
+| --- | --- | --- |
+| `created` | Everyone in a new conversation (its creator too, for their other devices); members of a new group | Read it and add it to the list |
+| `invited` | A new pending invitation | Read `GET /invitations` |
+| `added` | A member who joined without accepting (a custodian added its Silicon) | Read it and add it |
+| `invitation_accepted`, `invitation_declined` | The invitee, on every device (a custodian may decline for its Silicon) | Refresh invitations (accepted: add the group) |
+| `invitation_cancelled` | An invitee whose invitation an owner withdrew | Refresh invitations |
+| `left`, `removed` | The account that left, or was taken out | Drop it: reading it is 404 now |
+| `renamed`, `description_changed`, `owners_changed` | Members and pending invitees (an invitation shows these) | Read it again |
+| `members_changed` | Members | Read it again |
+
+`conversation_id` is the conversation's id as `GET /conversations` names it. One action can give several events
+(an owner who leaves: `left` for them, `members_changed` and `owners_changed` for the rest), and a change that changes
+nothing (saving the same name, inviting someone already invited) gives none. Without `include` they are skipped like
+events the account cannot see and the cursor moves past them, so older clients never meet one; turning it on or off
+between requests is safe. Any other `include` value is 422 `validation_error` with `details.valid`. `GET /contracts`
+announces it in `features.conversation_events`. An app acting for the account with a proof needs
+`dm.conversations.read` for them, besides the feed's `dm.messages.read` (403 `proof_scope_missing`). The CLI reads
+them with `dm sync --conversations` and `dm inbox --watch --conversations`.
+
 ## Errors
 
 ```json
@@ -351,14 +407,14 @@ service's path, such as `/api/api/v1/me`.
 
 | Method and path | What it does | Who may call it |
 | --- | --- | --- |
-| `POST /api/uploads?name=<file name>` | Saves the request's body, the file's bytes with its real `Content-Type`, in the signed-in Carbon's Briefcase under `apps/dm/`, and answers the link a message carries | This site's own pages (`Origin` and `Sec-Fetch-Site`), signed in |
+| `POST /api/uploads?name=<file name>&size=<bytes>&sha256=<hex>` | Saves the request's body, the file's bytes with its real `Content-Type` and exact `Content-Length`, in the signed-in Carbon's Briefcase under `apps/dm/`, and answers the link a message carries | This site's own pages (`Origin` and `Sec-Fetch-Site`), signed in |
 | `GET /api/uploads/config` | Whether uploads are on, and the largest file the website takes | anyone |
 | `GET`, `HEAD /api/uploads/file?url=<a Briefcase public link>[&download=1]` | A file from a message, served from the website's own origin | signed-in browsers |
 
 ### Uploading a file
 
 ```http
-POST /api/uploads?name=standup.m4a
+POST /api/uploads?name=standup.m4a&size=182044&sha256=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
 Content-Type: audio/mp4
 Content-Length: 182044
 
@@ -370,31 +426,38 @@ Content-Length: 182044
   "name": "standup.m4a", "content_type": "audio/mp4", "size": 182044}}
 ```
 
-The website streams the body to a private temporary file (with its SHA-256 and the `UPLOADS_MAX_BYTES` cap, 200 MiB by
-default), asks Silicon Accounts for a User verification proof that lets DM act for the Carbon at Briefcase (five
-upload scopes, ten minutes), reserves the upload, transfers the bytes, commits them, turns on "anyone with the link
-can view", then revokes the proof and deletes the temporary file. It never logs a file's name, bytes, a token or a
-proof. A message then carries the answer: as an attachment `{"permanent_url": url, "name", "content_type", "size"}`,
-or as a voice note `voice` with `duration_milliseconds` (and `voice_transcript`).
+A file may be any size Silicon Briefcase stores, up to 5 TiB (or less when the operator sets `UPLOADS_MAX_BYTES`).
+The page hashes the file first (its SHA-256), because Briefcase reserves an upload by its size and digest and checks
+the bytes against both. The website then asks Silicon Accounts for a User verification proof that lets DM act for the
+Carbon at Briefcase (five upload scopes, ten minutes), reserves the upload, pipes the body through to Briefcase as it
+arrives (it is never held on the website's disk or in its memory), commits it, turns on "anyone with the link can
+view", then revokes the proof. It never logs a file's name, bytes, a token or a proof. A message then carries the
+answer: as an attachment `{"permanent_url": url, "name", "content_type", "size"}`, or as a voice note `voice` with
+`duration_milliseconds` (and `voice_transcript`).
 
+- The body is the file itself, with its exact `Content-Length` (not chunked, not compressed): 411 `length_required`,
+  415 `encoded_body`, 400 `size_mismatch` when the length is not the declared `size`, 400 `invalid_size` or
+  `invalid_digest` when the query lacks them, 409 `file_changed` when the bytes are not the hashed ones.
 - One account may have 6 uploads running at once on a website server: the 7th is 429 `too_many_uploads` with
-  `Retry-After: 5`. It guards the server's temporary disk; it is not a quota.
+  `Retry-After: 5`. It guards the server's connections; it is not a quota.
 - A session in its last 30 seconds answers 401 `session_refresh_needed`: the page renews the session and sends the
   file again by itself. An upload never refreshes the session itself.
-- Other refusals: 401 `signed_out`, 403 `cross_site_request`, 413 `file_too_large`, 422 `invalid_name`, `file_empty`
-  or `file_refused`, 400 `upload_interrupted`, 409 `permission_ended`, 429 `briefcase_limit`, 502
-  `permission_refused` or `briefcase_refused`, 503 `uploads_not_configured`, `briefcase_not_allowed`,
-  `uploads_misconfigured`, `briefcase_unavailable` or `accounts_unavailable`, 507 `briefcase_full`, 500
-  `upload_failed`.
+- Other refusals: 401 `signed_out`, 403 `cross_site_request`, 408 `upload_stalled` (nothing moved for five minutes),
+  409 `permission_ended` or `page_outdated` (reload), 413 `file_too_large`, 422 `invalid_name`, `file_empty` or
+  `file_refused`, 400 `upload_interrupted`, 429 `briefcase_limit` or `briefcase_busy`, 502 `permission_refused` or
+  `briefcase_refused`, 503 `uploads_not_configured`, `briefcase_not_allowed`, `uploads_misconfigured`,
+  `briefcase_unavailable` or `accounts_unavailable`, 507 `briefcase_full`, 500 `upload_failed`. A refused upload
+  starts again from its first byte.
 
 ### Whether uploads are on
 
 ```json
-{"enabled": true, "max_bytes": 209715200}
-{"enabled": false, "reason": "Uploads are not set up on this DM website yet.", "max_bytes": 209715200}
+{"enabled": true, "max_bytes": 5497558138880, "capped": false}
+{"enabled": false, "reason": "Uploads are not set up on this DM website yet.", "max_bytes": 5497558138880, "capped": false}
 ```
 
-The answer is not an envelope and needs no sign-in: it holds nothing secret. `reason` is for Carbons; the setting that
+`max_bytes` is the largest file: Briefcase's 5 TiB, or `UPLOADS_MAX_BYTES` when that is lower (`capped: true`). The
+answer is not an envelope and needs no sign-in: it holds nothing secret. `reason` is for Carbons; the setting that
 is missing or wrong goes to the website's own log ([When uploads are off](configuration.md#when-uploads-are-off)).
 
 ### Showing a file from a message

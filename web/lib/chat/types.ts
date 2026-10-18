@@ -43,6 +43,14 @@ export interface SpeechSupport {
   model?: string;
   stt_model?: string;
   voices_path?: string;
+  /** The service's speech limits (DM 0.17; absent on an older service): what one script, a minute and a day may take. */
+  limits?: {
+    script_characters: number;
+    renders_per_minute: number;
+    daily_characters: number;
+    transcribe_max_bytes: number;
+    transcriptions_per_minute: number;
+  };
 }
 
 export interface Me {
@@ -143,6 +151,11 @@ export interface Message {
   gif?: Gif | null;
   speech?: Speech | null;
   metadata?: Record<string, unknown>;
+  /**
+   * The routing address its sender gave (an ISI such as `release-notes@si:sol`), with current ids, or null when it was
+   * not routed (DM 0.17); absent on an older service, where `recipient_id` carries it in a direct conversation only.
+   */
+  routed_to?: string | null;
 }
 
 export interface GroupSummary {
@@ -177,6 +190,8 @@ export interface ConversationSummary {
   unread_count?: number;
   /** The last message the listed account read, or null (spec §4.5). */
   last_read_message_id?: string | null;
+  /** The listed account's draft version here (what GET …/draft answers), or null when it has none; absent on an older service. */
+  draft_version?: number | null;
 }
 
 export interface Page<T> {
@@ -184,13 +199,20 @@ export interface Page<T> {
   next_cursor: string | null;
 }
 
-export interface SyncEvent {
-  event_id: string;
-  sequence: number;
-  type: "message" | "message_status";
-  conversation_id: string;
-  message_id: string;
-}
+/**
+ * A change to a conversation as it concerns you (DM 0.17, only with `include=conversations`; GET /api/v1/contracts
+ * announces it as `features.conversation_events`): it was created with you, you were invited, added, or took part in
+ * an invitation's answer, you left or were removed, or the group was renamed, described or changed its members or
+ * owners. A value a later service adds is treated as "something changed": the conversation is asked for again.
+ */
+export type ConversationChange =
+  | "created" | "invited" | "added" | "invitation_accepted" | "invitation_declined" | "invitation_cancelled"
+  | "left" | "removed" | "renamed" | "description_changed" | "members_changed" | "owners_changed";
+
+export type SyncEvent =
+  | { event_id: string; sequence: number; type: "message" | "message_status"; conversation_id: string; message_id: string }
+  /** No message_id: the event is about the conversation (its `id` as the list names it: g:…, c:a::si:b, or a UUID). */
+  | { event_id: string; sequence: number; type: "conversation"; conversation_id: string; change: ConversationChange | (string & {}); message_id?: undefined };
 
 export interface SyncPage {
   events: SyncEvent[];

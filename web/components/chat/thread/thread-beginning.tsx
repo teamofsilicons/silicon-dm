@@ -11,7 +11,7 @@ import type { AccountRef, ConversationSummary } from "@/lib/chat/types";
 import { AccountAvatar, GroupAvatar } from "../common/avatars";
 import { useChat } from "../shell/chat-context";
 import { useThreadActions, useThreadPeople } from "./thread-actions";
-import { namesInWords, peopleWords, viewedName } from "./thread-model";
+import { conversationPhrase, peopleWords, viewedName } from "./thread-model";
 import styles from "./thread.module.css";
 
 export function ThreadBeginning({ kind, others, title, conversation, empty }: { kind: ConversationKind; others: AccountRef[]; title: string; conversation: ConversationSummary | undefined; empty: boolean }) {
@@ -24,12 +24,8 @@ export function ThreadBeginning({ kind, others, title, conversation, empty }: { 
   const members = conversation?.participants.length ?? others.length + 1;
   // A conversation of several without a name: the people in it, not a group.
   const several = kind === "group" && !conversation?.group && !isGroupAddress(actions.address) && !!conversation;
-  const company = several ? namesInWords(conversation!.participants.filter(account => !sameAccount(account, perspective)).map(accountName)) : "";
-  const sentence = single
-    ? `This is the beginning of ${whose} conversation with ${accountName(single)}.`
-    : several && company
-      ? `This is the beginning of ${whose} conversation with ${company}.`
-      : `This is the beginning of ${title}.`;
+  const company = single ? [accountName(single)] : several ? conversation!.participants.filter(account => !sameAccount(account, perspective)).map(accountName) : [];
+  const sentence = `This is the beginning of ${conversationPhrase({ whose, others: company, title })}.`;
   const next = !empty ? null : actions.readOnly ? "Nothing has been said here yet." : "Say hello. What you send is kept even when you are offline, and goes out as soon as it can.";
   return (
     // In an empty conversation this sits inside the log, which reads new messages out; this is not one.

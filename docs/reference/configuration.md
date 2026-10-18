@@ -181,17 +181,22 @@ The website's server (Next.js) reads these at request time; none of them reaches
 | `PUBLIC_URL` | The website's own origin; `{PUBLIC_URL}/auth/callback` is registered at Silicon Accounts |
 | `EXTRA_IMG_ORIGINS`, `EXTRA_ORIGINS` | More trusted profile-photo origins; another explicitly trusted website origin |
 | `BRIEFCASE_API_URL` | Silicon Briefcase's API origin, where the website saves a Carbon's files and voice notes (in `apps/dm/` of the Carbon's own Briefcase). Unset: uploads are off and the website says so; links and GIFs still work |
-| `UPLOADS_MAX_BYTES` | The largest file the website takes (default 209715200, 200 MiB) |
+| `UPLOADS_MAX_BYTES` | Optional: a limit of the website's own on one file, in bytes, for an operator who wants one. Unset (the default), the website takes files of any size up to Silicon Briefcase's 5 TiB |
 
 The DM service never handles files: uploads are the website's job, done as DM acting for the Carbon at Silicon
-Briefcase with User verification proofs. Production needs Briefcase to accept DM's proofs for its upload scopes
+Briefcase with User verification proofs. The website's server passes each file's bytes through to Briefcase as they
+arrive and keeps none of them, so it needs no disk for uploads and its memory does not grow with a file's size; what
+sits in front of it must not limit or buffer the upload's body ([the website's ingress](../operations/deployment.md#the-website)).
+Production needs Briefcase to accept DM's proofs for its upload scopes
 ([the Briefcase side](../operations/deployment.md#uploads-the-briefcase-side)). `web/README.md` in the repository
 covers running and deploying the website.
 
 ### When uploads are off
 
 When uploads cannot work, the website tells Carbons only that, in their words: `GET /api/uploads/config` answers
-`{"enabled": false, "reason": …}`, the + menu offers links and GIFs instead, and the microphone offers dictation only.
+`{"enabled": false, "reason": …}`, the + menu says the reason under its switched-off Upload a file and offers links and
+GIFs instead, a file pasted or dropped is answered with the same reason (a dropped link still attaches), `/upload` and
+⌘⇧U say it too, and the microphone offers dictation only.
 Which setting is wrong is the operator's business, so the website's server writes it to its log, once per process, as
 a line that starts `dm: Uploads are off:`. What each one means:
 
@@ -199,7 +204,7 @@ a line that starts `dm: Uploads are off:`. What each one means:
 | --- | --- | --- |
 | "Uploads are not set up on this DM website yet." | `BRIEFCASE_API_URL is not set` | Set `BRIEFCASE_API_URL` to Briefcase's API origin, such as `https://api.briefcase.teamofsilicons.com` (after Briefcase accepts DM's proofs) |
 | "Uploads are not working on this DM website: its setup needs fixing." | `BRIEFCASE_API_URL is not a URL`, `… must start with https://`, `… must be an origin (and a path) without credentials, a query or a #fragment` | Give the origin alone; plain `http` works only for a stand-in on this machine |
-| the same | `UPLOADS_MAX_BYTES is not a whole number of bytes` | A whole number of bytes, such as `209715200`, or unset |
+| the same | `UPLOADS_MAX_BYTES is not a whole number of bytes` | A whole number of bytes, such as `1073741824` (1 GiB), or unset for no limit of the website's own |
 
 Once uploads are on, a refusal by Silicon Accounts or Briefcase reaches the Carbon as the upload's own error
 ([Errors](errors.md#from-the-website)): 503 `briefcase_not_allowed` means Briefcase does not list `dm` in its

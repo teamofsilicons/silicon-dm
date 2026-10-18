@@ -9,6 +9,7 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { getAllowList, getConversation, getGroup, getMe, listConversations, listInvitations, listMessages } from "./api";
 import { messagesOldestFirst, summariesOf } from "./cache";
+import { useConversationEvents } from "./features";
 import { chatKeys } from "./keys";
 import type { ConversationSummary, Me, Message, Page } from "./types";
 
@@ -71,15 +72,18 @@ export function useMessages(address: string, view: string | null) {
 }
 
 /**
- * Group invitations waiting for you (or, in a custodian's view, for the Silicon). The service's sync feed carries
- * messages only, so invitations are asked for every 15 s while the tab is visible: a new one shows in the sidebar, and
- * one answered on another device makes the list refresh (components/chat/shell/chat-runtime.tsx).
+ * Group invitations waiting for you (or, in a custodian's view, for the Silicon). When the sync feed carries
+ * conversation events (DM 0.17, lib/chat/features.ts) a new invitation, or one answered elsewhere, arrives through it
+ * at once, and the invitations are only asked for again every minute as a safety net. An older service's feed carries
+ * messages only, and a custodian's view is not in your feed: then they are asked for every 15 s, so a new one shows in
+ * the sidebar and one answered on another device makes the list refresh (components/chat/shell/chat-runtime.tsx).
  */
 export function useInvitations(view: string | null) {
+  const events = useConversationEvents();
   return useQuery({
     queryKey: chatKeys.invitations(view),
     queryFn: ({ signal }) => listInvitations({ view, signal }),
-    refetchInterval: INVITATIONS_POLL_MS,
+    refetchInterval: events && !view ? SAFETY_REFRESH_MS : INVITATIONS_POLL_MS,
     staleTime: 10_000,
     meta: { toast: false },
   });

@@ -79,7 +79,10 @@ function NewConversationForm() {
   );
 }
 
-/** What a custodian sees in a Silicon's read-only view: starting a conversation is something you do as yourself. */
+/**
+ * What a custodian sees in a Silicon's read-only view: starting a conversation is something you do as yourself. One
+ * action, the way back (the dialog's ✕ and Esc close it); a Cancel beside it would wrap onto a line of its own on a phone.
+ */
 export function ReadOnlyNote({ view, what }: { view: string; what: string }) {
   const { viewed } = useChat();
   const name = viewed ? accountName(viewed) : view;
@@ -87,7 +90,6 @@ export function ReadOnlyNote({ view, what }: { view: string; what: string }) {
     <div className={styles.form}>
       <p className={styles.text}>You are viewing {name}&apos;s conversations as its custodian, read only. {what} as yourself from your own conversations.</p>
       <div className={styles.actions}>
-        <Button type="button" variant="ghost" onClick={() => closeDialog()}>Cancel</Button>
         <ButtonLink href={inboxHref(null)} onClick={() => closeDialog()}>Back to your conversations</ButtonLink>
       </div>
     </div>

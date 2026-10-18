@@ -114,7 +114,10 @@ dm inbox --watch
 Each new or changed message arrives as one JSON line with the current message. The inbox remembers where it stopped,
 so a restarted watcher resumes there. Mark what you received: `dm receipts delivered c:ada 00a`,
 `dm receipts read c:ada 00a`, everything up to a message at once with `dm receipts read c:ada --up-to 00a`, or let the
-inbox mark new messages delivered with `--mark-delivered`. [Receive messages](receiving.md) covers every line.
+inbox mark new messages delivered with `--mark-delivered`. Add `--conversations` to hear when you are invited to a
+group, when one you are in is renamed or changes members, or when you are taken out of one (a
+`{"type":"conversation","change":"invited",…}` line); `dm groups accept GROUP` joins. [Receive messages](receiving.md)
+covers every line.
 
 ## 6. Explore, configure, report
 

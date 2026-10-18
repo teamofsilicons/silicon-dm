@@ -8,7 +8,8 @@
  *   both have it.
  * - Voice notes: the file itself (Briefcase bytes through displayUrl), decoded once in the browser for its waveform
  *   and played as a WAV made from the decoded samples, so its length and seeking are exact even for a MediaRecorder
- *   recording, which carries no duration.
+ *   recording, which carries no duration. A long one (past 12 MB, about half an hour; a voice message may last 48
+ *   hours) is never downloaded whole: the <audio> element streams it in ranges, with the length the message gives.
  * - Voice samples: POST /api/v1/speech with the sample line, in the voice being tried.
  *
  * Caches: an in-memory LRU of object URLs (64 MB; what is playing is pinned), and Cache Storage behind it so a reload
@@ -323,8 +324,23 @@ export interface NoteInfo {
 }
 
 const NOTE_RATE = 24_000;
-/** Larger files are played as they are (decoding ten minutes of audio at once costs too much memory). */
+/**
+ * Larger files are played as they are, streamed by the <audio> element with Range requests (decoding half an hour of
+ * audio at once costs too much memory, and a voice message may be 48 hours long): never fetched whole by this page.
+ */
 const DECODE_LIMIT_BYTES = 12 * 1024 * 1024;
+
+/**
+ * Whether a voice note of `size` bytes is fetched and decoded in the browser (its waveform, an exact length, a WAV that
+ * seeks anywhere). A longer one streams instead. An unknown size is tried: the download stops as soon as its length
+ * says it is too long (prepareNote).
+ */
+export function noteDecodable(size: number | null | undefined): boolean {
+  return !(typeof size === "number" && Number.isFinite(size) && size > DECODE_LIMIT_BYTES);
+}
+
+/** Said by prepareNote for a voice note too long to decode here: it plays streamed (loadNote). */
+const STREAMS = "voice_note_streams";
 const noteInfo = new Map<string, NoteInfo>();
 const preparing = new Map<string, Promise<CachedAudio>>();
 const noteListeners = new Set<() => void>();
@@ -404,7 +420,8 @@ async function prepareFromBytes(url: string, bytes: ArrayBuffer, type: string): 
  */
 export function rememberNote(url: string, recording: Blob): void {
   const key = noteKey(url);
-  if (memory.has(key) || preparing.has(key)) return;
+  // A long recording is not read into memory here: its bubble streams it from Briefcase like anyone else's.
+  if (memory.has(key) || preparing.has(key) || !noteDecodable(recording.size)) return;
   const work = turn(async () => prepareFromBytes(url, await recording.arrayBuffer(), recording.type.split(";")[0] || "audio/webm")).finally(() => preparing.delete(key));
   preparing.set(key, work);
   void work.catch(() => undefined);
@@ -426,10 +443,20 @@ export function prepareNote(url: string): Promise<CachedAudio> {
   if (!source.fetchable) return Promise.reject(new ApiError({ status: 0, code: "voice_note_direct", message: "This voice message plays as it is, without a waveform.", hint: "" }));
   const work = turn(async () => {
     let response: Response;
+    const download = new AbortController();
     try {
-      response = await fetch(source.url, { credentials: "same-origin" });
+      response = await fetch(source.url, { credentials: "same-origin", signal: download.signal });
     } catch (error) {
       throw networkError(error, "GET", source.url, "this site");
+    }
+    // Too long to hold and decode here (an older message may not say its size): stop the download at once and let it
+    // stream when played, with the flat waveform and the length the message gives.
+    const length = Number(response.headers.get("content-length"));
+    if (response.ok && !noteDecodable(Number.isFinite(length) && length > 0 ? length : null)) {
+      download.abort();
+      noteInfo.set(url, { peaks: null, durationMs: null });
+      for (const listener of noteListeners) listener();
+      throw new ApiError({ status: 0, code: STREAMS, message: "This voice message is long, so it plays as it streams.", hint: "" });
     }
     if (!response.ok) {
       const text = await response.text().catch(() => "");
@@ -460,15 +487,17 @@ export function subscribeNotes(listener: () => void): () => void {
   return () => noteListeners.delete(listener);
 }
 
-async function loadNote(url: string, durationHint: number | null): Promise<LoadedAudio> {
+async function loadNote(url: string, durationHint: number | null, size: number | null): Promise<LoadedAudio> {
   const key = noteKey(url);
+  const source = noteSource(url);
+  // A long voice message streams: the element reads it in ranges as it plays and seeks (through this website's proxy).
+  if (source && !noteDecodable(size)) return { url: source.url, durationMs: durationHint };
   try {
     return loaded(key, await prepareNote(url));
   } catch (error) {
     const failure = ApiError.from(error);
-    // This tab's own copy (a blob: URL), or a link elsewhere: the element plays it, without a waveform.
-    const source = noteSource(url);
-    if (source && !source.fetchable) return { url: source.url, durationMs: durationHint };
+    // Too long to decode, this tab's own copy (a blob: URL), or a link elsewhere: the element plays it as it is.
+    if (source && (failure.code === STREAMS || !source.fetchable)) return { url: source.url, durationMs: durationHint };
     throw failure;
   }
 }
@@ -500,8 +529,11 @@ export function speechTrack(input: TrackBase & { source: SpeechSource; durationM
   };
 }
 
-/** A voice note. `key` is its message's (messageKey) when known, so Listen and the bubble share it. */
-export function noteTrack(input: TrackBase & { key: string; url: string; durationMs?: number | null }): Track {
+/**
+ * A voice note. `key` is its message's (messageKey) when known, so Listen and the bubble share it; `size` (its bytes,
+ * when the message says) decides whether it is decoded here or streamed (noteDecodable).
+ */
+export function noteTrack(input: TrackBase & { key: string; url: string; size?: number | null; durationMs?: number | null }): Track {
   const durationMs = input.durationMs ?? noteInfo.get(input.url)?.durationMs ?? null;
   return {
     key: input.key,
@@ -512,7 +544,7 @@ export function noteTrack(input: TrackBase & { key: string; url: string; duratio
     artwork: httpsArtwork(input.artwork),
     durationMs,
     startAt: input.startAt,
-    load: () => loadNote(input.url, durationMs),
+    load: () => loadNote(input.url, durationMs, input.size ?? null),
   };
 }
 
@@ -521,7 +553,7 @@ export function messageTrack(input: { address: string; message: Message; view: s
   const { message } = input;
   const code = message["message-id"];
   const base = { title: message.sender.display_name?.trim() || message.sender.id, artwork: message.sender.pfp_url, origin: input.origin, startAt: input.startAt };
-  if (message.voice?.url) return noteTrack({ ...base, key: messageKey(input.address, code), url: message.voice.url, durationMs: message.voice.duration_milliseconds ?? null });
+  if (message.voice?.url) return noteTrack({ ...base, key: messageKey(input.address, code), url: message.voice.url, size: message.voice.size ?? null, durationMs: message.voice.duration_milliseconds ?? null });
   const source: SpeechSource = message.speech?.script
     ? { address: input.address, code, view: input.view, content: speechContent(message.speech), speaker: null }
     : { address: input.address, code, view: input.view, content: `text:${message.updated_at ?? message.created_at}:${message.message ?? ""}`, speaker: message.sender.uuid ?? message.sender.id };
