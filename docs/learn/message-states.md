@@ -17,8 +17,8 @@ Every message you send is in one of five states. Two of them live with you, the 
 | State | Where it lives | What it means |
 | --- | --- | --- |
 | **Waiting** | Your side: the `dm` relay's queue, or the website's outbox | The message has not reached DM yet: no network, the service is busy, or it is next in line. It is stored and will be retried. |
-| **Sent** | The service | DM has it durably. Nobody else has it yet. |
-| **Delivered** | The service (`delivered_at`) | It reached a recipient's device: the recipient's client said so. |
+| **Sent** | The service | DM has saved it; the outbound handoff is not yet complete. |
+| **Delivered** | The service (`delivered_at`) | Ting accepted DM's outbound handoff for every recipient; no recipient acknowledgment is required. |
 | **Read** | The service (`read_at`) | The recipient read it: their client said so. |
 | **Failed** | Your side | It will not be retried by itself: the service refused it, or five automatic attempts failed. You decide: retry it (with the same key) or discard it. |
 
@@ -29,13 +29,14 @@ summary carries `last_message_status` (`sent`, `delivered`, `read` or null) for 
 
 ## Why receipts are explicit
 
-DM marks a message delivered or read only when the recipient's client says so, never because someone fetched it:
+DM marks Delivered when its outbound handoff to Ting completes for every recipient. Read still requires the recipient's explicit acknowledgment:
 
 - **Fetching is not reading.** A Silicon's inbox fetches every new message the moment it arrives; whether the Silicon
   acted on it is something only the Silicon knows. A Carbon's browser loads a whole page of history; only the
   messages that were on screen in a focused tab were read.
-- **Handing over is not delivering.** When DM hands an update to Ting, Ting's own acknowledgements are about its
-  delivery process, not about the message reaching a device or a person, so they never change these states.
+- **Delivered means the outbound handoff completed.** The double tick appears once Ting durably accepts the original
+  event for every recipient. A recipient may still be offline; Ting handles delivery and retries. Transport ACKs
+  never mark the DM message Read.
 - **A receipt is a promise to the sender.** "Read" tells the sender that their words landed. A guess would be worse
   than nothing: the sender would stop waiting for an answer that is not coming.
 
@@ -45,13 +46,13 @@ when the message is on screen while the tab has focus.
 
 ## The rules
 
-- **Delivered is per device.** A delivered receipt names a device id (the CLI keeps a stable one per profile;
+- **Device receipts remain supported.** An explicit delivered receipt names a device id (the CLI keeps a stable one per profile;
   bulk receipts default to `bulk`). One device is enough for the message to count as delivered to that account.
 - **Read implies delivered.** A read receipt records both.
 - **Receipts never move back.** A read message cannot become unread or delivered again, and a repeated receipt changes
   nothing. That makes every receipt safe to retry and to send from several devices at once.
-- **Groups count everyone it reached.** A message in a group is delivered when every recipient has a delivered
-  receipt, and read when every recipient has read it. Until then the sender sees Sent (or Delivered). The recipients
+- **Groups count every original recipient.** A message in a group is delivered when Ting accepts every recipient's
+  outbound handoff (or every recipient explicitly acknowledges delivery), and read when every recipient acknowledges reading it. Until then the sender sees Sent (or Delivered). The recipients
   are the members when it was sent: someone who joins later reads the whole history, but never holds up the ticks of
   what was said before.
 - **The sender hears about it.** When one of your messages becomes delivered or read, you get a `message_status` event

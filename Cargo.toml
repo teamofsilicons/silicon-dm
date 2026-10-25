@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "silicon-dm"
-version = "0.17.1"
+version = "0.17.2"
 edition = "2024"
 rust-version = "1.98"
 license = "LicenseRef-Proprietary"
@@ -29,7 +29,7 @@ path = "src/bin/dm_migrate.rs"
 
 [dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-silicon-dm-protocol = { path = "crates/protocol", version = "0.17.1", features = ["http"] }
+silicon-dm-protocol = { path = "crates/protocol", version = "0.17.2", features = ["http"] }
 silicon-accounts-client = "0.4.0"
 aes-gcm = "0.10.3"
 anyhow = "1.0.100"
@@ -66,7 +66,7 @@ ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 jsonwebtoken = { version = "11.1.0", default-features = false, features = ["rust_crypto"] }
 tempfile = "3.27"
 tower = { version = "0.5.2", features = ["util"] }
-silicon-dm-client = { path = "crates/client", version = "0.17.1", features = ["runtime"] }
+silicon-dm-client = { path = "crates/client", version = "0.17.2", features = ["runtime"] }
 testcontainers = "0.27.3"
 testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
 wiremock = "0.6.5"

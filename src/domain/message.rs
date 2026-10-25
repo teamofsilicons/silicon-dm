@@ -150,7 +150,7 @@ pub enum MessageStatus {
     Waiting,
     /// Durably accepted by DM.
     Sent,
-    /// Every recipient actor has acknowledged delivery on one device.
+    /// Ting accepted the outbound event for every recipient, or each recipient acknowledged delivery.
     Delivered,
     /// Every recipient actor has read the message on one device.
     Read,

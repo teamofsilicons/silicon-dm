@@ -23,7 +23,7 @@ import urllib.request
 ROOT = Path('/opt/silicon-accounts-apps/dm')
 NAMES = ['dm-accounts-api', 'dm-accounts-worker']
 SECRET_ID = 'silicon-dm/accounts-production/runtime'
-VERSION = '0.17.1'
+VERSION = '0.17.2'
 
 
 def run(*args, stdin=None, env=None):

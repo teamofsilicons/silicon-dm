@@ -249,7 +249,8 @@ impl PostgresStore {
         .map_err(map_constraint_error)?
         .rows_affected())
     }
-    /// Records durable Ting acceptance without acknowledging the DM stream or changing receipts.
+    /// Records outbound Ting acceptance, advancing Delivered without a device receipt.
+    /// Read still requires an explicit recipient read acknowledgment.
     ///
     /// # Errors
     /// Rejects malformed acceptance or a lost lease; repeating an already stored

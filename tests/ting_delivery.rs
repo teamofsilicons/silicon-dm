@@ -148,7 +148,8 @@ async fn without_ting_handoffs_are_kept_and_marked_discarded() -> Result<(), Box
 }
 
 #[tokio::test]
-async fn with_ting_each_handoff_is_sent_once_and_never_becomes_a_receipt() -> Result<(), BoxError> {
+async fn with_ting_outbound_acceptance_advances_delivered_without_device_receipts()
+-> Result<(), BoxError> {
     let app = TestApp::start().await?;
     let (ada, bob, _) = people(&app).await;
     let ada_token = app.accounts.token(&ada);
@@ -217,8 +218,14 @@ async fn with_ting_each_handoff_is_sent_once_and_never_becomes_a_receipt() -> Re
         )
         .await?;
     assert!(
-        messages.1["items"][0]["delivered_at"].is_null(),
-        "Ting acceptance is not a DM receipt"
+        messages.1["items"][0]["delivered_at"].is_string(),
+        "Ting acceptance advances Delivered before a recipient acknowledgment"
+    );
+
+    assert!(messages.1["items"][0]["read_at"].is_null());
+    assert_eq!(
+        count(&app, "SELECT count(*) FROM message_receipts").await?,
+        0
     );
 
     // A refused send stays pending for a later attempt, with the same bytes.
@@ -255,8 +262,8 @@ async fn with_ting_each_handoff_is_sent_once_and_never_becomes_a_receipt() -> Re
         .await?;
     assert_eq!(
         retried_count,
-        original.len(),
-        "UUID strings must not be discarded as legacy references"
+        original.len() + 1,
+        "the original handoffs and the sender's Delivered notification are published"
     );
     let persisted: Vec<(uuid::Uuid, String)> = sqlx::query_as(
         "SELECT delivery_id, request_body FROM ting_handoffs WHERE delivery_id = ANY($1) ORDER BY delivery_id",

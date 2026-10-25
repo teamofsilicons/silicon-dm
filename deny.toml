@@ -6,6 +6,12 @@ ignore = [
   # verifies EdDSA tokens with public keys and performs no RSA private-key operation. No
   # fixed `rsa` release exists.
   { id = "RUSTSEC-2023-0071", reason = "EdDSA public-key verification only; no RSA private-key operations" },
+  # crypto-bigint 0.5 is pulled in by jsonwebtoken's unused P-256/P-384 backend.
+  # silicon-accounts-client::jwt::verify rejects every algorithm except EdDSA
+  # before verification. DM neither signs with these curves nor operates on secret
+  # crypto-bigint integers. The fixed 0.7.6 is incompatible with elliptic-curve 0.13.
+  # Remove this exception when the Accounts SDK's JWT dependency drops that backend.
+  { id = "RUSTSEC-2026-0387", reason = "Unused P-256/P-384 transitive backend; Accounts accepts EdDSA only and DM performs no crypto-bigint secret arithmetic" },
 ]
 
 [bans]
