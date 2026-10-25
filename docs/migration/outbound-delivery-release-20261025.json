@@ -1,0 +1,55 @@
+{
+  "service": "silicon-dm",
+  "version": "0.17.2",
+  "verified_at": "2026-10-25T11:27:18.984724+00:00",
+  "deployed": {
+    "revision": "ee75da518a01c418d2bb546526561f29705bd338",
+    "version": "0.17.2",
+    "image": "sha256:084a3f2f4d3f6539418112f3bed80bcf2c257f55a7cb245726582c15731ed408",
+    "memory": "768m",
+    "previous_image": "sha256:fbc102e76a12037af3e793f4ae8ace4416d3954de732dd32d1d4a0a7033263a4",
+    "backup": "/opt/silicon-accounts-apps/dm/best-chat-upgrade-20261025T112446Z",
+    "ready": true,
+    "speech": true
+  },
+  "backend_archive_sha256": "873242518e85d09d788ee56359c9af96fbc5bfaebfc3c003effd6ff9e9adf547",
+  "build_run": "https://github.com/teamofsilicons/silicon-dm/actions/runs/40188193917",
+  "ci_run": "https://github.com/teamofsilicons/silicon-dm/actions/runs/40188197662",
+  "pull_request": "https://github.com/teamofsilicons/silicon-dm/pull/19",
+  "public": {
+    "ready_http": 204,
+    "service_version": "0.17.2",
+    "identity_provider": "silicon-accounts"
+  },
+  "migration": {
+    "version": 52,
+    "success": true,
+    "checksum_verified": true
+  },
+  "database_snapshot": {
+    "snapshot": "dm-outbound-before-20261025",
+    "status": "available",
+    "progress": 100
+  },
+  "database_backup": {
+    "path": "/opt/silicon-accounts-apps/dm/outbound-before-20261025/accounts.dump",
+    "bytes": 6706468,
+    "sha256": "6f8d49fccc8206b4d8faa08eace6dda6d6598ca27e771a6c94db5237d54364df"
+  },
+  "verification": {
+    "workspace_tests_passed": 298,
+    "production_migration_rehearsal": "transaction applied and rolled back before rollout",
+    "delivered_without_any_device_receipt": 2,
+    "new_messages_since_rollout_delivered_without_any_device_receipt": 1,
+    "autonomous_delivered_notifications_since_rollout": 2,
+    "autonomous_delivered_notifications_accepted": 2,
+    "autonomous_delivered_notifications_discarded": 0,
+    "read_acknowledgments_since_rollout_observed": 0,
+    "read_semantics": "verified with integration tests; no synthetic recipient acknowledgments sent",
+    "api_and_worker_running": true,
+    "api_and_worker_restarts": 0
+  },
+  "scope": "Accounts API and worker updated; existing web maps Delivered to double tick. No CLI catalog release or website container replacement. Legacy IAM service untouched.",
+  "dependency_policy": "Updated affected compatible dependencies; RUSTSEC-2026-0387 narrowly exempted for unused transitive crypto-bigint backend. Accounts JWT verification rejects non-EdDSA before verification.",
+  "rollback": "Previous containers and private environment backups retained; additive schema can remain with prior code. Full database backup and available RDS snapshot retained."
+}
