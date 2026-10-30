@@ -59,12 +59,21 @@ def install(stage, source):
     env = ROOT / 'config/web.env'
     env.write_text(''.join(key + '=' + value + '\n' for key, value in values.items()))
     env.chmod(0o600)
+    state = Path('/var/lib/dm-browser-sessions')
+    state.mkdir(exist_ok=True, mode=0o700)
+    state.chmod(0o700)
+    for entry in [state, *state.iterdir()]:
+        if entry.is_symlink():
+            raise ValueError('Browser session storage must not contain symlinks')
+        os.chown(entry, 10001, 10001)
     run(['docker', 'load', '--input', str(stage / 'gateway.tar')])
     run(['docker', 'run', '-d', '--restart', 'unless-stopped', '--stop-timeout', '30', '--name', NAME,
          '--network', 'host', '--memory', '512m', '--pids-limit', '256', '--read-only',
          '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
          '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
          '--tmpfs', '/app/.next/cache:rw,noexec,nosuid,size=64m,uid=10001,gid=10001',
+         '--mount', 'type=bind,src=/var/lib/dm-browser-sessions,dst=/var/lib/browser-sessions',
+         '--env', 'REFRESH_STATE_PATH=/var/lib/browser-sessions/state.sqlite',
          '--env-file', str(env), image])
     for _ in range(30):
         try:
