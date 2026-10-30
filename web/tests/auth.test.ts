@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, test } from "node:test";
 import { NextRequest } from "next/server";
-import { GET as callback } from "../app/auth/callback/route";
+import { GET as callback, HEAD as callbackHead } from "../app/auth/callback/route";
 import { POST as refresh } from "../app/auth/refresh/route";
 import { GET as sessionRoute } from "../app/auth/session/route";
 import { GET as signIn } from "../app/auth/sign-in/route";
 import { POST as signOut } from "../app/auth/sign-out/route";
-import { readPending, sealSession, type StoredSession } from "../lib/server/session";
+import { readPending, sealSession, sessionFromCookie, type StoredSession } from "../lib/server/session";
 import { forgetRefreshes } from "../lib/server/tokens";
 import { json, mockFetch, tokenBody, applyTestEnv } from "./env";
 
@@ -90,6 +90,42 @@ test("the callback refuses a state this browser did not start, and turns errors 
   restore = mock.restore;
   const refused = await callback(new NextRequest(`http://127.0.0.1:4260/auth/callback?code=sac_used&state=${state}`, { headers: { cookie: `webkit_signin=${pending}` } }));
   assert.equal(new URL(refused.headers.get("location")!).searchParams.get("error"), "exchange_failed");
+});
+
+test("overlapping callbacks and a late retry exchange a single-use code only once", async () => {
+  const { location, pending } = await startSignIn();
+  const mock = mockFetch(async () => {
+    const first = mock.calls.length === 1;
+    await new Promise(resolve => setTimeout(resolve, 50));
+    return first ? json(200, tokenBody(42)) : json(400, { error: "invalid_grant", error_description: "The code was already used; its tokens were revoked." });
+  });
+  restore = mock.restore;
+  const request = () => new NextRequest(`http://127.0.0.1:4260/auth/callback?code=sac_duplicate&state=${location.searchParams.get("state")}`, { headers: { cookie: `webkit_signin=${pending}` } });
+  const responses = await Promise.all([callback(request()), callback(request())]);
+  responses.push(await callback(request()));
+  assert.equal(mock.calls.length, 1, "replaying the code would revoke the successful sign-in");
+  const sessions = responses.map(response => {
+    assert.equal(response.headers.get("location"), "http://127.0.0.1:4260/settings");
+    return sessionFromCookie(cookieValue(response.headers.get("set-cookie") ?? "", "webkit_session"));
+  });
+  assert.ok(sessions[0]?.sid);
+  assert.equal(new Set(sessions.map(value => value?.sid)).size, 1);
+});
+
+test("HEAD and prefetch callbacks never consume the code or change cookies", async () => {
+  const { location, pending } = await startSignIn();
+  const mock = mockFetch(() => { throw new Error("must not exchange a code"); });
+  restore = mock.restore;
+  const responses = [callbackHead()];
+  const prefetchHeaders: Record<string, string>[] = [{ "next-router-prefetch": "1" }, { purpose: "prefetch" }, { "sec-purpose": "prefetch;prerender" }, { rsc: "1" }];
+  for (const headers of prefetchHeaders) {
+    responses.push(await callback(new NextRequest(`http://127.0.0.1:4260/auth/callback?code=sac_prefetched&state=${location.searchParams.get("state")}`, { headers: { cookie: `webkit_signin=${pending}`, ...headers } })));
+  }
+  assert.equal(mock.calls.length, 0);
+  for (const response of responses) {
+    assert.equal(response.status, 204);
+    assert.equal(response.headers.get("set-cookie"), null);
+  }
 });
 
 test("signing out revokes the refresh token and clears the cookie; only from this site", async () => {

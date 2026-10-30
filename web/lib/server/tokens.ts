@@ -1,7 +1,7 @@
 /** Accounts refreshes use a durable random operation key shared by every server and retry. */
 import { randomUUID } from "node:crypto";
+import { exchangeOnce } from "./code-exchange";
 import { createSession, endSession, locateSession } from "./refresh-state";
-import { refreshStore } from "./refresh-store";
 import { basicAuth, callbackUrl, serverEnv } from "./env";
 import { accountFrom, type StoredSession } from "./session";
 
@@ -73,9 +73,10 @@ async function tokenCall(form: Record<string, string>, headers: Record<string, s
 /** Exchanges the code from /auth/callback (PKCE: the verifier proves this server started the sign-in). */
 export async function exchangeCode(code: string, verifier: string, headers: Record<string, string>): Promise<TokenResult> {
   try {
-    await refreshStore();
-    const result = await tokenCall({ grant_type: "authorization_code", code, redirect_uri: callbackUrl(), code_verifier: verifier }, headers);
-    return result.ok ? { ok: true, session: await createSession(result.session) } : result;
+    return await exchangeOnce(code, verifier, async () => {
+      const result = await tokenCall({ grant_type: "authorization_code", code, redirect_uri: callbackUrl(), code_verifier: verifier }, headers);
+      return result.ok ? { ok: true, session: await createSession(result.session) } : result;
+    }, session => refreshSession(session, headers));
   } catch (error) {
     console.error("Browser session storage failed", error instanceof Error ? error.name : "UnknownError");
     return storageUnavailable();

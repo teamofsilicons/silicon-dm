@@ -7,13 +7,18 @@
  * gets a friendly page): the address's own error_description is never shown, since anyone could put words in a link.
  * A session this sign-in replaces is revoked at Silicon Accounts, so no old sign-in lingers.
  */
-import type { NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { EnvError, serverEnv } from "@/lib/server/env";
 import { misconfigured, redirectTo } from "@/lib/server/responses";
 import { clientHeaders, readPending, readSession, writePending, writeSession, type PendingSignIn } from "@/lib/server/session";
 import { exchangeCode, revokeSession } from "@/lib/server/tokens";
 
 export const dynamic = "force-dynamic";
+
+// Next otherwise runs GET for HEAD, which would consume a code without setting a browser session.
+export function HEAD() {
+  return new NextResponse(null, { status: 204, headers: { "Cache-Control": "no-store" } });
+}
 
 /** What may be passed on to /sign-in as `error`: a code's shape, never a property every object has (`__proto__`). */
 const ERROR_CODE = /^[a-z][a-z_]{0,47}$/;
@@ -28,6 +33,7 @@ function failed(publicUrl: string, code: string, pending: PendingSignIn[], state
 }
 
 export async function GET(request: NextRequest) {
+  if (request.headers.get("next-router-prefetch") || request.headers.get("purpose") === "prefetch" || request.headers.get("sec-purpose")?.includes("prefetch") || request.headers.get("rsc")) return HEAD();
   let env;
   try {
     env = serverEnv();
@@ -52,7 +58,7 @@ export async function GET(request: NextRequest) {
     return failed(env.publicUrl, result.error === "accounts_unreachable" ? "accounts_unreachable" : "exchange_failed", pending, state, entry.r);
   }
   const replaced = readSession(request);
-  if (replaced && replaced.rt !== result.session.rt) await revokeSession(replaced, headers);
+  if (replaced && replaced.rt !== result.session.rt && (!replaced.sid || replaced.sid !== result.session.sid)) await revokeSession(replaced, headers);
 
   const response = redirectTo(new URL(entry.r, env.publicUrl));
   writeSession(response, result.session);

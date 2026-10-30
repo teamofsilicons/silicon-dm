@@ -61,6 +61,12 @@ upload scopes.
 
 ## Verification
 
+The callback saves an encrypted claim before exchanging its single-use code. Concurrent callbacks and retries read
+the saved result from the same durable store as refreshes, including across processes and restarts. HEAD and prefetch
+requests do not exchange codes. If an exchange is interrupted before its result is saved, start a new sign-in;
+replaying an uncertain code could revoke the session Accounts already issued. Replayed callbacks resolve the current
+session state and cannot restore a signed-out session.
+
 ```sh
 pnpm typecheck
 pnpm lint
