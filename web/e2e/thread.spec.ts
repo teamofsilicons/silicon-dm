@@ -7,7 +7,7 @@
  *   long threads: a reply quote goes to its original (older pages load), a #code link opens at its message, and older
  *     pages load above without moving what you read
  *   deleting asks in place; an edit keeps its history
- *   the keyboard: ⌘↑ selects the last message, ↑/↓ move, I, R, Esc, and Tab stays inside the selected message
+ *   the keyboard: ⇧⌘. selects the last message, ↑/↓ move, I, R, Esc, and Tab stays inside the selected message
  *   photos: the lightbox by keyboard (Enter, → , Esc back to the photo)
  *   the menu gives the keyboard back (Shift+F10, Esc), keys that do not apply do nothing, code blocks are a Tab stop of
  *     their message only, and a link no older page can bring is answered at once
@@ -354,7 +354,7 @@ test("deleting asks in place, and an edit keeps its history", async ({ browser }
 
   // Delete on the selected message asks in place, with the keyboard on the question; Esc keeps it, Delete removes it.
   await field.click();
-  await field.press(`${MOD}+ArrowUp`);
+  await field.press(`${MOD}+Shift+Period`);
   await expect.poll(() => focusedLabel(page)).toContain(final);
   await page.keyboard.press("Delete");
   const question = edited.getByText("Delete for everyone?");
@@ -391,9 +391,9 @@ test("the keyboard moves through messages and acts on the selected one, without 
   const field = page.getByRole("textbox", { name: /^Message / });
   await expect(row(page, three)).toBeVisible();
 
-  // ⌘↑ from the composer selects the last message; ↑ and K go back, J forward; the selected message is named in full.
+  // ⇧⌘. from the composer selects the last message; ↑ and K go back, J forward; the selected message is named in full.
   await field.click();
-  await field.press(`${MOD}+ArrowUp`);
+  await field.press(`${MOD}+Shift+Period`);
   await expect.poll(() => focusedLabel(page)).toMatch(/^Message from Bo Okafor at \d\d:\d\d: Third from Bo/);
   await page.keyboard.press("ArrowUp");
   await expect.poll(() => focusedLabel(page)).toMatch(/^Your message at \d\d:\d\d, (Sent|Delivered|Read): Second from Ada/);
@@ -419,7 +419,7 @@ test("the keyboard moves through messages and acts on the selected one, without 
   expect(visited.some(label => label.includes("First from Bo"))).toBe(false);
 
   // I shows the message's details and its CLI commands; Esc closes them.
-  await field.press(`${MOD}+ArrowUp`);
+  await field.press(`${MOD}+Shift+Period`);
   await page.keyboard.press("i");
   const details = page.getByRole("dialog", { name: /^Message / });
   await expect(details).toContainText("dm messages show");
@@ -427,18 +427,18 @@ test("the keyboard moves through messages and acts on the selected one, without 
   await expect(details).toHaveCount(0);
 
   // R replies (the composer takes the keyboard); Esc cancels the reply; Esc on a message goes back to the composer.
-  await field.press(`${MOD}+ArrowUp`);
+  await field.press(`${MOD}+Shift+Period`);
   await page.keyboard.press("r");
   await expect(page.getByText(/^Replying to Bo Okafor/)).toBeVisible();
   await expect(field).toBeFocused();
   await field.press("Escape");
   await expect(page.getByText(/^Replying to/)).toHaveCount(0);
-  await field.press(`${MOD}+ArrowUp`);
+  await field.press(`${MOD}+Shift+Period`);
   await page.keyboard.press("Escape");
   await expect(field).toBeFocused();
 
   // C and L copy the message's words and its link.
-  await field.press(`${MOD}+ArrowUp`);
+  await field.press(`${MOD}+Shift+Period`);
   await page.keyboard.press("c");
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("Third from Bo");
   await page.keyboard.press("l");
@@ -468,7 +468,7 @@ test("photos open in a lightbox by keyboard: Enter, → to the next, Esc back to
   await expect(row(page, caption)).toBeVisible();
 
   await field.click();
-  await field.press(`${MOD}+ArrowUp`);
+  await field.press(`${MOD}+Shift+Period`);
   await expect.poll(() => focusedLabel(page)).toContain(caption);
   let found = false;
   for (let index = 0; index < 5 && !found; index++) {
@@ -512,7 +512,7 @@ test("the menu gives the keyboard back; keys that do not apply do nothing; code 
 
   // Shift+F10 opens the selected message's menu; Esc closes it and the message has the keyboard again.
   await field.click();
-  await field.press(`${MOD}+ArrowUp`);
+  await field.press(`${MOD}+Shift+Period`);
   await page.keyboard.press("ArrowUp");
   await page.keyboard.press("ArrowUp");
   await expect.poll(() => focusedLabel(page)).toContain(theirs);
@@ -533,7 +533,7 @@ test("the menu gives the keyboard back; keys that do not apply do nothing; code 
   await page.keyboard.press("Tab");
   expect(await page.evaluate(() => !!document.activeElement?.closest("[role='log']"))).toBe(false);
   // The selected message's own controls include its code block, which scrolls with the keyboard.
-  await field.press(`${MOD}+ArrowUp`);
+  await field.press(`${MOD}+Shift+Period`);
   await page.keyboard.press("ArrowUp");
   await expect.poll(() => focusedLabel(page)).toContain("Code from Bo");
   let reached = false;
@@ -583,7 +583,7 @@ test("one message's toolbar at a time, never over another: beside it, or under t
   // It comes and goes inside the log, which reads out only new messages: the toolbar is not one.
   await expect(page.locator("[role='toolbar']")).toHaveAttribute("aria-live", "off");
   await field.click();
-  await field.press(`${MOD}+ArrowUp`);
+  await field.press(`${MOD}+Shift+Period`);
   await expect.poll(() => focusedLabel(page)).toContain("Last from Bo");
   await expect.poll(async () => (await toolbars(page)).map(bar => bar.row)).toEqual([expect.stringContaining("Last from Bo")]);
   await row(page, first).locator("[data-sq='surface']").first().hover();
@@ -928,7 +928,8 @@ test("switching conversations gives the message field the keyboard; on a phone's
   await page.keyboard.type(nameOne!);
   await page.getByRole("option", { name: new RegExp(`^${escaped(nameOne!)}`) }).first().click();
   await expect(field(nameOne!)).toBeFocused();
-  // ⌥↓ from the field: whichever conversation comes next in the list, its field has the keyboard (or it has none).
+  // ⌥↓ outside a text field: whichever conversation comes next in the list, its field has the keyboard (or it has none).
+  await page.getByRole("log").focus();
   await page.keyboard.press("Alt+ArrowDown");
   await expect(page).not.toHaveURL(new RegExp(`/c/${escaped(one)}$`));
   await expect.poll(() => page.evaluate(() => {
@@ -983,9 +984,9 @@ test("keyboard focus on the thread's own controls changes them by 3:1 or more (W
 
   await expectFocusSeen(page, "the header's More", main.getByRole("button", { name: "More for this conversation" }));
   await expectFocusSeen(page, "a file's Download", message.getByRole("link", { name: "Download pricing-v3.pdf" }));
-  // The selected message (⌘↑ from the field): its bubble's edge.
+  // The selected message (⇧⌘. from the field): its bubble's edge.
   await field.focus();
-  await expectFocusSeen(page, "the selected message", message, { measure: message.locator("[data-sq='surface']").first(), select: async () => { await field.focus(); await field.press(`${MOD}+ArrowUp`); } });
+  await expectFocusSeen(page, "the selected message", message, { measure: message.locator("[data-sq='surface']").first(), select: async () => { await field.focus(); await field.press(`${MOD}+Shift+Period`); } });
   // A send the service refused (this page's request only): Retry and Discard.
   const refusing = (url: URL) => url.pathname.endsWith(`/conversations/${encodeURIComponent(group)}/messages`);
   await page.route(refusing, route => (route.request().method() === "POST"
@@ -1163,4 +1164,133 @@ test("the log reads out the first message of a conversation that opened empty", 
 
   expect(errors()).toEqual([]);
   await ada.close();
+});
+
+/* Native scrolling and writing ------------------------------------------------------------------------------- */
+
+test("tiny upward scrolls leave the bottom of a long message and stay put when more arrives", async ({ browser }) => {
+  const group = await newGroup("Slow scrolling");
+  await send("ada", group, { message: Array.from({ length: 80 }, (_, i) => `Paragraph ${i}: a long message to read slowly.`).join("\n\n") });
+  const context = await signedIn(browser, "ada");
+  try {
+    const page = await context.newPage();
+    await page.goto(`/c/${group}`);
+    await expect(page.locator("[data-composer-field]")).toBeFocused();
+    const area = scroller(page);
+    await expect.poll(() => area.evaluate(node => node.scrollHeight - node.clientHeight)).toBeGreaterThan(1000);
+    await expect.poll(() => area.evaluate(node => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThanOrEqual(1);
+    const start = await area.evaluate(node => node.scrollTop);
+    const box = (await area.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    // Each step is below the old movement threshold; the whole gesture stays inside the old 48 px sticky zone.
+    for (let i = 0; i < 20; i++) {
+      await page.mouse.wheel(0, -1);
+      await page.waitForTimeout(35);
+    }
+    const reading = await area.evaluate(node => node.scrollTop);
+    expect(start - reading).toBeGreaterThanOrEqual(18);
+    const next = await send("bo", group, { message: "A new message must not pull the reader down." });
+    await expect(page.locator(`[data-message-code="${next["message-id"]}"]`)).toHaveCount(1);
+    await expect.poll(() => area.evaluate((node, top) => Math.abs(node.scrollTop - top), reading)).toBeLessThan(2);
+    // Resizing the composer while reading keeps the same paragraph in place too.
+    await page.locator("[data-composer-field]").fill("A reply\nwith another line");
+    expect(await area.evaluate((node, top) => Math.abs(node.scrollTop - top), reading)).toBeLessThan(2);
+    await area.evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await page.waitForTimeout(100);
+    const last = await send("bo", group, { message: "At the bottom, new messages should still follow." });
+    await expect(page.locator(`[data-message-code="${last["message-id"]}"]`)).toHaveCount(1);
+    await expect.poll(() => area.evaluate(node => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThanOrEqual(1);
+  } finally {
+    await context.close();
+  }
+});
+
+test("new lines grow smoothly, keep the caret visible, and preserve native writing keys", async ({ browser }) => {
+  const group = await newGroup("Native writing");
+  const context = await signedIn(browser, "ada");
+  try {
+    const page = await context.newPage();
+    await page.goto(`/c/${group}`);
+    const field = page.locator("[data-composer-field]");
+    await expect(field).toBeFocused();
+    await field.fill("First line");
+    const initial = await field.evaluate(node => node.clientHeight);
+    for (let i = 1; i <= 14; i++) {
+      await field.press("Shift+Enter");
+      await field.pressSequentially(`Line ${i + 1}`);
+      expect(await field.evaluate(node => node.clientHeight)).toBe(Math.min(initial + 22 * i, 240));
+      expect(await field.evaluate(node => node.scrollHeight - node.scrollTop - node.clientHeight)).toBeLessThan(22);
+    }
+    const longDraft = Array.from({ length: 30 }, (_, i) => `Draft line ${i}`).join("\n");
+    await field.fill(longDraft);
+    await field.evaluate((node: HTMLTextAreaElement) => {
+      const at = node.value.indexOf("Draft line 10");
+      node.setSelectionRange(at, at);
+      node.scrollTop = 150;
+    });
+    await field.press("Shift+Enter");
+    expect(await field.evaluate(node => node.scrollTop), "inserting a line in the visible middle must not move the viewport").toBe(150);
+    await field.fill("Undo this newline");
+    await field.press("Shift+Enter");
+    await expect(field).toHaveValue("Undo this newline\n");
+    await field.press(`${MOD}+z`);
+    await expect(field).toHaveValue("Undo this newline");
+    await field.press(`${MOD}+Shift+z`);
+    await expect(field).toHaveValue("Undo this newline\n");
+
+    // Compare DM's field with the browser's unhandled textarea, including when the slash menu is open.
+    await page.evaluate(() => {
+      const control = document.createElement("textarea");
+      control.id = "native-writing-reference";
+      control.dataset.shortcuts = "off";
+      control.style.cssText = "position:fixed;top:0;left:0;width:500px;height:150px;z-index:9999";
+      document.body.append(control);
+    });
+    const reference = page.locator("#native-writing-reference");
+    for (const words of ["First paragraph\nSecond paragraph\nThird paragraph", "/"]) {
+      for (const chord of ["Alt+ArrowUp", "Alt+ArrowDown", "Alt+Shift+ArrowUp", "Alt+Shift+ArrowDown", `${MOD}+ArrowUp`, `${MOD}+ArrowDown`, `${MOD}+Shift+ArrowUp`, "Control+a", "Control+e"]) {
+        const point = Math.floor(words.length / 2);
+        const state = async (target: typeof field) => {
+          await target.fill(words);
+          await target.evaluate((node: HTMLTextAreaElement, at) => node.setSelectionRange(at, at), point);
+          await target.press(chord);
+          await expect(target).toBeFocused();
+          return target.evaluate((node: HTMLTextAreaElement) => ({ start: node.selectionStart, end: node.selectionEnd, direction: node.selectionDirection, value: node.value }));
+        };
+        const expected = await state(reference);
+        expect(await state(field), `${chord} in ${JSON.stringify(words)}`).toEqual(expected);
+        await expect(page).toHaveURL(new RegExp(`/c/${escaped(group)}$`));
+      }
+    }
+    await reference.evaluate(node => node.remove());
+    await field.press(`${MOD}+k`);
+    const palette = page.getByRole("dialog", { name: "Search conversations and actions" }).getByRole("combobox");
+    await palette.fill("a");
+    await palette.press("ArrowDown");
+    const active = await palette.getAttribute("aria-activedescendant");
+    await palette.evaluate((node: HTMLInputElement) => node.setSelectionRange(1, 1));
+    await palette.press("Shift+Home");
+    expect(await palette.evaluate((node: HTMLInputElement) => [node.selectionStart, node.selectionEnd])).toEqual([0, 1]);
+    await expect(palette).toHaveAttribute("aria-activedescendant", active!);
+    await palette.press("Alt+ArrowDown");
+    await expect(palette).toBeFocused();
+    await expect(palette).toHaveAttribute("aria-activedescendant", active!);
+    await palette.press("Escape");
+    await expect(page.getByRole("dialog", { name: "Search conversations and actions" })).toHaveCount(0);
+    await field.fill("/gif");
+    await field.press("Enter");
+    const gifSearch = page.getByPlaceholder("Search GIPHY");
+    await expect(gifSearch).toBeFocused();
+    await gifSearch.press("Alt+ArrowDown");
+    await expect(gifSearch).toBeFocused();
+    await gifSearch.press("Escape");
+    await field.fill("A draft with\na new line");
+    await page.screenshot({ path: "test-results/native-writing-desktop.png" });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await field.fill("Mobile line one\nMobile line two\n");
+    expect(await field.evaluate(node => node.clientHeight)).toBe(86);
+    await page.screenshot({ path: "test-results/native-writing-mobile.png" });
+  } finally {
+    await context.close();
+  }
 });

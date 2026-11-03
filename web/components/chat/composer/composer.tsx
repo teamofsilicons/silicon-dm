@@ -3,7 +3,7 @@
 /**
  * The composer (spec §6.5): a field that grows from one line to ten with "Message <name>" in it, Enter to send and
  * Shift+Enter for a new line (or ⌘Enter, Settings → Sending; phones use the send button and Enter for new lines),
- * the reply and edit bars above it, ↑ in an empty field to edit your last message, ⌘↑ to select it, Esc to cancel a
+ * the reply and edit bars above it, ↑ in an empty field to edit your last message, ⇧⌘. to select it, Esc to cancel a
  * reply or an edit and then to leave the field. Words are a draft from the first keystroke (lib/chat/draft-store.ts)
  * and sending goes through the outbox (lib/chat/outbox-store.ts): the message shows at once as Waiting and nothing
  * typed is ever lost. While typing, the others see "typing…".
@@ -86,7 +86,7 @@ export interface ComposerProps {
   draftHint?: DraftHint;
   /** A message went into the outbox (the thread scrolls to it). */
   onSent: () => void;
-  /** ⌘↑: select the last message. */
+  /** ⇧⌘.: select the last message. */
   onSelectLast: () => boolean;
   /** Esc with nothing to cancel: the keyboard leaves the field for the messages. */
   onLeave: () => void;
@@ -97,8 +97,6 @@ export function ComposerActions({ side, children }: { side: "start" | "end"; chi
   return <div className={styles.actions} data-side={side}>{children}</div>;
 }
 
-const LINE_PX = 22;
-const MAX_LINES = 10;
 const NOTICE_MS = 7000;
 /** Uploads finishing within this long of each other are announced in one sentence ("3 files are uploaded."). */
 const ANNOUNCE_AFTER_MS = 900;
@@ -216,19 +214,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const carries = items.some(item => item.status !== "failed");
   // Something to send (words, or what the tray carries, ready or still on its way), and nothing that failed.
   const ready = enabled && !failed && (text.trim().length > 0 || (!editing && carries));
-
-  // The field grows with its text, from one line to ten, then scrolls.
-  useLayoutEffect(() => {
-    const node = field.current;
-    if (!node) return;
-    // Empty, it is one line whatever the placeholder says (a long name would otherwise wrap it to two).
-    if (!node.value) {
-      node.style.height = `${LINE_PX + 20}px`;
-      return;
-    }
-    node.style.height = "auto";
-    node.style.height = `${Math.min(node.scrollHeight, LINE_PX * MAX_LINES + 20)}px`;
-  }, [text, disabledReason]);
 
   const focus = useCallback(() => field.current?.focus({ preventScroll: true }), []);
 
@@ -616,53 +601,57 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </ComposerActions>
           <GifAnchor asChild>
             <div className={styles.box} data-sq="surface">
-              <textarea
-                ref={field}
-                className={styles.field}
-                value={text}
-                rows={1}
-                placeholder={placeholder}
-                aria-label={label}
-                aria-keyshortcuts={sendKeys.aria}
-                aria-autocomplete={editing ? undefined : "list"}
-                aria-controls={slash.length ? listId : undefined}
-                aria-activedescendant={slash.length ? optionId(listId, slash[slashActive]!) : undefined}
-                data-composer-field=""
-                enterKeyHint="send"
-                onChange={event => {
-                  const value = event.target.value;
-                  if (editing) {
-                    setEditText(value);
-                    return;
-                  }
-                  draft.setText(value);
-                  setSlashIndex(0);
-                  if (!value.startsWith("/")) setSlashDismissed(false);
-                  reportActivity(value.trim() ? "typing" : null, address);
-                }}
-                onKeyDown={event => {
-                  if (!slash.length || event.nativeEvent.isComposing) return;
-                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              <div className={styles.fieldSizer}>
+                {/* Measure without collapsing the focused field: native caret scrolling and undo stay intact. */}
+                <div className={styles.fieldMirror} aria-hidden="true">{text + "\u200b"}</div>
+                <textarea
+                  ref={field}
+                  className={styles.field}
+                  value={text}
+                  rows={1}
+                  placeholder={placeholder}
+                  aria-label={label}
+                  aria-keyshortcuts={sendKeys.aria}
+                  aria-autocomplete={editing ? undefined : "list"}
+                  aria-controls={slash.length ? listId : undefined}
+                  aria-activedescendant={slash.length ? optionId(listId, slash[slashActive]!) : undefined}
+                  data-composer-field=""
+                  enterKeyHint="send"
+                  onChange={event => {
+                    const value = event.target.value;
+                    if (editing) {
+                      setEditText(value);
+                      return;
+                    }
+                    draft.setText(value);
+                    setSlashIndex(0);
+                    if (!value.startsWith("/")) setSlashDismissed(false);
+                    reportActivity(value.trim() ? "typing" : null, address);
+                  }}
+                  onKeyDown={event => {
+                    if (!slash.length || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return;
+                    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                      event.preventDefault();
+                      setSlashIndex((slashActive + (event.key === "ArrowDown" ? 1 : -1) + slash.length) % slash.length);
+                    } else if ((event.key === "Tab" || event.key === "Enter") && !event.shiftKey && !event.altKey) {
+                      event.preventDefault();
+                      runSlashAt(slashActive);
+                    } else if (event.key === "Escape") {
+                      // The list closes; the text stays, and Enter now sends it as it is.
+                      event.preventDefault();
+                      setSlashDismissed(true);
+                    }
+                  }}
+                  onPaste={event => {
+                    const pasted = filesToAttach(event.clipboardData);
+                    if (!pasted.length) return;
                     event.preventDefault();
-                    setSlashIndex((slashActive + (event.key === "ArrowDown" ? 1 : -1) + slash.length) % slash.length);
-                  } else if ((event.key === "Tab" || event.key === "Enter") && !event.shiftKey && !event.altKey) {
-                    event.preventDefault();
-                    runSlashAt(slashActive);
-                  } else if (event.key === "Escape") {
-                    // The list closes; the text stays, and Enter now sends it as it is.
-                    event.preventDefault();
-                    setSlashDismissed(true);
-                  }
-                }}
-                onPaste={event => {
-                  const pasted = filesToAttach(event.clipboardData);
-                  if (!pasted.length) return;
-                  event.preventDefault();
-                  // Words paste into an edit as usual; files would go with a new message, so they wait for one.
-                  if (editing) say(ATTACH_AFTER_EDIT);
-                  else addFiles(pasted);
-                }}
-              />
+                    // Words paste into an edit as usual; files would go with a new message, so they wait for one.
+                    if (editing) say(ATTACH_AFTER_EDIT);
+                    else addFiles(pasted);
+                  }}
+                />
+              </div>
               <button
                 type="button"
                 className={styles.send}

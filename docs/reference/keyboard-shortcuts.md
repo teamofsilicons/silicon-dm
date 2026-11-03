@@ -18,10 +18,13 @@ it names every shortcut there is.
 How the keys behave:
 
 - **Where it works.** "Anywhere" shortcuts work on every page of the signed-in website. "In the message field" ones
-  work while you type a message. "On a selected message" ones work when a message has the keyboard: press `⌘↑`
-  (Ctrl+↑) in the message field to select the last message, then move with `↑`/`↓`.
+  work while you type a message. "On a selected message" ones work when a message has the keyboard: press `⇧⌘.`
+  (Ctrl+Shift+.) in the message field to select the last message, then move with `↑`/`↓`.
 - **Plain keys never fire while you type.** A single key such as `N`, `R` or `/` types the letter when you are in a
   text field; it is a shortcut only outside one.
+- **Native editing keys stay native.** While a text field has focus, Option/Alt and Command/Ctrl arrows navigate or
+  select text; clipboard, undo, deletion, and macOS Option typing and Control editing commands stay with the field,
+  even if rebound in DM. Option-arrow conversation switching works outside text fields.
 - **Sequences.** "G then S" means: press G, let go, then press S.
 - **Typing goes to the message field.** In a conversation, typing a letter that is not a shortcut starts your message.
 - **Every action has a menu.** The menu key (or Shift+F10) on a selected message opens its menu, with every action by
@@ -60,7 +63,7 @@ How the keys behave:
 | `↩` | `Enter` | Send | In the message field |
 | `⇧↩` | `Shift+Enter` | New line | In the message field |
 | `↑` | `↑` | Edit your last message (empty field) | In the message field |
-| `⌘↑` | `Ctrl+↑` | Select the last message | In the message field |
+| `⇧⌘.` | `Ctrl+Shift+.` | Select the last message | In the message field |
 | `Esc` | `Esc` | Cancel reply or edit, then leave the field | In the message field |
 | `⇧⌘U` | `Ctrl+Shift+U` | Upload a file | In the message field |
 

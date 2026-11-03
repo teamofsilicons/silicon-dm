@@ -59,9 +59,9 @@ test("two Carbons talk: a conversation, live delivery, a reply, an edit, a draft
   const edited = page.locator("article[data-message-code]", { hasText: `A thought, made clearer ${stamp}` });
   await expect(edited.getByRole("button", { name: "Edited" })).toBeVisible();
 
-  // ⌘↑ selects the last message; I shows its details with the CLI commands.
+  // ⇧⌘. selects the last message; I shows its details with the CLI commands.
   await field.click();
-  await field.press(process.platform === "darwin" ? "Meta+ArrowUp" : "Control+ArrowUp");
+  await field.press(process.platform === "darwin" ? "Meta+Shift+Period" : "Control+Shift+Period");
   await page.keyboard.press("i");
   const details = page.getByRole("dialog", { name: /^Message / });
   await expect(details).toContainText("dm messages show");
@@ -72,7 +72,7 @@ test("two Carbons talk: a conversation, live delivery, a reply, an edit, a draft
   await field.fill(doomed);
   await field.press("Enter");
   await expect(page.locator("article[data-message-code]", { hasText: doomed })).toBeVisible();
-  await field.press(process.platform === "darwin" ? "Meta+ArrowUp" : "Control+ArrowUp");
+  await field.press(process.platform === "darwin" ? "Meta+Shift+Period" : "Control+Shift+Period");
   await page.keyboard.press("Delete");
   await expect(page.getByText("Delete for everyone?")).toBeVisible();
   await page.getByRole("button", { name: "Delete", exact: true }).last().click();

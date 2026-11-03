@@ -214,7 +214,7 @@ export function llmsFullTxt(origin: string): string {
     "",
     "# Keyboard (the website)",
     "",
-    "⌘ is Ctrl on Windows and Linux, ⌥ is Alt. Plain keys (N, R, /) never fire while you type in a field. Every shortcut can be changed in Settings → Keyboard, and `?` shows them all.",
+    "⌘ is Ctrl on Windows and Linux, ⌥ is Alt. Plain keys (N, R, /) and native text-editing shortcuts stay with the focused field. Option-arrow conversation switching works outside text fields. Every shortcut can be changed in Settings → Keyboard, and `?` shows them all.",
     ...keyboard,
     "",
     "# Voices",

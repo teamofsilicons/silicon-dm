@@ -30,12 +30,13 @@
 }
 /* The field's own focus: its edge in ink, as Silicon UI's fields show it (a --border-strong hairline was 1.4:1). Only
    the field's: Send inside the box draws its own edge. */
-.box:has(> [data-composer-field]:focus) { --sq-stroke: var(--foreground); }
+.box:has([data-composer-field]:focus) { --sq-stroke: var(--foreground); }
 
-.field {
+.fieldSizer { position: relative; min-width: 0; flex: 1; }
+.field, .fieldMirror {
   display: block;
+  width: 100%;
   min-width: 0;
-  flex: 1;
   max-height: calc(22px * 10 + 20px);
   resize: none;
   overflow-y: auto;
@@ -50,6 +51,8 @@
   overflow-wrap: anywhere;
   scrollbar-width: thin;
 }
+.field { position: absolute; inset: 0; height: 100%; }
+.fieldMirror { visibility: hidden; white-space: pre-wrap; overflow: hidden; pointer-events: none; }
 /* One line, cut with an ellipsis: a long name never wraps the empty field to two lines. */
 .field::placeholder { overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; }
 
@@ -310,7 +313,7 @@
 
 @media (max-width: 767px) {
   .composer { padding: var(--space-2) var(--space-3) calc(var(--space-2) + env(safe-area-inset-bottom, 0px)); }
-  .field { font-size: 16px; }
+  .field, .fieldMirror { font-size: 16px; }
   /* Phones: one quiet list, each item a slim row. */
   .tray { max-height: 156px; grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .chip { min-height: 44px; padding: 4px 4px 4px 4px; }

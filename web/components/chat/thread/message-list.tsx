@@ -45,7 +45,7 @@ type Row = TimelineRow<Item>;
 
 export interface MessageListHandle {
   scrollToBottom: () => void;
-  /** Selects the last message (⌘↑ from the composer). Returns false when there is none. */
+  /** Selects the last message (⇧⌘. from the composer). Returns false when there is none. */
   focusLast: () => boolean;
   jumpTo: (code: string) => void;
 }
@@ -73,7 +73,7 @@ export interface MessageListProps {
 }
 
 /** Within this distance of the bottom counts as at the bottom: new messages keep it there. */
-const STICK_PX = 48;
+const STICK_PX = 1;
 /** Further than this from the bottom shows "Jump to latest". */
 const PILL_PX = 360;
 /** Older messages are rendered (or loaded) this far before the top, so the top is rarely reached. */
@@ -100,7 +100,7 @@ const LAYERS = "[role='menu'], [role='dialog'], [role='alertdialog'], [data-radi
 
 /**
  * How the Carbon acted last: with the keyboard, or with a pointer of some kind. Focus that follows decides whether a
- * message is selected (a browser does not always show focus for keys with a modifier, such as ⌘↑, so :focus-visible
+ * message is selected (a browser does not always show focus for keys with a modifier, such as ⇧⌘., so :focus-visible
  * cannot tell).
  */
 const lastInput = { keyboard: false, pointerType: "" };
@@ -327,6 +327,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
     if (!node || !list) return;
     const children = list.children;
     const top = node.scrollTop;
+    lastTop.current = top;
     let low = 0;
     let high = children.length - 1;
     let found = -1;
@@ -389,7 +390,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
     const node = scroller.current;
     if (!node) return;
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
-    stick.current = distance <= STICK_PX;
+    stick.current = stick.current && distance <= STICK_PX;
     store.set({ atBottom: stick.current, away: distance > PILL_PX });
     window.clearTimeout(shrinkTimer.current);
     if (stick.current && latest.current.rows.length - latest.current.startIndex > WINDOW + STEP) {
@@ -438,7 +439,11 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
     if (!node) return;
     // A scroll can arrive after the thread changed size and before the size observer ran: settle that first. At the
     // bottom, more content (a photo, a voice bubble) keeps the bottom unless the reader moved up.
-    const movedUp = node.scrollTop < lastTop.current - 1;
+    const movedUp = node.scrollTop < lastTop.current;
+    // Even a fractional upward step releases follow mode. Only returning to the bottom reattaches it;
+    // being near the bottom must never pull a slow trackpad gesture back down.
+    if (movedUp) stick.current = false;
+    else if (node.scrollHeight - node.clientHeight - node.scrollTop <= STICK_PX) stick.current = true;
     if (positioned.current) {
       if (stick.current && !movedUp) restore();
       else keepAnchor();
@@ -833,7 +838,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
 
   return (
     <div className={styles.listFrame}>
-      <div ref={scroller} className={styles.scroller} onScroll={onScroll} data-empty={empty ? "" : undefined}>
+      <div ref={scroller} className={styles.scroller} onScroll={onScroll} onWheelCapture={event => {
+        // Release before ResizeObserver can restore the bottom during the same wheel frame.
+        if (event.deltaY < 0 && !event.ctrlKey) stick.current = false;
+      }} data-empty={empty ? "" : undefined}>
         <div className={styles.column}>
           {/* The top of history sits over the log; an empty conversation shows it in the log itself (the log is then not an
               empty, invisible stop for Tab or for Esc from the composer). */}

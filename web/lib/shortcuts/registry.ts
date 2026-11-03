@@ -6,7 +6,7 @@
  * Scopes:
  *   global    anywhere in the signed-in website (plain keys such as N never fire while typing in a field)
  *   thread    while a conversation is open
- *   message   while a message has the keyboard (↑/↓ through the thread, or ⌘↑ from the composer)
+ *   message   while a message has the keyboard (↑/↓ through the thread, or ⇧⌘. from the composer)
  *   composer  inside the message field
  *
  * A shortcut whose feature depends on what this DM service and this browser offer (speech, a microphone) is listed
@@ -60,7 +60,7 @@ export const SHORTCUTS: ShortcutDefinition[] = [
   { id: "composer.send", scope: "composer", group: "Composer", label: "Send", keys: ["enter"], fixed: true, keywords: "submit" },
   { id: "composer.newline", scope: "composer", group: "Composer", label: "New line", keys: ["shift+enter"], fixed: true },
   { id: "composer.editLast", scope: "composer", group: "Composer", label: "Edit your last message (empty field)", keys: ["up"] },
-  { id: "composer.selectLast", scope: "composer", group: "Composer", label: "Select the last message", keys: ["mod+up"], keywords: "message navigation" },
+  { id: "composer.selectLast", scope: "composer", group: "Composer", label: "Select the last message", keys: ["mod+shift+."], keywords: "message navigation" },
   { id: "composer.cancel", scope: "composer", group: "Composer", label: "Cancel reply or edit, then leave the field", keys: ["escape"] },
   // Always on: when this website takes no uploads, pressing it (or the + menu) says why.
   { id: "composer.upload", scope: "composer", group: "Composer", label: "Upload a file", keys: ["mod+shift+u"], keywords: "attach" },

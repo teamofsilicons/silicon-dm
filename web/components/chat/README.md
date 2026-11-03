@@ -196,7 +196,7 @@ Rows carry `data-message-row`, `data-message-code`, `data-conversation`, `data-s
 named with its sender and time: the shortcuts, receipts, tests and agents rely on them.
 
 ### Composer and uploads (`composer/**`, `lib/upload/**`, `app/api/uploads/**`, `lib/server/briefcase.ts`)
-`composer.tsx`: the field (1–10 lines, "Message <name>"), Enter / ⇧Enter / ⌘Enter, reply and edit bars, ↑ edits, ⌘↑
+`composer.tsx`: the field (1–10 lines, "Message <name>"), Enter / ⇧Enter / ⌘Enter, reply and edit bars, ↑ edits, ⇧⌘.
 selects, the Esc chain, drafts (asked for only when the list says there is one: `draftHint`, `lib/chat/drafts.ts`), the
 outbox, typing activity. The tray (`tray.ts` pure, `tray-store.ts` one tray per
 account and conversation outside React, so uploads and a waiting send survive a change of conversation; `send-latch.ts`

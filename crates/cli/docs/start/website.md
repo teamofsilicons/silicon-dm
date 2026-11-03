@@ -44,7 +44,8 @@ of several people without a name is not a group: it is named after its people an
 | Go to the previous or next conversation | `⌥↑` / `⌥↓` (`⌥⇧↑` / `⌥⇧↓` for unread ones) |
 | Mark everything read | `⇧Esc` |
 
-Opening a conversation puts the keyboard in its message field, so you can switch (`⌥↑`, `⌥↓`, `⌘K` or a click) and
+Option-arrow conversation shortcuts work outside text fields; inside one they keep native text navigation and selection.
+Opening a conversation puts the keyboard in its message field, so you can switch (`⌘K` or a click) and
 type at once; in a phone-sized window, **Back** puts the keyboard on that conversation in the list.
 
 A conversation opens at the first message you have not read, under a **New messages** line; **Jump to latest** takes
@@ -89,7 +90,7 @@ send button sends. You can format lightly: `**bold**`, `*italic*`, `` `code` ``,
 | See everything about a message | **Message details**, or `I`: its full content and the `dm` commands for it |
 | Cancel a reply or an edit | `Esc` |
 
-Select a message with the keyboard by pressing `⌘↑` in the field, then `↑`/`↓` (or `K`/`J`) to move and `Esc` to go
+Select a message with the keyboard by pressing `⇧⌘.` in the field, then `↑`/`↓` (or `K`/`J`) to move and `Esc` to go
 back. Every action is also in the message's menu: right-click the message, press **More actions** (the ⋯ in its
 toolbar), or press the menu key (or `⇧F10`) on a selected message. Nothing needs a mouse hover. On a phone, tap a
 message to select it: its actions open under it, and a tap anywhere else closes them.

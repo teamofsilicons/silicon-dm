@@ -121,3 +121,19 @@ test("a shortcut says whether it works here, and why not: uploads always do; voi
   // Nothing in the registry is waiting for a feature that has arrived: only the voice shortcuts are checked at run time.
   assert.deepEqual(SHORTCUTS.filter(shortcut => shortcut.planned).map(shortcut => shortcut.group), ["Voice", "Voice", "Voice", "Voice"]);
 });
+
+
+test("native writing keys stay in fields, including rebound actions and sequences", () => {
+  for (const platform of ["mac", "other"] as const) {
+    const protectedKeys = ["shift+up", "shift+down", "shift+left", "home", "shift+backspace", "alt+up", "alt+shift+down", "mod+up", "mod+shift+left", "mod+backspace", "mod+z", "mod+shift+z", "mod+a", "mod+c", "mod+x", "mod+v", ...(platform === "mac" ? ["alt+e", "alt+shift+k", "ctrl+a", "ctrl+e", "ctrl+k", "ctrl+o", "ctrl+t"] : [])];
+    for (const chord of protectedKeys) {
+      const shortcuts = effectiveShortcuts({ "conversation.next": [chord], "composer.selectLast": [chord] }, { platform, sendWith: "enter" });
+      const field = { scopes: scopes("thread", "composer"), inField: true, platform };
+      assert.equal(matchChord(shortcuts, IDLE, chord, 0, field).id, undefined, `${platform}: ${chord}`);
+      const sequence = effectiveShortcuts({ "conversation.next": [`${chord} n`] }, { platform, sendWith: "enter" });
+      assert.equal(matchChord(sequence, IDLE, chord, 0, field).pending, false, `${chord} must not be swallowed as a prefix`);
+    }
+  }
+  assert.equal(matchChord(mac, IDLE, "alt+down", 0, { scopes: scopes(), inField: false }).id, "conversation.next");
+  assert.equal(matchChord(mac, IDLE, "mod+shift+.", 0, { scopes: scopes("composer"), inField: true }).id, "composer.selectLast");
+});

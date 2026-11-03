@@ -17,7 +17,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useChatSettings } from "@/lib/chat/settings";
 import { effectiveShortcuts, findConflicts, type Conflict, type EffectiveShortcut } from "./bindings";
 import { ariaKeyShortcut, chordFromEvent, formatBinding, platformOf, type Platform } from "./keys";
-import { IDLE, matchChord, type SequenceState } from "./match";
+import { IDLE, isTextEditingChord, matchChord, type SequenceState } from "./match";
 import { shortcutDefinition, type ShortcutScope } from "./registry";
 import { useShortcutOverrides } from "./store";
 
@@ -201,7 +201,7 @@ export function ShortcutsProvider({ children }: { children: ReactNode }) {
       const message = !inField ? target?.closest<HTMLElement>("[data-message-row]") : null;
       if (target?.closest("[data-composer-field]")) scopes.add("composer");
       else if (message && message.matches(":focus-visible")) scopes.add("message");
-      const result = matchChord(shortcuts, state.current, chord, Date.now(), { scopes, inField });
+      const result = matchChord(shortcuts, state.current, chord, Date.now(), { scopes, inField, platform });
       state.current = result.state;
       if (result.pending) {
         event.preventDefault();
@@ -214,8 +214,22 @@ export function ShortcutsProvider({ children }: { children: ReactNode }) {
       event.preventDefault();
       event.stopPropagation();
     };
+    // Protect editing before a field's own menu handler sees the key (the palette, account picker, GIF search).
+    // Leave the default action intact: the browser still moves the caret, extends a selection, deletes, or undoes.
+    const preserveEditing = (event: KeyboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target?.closest(FIELD)) return;
+      const chord = chordFromEvent(event, platform);
+      if (!chord || !isTextEditingChord(chord, platform)) return;
+      state.current = IDLE;
+      event.stopPropagation();
+    };
+    document.addEventListener("keydown", preserveEditing, true);
     document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", preserveEditing, true);
+      document.removeEventListener("keydown", onKeyDown);
+    };
   }, [platform, shortcuts]);
 
   const value = useMemo(() => ({ platform, shortcuts, conflicts }), [platform, shortcuts, conflicts]);
