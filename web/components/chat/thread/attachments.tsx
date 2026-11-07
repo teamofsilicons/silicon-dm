@@ -6,12 +6,13 @@
  * What a message carries besides words (spec §6.4): photos that keep their shape (one alone at its own shape, height
  * bounded; two side by side sharing a height; three or four in rows that share a height, thread-model.ts galleryRows)
  * and open a lightbox (← and → between photos, Esc to close, focus back on the photo), a GIF in its own shape, videos
- * inline, audio files as a small player card, and other files as cards with their name, type, size, Open and
- * Download. A GIF shows its first frame only under reduced motion. A photo, video or GIF that does not load becomes a
- * file card, never a broken image, and is tried again: once by itself a few seconds later, whenever the browser is back
- * online, and with the card's Try again (a picture loads lazily, so one off screen is asked for when it comes back).
+ * inline, audio files as a small player card, web links as readable addresses, and other files as cards with their
+ * name, type, size, Open and Download. A GIF shows its first frame only under reduced motion. A photo, video or GIF
+ * that does not load becomes a file card, never a broken image, and is tried again: once by itself a few seconds
+ * later, whenever the browser is back online, and with the card's Try again (a picture loads lazily, so one off screen
+ * is asked for when it comes back).
  *
- * Every address goes through displayUrl() (lib/upload/display.ts): Silicon Briefcase serves files only to its own
+ * File addresses go through displayUrl() (lib/upload/display.ts): Silicon Briefcase serves files only to its own
  * origin, so the browser loads them through this website.
  */
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type SyntheticEvent } from "react";
@@ -282,6 +283,18 @@ function FileCard({ item, note, onRetry }: { item: ShownAttachment; note?: strin
   );
 }
 
+/** A shared page is a link, with its destination visible even when the sender supplied a title. */
+function SharedLink({ item }: { item: ShownAttachment }) {
+  const name = item.name?.trim();
+  return (
+    <a href={item.url} target="_blank" rel="noopener noreferrer" className={styles.sharedLink}>
+      {name && name !== item.url ? <span className={styles.sharedLinkTitle}>{name}</span> : null}
+      <span>{item.url}</span>
+      <span className="sr-only"> (opens in a new tab)</span>
+    </a>
+  );
+}
+
 function AudioCard({ item, onBroken }: { item: ShownAttachment; onBroken: () => void }) {
   const audio = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
@@ -386,8 +399,10 @@ export const Attachments = memo(function Attachments({ items }: { items: ShownAt
   const videos = items.filter(item => item.kind === "video" && !broken.has(item.url));
   const audio = items.filter(item => item.kind === "audio" && !broken.has(item.url));
   const files = items.filter(item => item.kind === "file" || broken.has(item.url));
+  const links = items.filter(item => item.kind === "link");
   return (
     <div className={styles.attachments}>
+      {links.map((item, index) => <SharedLink key={`${item.url}-${index}`} item={item} />)}
       {images.length === 1 ? <SinglePhoto image={images[0]!} attempt={attempts.get(images[0]!.url) ?? 0} onOpen={() => setOpen(0)} onBroken={() => fail(images[0]!.url)} /> : null}
       {images.length > 1 ? <Gallery images={images} attempts={attempts} onOpen={setOpen} onBroken={fail} /> : null}
       {videos.map((video, index) => <VideoView key={`${video.url}-${index}-${attempts.get(video.url) ?? 0}`} item={video} onBroken={() => fail(video.url)} />)}

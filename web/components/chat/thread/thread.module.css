@@ -259,6 +259,10 @@
 
 .attachments { display: grid; gap: 6px; margin-top: 2px; grid-template-columns: minmax(0, 1fr); justify-items: start; }
 .richText + .attachments, .quote + .attachments { margin-top: 8px; }
+.sharedLink { display: grid; min-width: 0; max-width: 100%; color: var(--accent-ink); overflow-wrap: anywhere; text-decoration: underline; text-underline-offset: 3px; }
+.sharedLinkTitle { font-weight: 500; }
+.sharedLink:hover { text-decoration-thickness: 2px; }
+.sharedLink:focus-visible { --focus-outline: transparent; outline: none !important; text-decoration-thickness: 2px; text-decoration-color: var(--foreground); }
 /* A lone photo: its own shape (attachments.tsx sets the shape and a width that keeps it at most 420 px tall). */
 .photo { --sq-r: 14px; position: relative; display: block; width: 320px; max-width: 100%; overflow: hidden; border: 0; padding: 0; background: var(--surface-pressed); cursor: zoom-in; }
 .photo img, .galleryItem img { display: block; width: 100%; height: 100%; object-fit: cover; }

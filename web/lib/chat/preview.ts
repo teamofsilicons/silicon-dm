@@ -37,6 +37,8 @@ export function messageGist(message: Message): string {
     if (kinds.size === 1 && kinds.has("image")) return count === 1 ? "Photo" : `${count} photos`;
     if (kinds.size === 1 && kinds.has("video")) return count === 1 ? "Video" : `${count} videos`;
     if (kinds.size === 1 && kinds.has("audio")) return count === 1 ? "Audio" : `${count} audio files`;
+    if (kinds.size === 1 && kinds.has("link")) return count === 1 ? "Link" : `${count} links`;
+    if (kinds.has("link")) return `${count} attachments`;
     return count === 1 ? "File" : `${count} files`;
   }
   return "Message";

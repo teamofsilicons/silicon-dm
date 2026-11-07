@@ -450,6 +450,73 @@ test("the keyboard moves through messages and acts on the selected one, without 
 
 /* Photos -------------------------------------------------------------------------------------------------------------- */
 
+test("shared web pages stay links on desktop and phone, while actual files keep Download", async ({ browser }) => {
+  const group = await newGroup("Thread links");
+  const caption = `Added ₹80,000. Can you show me the new hide-tab control? ${stamp()}`;
+  const sheet = "https://calc.teamofsilicons.com/s/gemoru65fxez?tab=bank#transactions";
+  const article = `https://example.test/articles/${"long-readable-address-".repeat(12)}?view=all#notes`;
+  await send("bo", group, { message: caption, attachments: [sheet] });
+  const mixed = `Links and files ${stamp()}`;
+  await send("bo", group, { message: mixed, attachments: [
+    { permanent_url: article, name: "Project notes", content_type: "text/html" },
+    { permanent_url: "https://example.test/report.pdf", name: "report.pdf", content_type: "application/pdf", size: 1024 },
+  ] });
+  const ada = await signedIn(browser, "ada");
+  const page = await ada.newPage();
+  const errors = threadErrors(page);
+  const visits: string[] = [];
+  await ada.route("https://calc.teamofsilicons.com/**", route => {
+    visits.push(route.request().url());
+    return route.fulfill({ contentType: "text/html", body: "<title>Shared sheet</title><p>Shared sheet</p>" });
+  });
+  await page.goto(`/c/${group}`);
+  const message = row(page, caption);
+  const link = message.getByRole("link", { name: sheet, exact: false });
+  await expect(link).toBeVisible();
+  await expect(link).toHaveAttribute("href", sheet);
+  await expect(message.locator("a[download]")).toHaveCount(0);
+  await expect(row(page, mixed).getByRole("link", { name: /Project notes/ })).toHaveAttribute("href", article);
+  await expect(row(page, mixed).getByRole("link", { name: "Download report.pdf", exact: true })).toBeVisible();
+  expect(visits, "displaying a link does not fetch its destination").toEqual([]);
+
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await message.scrollIntoViewIfNeeded();
+    await expect(link).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(await row(page, mixed).getByRole("link", { name: /Project notes/ }).evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+    await message.screenshot({ path: test.info().outputPath(`shared-link-${width}.png`) });
+  }
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await link.focus();
+  const opened = ada.waitForEvent("page");
+  await page.keyboard.press("Enter");
+  const destination = await opened;
+  await destination.waitForLoadState();
+  expect(destination.url()).toBe(sheet);
+  await destination.close();
+  await page.reload();
+  await expect(link).toBeVisible();
+  await expect(message.locator("a[download]")).toHaveCount(0);
+
+  // The composer and the outbox use the same rendering before and after the service saves the message.
+  const field = page.getByRole("textbox", { name: /^Message / });
+  const outgoing = `Sending the sheet ${stamp()}`;
+  await field.fill(`/link ${sheet}`);
+  await field.press("Enter");
+  await ada.setOffline(true);
+  await field.fill(outgoing);
+  await field.press("Enter");
+  const pending = page.locator("article[data-pending]", { hasText: outgoing });
+  await expect(pending.getByRole("link", { name: sheet, exact: false })).toBeVisible();
+  await expect(pending.locator("a[download]")).toHaveCount(0);
+  await ada.setOffline(false);
+  await expect(pending).toHaveCount(0, { timeout: 30_000 });
+  await expect(row(page, outgoing).getByRole("link", { name: sheet, exact: false })).toBeVisible();
+  expect(errors()).toEqual([]);
+  await ada.close();
+});
+
 test("photos open in a lightbox by keyboard: Enter, → to the next, Esc back to the photo", async ({ browser }) => {
   const group = await newGroup("Thread photos");
   const caption = `Two photos ${stamp()}`;

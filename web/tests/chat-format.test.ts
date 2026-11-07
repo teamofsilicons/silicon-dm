@@ -76,6 +76,29 @@ test("attachments: kinds from details or addresses, names, and https only", () =
   assert.deepEqual(media.attachments.map(item => [item.url, item.kind, item.name]), [["https://x.test/b.png", "image", "b.png"]], "the voice note is not an attachment too");
 });
 
+test("shared pages are links; file evidence keeps uploads and downloads as files", () => {
+  const sheet = "https://calc.teamofsilicons.com/s/gemoru65fxez?tab=bank#transactions";
+  for (const url of [sheet, "https://write.teamofsilicons.com/d/abc", "https://example.com", "https://example.com/article.html", "https://example.com/view?file=report.pdf", "https://example.com/release/v1.2"]) {
+    assert.equal(mediaKind(url), "link", url);
+  }
+  assert.equal(mediaKind(sheet, " Text/HTML; charset=UTF-8 "), "link");
+  assert.equal(mediaKind(sheet, "application/xhtml+xml"), "link");
+  assert.equal(mediaKind(sheet, undefined, { name: "Bank uses" }), "link", "a page title is not a file name");
+  assert.equal(mediaKind("https://example.com/report%2Epdf?download=1"), "file");
+  assert.equal(mediaKind("https://example.com/download", "application/octet-stream"), "file");
+  assert.equal(mediaKind("https://example.com/download", undefined, { name: "report.csv" }), "file");
+  assert.equal(mediaKind("https://example.com/download", undefined, { name: "LICENSE", size: 0 }), "file");
+  assert.equal(mediaKind("https://example.com/download", undefined, { name: "photo.png" }), "image");
+  const upload = "https://briefcase.teamofsilicons.com/api/v1/public/c:ada/apps/dm/README";
+  assert.equal(mediaKind(upload), "file", "extensionless Briefcase upload");
+  assert.equal(mediaKind(`${upload}.html`, "text/html"), "file", "uploaded HTML still downloads safely");
+  const media = messageMedia(base({ attachments: [sheet, "javascript:alert(1)", "https://user:pass@example.com/private"], attachment_details: [{ url: sheet, name: "Bank uses" }] }));
+  assert.deepEqual(media.attachments, [{ url: sheet, name: "Bank uses", kind: "link" }]);
+  assert.equal(messageGist(base({ attachments: [sheet] })), "Link");
+  assert.equal(messageGist(base({ attachments: [sheet, "https://example.com"] })), "2 links");
+  assert.equal(messageGist(base({ attachments: [sheet, "https://example.com/report.pdf"] })), "2 attachments");
+});
+
 test("an edit carries everything the message keeps; a reply preview quotes it", () => {
   const message = base({
     sender: ada, message: "old", attachments: ["https://x.test/a.webm", "https://x.test/doc.pdf", "https://media.giphy.com/x.gif"],
