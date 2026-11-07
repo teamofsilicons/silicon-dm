@@ -1,0 +1,87 @@
+{
+  "verified_at": "2026-11-07T10:28:26.245982+00:00",
+  "scope": "DM website only: render shared web URLs as links and retain real file downloads",
+  "public_origin": "https://dm.teamofsilicons.com",
+  "source_revision": "7402a4728d5b0b88ccab368c70ad65ccd1ba44f1",
+  "installation": {
+    "source_revision": "7402a4728d5b0b88ccab368c70ad65ccd1ba44f1",
+    "image": "sha256:82ff1da224071caab6b62d52f33f3e01ec5215be948c53a6c304deb9b6945c4e",
+    "archive_sha256": "c9ad05acb197361c1d814509ef7645c4de554cbcda7f11acef493b8bb67544f5",
+    "port": 4316,
+    "container": "dm-accounts-web",
+    "local_ready": true,
+    "legacy_gateway_running": false
+  },
+  "rollback": {
+    "previous_container": "dm-accounts-web-before-1794047216",
+    "previous_image": "sha256:1b671d83e8f04c134388d04e9ab765b9da12a3b3052eb54a2381e892bc792512",
+    "source": "7402a4728d5b0b88ccab368c70ad65ccd1ba44f1"
+  },
+  "host_verification": {
+    "revision": "7402a4728d5b0b88ccab368c70ad65ccd1ba44f1",
+    "image": "sha256:82ff1da224071caab6b62d52f33f3e01ec5215be948c53a6c304deb9b6945c4e",
+    "running": true,
+    "sessions_preserved": true,
+    "session_integrity": "ok",
+    "service_and_worker_unchanged": true,
+    "local_http": {
+      "/": 200,
+      "/robots.txt": 200,
+      "/llms.txt": 200,
+      "HEAD /auth/callback": 204
+    }
+  },
+  "public_verification": [
+    {
+      "path": "/",
+      "status": 200,
+      "bytes": 45373
+    },
+    {
+      "path": "/robots.txt",
+      "status": 200,
+      "bytes": 767
+    },
+    {
+      "path": "/llms.txt",
+      "status": 200,
+      "bytes": 8460
+    },
+    {
+      "path": "HEAD /auth/callback",
+      "status": 204
+    },
+    {
+      "path": "/_next/static/chunks/1dwot96zewhh6.css",
+      "status": 200,
+      "sha256": "6b342ad5f6232370c60bbdef6ece8cade3be8969a0868adb56300967f9a3331c",
+      "matches_image": true
+    },
+    {
+      "path": "/_next/static/chunks/1eymwtnibu_s5.js",
+      "status": 200,
+      "sha256": "6c3bf1f9619eb8aef8fe030a8c8c6258a951076f2265a57db1556cf98e0320e7",
+      "matches_image": true
+    }
+  ],
+  "local_verification": {
+    "typecheck": "passed",
+    "lint": "passed",
+    "unit_tests_passed": 345,
+    "production_build": "passed",
+    "browser_distinct_cases_passed": 104,
+    "known_baseline_failure": "One existing refresh test fails on both this revision and unchanged 90d4192; its two dependent tests were skipped.",
+    "regression_coverage": [
+      "desktop and phone link rendering",
+      "mixed links and files",
+      "keyboard opening",
+      "reload",
+      "pending and offline sends"
+    ],
+    "production_authenticated_message_test": "not performed"
+  },
+  "ssm_commands": {
+    "stage": "c58db052-206c-47bf-8e1e-ec79f6476124",
+    "deploy": "e27811e7-9240-4585-9fa3-fb03d4ae157c"
+  }
+}
