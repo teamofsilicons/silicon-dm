@@ -24,6 +24,8 @@ pub(super) fn delivery(state: &AppState) -> Value {
         "transport": if ting.is_some() { "ting" } else { "sync" },
         "ting_enabled": ting.is_some(),
         "ting_api_base_url": ting,
+        "ting_notification_type": format!("{}.syncChanged", state.settings.accounts.app_id),
+        "ting_receiver_sessions": {"protocol":"v1", "address_lifetime":"connection", "message_target":"account", "recovery":"dm_sync"},
         "enrolment": if ting.is_some() {
             format!("automatic on sign-in (User verification proof, scope {})", crate::infrastructure::ting_enrollment::SUBSCRIBE_SCOPE)
         } else { "none: Ting is not configured for this DM".to_owned() },

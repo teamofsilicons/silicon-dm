@@ -1671,6 +1671,15 @@ components:
         transport: {type: string, enum: [sync, ting], description: '`sync` while Ting is not configured for this DM.'}
         ting_enabled: {type: boolean}
         ting_api_base_url: {type: [string, 'null'], format: uri}
+        ting_notification_type: {type: string, example: dm.syncChanged, description: 'Type used for newly prepared message handoffs.'}
+        ting_receiver_sessions:
+          type: object
+          description: 'Receiver policy, not evidence that a client is connected.'
+          properties:
+            protocol: {type: string, const: v1}
+            address_lifetime: {type: string, const: connection}
+            message_target: {type: string, const: account}
+            recovery: {type: string, const: dm_sync}
         enrolled: {type: boolean, description: 'Present for a signed-in account: Ting knows it as a recipient.'}
         enrolment: {type: string}
         sync_path: {type: string, const: /api/v1/sync}

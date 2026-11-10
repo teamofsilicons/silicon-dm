@@ -828,6 +828,12 @@ pub struct Delivery {
     pub ting_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ting_api_base_url: Option<String>,
+    /// Type emitted for newly prepared message references; old history may use an earlier name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ting_notification_type: Option<String>,
+    /// Receiver lifetime/routing policy, not evidence of an active connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ting_receiver_sessions: Option<TingReceiverSessions>,
     /// Present for a signed-in account: Ting knows it as a recipient.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enrolled: Option<bool>,
@@ -843,6 +849,15 @@ pub struct Delivery {
     pub receipts_path: Option<String>,
     #[serde(default)]
     pub dm_websocket_supported: bool,
+}
+
+/// Ting receiver sessions are live connection addresses; messages still target accounts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TingReceiverSessions {
+    pub protocol: String,
+    pub address_lifetime: String,
+    pub message_target: String,
+    pub recovery: String,
 }
 
 /// `GET /api/v1/me`: the account behind the credential.

@@ -66,6 +66,9 @@ pub enum TingFailure {
     /// Silicon Accounts could not issue DM's proof for Ting right now.
     #[error("Ting delivery authority is temporarily unavailable")]
     AuthorityUnavailable,
+    /// The recipient blocked this notification. It must not be retried or marked delivered.
+    #[error("The recipient blocked this Ting notification")]
+    Blocked,
 }
 
 impl TingFailure {
@@ -79,6 +82,7 @@ impl TingFailure {
             Self::Rejected(code) => code,
             Self::InvalidRequest => "ting_invalid_prepared_request",
             Self::AuthorityUnavailable => "ting_authority_unavailable",
+            Self::Blocked => "ting_recipient_blocked",
         }
     }
 }
@@ -259,7 +263,11 @@ async fn connect(base_url: &url::Url, settings: &TingSettings) -> Result<Socket,
         let ready = next_json(&mut socket).await?;
         if ready["op"] != "ready"
             || ready["protocol"] != "v1"
-            || ready["receiver_id"].as_str().is_none_or(str::is_empty)
+            || ready
+                .get("session_id")
+                .or_else(|| ready.get("receiver_id"))
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
         {
             return Err(TingFailure::Protocol);
         }
@@ -305,7 +313,10 @@ async fn send_one(
 }
 
 fn acceptance(response: &Value, key: &str) -> Result<TingAcceptance, TingFailure> {
-    if response["op"] != "accepted" || response["status"] != "accepted" || response["key"] != key {
+    if response["op"] != "accepted"
+        || !matches!(response["status"].as_str(), Some("accepted" | "blocked"))
+        || response["key"] != key
+    {
         return Err(TingFailure::Protocol);
     }
     let id = response["id"]
@@ -320,6 +331,9 @@ fn acceptance(response: &Value, key: &str) -> Result<TingAcceptance, TingFailure
     let created_at =
         OffsetDateTime::parse(created_at, &Rfc3339).map_err(|_| TingFailure::Protocol)?;
     let silent = response["silent"].as_bool().ok_or(TingFailure::Protocol)?;
+    if response["status"] == "blocked" {
+        return Err(TingFailure::Blocked);
+    }
     Ok(TingAcceptance {
         id,
         created_at,

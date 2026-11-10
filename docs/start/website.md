@@ -220,3 +220,12 @@ conversations further down the list than you have scrolled.
 
 **Settings → Report a problem** sends what went wrong to the people who build DM. Say what you did, what you expected
 and what happened.
+
+### Live updates through Ting
+
+When Ting is connected, Settings → Notifications shows **Live updates**. Each
+open DM tab has its own receiver. If it asks for Ting sign-in, use **Sign in to
+Ting**, choose the same account as DM, then return to this tab. DM reconnects
+and catches up automatically. If Ting is unavailable, DM keeps checking for
+messages. Closing a tab ends that receiver without signing you out of Ting or
+ending another device's connection.

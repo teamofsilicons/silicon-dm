@@ -10,7 +10,7 @@ before relying on memory.
 - The product contract is `../understanding/UNDERSTANDING.md`: never edit it. The repository's rules are in `../AGENTS.md`.
 - **The browser never holds a token.** Pages call the DM service through the same-origin proxy (`/api/*`,
   `lib/chat/api.ts`), Server Components through `apiFetch()` / `tryApiFetch()` (`lib/server/rsc.ts`). Writes must be
-  same-origin. The browser connects to this site only (CSP `connect-src 'self'`).
+  same-origin. The browser uses this site for DM data. The one exception is the exact configured `TING_BROWSER_ORIGIN`: cookie-authenticated identity checks and receiver WebSockets, never DM tokens or mutations. CSP permits only that origin and its WebSocket equivalent in addition to `'self'`.
 - **Data** goes through `lib/chat/**` (typed API, query keys, the sync loop, outbox, drafts, receipts, presence, news
   between tabs); **keys** through `lib/shortcuts/**` (every shortcut is in `registry.ts`, behaviour attached with
   `useShortcut`); **voice** through `lib/voice` (`index.ts` is its public face); **files** through `lib/upload`

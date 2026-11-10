@@ -19,6 +19,7 @@ import { appConfig } from "@/lib/app.config";
 import { accountName } from "@/lib/chat/address";
 import { submitReport } from "@/lib/chat/api";
 import { disableNotifications, enableNotifications, notificationState, type NotificationState } from "@/lib/chat/notifications";
+import { subscribeTingConnection, tingConnection, serverTingConnection } from "@/lib/chat/ting-status";
 import { updateChatSettings, useChatSettings } from "@/lib/chat/settings";
 import { useSignOut } from "@/lib/client/session";
 import { ApiError } from "@/lib/errors";
@@ -66,6 +67,15 @@ const subscribeNothing = () => () => undefined;
 
 export function NotificationsSection() {
   const settings = useChatSettings();
+  const { tingOrigin, me } = useChat();
+  const delivery = useSyncExternalStore(subscribeTingConnection, tingConnection, serverTingConnection);
+  const deliveryText = delivery?.state === "connected"
+    ? "Connected through Ting. Messages also recover automatically after a connection loss."
+    : delivery?.state === "sign-in"
+      ? `Sign in to Ting as ${me.account.id}, then return here. DM keeps checking for messages meanwhile.`
+      : !delivery || delivery.state === "connecting"
+        ? "Connecting to Ting…"
+        : "Ting is unavailable. DM keeps checking for messages and will reconnect automatically.";
   const initial = useSyncExternalStore(subscribeNothing, notificationState, () => "default" as NotificationState);
   const [state, setState] = useState<NotificationState | null>(null);
   const current = state ?? initial;
@@ -99,7 +109,14 @@ export function NotificationsSection() {
           }}
         />
       </div>
-      <p className={styles.note}>Nothing leaves your browser for this: it shows what this tab already has. The tab&apos;s title counts what is unread either way.</p>
+      {tingOrigin && me.delivery.ting_enabled ? <div className={styles.row}>
+        <div className={styles.rowText}>
+          <span className={styles.rowLabel}>Live updates</span>
+          <span className={styles.rowDescription} role="status">{deliveryText}</span>
+        </div>
+        {delivery?.state === "sign-in" ? <ButtonLink variant="secondary" size="sm" href={`${tingOrigin}/v1/session/login`} target="_blank" rel="noopener noreferrer">Sign in to Ting</ButtonLink> : null}
+      </div> : null}
+      <p className={styles.note}>Desktop notifications show messages this tab already has. The tab&apos;s title counts what is unread either way.</p>
       {on ? <div><Button size="sm" variant="ghost" onClick={test}>Show a test notification</Button></div> : null}
     </div>
   );

@@ -16,6 +16,7 @@ export interface ChatContextValue {
   /** The session's account (photo and name as Silicon Accounts has them). */
   account: SessionAccount;
   accountsUrl: string;
+  tingOrigin?: string;
   /** The Silicon whose conversations are shown read only (`?for=`), or null for your own. */
   view: string | null;
   viewed: AccountRef | null;
@@ -38,7 +39,7 @@ export function meFromSession(account: SessionAccount): Me {
   };
 }
 
-export function ChatProvider({ account, accountsUrl, initialMe, children }: { account: SessionAccount; accountsUrl: string; initialMe: Me | null; children: ReactNode }) {
+export function ChatProvider({ account, accountsUrl, tingOrigin, initialMe, children }: { account: SessionAccount; accountsUrl: string; tingOrigin?: string; initialMe: Me | null; children: ReactNode }) {
   const me = useMe(initialMe ?? undefined).data ?? initialMe ?? meFromSession(account);
   const params = useSearchParams();
   const requested = params.get("for")?.trim() || null;
@@ -47,8 +48,8 @@ export function ChatProvider({ account, accountsUrl, initialMe, children }: { ac
     // A view of a Silicon this account does not look after is still asked of the service, which says why it refuses.
     const view = requested ? viewed?.id ?? requested : null;
     const perspective = viewed ?? (view ? { type: "silicon" as const, id: view } : me.account);
-    return { me, account, accountsUrl, view, viewed, perspective, readOnly: !!view };
-  }, [me, account, accountsUrl, requested]);
+    return { me, account, accountsUrl, tingOrigin, view, viewed, perspective, readOnly: !!view };
+  }, [me, account, accountsUrl, tingOrigin, requested]);
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;
 }
 

@@ -85,3 +85,12 @@ test("the same-origin guard accepts this site, EXTRA_ORIGINS and, in development
   const production = allowedOrigins(read({ NODE_ENV: "production", PUBLIC_URL: "https://webkit.example" }));
   assert.deepEqual([...production], ["https://webkit.example"]);
 });
+
+test("Ting is optional and allows exactly one secure origin (HTTP only on loopback)", () => {
+  assert.equal(read({}).tingBrowserOrigin, undefined);
+  assert.equal(read({ TING_BROWSER_ORIGIN: "https://ting.example/" }).tingBrowserOrigin, "https://ting.example");
+  assert.equal(read({ TING_BROWSER_ORIGIN: "http://127.0.0.1:4748" }).tingBrowserOrigin, "http://127.0.0.1:4748");
+  for (const origin of ["http://ting.example", "https://ting.example/path", "https://ting.example?token=bad", "https://ting.example#fragment", "https://*.example", "https://ting.example https://evil.example"]) {
+    assert.ok(problemsOf({ TING_BROWSER_ORIGIN: origin }).some(problem => problem.startsWith("TING_BROWSER_ORIGIN")));
+  }
+});

@@ -167,6 +167,10 @@ impl TingDeliveryWorker {
     /// # Errors
     /// Returns durable-storage/configuration failures; lost leases are harmless
     /// and are recovered by the next owner with the unchanged event key/body.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one leased handoff and its terminal or retry outcome stay together"
+    )]
     pub async fn process_once(&self) -> AppResult<usize> {
         let Some(publisher) = &self.publisher else {
             let discarded = self
@@ -223,6 +227,12 @@ impl TingDeliveryWorker {
                             acceptance.created_at,
                             acceptance.silent,
                         )
+                        .await
+                }
+                Err(TingFailure::Blocked) => {
+                    self.state
+                        .store
+                        .block_ting_delivery(claim.delivery_id, claim.lease_id)
                         .await
                 }
                 Err(error) => {

@@ -200,6 +200,36 @@ export function applyMessage(queryClient: QueryClient, me: AccountRef, message: 
 
 /** Ends the loop's wait after a failure (another request reached the service: it is back). */
 const wakers = new Set<() => void>();
+const polls = new Set<AbortController>();
+const TING_INTERRUPTED = Symbol("ting-interrupted");
+let tingWake: ReturnType<typeof setTimeout> | undefined;
+
+/** Coalesce a Ting burst and reconcile from the saved opaque DM cursor. Only a
+ * waiting HTTP read is interrupted; hydration and cursor commits finish in order. */
+export function wakeFromTing(): void {
+  if (tingWake) return;
+  tingWake = setTimeout(() => {
+    tingWake = undefined;
+    for (const poll of polls) poll.abort("ting");
+    wakeSync();
+  }, 100);
+}
+
+async function pollSync(options: Parameters<typeof syncPage>[0], signal: AbortSignal) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) controller.abort();
+  polls.add(controller);
+  try { return await syncPage({ ...options, signal: controller.signal }); }
+  catch (error) {
+    if (!signal.aborted && controller.signal.reason === "ting") return TING_INTERRUPTED;
+    throw error;
+  } finally {
+    polls.delete(controller);
+    signal.removeEventListener("abort", abort);
+  }
+}
 
 /** Tells a sync loop waiting out its backoff to try again now (components/chat/shell/chat-runtime.tsx). */
 export function wakeSync(): void {
@@ -337,7 +367,8 @@ export async function runSync(options: SyncOptions, signal: AbortSignal): Promis
         refetchAfterReset(queryClient, expired);
         expired = false;
       }
-      const page = await syncPage({ cursor, wait: more ? 0 : WAIT_SECONDS, include, signal });
+      const page = await pollSync({ cursor, wait: more ? 0 : WAIT_SECONDS, include }, signal);
+      if (page === TING_INTERRUPTED) continue;
       const plan = planConversationEvents(page.events, seen);
       await applyConversationPlan(queryClient, plan, signal, options.onConversationGone);
       for (const id of plan.eventIds) seen.add(id);

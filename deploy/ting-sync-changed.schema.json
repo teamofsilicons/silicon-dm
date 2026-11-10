@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "event", "conversation_id", "message_id", "delivery_id", "delivery_sequence"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 2},
+    "event": {"enum": ["message.created", "message.updated", "message.deleted", "message.delivered", "message.read", "message.failed"]},
+    "conversation_id": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "message_id": {"type": "string", "pattern": "^[0-9a-z]{3,}$"},
+    "delivery_id": {"type": "string", "format": "uuid"},
+    "delivery_sequence": {"type": "integer", "minimum": 1}
+  }
+}

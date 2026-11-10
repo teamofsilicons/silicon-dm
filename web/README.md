@@ -18,7 +18,7 @@ against Silicon Accounts' JWKS, and every write must come from this site's own p
 | `GET`/`HEAD /api/uploads/file?url=` | The only way a browser loads Briefcase's bytes: the configured Briefcase's public files only, inline only for pictures, audio, video and PDF (everything else is a download), always nosniff and a sandbox CSP |
 | `/llms.txt`, `/llms-full.txt`, `/robots.txt`, `/sitemap.xml` | For Silicons and crawlers (`lib/agent/files.ts`) |
 
-Every page gets a fresh CSP nonce (`proxy.ts`): scripts from this site only, `connect-src 'self'`, no framing, and the
+Every page gets a fresh CSP nonce (`proxy.ts`): scripts from this site only, `connect-src 'self'` plus the optional exact Ting receiver origin, no framing, and the
 microphone allowed for this site alone. The website records no telemetry, and tells the DM service so on every call.
 
 ## Run locally
@@ -117,3 +117,10 @@ rotating again. Only a definitive `invalid_grant` ends the sign-in. Sign-out is 
 Tests in `tests/refresh-recovery.test.ts` cover competing refreshes, process restart, lost replies, expired recovery,
 stale cookies, storage failure and sign-out racing a refresh. All replicas must use this protocol before traffic is
 switched; do not roll back to the old token-refresh code once these sessions are in use.
+
+
+Ting 0.4 receivers: set `TING_BROWSER_ORIGIN` to the Ting cookie origin and allow
+this website's `PUBLIC_URL` in Ting. The account UUID is checked before and after
+the socket opens; Settings → Notifications offers Ting sign-in if needed.
+The direct socket wakes the existing DM sync reader and never sends read ACKs.
+See `docs/reference/ting.md` for account-wide delivery, recovery and rollout.

@@ -21,7 +21,10 @@ import { maybeNotify, setScreenConversation, trackScreen } from "@/lib/chat/noti
 import { attachOutbox } from "@/lib/chat/outbox-store";
 import { setPresenceConversation, startPresence } from "@/lib/chat/presence";
 import { attachReceipts, noteDelivered } from "@/lib/chat/receipts";
-import { refreshConversationsSoon, startSync, wakeSync, type GoneConversation } from "@/lib/chat/sync";
+import { openTingSession } from "@/lib/chat/ting-session";
+import { setTingConnection } from "@/lib/chat/ting-status";
+import { appConfig } from "@/lib/app.config";
+import { refreshConversationsSoon, startSync, wakeFromTing, wakeSync, type GoneConversation } from "@/lib/chat/sync";
 import { useUnreadTitle } from "@/lib/chat/title";
 import { noteListHead, resetUnreadTotal, useUnreadTotal } from "@/lib/chat/unread-total";
 import { notify } from "@/lib/notify";
@@ -30,7 +33,7 @@ import { useOpenAddress } from "../sidebar/conversations-pane";
 import { useChat } from "./chat-context";
 
 export function ChatRuntime() {
-  const { me, view } = useChat();
+  const { me, view, tingOrigin } = useChat();
   const queryClient = useQueryClient();
   const router = useRouter();
   const openAddress = useOpenAddress();
@@ -59,6 +62,12 @@ export function ChatRuntime() {
   useEffect(() => queryClient.getQueryCache().subscribe(event => {
     if (event.type === "updated" && event.action.type === "success") wakeSync();
   }), [queryClient]);
+  useEffect(() => {
+    if (!tingOrigin || !me.delivery.ting_enabled) return;
+    const connection = openTingSession({ origin: tingOrigin, account, appId: appConfig.appId, changed: wakeFromTing, status: setTingConnection });
+    const signedOut = whenSignedOut(() => { connection.close(); setTingConnection(null); });
+    return () => { signedOut(); connection.close(); setTingConnection(null); };
+  }, [tingOrigin, me.delivery.ting_enabled, accountKey]); // eslint-disable-line react-hooks/exhaustive-deps -- immutable account key owns the receiver
   useListSafetyNet(view);
   useEffect(() => {
     const onIncoming = (message: Message, info: { fresh: boolean }) => {

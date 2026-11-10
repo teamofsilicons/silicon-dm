@@ -30,7 +30,7 @@ export const TEST_ENV: Record<string, string> = {
 /** Puts the test environment in place (call before the code under test reads it). */
 export function applyTestEnv(overrides: Record<string, string | undefined> = {}): void {
   const env = process.env as Record<string, string | undefined>;
-  for (const key of ["APP_ID", "APP_SECRET", "ACCOUNTS_URL", "ACCOUNTS_API_URL", "APP_API_URL", "SESSION_SECRET", "PUBLIC_URL", "EXTRA_IMG_ORIGINS", "EXTRA_ORIGINS"]) delete env[key];
+  for (const key of ["APP_ID", "APP_SECRET", "ACCOUNTS_URL", "ACCOUNTS_API_URL", "APP_API_URL", "SESSION_SECRET", "PUBLIC_URL", "EXTRA_IMG_ORIGINS", "EXTRA_ORIGINS", "TING_BROWSER_ORIGIN"]) delete env[key];
   Object.assign(env, TEST_ENV);
   setRefreshStoreForTests(memoryRefreshStore());
   for (const [key, value] of Object.entries(overrides)) {

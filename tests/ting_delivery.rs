@@ -71,6 +71,7 @@ impl TingPublisher for Recording {
             sent.push((claim.target.id.to_string(), body));
         }
         match self.reject_with {
+            Some("blocked") => Err(TingFailure::Blocked),
             Some(code) => Err(TingFailure::Rejected(code.to_owned())),
             None => Ok(TingAcceptance {
                 id: format!("ting-{}", claim.delivery_id),
@@ -184,7 +185,11 @@ async fn with_ting_outbound_acceptance_advances_delivered_without_device_receipt
         .find(|(target, _)| target == "Bb2")
         .map(|(_, body)| body.clone())
         .unwrap_or_default();
-    assert_eq!(to_bob["type"], "dm.sync.changed");
+    assert_eq!(to_bob["type"], "dm.syncChanged");
+    assert!(
+        to_bob.get("session_id").is_none(),
+        "durable messages reach every device"
+    );
     assert_eq!(to_bob["for"], json!("Bb2"));
     assert_eq!(to_bob["key"], to_bob["data"]["delivery_id"]);
     assert_eq!(to_bob["data"]["schema_version"], 2);
@@ -558,6 +563,91 @@ async fn new_messages_go_to_ting_before_a_burst_of_receipts() -> Result<(), BoxE
             .iter()
             .all(|event| event != "message.created"),
         "{events:?}"
+    );
+    app.close().await
+}
+
+#[tokio::test]
+async fn recipient_block_stops_retries_without_recording_acceptance_or_delivery()
+-> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let (ada, _bob, _) = people(&app).await;
+    let sent = app
+        .post(
+            "/api/v1/messages",
+            &app.accounts.token(&ada),
+            json!({"recipient_id":"c:bob","message":"blocked notification remains durable in DM"}),
+        )
+        .await?;
+    expect_status(&sent, StatusCode::ACCEPTED)?;
+    let recorder = Recording::rejecting("blocked");
+    let worker = TingDeliveryWorker::new(app.state.clone(), Some(recorder));
+    assert!(worker.process_once().await? > 0);
+    assert_eq!(worker.process_once().await?, 0);
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM ting_handoffs WHERE accepted_at IS NOT NULL"
+        )
+        .await?,
+        0
+    );
+    assert!(
+        count(
+            &app,
+            "SELECT count(*) FROM ting_handoffs WHERE discard_reason='ting_recipient_blocked'"
+        )
+        .await?
+            > 0
+    );
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM messages WHERE delivered_at IS NOT NULL OR read_at IS NOT NULL"
+        )
+        .await?,
+        0
+    );
+    app.close().await
+}
+
+#[tokio::test]
+async fn prepared_legacy_handoffs_keep_their_original_bytes_after_upgrade() -> Result<(), BoxError>
+{
+    let app = TestApp::start().await?;
+    let (ada, _, _) = people(&app).await;
+    expect_status(
+        &app.post(
+            "/api/v1/messages",
+            &app.accounts.token(&ada),
+            json!({"recipient_id":"c:bob","message":"immutable retry"}),
+        )
+        .await?,
+        StatusCode::ACCEPTED,
+    )?;
+    // Seed the old producer's first preparation while the immutable body is null.
+    sqlx::query("UPDATE ting_handoffs SET request_body=json_build_object('type','dm.sync.changed','for',target_id,'key',delivery_id,'metadata',json_build_object(),'data',json_build_object('schema_version',2,'event',event,'conversation_id',public_conversation_id,'message_id','000','delivery_id',delivery_id,'delivery_sequence',delivery_sequence))::text WHERE request_body IS NULL").execute(app.state.store.pool()).await?;
+    TingDeliveryWorker::new(app.state.clone(), Some(Recording::rejecting("unavailable")))
+        .process_once()
+        .await?;
+    sqlx::query(
+        "UPDATE ting_handoffs SET next_attempt_at=clock_timestamp() WHERE request_body IS NOT NULL",
+    )
+    .execute(app.state.store.pool())
+    .await?;
+    let before:Vec<(uuid::Uuid,String)>=sqlx::query_as("SELECT delivery_id,request_body FROM ting_handoffs WHERE request_body IS NOT NULL ORDER BY delivery_id").fetch_all(app.state.store.pool()).await?;
+    let recorder = Recording::accepting();
+    TingDeliveryWorker::new(app.state.clone(), Some(recorder.clone()))
+        .process_once()
+        .await?;
+    let after:Vec<(uuid::Uuid,String)>=sqlx::query_as("SELECT delivery_id,request_body FROM ting_handoffs WHERE delivery_id=ANY($1) ORDER BY delivery_id").bind(before.iter().map(|row|row.0).collect::<Vec<_>>()).fetch_all(app.state.store.pool()).await?;
+    assert!(!before.is_empty());
+    assert_eq!(before, after);
+    assert!(
+        recorder
+            .sent()
+            .iter()
+            .any(|(_, body)| body["type"] == "dm.sync.changed")
     );
     app.close().await
 }

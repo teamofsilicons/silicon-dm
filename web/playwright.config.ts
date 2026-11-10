@@ -40,12 +40,14 @@ process.env.E2E_SESSION_SECRET = sessionSecret;
 const PORT = Number(process.env.E2E_PORT || 4530);
 const API_PORT = Number(process.env.API_PORT || 4521);
 const env = {
+  ...(process.env.E2E_TING === "1" ? { TING_BROWSER_ORIGIN: "http://127.0.0.1:4748" } : {}),
   APP_ID: pick("APP_ID", "dm")!,
   APP_SECRET: appSecret(),
   ACCOUNTS_URL: pick("ACCOUNTS_URL", "http://localhost:9840")!,
   ACCOUNTS_API_URL: pick("ACCOUNTS_API_URL", "http://127.0.0.1:9839")!,
   APP_API_URL: `http://127.0.0.1:${API_PORT}`,
   SESSION_SECRET: sessionSecret,
+  REFRESH_STATE_PATH: process.env.REFRESH_STATE_PATH || `.dev/refresh-state-e2e-${PORT}.sqlite`,
   PUBLIC_URL: `http://127.0.0.1:${PORT}`,
   EXTRA_IMG_ORIGINS: pick("EXTRA_IMG_ORIGINS", "http://127.0.0.1:9844")!,
 };
@@ -71,6 +73,7 @@ export default defineConfig({
     { name: "screens", testMatch: /screens\.spec\.ts/, dependencies: ["setup"], use: { browserName: "chromium" } },
   ],
   webServer: [
+    ...(process.env.E2E_TING === "1" ? [{ command: "node e2e/ting-fixture.mjs", url: "http://127.0.0.1:4747/live", timeout: 10_000 }] : []),
     { command: `./node_modules/.bin/next build && ./node_modules/.bin/next start --port ${PORT}`, url: `http://127.0.0.1:${PORT}/robots.txt`, env: { ...env, PORT: String(PORT), NEXT_DIST_DIR: process.env.E2E_DIST_DIR || ".next-e2e", NEXT_TELEMETRY_DISABLED: "1" }, reuseExistingServer: true, timeout: 420_000 },
   ],
 });

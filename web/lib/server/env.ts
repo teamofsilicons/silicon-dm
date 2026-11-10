@@ -32,6 +32,8 @@ export interface ServerEnv {
   publicUrl: string;
   extraImgOrigins: string[];
   extraOrigins: string[];
+  /** Exact Ting cookie/WebSocket origin; absent keeps HTTP recovery only. */
+  tingBrowserOrigin?: string;
   production: boolean;
 }
 
@@ -150,16 +152,20 @@ export function readEnv(source: Source = process.env): ServerEnv {
     ? url("PUBLIC_URL", publicRaw, "origin", production, problems, "https://example.teamofsilicons.com")
     : (problems.push("PUBLIC_URL is not set. Set it to this site's own origin, for example http://127.0.0.1:4260; Silicon Accounts sends sign-ins back to {PUBLIC_URL}/auth/callback."), null);
 
+  const tingRaw = value(source, "TING_BROWSER_ORIGIN");
+  if (tingRaw?.includes("*")) problems.push("TING_BROWSER_ORIGIN must name one exact host, without wildcards.");
+  const tingBrowserOrigin = tingRaw ? url("TING_BROWSER_ORIGIN", tingRaw, "origin", true, problems, "https://ting.teamofsilicons.com") ?? undefined : undefined;
+
   const extraImgOrigins = origins("EXTRA_IMG_ORIGINS", value(source, "EXTRA_IMG_ORIGINS"), problems);
   const extraOrigins = origins("EXTRA_ORIGINS", value(source, "EXTRA_ORIGINS"), problems);
 
   if (problems.length || !appSecret || !accountsUrl || !accountsApiUrl || !appApiUrl || !sessionSecret || !publicUrl) {
     throw new EnvError(problems.length ? problems : ["The environment could not be read."]);
   }
-  return { appId, appSecret, accountsUrl, accountsApiUrl, appApiUrl, sessionSecret, publicUrl, extraImgOrigins, extraOrigins, production };
+  return { appId, appSecret, accountsUrl, accountsApiUrl, appApiUrl, sessionSecret, publicUrl, extraImgOrigins, extraOrigins, production, ...(tingBrowserOrigin ? { tingBrowserOrigin } : {}) };
 }
 
-const KEYS = ["NODE_ENV", "APP_ID", "APP_SECRET", "ACCOUNTS_URL", "ACCOUNTS_API_URL", "APP_API_URL", "SESSION_SECRET", "PUBLIC_URL", "EXTRA_IMG_ORIGINS", "EXTRA_ORIGINS"];
+const KEYS = ["NODE_ENV", "APP_ID", "APP_SECRET", "ACCOUNTS_URL", "ACCOUNTS_API_URL", "APP_API_URL", "SESSION_SECRET", "PUBLIC_URL", "EXTRA_IMG_ORIGINS", "EXTRA_ORIGINS", "TING_BROWSER_ORIGIN"];
 let cached: { fingerprint: string; env: ServerEnv } | null = null;
 
 /** The checked settings (cached until the environment changes). Throws EnvError like readEnv. */

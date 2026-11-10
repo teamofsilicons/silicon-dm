@@ -1,8 +1,8 @@
 /**
  * Next.js config of DM's website, built from the Silicon web kit.
  *
- * Topology: the website's own server stands between the browser and the DM service. The browser only ever talks to this
- * origin; the Next server holds the account's Silicon Accounts tokens in a sealed httpOnly cookie and calls the DM
+ * Topology: the website's own server stands between the browser and the DM service. DM API calls use this
+ * origin; the optional Ting receiver uses its explicitly permitted cookie origin; the Next server holds the account's Silicon Accounts tokens in a sealed httpOnly cookie and calls the DM
  * service itself:
  *   /api/*          → ${APP_API_URL}/* with Authorization: Bearer (app/api/[...path]/route.ts)
  *   /auth/sign-in   → the hosted sign-in on ${ACCOUNTS_URL}/authorize (PKCE S256, state in a sealed cookie)

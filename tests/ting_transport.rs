@@ -76,7 +76,7 @@ async fn accept(listener: &TcpListener) -> TestResult<ServerSocket> {
     .await?;
     socket
         .send(Message::Text(
-            json!({"op":"ready","receiver_id":"receiver-local","protocol":"v1"})
+            json!({"op":"ready","session_id":"receiver-local","protocol":"v1"})
                 .to_string()
                 .into(),
         ))
@@ -445,5 +445,25 @@ async fn invalid_local_requests_are_not_transmitted() -> TestResult {
         .map_err(|()| "inspection receiver closed")?;
     server.await??;
     cancellation.cancel();
+    Ok(())
+}
+
+#[tokio::test]
+async fn blocked_notification_is_a_terminal_preference_outcome() -> TestResult {
+    let (listener, settings) = fixture(Duration::from_secs(2)).await?;
+    let server = tokio::spawn(async move {
+        let mut socket = accept(&listener).await?;
+        let frame = next_send(&mut socket).await?;
+        socket.send(Message::Text(json!({"op":"accepted","request_id":frame["request_id"],"key":"dm-original-key","status":"blocked","id":"blocked-id","created_at":"2026-11-10T00:00:00Z","silent":false}).to_string().into())).await?;
+        Ok::<_, Box<dyn Error + Send + Sync>>(())
+    });
+    let cancellation = CancellationToken::new();
+    let publisher = start(&settings, cancellation.clone());
+    assert!(matches!(
+        publisher.send(BODY, authority("proof-test")).await,
+        Err(TingFailure::Blocked)
+    ));
+    cancellation.cancel();
+    server.await??;
     Ok(())
 }

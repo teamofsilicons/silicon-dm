@@ -372,3 +372,22 @@ over a control's own edge), `public`, `session`, `refresh`.
   the stand-ins' shared `/_faults`.
 - **Looking at it.** `node ../scripts/chat-stack/identities.mjs cookie ada` gives a website session cookie for any
   127.0.0.1 port; screenshots go to the ignored `screens/`.
+
+
+### Ting receiver sessions
+
+`lib/chat/ting-session.ts` owns the tab's cookie-authenticated Ting 0.4 connection,
+its ephemeral ID, identity checks and reconnection. `ChatRuntime` closes it on
+account change or unmount. `ting-status.ts` supplies Settings → Notifications.
+Only the configured `TING_BROWSER_ORIGIN` is permitted by CSP. Direct events
+wake `sync.ts` through `wakeFromTing`; that reader retains its cursor, ordered
+hydration and long poll for conversation events and recovery. A Ting event
+never directly changes message content or writes a read receipt.
+
+
+The browser receiver check uses the local Accounts/DM stack and a page-owned
+Ting socket: `E2E_TING=1 API_PORT=4747 E2E_PORT=4719 E2E_DIST_DIR=.next-e2e-ting-live pnpm exec playwright test --project=e2e e2e/ting-session.spec.ts`.
+The discovery adapter on 4747 only enables Ting in the test's `/me` response;
+4748 is intercepted inside that browser. This is protocol coverage, not a live
+Ting deployment claim. Every browser run has a private persistent refresh store
+under `web/.dev/`, so production-mode test servers can complete real sign-ins.

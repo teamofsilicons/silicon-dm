@@ -10,6 +10,7 @@ import { Providers } from "@/components/foundation/providers";
 import { ChatApp } from "@/components/chat/shell/chat-app";
 import type { ConversationSummary, Invitation, Me, Page } from "@/lib/chat/types";
 import { requireSession, tryApiFetch } from "@/lib/server/rsc";
+import { serverEnv } from "@/lib/server/env";
 import { accountsOrigin } from "@/lib/server/site";
 
 interface Envelope<T> {
@@ -27,7 +28,7 @@ export default async function WorkspaceLayout({ children }: { children: ReactNod
   ]);
   return (
     <Providers session={{ signedIn: true, account: session.account, expiresAt: session.expiresAt }}>
-      <ChatApp account={session.account} accountsUrl={accountsOrigin()} initialMe={me.data?.data ?? null} initialConversations={conversations.data?.data ?? null} initialInvitations={invitations.data?.data ?? null}>
+      <ChatApp tingOrigin={serverEnv().tingBrowserOrigin} account={session.account} accountsUrl={accountsOrigin()} initialMe={me.data?.data ?? null} initialConversations={conversations.data?.data ?? null} initialInvitations={invitations.data?.data ?? null}>
         {children}
       </ChatApp>
     </Providers>

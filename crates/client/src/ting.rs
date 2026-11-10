@@ -2,7 +2,7 @@
 //! to Ting (`DM_TING_URL` configured). This module never accepts a webhook batch,
 //! dispatches callbacks, or records Ting/DM delivered/read ACKs.
 //!
-//! DM's Ting items are references, not content: `{"type": "dm.sync.changed", "for":
+//! DM's Ting items are references, not content: `{"type": "dm.syncChanged", "for":
 //! "<account uuid>", "key": <delivery id>, "data": {"schema_version": 2, "event",
 //! "conversation_id", "message_id", "delivery_id", "delivery_sequence"}, "metadata":
 //! {"isi"?}}`. Validate them with [`validate_batch`] against the account the consumer's hook
@@ -32,7 +32,7 @@ pub const REFERENCE_SCHEMA_VERSION: u8 = 2;
 /// the hook; never assembled from webhook JSON. Match it to the current `Client::me()`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TingReceiverContext {
-    /// The producer app (`dm`); its items have type `{app_id}.sync.changed`.
+    /// The producer app (`dm`); its new items have type `{app_id}.syncChanged` (old references remain readable).
     pub app_id: String,
     /// The recipient's permanent Silicon Accounts uuid (compared exactly).
     pub account_uuid: String,
@@ -145,17 +145,68 @@ pub fn validate_batch(
     if tings.len() > MAX_BATCH_ITEMS {
         return Err(TingBatchError::TooLarge);
     }
-    let event_type = format!("{}.sync.changed", receiver.app_id);
+    let event_type = format!("{}.syncChanged", receiver.app_id);
+    let legacy_type = format!("{}.sync.changed", receiver.app_id);
     Ok(tings
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            if item.get("type").and_then(Value::as_str) != Some(event_type.as_str()) {
+            if ![Some(event_type.as_str()), Some(legacy_type.as_str())]
+                .contains(&item.get("type").and_then(Value::as_str))
+            {
                 return TingItem::Unrelated { index };
             }
             validate_item(index, item, receiver)
         })
         .collect())
+}
+
+/// Validates a direct Ting receiver event against the live connection and account.
+///
+/// Unlike a durable hook batch, every direct item must name its recipient. A
+/// session ID is ephemeral: obtain it from the authenticated socket handshake,
+/// replace it after reconnecting, and never derive it from the event itself.
+/// Direct events have no hook ACK. This method performs no I/O or receipt writes.
+///
+/// # Errors
+/// Rejects malformed, oversized, wrong-session or hook events, and invalid account bindings.
+pub fn validate_session_batch(
+    raw: &[u8],
+    session_id: &str,
+    receiver: &TingReceiverContext,
+    me: &Me,
+) -> std::result::Result<Vec<TingItem>, TingBatchError> {
+    if raw.len() > MAX_BATCH_BYTES {
+        return Err(TingBatchError::TooLarge);
+    }
+    let batch: Value = serde_json::from_slice(raw).map_err(|_| TingBatchError::InvalidBatch)?;
+    if !bounded_text(session_id, 255)
+        || batch["session_id"].as_str() != Some(session_id)
+        || !matches!(batch["op"].as_str(), Some("tings" | "silent_digest"))
+        || batch
+            .get("webhook_id")
+            .is_some_and(|value| !value.is_null())
+    {
+        return Err(TingBatchError::InvalidBatch);
+    }
+    let mut items = validate_batch(raw, receiver, me)?;
+    for item in &mut items {
+        if let TingItem::Reference(reference) = item {
+            let source = &batch["tings"][reference.index];
+            if source["for"].as_str() != Some(receiver.account_uuid.as_str())
+                || source
+                    .get("session_id")
+                    .is_some_and(|id| !id.is_null() && id.as_str() != Some(session_id))
+            {
+                *item = TingItem::Rejected {
+                    index: reference.index,
+                    ting_id: Some(reference.ting_id.clone()),
+                    reason: TingRejection::WrongRecipient,
+                };
+            }
+        }
+    }
+    Ok(items)
 }
 
 fn validate_receiver(
@@ -357,6 +408,66 @@ mod tests {
             "metadata":{"isi":"planner"},
             "data":{"schema_version":2,"event":"message.created","conversation_id":"c:alice::si:cos",
                 "message_id":"000","delivery_id":id,"delivery_sequence":1}})
+    }
+
+    #[test]
+    fn direct_sessions_bind_envelopes_and_items_without_losing_legacy_history() {
+        let (receiver, me) = context();
+        for name in ["dm.syncChanged", "dm.sync.changed"] {
+            let mut item = event();
+            item["type"] = json!(name);
+            item["for"] = json!("K1E");
+            let frame = json!({"op":"silent_digest","session_id":"session-a","tings":[item]});
+            let raw = serde_json::to_vec(&frame).unwrap();
+            assert!(matches!(
+                &validate_session_batch(&raw, "session-a", &receiver, &me).unwrap()[0],
+                TingItem::Reference(_)
+            ));
+            assert!(validate_session_batch(&raw, "session-b", &receiver, &me).is_err());
+            for field in ["for", "session_id"] {
+                let mut wrong = frame.clone();
+                wrong["tings"][0][field] = json!("someone-else");
+                assert!(matches!(
+                    &validate_session_batch(
+                        &serde_json::to_vec(&wrong).unwrap(),
+                        "session-a",
+                        &receiver,
+                        &me
+                    )
+                    .unwrap()[0],
+                    TingItem::Rejected {
+                        reason: TingRejection::WrongRecipient,
+                        ..
+                    }
+                ));
+            }
+            let mut hook = frame.clone();
+            hook["webhook_id"] = json!("stable-hook");
+            assert!(
+                validate_session_batch(
+                    &serde_json::to_vec(&hook).unwrap(),
+                    "session-a",
+                    &receiver,
+                    &me
+                )
+                .is_err()
+            );
+            let mut absent = frame.clone();
+            absent["tings"][0].as_object_mut().unwrap().remove("for");
+            assert!(matches!(
+                &validate_session_batch(
+                    &serde_json::to_vec(&absent).unwrap(),
+                    "session-a",
+                    &receiver,
+                    &me
+                )
+                .unwrap()[0],
+                TingItem::Rejected {
+                    reason: TingRejection::WrongRecipient,
+                    ..
+                }
+            ));
+        }
     }
 
     fn validate(item: Value, receiver: &TingReceiverContext, me: &Me) -> TingItem {

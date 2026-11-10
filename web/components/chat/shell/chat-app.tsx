@@ -30,6 +30,7 @@ import styles from "./shell.module.css";
 export interface ChatAppProps {
   account: SessionAccount;
   accountsUrl: string;
+  tingOrigin?: string;
   /** GET /api/v1/me as the server read it (null when the service could not answer). */
   initialMe: Me | null;
   /** The first page of your conversations as the server read it, so the list paints with the page. */
@@ -80,7 +81,7 @@ function ChatFrame({ children }: { children: ReactNode }) {
   );
 }
 
-export function ChatApp({ account, accountsUrl, initialMe, initialConversations, initialInvitations = null, children }: ChatAppProps) {
+export function ChatApp({ account, accountsUrl, tingOrigin, initialMe, initialConversations, initialInvitations = null, children }: ChatAppProps) {
   const queryClient = useQueryClient();
   // Seed the caches once, before anything reads them, with what the server already fetched.
   useState(() => {
@@ -90,7 +91,7 @@ export function ChatApp({ account, accountsUrl, initialMe, initialConversations,
     return true;
   });
   return (
-    <ChatProvider account={account} accountsUrl={accountsUrl} initialMe={initialMe}>
+    <ChatProvider tingOrigin={tingOrigin} account={account} accountsUrl={accountsUrl} initialMe={initialMe}>
       <ShortcutsProvider>
         <DetailsProvider>
           <ChatRuntime />

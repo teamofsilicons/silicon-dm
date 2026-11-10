@@ -216,3 +216,16 @@ these, and for every other failure that points at Briefcase or Silicon Accounts 
 line with Briefcase's own code, never a file's name: `upload failed: briefcase_not_allowed (proof_scope_missing)`. A
 cancel Briefcase refuses is logged as `upload: Silicon Briefcase did not cancel an unfinished upload (…)`: that upload
 stays pending there until it expires, within a day.
+
+### Ting receiver origin on the website
+
+`TING_BROWSER_ORIGIN` is optional. Set it to the exact Ting origin that issues
+its browser cookie, for example `https://ting.teamofsilicons.com`. It accepts
+HTTPS, or HTTP on loopback for local testing, with no path, credentials, query,
+fragment or wildcard. Leaving it unset keeps DM's HTTP recovery reader.
+
+Also allow the website's exact `PUBLIC_URL` in Ting's browser-origin settings.
+The site adds only that Ting origin and its corresponding `wss:` origin to CSP;
+DM API calls and mutations stay on the website's own origin. Both sites must
+support Ting's SameSite cookie policy; a CORS allowlist alone cannot enable a
+cross-site cookie. The Carbon signs into Ting as the same account separately.

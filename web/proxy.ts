@@ -8,7 +8,7 @@
  * - Sends `/` to the workspace (appConfig.home) when signed in, and a workspace address to the hosted sign-in when not.
  * - A fresh CSP nonce per request and the security headers: script-src 'self' 'nonce-…' 'strict-dynamic' (Next adds the
  *   nonce to its own scripts, the root layout to the theme boot script), img-src for Silicon Accounts and Iris profile
- *   photos (plus EXTRA_IMG_ORIGINS), connect-src 'self' (the browser talks to this site only), frame-ancestors 'none'.
+ *   photos (plus EXTRA_IMG_ORIGINS), connect-src 'self' plus the configured Ting origin for receiver sessions, frame-ancestors 'none'.
  *   X-Frame-Options DENY, nosniff, a strict referrer policy, HSTS in production over https.
  */
 import { NextResponse, type NextRequest } from "next/server";
@@ -28,7 +28,7 @@ function contentSecurityPolicy(nonce: string, env: ServerEnv): string {
     "style-src 'self' 'unsafe-inline'",
     `img-src 'self' data: blob: ${images} https:`,
     "font-src 'self' data:",
-    "connect-src 'self'",
+    `connect-src 'self'${env.tingBrowserOrigin ? ` ${env.tingBrowserOrigin} ${env.tingBrowserOrigin.replace(/^http/, "ws")}` : ""}`,
     "media-src 'self' blob: https:",
     "object-src 'none'",
     "frame-ancestors 'none'",

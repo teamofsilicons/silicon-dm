@@ -227,6 +227,20 @@ impl PostgresStore {
         .map_err(AppError::database)
     }
 
+    /// Records a final recipient block without claiming delivery or retrying it.
+    ///
+    /// # Errors
+    /// Database failures or an expired worker lease.
+    pub async fn block_ting_delivery(&self, delivery_id: Uuid, lease_id: Uuid) -> AppResult<()> {
+        let count = sqlx::query("UPDATE ting_handoffs SET discarded_at=clock_timestamp(),discard_reason='ting_recipient_blocked',last_error_code='ting_recipient_blocked',lease_id=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE delivery_id=$1 AND lease_id=$2 AND lease_expires_at>clock_timestamp() AND accepted_at IS NULL AND discarded_at IS NULL")
+            .bind(delivery_id).bind(lease_id).execute(self.pool()).await?.rows_affected();
+        if count == 1 {
+            Ok(())
+        } else {
+            Err(AppError::conflict("Ting delivery claim is no longer owned"))
+        }
+    }
+
     /// Marks unsent handoffs discarded with a reason (never deletes them): what DM does
     /// while Ting is not configured. Returns how many were marked.
     ///
@@ -488,10 +502,12 @@ fn is_prepared_before_cutover(body: &str) -> bool {
 }
 
 fn prepared_body(record: &HandoffRecord, context: &TingDeliveryContext) -> AppResult<String> {
-    let event_type = format!("{}.sync.changed", context.app_id);
+    let event_type = format!("{}.syncChanged", context.app_id);
     if let Some(body) = &record.request_body {
         let parsed: Value = serde_json::from_str(body).map_err(AppError::internal)?;
-        if parsed["type"] != event_type {
+        if parsed["type"] != event_type
+            && parsed["type"] != format!("{}.sync.changed", context.app_id)
+        {
             return Err(AppError::conflict(
                 "prepared Ting request belongs to another producer",
             ));
