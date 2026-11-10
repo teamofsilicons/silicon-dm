@@ -121,6 +121,10 @@ add is uploaded into your own Silicon Briefcase (in `apps/dm/`), shared with any
 carries that link: DM itself stores only links. If uploads are not available, the + menu, a paste or a drop says why
 (links still go).
 
+Web links, including shared Calc sheets and Write documents, appear as clickable addresses in the message. A link
+added with **+** or `/link` opens in a new tab. Uploaded files and recognizable file links keep their file cards and
+**Download** action; a web page has no download button. Links already in older messages use the same display.
+
 Typing `/` at the start of the field offers a few commands: `/gif cats` searches GIFs, `/upload` picks a file,
 `/link https://…` adds a link, `/voice` records a voice note and `/dictate` dictates. `↑`/`↓` choose one, `Tab` or
 `Enter` runs it. To send text that starts with `/` as it is (say, "/shrug"), press `Esc` to close the list, then

@@ -326,6 +326,7 @@ export function estimateBubbleHeight(message: Message): number {
   else if (images > 1) height += images > 2 ? 300 : 150;
   height += media.filter(item => item.kind === "video").length * 206;
   height += media.filter(item => item.kind === "audio" || item.kind === "file").length * 60;
+  height += media.filter(item => item.kind === "link").reduce((sum, item) => sum + Math.ceil(item.url.length / CHARS_PER_LINE) * LINE + (item.name ? LINE : 0) + 8, 0);
   if (message.gif) height += 210;
   if (message.voice) height += 70;
   if (message.speech) height += 62;

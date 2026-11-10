@@ -180,6 +180,12 @@ tooltip), `refocusIfLost` (where the keyboard goes when a question asked in plac
 focus fell to the page or stayed in the row).
 
 ### Thread (`thread/**`)
+
+`lib/chat/media.ts` distinguishes shared web pages from files in the service's attachment list. Pages show as
+clickable addresses, with a sender-provided title when present, and no download action. File MIME types, recognized
+file extensions, file sizes and Briefcase upload paths keep file/media rendering. Old messages and pending sends
+use the same classification; plain URLs in the text keep the markdown renderer's inline links.
+
 | File | What |
 | --- | --- |
 | `conversation-view.tsx` | Owns the conversation, its messages and the outbox; opens at the first unread. Provides `ThreadActions` (stable for the visit) and `ThreadPeople`. The offline banner, the load-failure state, the custodian view's note (it says whose messages may be deleted there). |
