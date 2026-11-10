@@ -53,6 +53,7 @@ def install(stage, source):
               'APP_API_URL': 'http://127.0.0.1:8081', 'PUBLIC_URL': 'https://dm.teamofsilicons.com',
               'SESSION_SECRET': secret['session_secret'], 'HOSTNAME': '0.0.0.0', 'PORT': '4316',
               'BRIEFCASE_API_URL': 'https://api.briefcase.teamofsilicons.com',
+              'TING_BROWSER_ORIGIN': 'https://ting.teamofsilicons.com',
               'NEXT_TELEMETRY_DISABLED': '1'}
     if any('\n' in value or '\r' in value for value in values.values()):
         raise ValueError('Environment values must be single line')

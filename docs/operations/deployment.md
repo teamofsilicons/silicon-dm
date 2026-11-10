@@ -129,6 +129,7 @@ older than 30 days, which no client can still ask for.
 | `HOSTNAME`, `PORT` | `0.0.0.0`, `4316` |
 | `BRIEFCASE_API_URL` | `https://api.briefcase.teamofsilicons.com`: uploads are on |
 | `NEXT_TELEMETRY_DISABLED` | `1` |
+| `TING_BROWSER_ORIGIN` | `https://ting.teamofsilicons.com`; enable after registering `dm.syncChanged` and checking the [Ting rollout](../reference/ting.md#upgrading-the-producer) |
 
 There is no `UPLOADS_MAX_BYTES`, so the website has no limit of its own and Briefcase's apply. There is no
 `KEEP_ALIVE_TIMEOUT` either: the website keeps idle connections longer than the load balancer by itself
