@@ -62,6 +62,17 @@ test("the chat's frame: the conversation list, the account menu and the ⌘K pal
   await expect(page.getByRole("heading", { level: 1, name: "Settings" })).toBeVisible();
 });
 
+test("the account menu saves appearance through reload", async () => {
+  await page.getByRole("button", { name: /^Account menu, / }).click();
+  await page.getByRole("group", { name: "Theme" }).getByRole("menuitemradio", { name: "Dark", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.getByRole("button", { name: /^Account menu, / }).click();
+  await page.getByRole("group", { name: "Theme" }).getByRole("menuitemradio", { name: "System", exact: true }).click();
+  await page.keyboard.press("Escape");
+});
+
 test("the session keeper's refresh does nothing while the token has time left", async () => {
   const before = await sessionOf(context);
   const response = await page.request.post("/auth/refresh", { headers: { Origin: BASE } });

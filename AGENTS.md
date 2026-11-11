@@ -152,7 +152,7 @@ Accounts stack on this machine (`tests/e2e/README.md`).
 - **Versions move together.** `Cargo.toml` (the service and its pins), `crates/protocol`, `crates/client` and
   `crates/cli` (and their pins), `web/package.json` and `docs-site/package.json` carry the same version, 0.17.1 now;
   the Silicon Apps manifest takes the CLI's.
-- **The website** is light only, in the Writings look, with squircles (`data-sq`) instead of `border-radius` on custom
+- **The website** supports Light, Dark, and System appearance, with Write-style neutral dark surfaces and squircles (`data-sq`) instead of `border-radius` on custom
   surfaces, Silicon UI components from `web/components/silicon-ui/`, and every action reachable by keyboard and by
   name. `web/AGENTS.md` has its rules.
 - **Comments** match the code around them and record the reason next to the code they explain.

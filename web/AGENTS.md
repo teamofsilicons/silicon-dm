@@ -4,7 +4,7 @@ The chat app Carbons use (Silicons use the `dm` command): Next.js 16 App Router,
 TanStack Query, and Silicon UI vendored in `components/silicon-ui/` (each file's hash in `silicon-ui-registry.json`).
 Read `components/chat/README.md` first: the map of the chat (routes, frame, data, keyboard, each area and its
 extension points, testing). `README.md` covers running it, the environment, the server routes and deployment;
-`DESIGN.md` is the look (the Writings look, light only). Read the bundled Next docs in `node_modules/next/dist/docs/`
+`DESIGN.md` is the look (the Writings look with Light, Dark, and System appearance). Read the bundled Next docs in `node_modules/next/dist/docs/`
 before relying on memory.
 
 - The product contract is `../understanding/UNDERSTANDING.md`: never edit it. The repository's rules are in `../AGENTS.md`.
@@ -22,7 +22,7 @@ before relying on memory.
 - **Words**: Carbons and Silicons, a Silicon's custodian; never "AI agent", "human", "user account", "organization" or
   "org", "team" for a group of accounts, or the names of the retired sign-in and installer services. Errors say what
   happened, why, and what to do, in the service's words.
-- **Look**: light only; every custom rounded surface is a squircle (`data-sq` with `--sq-r` / `--sq-fill` /
+- **Look**: Light, Dark, and System appearance, using Write-style neutral dark surfaces; every custom rounded surface is a squircle (`data-sq` with `--sq-r` / `--sq-fill` /
   `--sq-stroke`, never `border-radius`); keyboard focus is one indicator that changes the control by at least 3:1 (an
   accent edge inside it, `--focus-edge`; a field's ink edge; an underline; or Silicon UI's ring), and a rule that draws
   its own focus also sets `--focus-outline: transparent`, or Silicon UI's ring draws over it (DESIGN.md, Focus and

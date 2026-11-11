@@ -6,6 +6,7 @@
 import { ArrowUpRight } from "lucide-react";
 import { BRAND_NAME, Wordmark } from "@/components/foundation/brand/app-mark";
 import { appConfig } from "@/lib/app.config";
+import { ThemeMenu } from "@/components/foundation/theme/theme-menu";
 import { Action } from "./action";
 import styles from "./site.module.css";
 
@@ -29,6 +30,7 @@ export function SiteHeader({ signedIn }: SiteHeaderProps) {
             Docs
             <ArrowUpRight size={14} strokeWidth={1.75} aria-hidden="true" className={styles.navExternal} />
           </a>
+          <ThemeMenu />
           <Action href={account.href} size="sm" variant="secondary" className={styles.account}>{account.label}</Action>
         </div>
       </div>

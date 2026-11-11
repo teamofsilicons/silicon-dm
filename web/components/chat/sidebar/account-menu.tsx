@@ -7,6 +7,7 @@
  */
 import { useRouter } from "next/navigation";
 import { BookOpen, CircleUserRound, Keyboard, Settings2 } from "lucide-react";
+import { useTheme } from "@/components/foundation/theme/use-theme";
 import { UserMenu } from "@/components/silicon-ui/user-menu/user-menu";
 import { appConfig } from "@/lib/app.config";
 import { useSignOut } from "@/lib/client/session";
@@ -21,6 +22,7 @@ import styles from "./sidebar.module.css";
 export function AccountMenu() {
   const { account, accountsUrl } = useChat();
   const { signOut } = useSignOut();
+  const { preference, set } = useTheme();
   const router = useRouter();
   const { shortcuts, platform } = useShortcuts();
   // The keys as the cheatsheet and the palette write them ("G then S", "⌘K"), as one cap: the menu draws each cap it
@@ -32,7 +34,8 @@ export function AccountMenu() {
   return (
     <UserMenu
       user={{ name: account.display_name || account.id, email: account.id, plan: kindNoun(account.kind), avatarSrc: account.pfp_url ?? undefined }}
-      showTheme={false}
+      theme={preference}
+      onThemeChange={set}
       showName
       className={styles.account}
       align="start"
