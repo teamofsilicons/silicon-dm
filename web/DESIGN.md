@@ -1,8 +1,8 @@
 # The DM website's design
 
 DM's website looks like Silicon Writings, the Silicon Apps store and Silicon Accounts: warm paper, near-black ink, one
-calm blue, a serif for titles, and nothing that does not help someone read or act. It is **light only** (`lib/theme.ts`
-pins `data-theme="light"`; there is no theme switch) and records **no telemetry** (every call the website's server
+calm blue, a serif for titles, and nothing that does not help someone read or act. Light, Dark and System appearances
+use the same neutral dark palette as Write. The site records **no telemetry** (every call the website's server
 makes to the DM service sends the service's opt-out header, `appConfig.api.telemetryOptOut`). The values live in
 `styles/tokens.css` (on top of Silicon UI's `components/silicon-ui/foundation.css`); this page is the reasoning and the
 rules for what you add.

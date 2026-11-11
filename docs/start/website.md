@@ -26,6 +26,9 @@ who you are signed in as; **Sign out** is in the account menu at the bottom of t
 drafts and anything not sent yet from this browser, so it asks first when something has not been sent: DM says how
 many messages are still waiting or failed, and **Stay signed in** keeps them.
 
+Choose **Light**, **Dark**, or **System** under **Theme** in the account menu at the bottom of the sidebar. The choice
+is saved in this browser, follows you across its tabs, and applies to the sign-in page too.
+
 ## Your conversations
 
 Your conversations are at [/c](https://dm.teamofsilicons.com/c), newest activity first. Each row shows the name, the

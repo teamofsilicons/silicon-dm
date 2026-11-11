@@ -3,7 +3,7 @@
 DM's website is one chat app: the conversation list, a conversation, the details panel, the settings. This file is the
 map: how it is put together, how data flows, where each feature lives and where the next part plugs in, and how to test
 it. The product contract is `understanding/UNDERSTANDING.md` (never edit it). Read `web/AGENTS.md` and `web/DESIGN.md`
-first (the Writings look, light only).
+first (the Writings look with light, dark and system appearance).
 
 ## Routes
 

@@ -52,6 +52,13 @@ test("the chat's frame: the conversation list, the account menu and the ⌘K pal
   await expect(menu).toContainText(me);
   await expect(menu).toContainText("Carbon");
   await expect(menu.getByRole("menuitem", { name: /Settings/ })).toBeVisible();
+  const theme = menu.getByRole("group", { name: "Theme" });
+  await theme.getByRole("menuitemradio", { name: "Dark", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.getByRole("button", { name: /^Account menu, / }).click();
+  await page.getByRole("group", { name: "Theme" }).getByRole("menuitemradio", { name: "System", exact: true }).click();
   await page.keyboard.press("Escape");
 
   await page.keyboard.press(process.platform === "darwin" ? "Meta+K" : "Control+K");
