@@ -111,6 +111,8 @@ pub enum ConversationChange {
     Renamed,
     /// The group's description changed.
     DescriptionChanged,
+    /// The group picture changed.
+    PictureChanged,
     /// Someone joined, left, was removed or invited, or an invitation was answered or withdrawn.
     MembersChanged,
     /// Owners were added or removed.
@@ -122,7 +124,7 @@ pub enum ConversationChange {
 
 impl ConversationChange {
     /// Every change, in the order the docs list them.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Created,
         Self::Invited,
         Self::Added,
@@ -133,6 +135,7 @@ impl ConversationChange {
         Self::Removed,
         Self::Renamed,
         Self::DescriptionChanged,
+        Self::PictureChanged,
         Self::MembersChanged,
         Self::OwnersChanged,
         Self::Read,
@@ -152,6 +155,7 @@ impl ConversationChange {
             Self::Removed => "removed",
             Self::Renamed => "renamed",
             Self::DescriptionChanged => "description_changed",
+            Self::PictureChanged => "picture_changed",
             Self::MembersChanged => "members_changed",
             Self::OwnersChanged => "owners_changed",
             Self::Read => "read",

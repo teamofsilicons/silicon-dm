@@ -1756,6 +1756,7 @@ components:
             `validation_error`, `details.rule` `needs_letter_or_digit`); a rename keeps the address
             and may use any name.
         description: {type: string, maxLength: 4000, default: ''}
+        picture_url: {type: string, maxLength: 8192, description: 'HTTP(S) picture link; omit to keep it on update, or send an empty string to remove it.'}
     GroupCreate:
       # The settings' properties written out, not an allOf of GroupSettings: its
       # additionalProperties false would refuse member_ids (a validator judges each part of an
@@ -1766,6 +1767,7 @@ components:
       properties:
         name: {$ref: '#/components/schemas/GroupSettings/properties/name'}
         description: {type: string, maxLength: 4000, default: ''}
+        picture_url: {$ref: '#/components/schemas/GroupSettings/properties/picture_url'}
         member_ids:
           type: array
           maxItems: 100
@@ -1778,6 +1780,7 @@ components:
       properties:
         name: {type: string}
         description: {type: string}
+        picture_url: {type: string, description: Public picture link, when set.}
         version: {type: integer, minimum: 1}
         owners: {type: array, minItems: 1, items: {$ref: '#/components/schemas/AccountRef'}}
         members: {type: array, items: {$ref: '#/components/schemas/AccountRef'}, description: 'Accepted members, owners included.'}
@@ -1786,6 +1789,7 @@ components:
       type: object
       required: [name, description, owners]
       properties:
+        picture_url: {type: string, description: Public picture link, when set.}
         name: {type: string}
         description: {type: string}
         owners: {type: array, items: {$ref: '#/components/schemas/AccountRef'}}
@@ -1887,7 +1891,7 @@ components:
     ConversationChange:
       type: string
       enum: [created, invited, added, invitation_accepted, invitation_declined, invitation_cancelled,
-        left, removed, renamed, description_changed, members_changed, owners_changed, read]
+        left, removed, renamed, description_changed, picture_changed, members_changed, owners_changed, read]
       description: >-
         Conversation events only. To the account itself: `created` (a conversation with you in
         it; the creator too), `invited` (a new pending invitation), `added` (a member without
@@ -1896,7 +1900,7 @@ components:
         withdrew it), `left`, `removed` (drop the conversation: reading it is 404 now), `read`
         (you read messages there on one of your devices, one by one or in bulk; with
         `unread_count` and `last_read_message_id`, so your other devices update their badges).
-        To the others: `renamed` and `description_changed` (members and pending invitees),
+        To the others: `renamed`, `description_changed` and `picture_changed` (members and pending invitees),
         `members_changed` (members), `owners_changed` (members and pending invitees).
     SyncPage:
       type: object

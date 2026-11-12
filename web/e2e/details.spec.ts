@@ -541,3 +541,34 @@ for (const phone of [false, true]) {
     await context.close();
   });
 }
+
+test("a group owner uploads and removes a picture seen by another member", async ({ browser }) => {
+  const ada = await signedIn(browser, "ada");
+  const bo = await signedIn(browser, "bo");
+  const name = `Group picture ${stamp()}`;
+  const created = await call(ada.context, "POST", "/api/v1/groups", { type: "create_group", data: { name, member_ids: [bo.id] } });
+  expect(created.status).toBe(201);
+  const group = created.json!.data!.id as string;
+  const accepted = await call(bo.context, "POST", `/api/v1/groups/${encodeURIComponent(group)}/accept`, { type: "accept_group_invitation", data: {} });
+  expect(accepted.status).toBe(200);
+  await ada.page.goto(`/c/${encodeURIComponent(group)}`);
+  await bo.page.goto(`/c/${encodeURIComponent(group)}`);
+  const panel = await openDetails(ada.page);
+  const boPanel = await openDetails(bo.page);
+  await expect(boPanel.getByRole("button", { name: "Add picture" })).toHaveCount(0);
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAwAAAAICAIAAABChommAAAAPklEQVR4nGP4taqCIGJ4vqmPIGK4umsJQcRw+NAugohh46kLWNH/az1ABGEzuOZOJYgYrBM6CCIGw+BqgggAm7etGSu/h7MAAAAASUVORK5CYII=", "base64");
+  await panel.locator('input[type="file"]').setInputFiles({ name: "group-picture.png", mimeType: "image/png", buffer: png });
+  await expect(panel.getByRole("button", { name: "Remove picture" })).toBeVisible();
+  const picture = panel.locator('img[src^="blob:"], img[src^="/api/uploads/file"]');
+  await expect(picture).toBeVisible();
+  await expect.poll(async () => boPanel.locator('img[src^="/api/uploads/file"]').count(), { timeout: 15_000 }).toBe(1);
+  await expect(boPanel.locator('img[src^="/api/uploads/file"]')).toHaveJSProperty("naturalWidth", 12);
+  await bo.page.reload();
+  const reopened = await openDetails(bo.page);
+  await expect(reopened.locator('img[src^="/api/uploads/file"]')).toHaveJSProperty("naturalWidth", 12);
+  await panel.getByRole("button", { name: "Remove picture" }).click();
+  await expect(panel.getByRole("button", { name: "Add picture" })).toBeVisible();
+  await expect.poll(async () => reopened.locator('img[src^="/api/uploads/file"]').count(), { timeout: 15_000 }).toBe(0);
+  await ada.context.close();
+  await bo.context.close();
+});

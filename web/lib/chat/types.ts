@@ -159,6 +159,7 @@ export interface Message {
 }
 
 export interface GroupSummary {
+  picture_url?: string;
   name: string;
   description: string;
   owners: AccountRef[];
@@ -208,7 +209,7 @@ export interface Page<T> {
  */
 export type ConversationChange =
   | "created" | "invited" | "added" | "invitation_accepted" | "invitation_declined" | "invitation_cancelled"
-  | "left" | "removed" | "renamed" | "description_changed" | "members_changed" | "owners_changed" | "read";
+  | "left" | "removed" | "renamed" | "description_changed" | "picture_changed" | "members_changed" | "owners_changed" | "read";
 
 export type SyncEvent =
   | { event_id: string; sequence: number; type: "message" | "message_status"; conversation_id: string; message_id: string }

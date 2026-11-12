@@ -636,7 +636,7 @@ async fn only_clients_that_ask_get_conversation_events() -> Result<(), BoxError>
     let contracts = app.get("/api/v1/contracts", &bob).await?;
     let feature = &contracts.1["features"]["conversation_events"];
     assert_eq!(feature["sync_query"], "include=conversations");
-    assert_eq!(feature["changes"].as_array().map(Vec::len), Some(13));
+    assert_eq!(feature["changes"].as_array().map(Vec::len), Some(14));
     assert_eq!(feature["read"]["change"], "read");
     assert_eq!(
         feature["read"]["fields"],
@@ -928,5 +928,86 @@ async fn group_changes_do_not_wait_for_writers_that_reference_the_conversation()
     .map_err(|_| "the rename waited for the other writer")??;
     expect_status(&rename, StatusCode::OK)?;
     writer.rollback().await?;
+    app.close().await
+}
+
+#[tokio::test]
+async fn group_picture_is_owner_controlled_and_survives_older_updates() -> Result<(), BoxError> {
+    let app = TestApp::start().await?;
+    let p = people(&app).await;
+    let ada = app.accounts.token(&p.ada);
+    let bob = app.accounts.token(&p.bob);
+    let created = app
+        .post(
+            "/api/v1/groups",
+            &ada,
+            json!({"name":"Picture", "member_ids":["c:bob"]}),
+        )
+        .await?;
+    expect_status(&created, StatusCode::CREATED)?;
+    let group = created.1["id"]
+        .as_str()
+        .ok_or("group has no id")?
+        .to_owned();
+    let path = format!("/api/v1/groups/{group}");
+    app.post(&format!("{path}/accept"), &bob, json!(null))
+        .await?;
+    let mut feed = Feed::start(&app, bob.clone()).await?;
+    let picture = "https://briefcase.example/api/v1/public/c:ada/picture.png";
+    let v = version(&app, &ada, &group).await?;
+    let set = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&ada),
+            Some(json!({"name":"Picture", "picture_url":picture})),
+            &[("if-match", v.to_string())],
+        )
+        .await?;
+    expect_status(&set, StatusCode::OK)?;
+    assert_eq!(set.1["picture_url"], picture);
+    assert_eq!(heard(&app, &mut feed, &group).await?, ["picture_changed"]);
+    let summary = app.get("/api/v1/conversations", &bob).await?;
+    assert!(
+        summary.1["items"]
+            .as_array()
+            .ok_or("conversation list has no items")?
+            .iter()
+            .any(|row| row["id"] == group && row["group"]["picture_url"] == picture)
+    );
+    let v = version(&app, &ada, &group).await?;
+    let denied = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&bob),
+            Some(json!({"name":"Picture", "picture_url":""})),
+            &[("if-match", v.to_string())],
+        )
+        .await?;
+    assert_eq!(denied.0, StatusCode::FORBIDDEN);
+    let renamed = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&ada),
+            Some(json!({"name":"Renamed"})),
+            &[("if-match", v.to_string())],
+        )
+        .await?;
+    expect_status(&renamed, StatusCode::OK)?;
+    assert_eq!(renamed.1["picture_url"], picture);
+    let v = version(&app, &ada, &group).await?;
+    let removed = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&ada),
+            Some(json!({"name":"Renamed", "picture_url":""})),
+            &[("if-match", v.to_string())],
+        )
+        .await?;
+    expect_status(&removed, StatusCode::OK)?;
+    assert!(removed.1.get("picture_url").is_none());
     app.close().await
 }

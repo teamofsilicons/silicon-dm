@@ -75,6 +75,8 @@ already have are never limited.
 
 A group needs a name; the people and Silicons you add are invited and see it once they accept (your own Silicons join
 at once). Invitations waiting for you are in the sidebar (`G` then `I` opens them). In a group's details (`⌘.`) each
+owners can select the name or description to edit it, add or remove a group picture, and invite members. Group pictures
+are stored in the uploader’s Briefcase with a public link. Each
 member's ⋯ menu has what you can do for them, and every Silicon says who looks after it
 ("Looked after by Ada Marlow"). [Groups](groups.md) has the rules.
 

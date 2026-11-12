@@ -29,6 +29,8 @@ import { AccountPicker, type AccountPickerHandle } from "../dialogs/account-pick
 import { idsNamedIn, isListed, keySet } from "../dialogs/contacts";
 import { useShowWhenSet } from "../dialogs/show-when-set";
 import { useKnownAccounts } from "../dialogs/use-known-accounts";
+import { uploadFile } from "@/lib/upload/client";
+import { GroupAvatar } from "../common/avatars";
 import { useChat } from "../shell/chat-context";
 import { useDetails } from "../shell/details";
 import { applyGroupToSummaries, summaryDiffers, useGroupActions } from "./group-actions";
@@ -118,6 +120,23 @@ export function GroupDetailsPanel({ address, conversation, presence }: { address
   const [leaveError, setLeaveError] = useState<ApiError | null>(null);
   const [left, setLeft] = useState(false);
   const addButton = useRef<HTMLButtonElement>(null);
+  const pictureInput = useRef<HTMLInputElement>(null);
+  const [pictureBusy, setPictureBusy] = useState(false);
+  const [pictureError, setPictureError] = useState<ApiError | null>(null);
+  const changePicture = async (file: File) => {
+    if (!/^image\/(png|jpeg|gif|webp|avif)$/.test(file.type) || file.size > 10 * 1024 * 1024) {
+      setPictureError(new ApiError({ status: 400, code: "picture_invalid", message: "Choose a PNG, JPEG, GIF, WebP or AVIF picture up to 10 MB.", method: "POST", path: "/api/uploads" }));
+      return;
+    }
+    setPictureBusy(true);
+    setPictureError(null);
+    try {
+      const uploaded = await uploadFile(file, { name: file.name });
+      await actions.update({ picture_url: uploaded.url });
+      notify.success("Group picture updated");
+    } catch (failure) { setPictureError(ApiError.from(failure)); }
+    finally { setPictureBusy(false); }
+  };
 
   const members = useMemo(() => {
     const list = group?.members ?? conversation?.participants ?? [];
@@ -212,6 +231,16 @@ export function GroupDetailsPanel({ address, conversation, presence }: { address
   return (
     <>
       <section className={styles.section} aria-label="The group">
+        <div className={styles.pictureRow}>
+          <GroupAvatar name={name} pictureUrl={summary?.picture_url} size="row" decorative />
+          {canManage ? <>
+            <input ref={pictureInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/avif" hidden onChange={event => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (file) void changePicture(file); }} />
+            <Button type="button" size="sm" variant="secondary" disabled={pictureBusy} onClick={() => pictureInput.current?.click()}>{pictureBusy ? "Saving picture…" : summary?.picture_url ? "Change picture" : "Add picture"}</Button>
+            {summary?.picture_url ? <Button type="button" size="sm" variant="ghost" disabled={pictureBusy} onClick={() => { setPictureBusy(true); setPictureError(null); void actions.update({ picture_url: "" }).catch(failure => setPictureError(ApiError.from(failure))).finally(() => setPictureBusy(false)); }}>Remove picture</Button> : null}
+          </> : null}
+        </div>
+        {pictureError ? <ErrorAlert error={pictureError} title="The picture was not changed" /> : null}
+        {canManage ? <p className={styles.note}>Select the name or description to edit it. Group pictures use a public link.</p> : null}
         {canManage ? (
           <div className={styles.groupHead}>
             {/* The name only: its description takes line breaks (Shift+Enter) as usual. */}

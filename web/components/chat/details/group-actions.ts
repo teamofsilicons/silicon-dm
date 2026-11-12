@@ -25,7 +25,7 @@ type GroupData = ConversationSummary & { group: GroupDetails };
 /** Writes a group's details into the conversation and its row in the list (the thread header and the sidebar read them). */
 export function applyGroupToSummaries(queryClient: QueryClient, id: string, view: string | null, details: GroupDetails): void {
   const merge = (summary: ConversationSummary): ConversationSummary =>
-    summary.id === id || summary.supersedes?.includes(id) ? { ...summary, group: { ...summary.group, ...details }, participants: details.members.length ? details.members : summary.participants } : summary;
+    summary.id === id || summary.supersedes?.includes(id) ? { ...summary, group: { ...summary.group, ...details, picture_url: details.picture_url }, participants: details.members.length ? details.members : summary.participants } : summary;
   queryClient.setQueryData<ConversationSummary>(chatKeys.conversation(id, view), data => (data ? merge(data) : data));
   queryClient.setQueryData<ConversationPages>(chatKeys.conversations(view), data => (data ? { ...data, pages: data.pages.map(page => ({ ...page, items: page.items.map(merge) })) } : data));
 }
@@ -40,7 +40,7 @@ export function applyGroup(queryClient: QueryClient, id: string, view: string | 
 export function summaryDiffers(summary: ConversationSummary["group"] | undefined, details: GroupDetails): boolean {
   if (!summary) return false;
   const owners = (list: Array<{ id: string; uuid?: string }>) => list.map(owner => owner.uuid ?? owner.id).sort().join(" ");
-  return summary.name !== details.name || summary.description !== details.description || owners(summary.owners) !== owners(details.owners);
+  return summary.name !== details.name || summary.description !== details.description || summary.picture_url !== details.picture_url || owners(summary.owners) !== owners(details.owners);
 }
 
 /** Takes a group out of the list (after leaving it). */
@@ -52,7 +52,7 @@ function dropGroup(queryClient: QueryClient, id: string, view: string | null): v
 
 export interface GroupActions {
   /** Renames and/or describes the group (owners). */
-  update: (change: { name?: string; description?: string }) => Promise<GroupDetails>;
+  update: (change: { name?: string; description?: string; picture_url?: string }) => Promise<GroupDetails>;
   invite: (ids: string[]) => Promise<GroupDetails>;
   /** Removes members, or withdraws invitations. */
   remove: (ids: string[]) => Promise<GroupDetails>;
@@ -70,9 +70,9 @@ export function useGroupActions(id: string, view: string | null, current: GroupD
     return details;
   }, [queryClient, id, view, account]);
 
-  const update = useCallback(async (change: { name?: string; description?: string }) => {
+  const update = useCallback(async (change: { name?: string; description?: string; picture_url?: string }) => {
     const base = current ?? (await getGroup(id, { view })).group;
-    const body = (from: GroupDetails) => ({ name: change.name ?? from.name, description: change.description ?? from.description });
+    const body = (from: GroupDetails) => ({ name: change.name ?? from.name, description: change.description ?? from.description, ...(change.picture_url !== undefined ? { picture_url: change.picture_url } : {}) });
     try {
       return apply(await updateGroup(id, body(base), base.version));
     } catch (failure) {

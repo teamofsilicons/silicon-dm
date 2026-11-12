@@ -94,7 +94,7 @@ their own `event_id` and `sequence`:
 
 `conversation_id` is the conversation's id as `GET /api/v1/conversations` names it; there is no `message_id`.
 `change` is `created`, `invited`, `added`, `invitation_accepted`, `invitation_declined`, `invitation_cancelled`,
-`left`, `removed` (each about your own place in it), or `renamed`, `description_changed`, `members_changed`,
+`left`, `removed` (each about your own place in it), or `renamed`, `description_changed`, `picture_changed`, `members_changed`,
 `owners_changed` (the conversation changed for you). Read the conversation (or `GET /api/v1/invitations`) on any of
 them; after `left` or `removed` it is 404, so drop it. `read` means you read messages there on one of your devices;
 it carries what is unread now, so there is nothing to read:

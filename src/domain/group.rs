@@ -11,6 +11,9 @@ pub struct GroupSettings {
     /// Purpose and context for members.
     #[serde(default)]
     pub description: String,
+    /// Public picture link. Omitted on an update keeps the current picture; an empty string removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_url: Option<String>,
 }
 /// Longest group name, in characters (after trimming).
 pub const MAX_GROUP_NAME_CHARACTERS: usize = 120;
@@ -38,13 +41,19 @@ impl GroupSettings {
             format!(
                 "A group's description is at most {MAX_GROUP_DESCRIPTION_CHARACTERS} characters; this one has {description_length}."
             )
+        } else if self.picture_url.as_ref().is_some_and(|url| {
+            url.len() > 8192
+                || url.chars().any(char::is_control)
+                || (!url.is_empty() && !url.starts_with("https://") && !url.starts_with("http://"))
+        }) {
+            "A group picture must be an HTTP or HTTPS link of at most 8192 bytes.".to_owned()
         } else if self.description.contains('\0') {
             "A group's description cannot contain the NUL character (\\u0000).".to_owned()
         } else {
             return Ok(());
         };
         Err(crate::AppError::invalid(problem)
-            .with_hint("Fix the name or description and send the request again."))
+            .with_hint("Fix the name, description or picture link and send the request again."))
     }
 
     /// A new group's address is made from its name: `g:` and its ASCII letters and digits,

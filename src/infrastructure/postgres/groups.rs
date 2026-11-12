@@ -139,8 +139,8 @@ impl PostgresStore {
         if ids.is_empty() {
             return Ok(details);
         }
-        let groups: Vec<(Uuid, String, String, i64)> = sqlx::query_as(
-            "SELECT conversation_id, name, description, version FROM groups
+        let groups: Vec<(Uuid, String, String, i64, Option<String>)> = sqlx::query_as(
+            "SELECT conversation_id, name, description, version, picture_url FROM groups
              WHERE conversation_id = ANY($1)",
         )
         .bind(ids)
@@ -207,11 +207,15 @@ impl PostgresStore {
         let mut owners = group_by(owners);
         let mut members = group_by(members);
         let mut pending = group_by(pending);
-        for (id, name, description, version) in groups {
+        for (id, name, description, version, picture_url) in groups {
             details.insert(
                 id,
                 GroupDetails {
-                    settings: GroupSettings { name, description },
+                    settings: GroupSettings {
+                        name,
+                        description,
+                        picture_url,
+                    },
                     version,
                     owners: owners.remove(&id).unwrap_or_default(),
                     members: members.remove(&id).unwrap_or_default(),
@@ -257,8 +261,8 @@ impl PostgresStore {
                     .bind(id).bind(partition.as_str()).bind(digest.as_bytes().as_slice())
                     .bind(creator.actor_type.as_str()).bind(creator.id.as_str())
                     .execute(&mut *tx).await.map_err(map_constraint_error)?;
-                sqlx::query("INSERT INTO groups(conversation_id,organization_id,name,description) VALUES($1,$2,$3,$4)")
-                    .bind(id).bind(partition.as_str()).bind(&settings.name).bind(&settings.description)
+                sqlx::query("INSERT INTO groups(conversation_id,organization_id,name,description,picture_url) VALUES($1,$2,$3,$4,NULLIF($5, ''))")
+                    .bind(id).bind(partition.as_str()).bind(&settings.name).bind(&settings.description).bind(&settings.picture_url)
                     .execute(&mut *tx).await.map_err(map_constraint_error)?;
                 sqlx::query("INSERT INTO group_owners(conversation_id,actor_kind,actor_id,added_by_id) VALUES($1,$2::text::actor_kind,$3,$3)")
                     .bind(id).bind(creator.actor_type.as_str()).bind(creator.id.as_str())
@@ -314,13 +318,15 @@ impl PostgresStore {
         let mut tx = self.pool().begin().await?;
         lock_group(&mut tx, id).await?;
         if acquired(&mut tx, actor, "groups.update", key, &hash).await? {
-            let (name, description): (String, String) =
-                sqlx::query_as("SELECT name, description FROM groups WHERE conversation_id=$1")
-                    .bind(id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            let changed = sqlx::query("UPDATE groups SET name=$2,description=$3,version=version+1 WHERE conversation_id=$1 AND version=$4")
-                .bind(id).bind(&settings.name).bind(&settings.description).bind(version)
+            let (name, description, picture_url): (String, String, Option<String>) =
+                sqlx::query_as(
+                    "SELECT name, description, picture_url FROM groups WHERE conversation_id=$1",
+                )
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+            let changed = sqlx::query("UPDATE groups SET name=$2,description=$3,picture_url=CASE WHEN $5::text IS NULL THEN picture_url ELSE NULLIF($5, '') END,version=version+1 WHERE conversation_id=$1 AND version=$4")
+                .bind(id).bind(&settings.name).bind(&settings.description).bind(version).bind(&settings.picture_url)
                 .execute(&mut *tx).await?;
             if changed.rows_affected() != 1 {
                 return Err(AppError::refused(
@@ -339,6 +345,16 @@ impl PostgresStore {
             }
             if description != settings.description {
                 events.extend(each(&readers, ConversationChange::DescriptionChanged, &[]));
+            }
+            if settings.picture_url.as_ref().is_some_and(|url| {
+                picture_url.as_deref()
+                    != if url.is_empty() {
+                        None
+                    } else {
+                        Some(url.as_str())
+                    }
+            }) {
+                events.extend(each(&readers, ConversationChange::PictureChanged, &[]));
             }
             conversation_events::record_in(&mut tx, id, &events).await?;
             complete_group(&mut tx, actor, "groups.update", key, id, 200).await?;

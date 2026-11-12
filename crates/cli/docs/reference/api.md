@@ -57,7 +57,7 @@ app may call with a User verification proof ([below](#apps-acting-for-an-account
 | `POST /speech/transcriptions` | Audio in, transcript out | own |
 | `POST /groups` | Create a group; you are its first owner | own |
 | `GET /groups/{group}` | A group with its owners, members and (for owners) pending invitations | own, proof |
-| `PATCH /groups/{group}` | Rename or describe (owners, `If-Match`) | own |
+| `PATCH /groups/{group}` | Rename, describe or set a picture (owners, `If-Match`) | own |
 | `POST`, `DELETE /groups/{group}/members` | Invite; remove or withdraw | own |
 | `POST`, `DELETE /groups/{group}/owners` | Make owners; stop being owners | own |
 | `POST /groups/{group}/accept`, `/decline`, `/leave` | Your invitation and membership | own |
@@ -407,7 +407,7 @@ the account. They come in the same stream, ordered with the message events, so o
 | `invitation_accepted`, `invitation_declined` | The invitee, on every device (a custodian may decline for its Silicon) | Refresh invitations (accepted: add the group) |
 | `invitation_cancelled` | An invitee whose invitation an owner withdrew | Refresh invitations |
 | `left`, `removed` | The account that left, or was taken out | Drop it: reading it is 404 now |
-| `renamed`, `description_changed`, `owners_changed` | Members and pending invitees (an invitation shows these) | Read it again |
+| `renamed`, `description_changed`, `picture_changed`, `owners_changed` | Members and pending invitees (an invitation shows these) | Read it again |
 | `members_changed` | Members | Read it again |
 | `read` | The account itself, after it read messages there on any device (one by one or in bulk), with `unread_count` and `last_read_message_id` | Set the conversation's unread badge to them: no need to read it |
 
