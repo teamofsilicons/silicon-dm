@@ -336,7 +336,7 @@ export function ConversationView({ address }: { address: string }) {
               beginning={<ThreadBeginning kind={kind} others={others} title={title} conversation={conversation} empty={empty} />}
             />
           )}
-          <Composer ref={composer} address={address} name={name} messages={thread.messages} me={perspective} disabledReason={disabledReason} draftHint={hint} onSent={onSent} onSelectLast={onSelectLast} onLeave={onLeave} />
+          <Composer ref={composer} address={address} name={name} messages={thread.messages} me={perspective} groupMembers={conversation?.group ? conversation.participants : undefined} disabledReason={disabledReason} draftHint={hint} onSent={onSent} onSelectLast={onSelectLast} onLeave={onLeave} />
         </section>
         <MessageMenu state={menu} onClose={() => setMenu(null)} />
         <MessageDetailsDialog message={detailsFor} address={address} view={view} where={where} onClose={() => setDetailsFor(null)} />

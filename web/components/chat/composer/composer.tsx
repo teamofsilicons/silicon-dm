@@ -56,6 +56,9 @@ import { planDrop, type DropQuestion } from "./drop-plan";
 import { GifAnchor, GifPicker } from "./gif-picker";
 import { LinkBar } from "./link-bar";
 import { filesToAttach } from "./paste";
+import { matchAccounts } from "../dialogs/contacts";
+import { MentionMenu, mentionOptionId } from "./mention-menu";
+import { insertMention, mentionAt } from "./mentions";
 import { fitPlaceholder } from "./placeholder";
 import { blockedWords, itemName, waitingWords } from "./send-latch";
 import { runSlash, slashOptions, type SlashContext } from "./slash";
@@ -80,6 +83,8 @@ export interface ComposerProps {
   /** The loaded messages (oldest first): your last one for ↑, the one a draft replies to. */
   messages: Message[];
   me: AccountRef;
+  /** Accepted members of a named group; absent in direct conversations. */
+  groupMembers?: AccountRef[];
   /** Why nothing can be sent here (a custodian's view, a conversation kept for its history), or null. */
   disabledReason: string | null;
   /** What the conversation list says about this conversation's draft on the service (lib/chat/drafts.ts draftHint). */
@@ -167,7 +172,7 @@ function insertIntoField(node: HTMLTextAreaElement, words: string, fallback: (va
   requestAnimationFrame(() => node.setSelectionRange(start + insert.length, start + insert.length));
 }
 
-export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({ address, name, messages, me, disabledReason, draftHint = "unknown", onSent, onSelectLast, onLeave }, ref) {
+export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({ address, name, messages, me, groupMembers, disabledReason, draftHint = "unknown", onSent, onSelectLast, onLeave }, ref) {
   const queryClient = useQueryClient();
   const router = useRouter();
   const field = useRef<HTMLTextAreaElement>(null);
@@ -197,6 +202,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [fitted, setFitted] = useState<string | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
+  const [selection, setSelection] = useState<{ start: number; end: number } | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [dismissedMention, setDismissedMention] = useState<{ text: string; start: number; end: number } | null>(null);
   const voiceControls = useRef<ComposerVoiceControls | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const statuses = useRef(new Map<string, TrayItem["status"]>());
@@ -210,6 +218,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const replyTarget = useMemo(() => (draft.replyTo ? messages.find(message => message["message-id"] === draft.replyTo) ?? null : null), [draft.replyTo, messages]);
   const slash = enabled && !editing && !slashDismissed ? slashOptions(text) : [];
   const slashActive = Math.min(slashIndex, Math.max(0, slash.length - 1));
+  const mentionDismissed = !!selection && dismissedMention?.text === text && dismissedMention.start === selection.start && dismissedMention.end === selection.end;
+  const mention = enabled && groupMembers && selection && !mentionDismissed ? mentionAt(text, selection.start, selection.end) : null;
+  const candidates = mention ? matchAccounts(groupMembers!.filter(member => !member.deleted && !sameAccount(member, me)), mention.query, 8) : [];
+  const mentionActive = Math.min(mentionIndex, Math.max(0, candidates.length - 1));
   const failed = trayFailed(items);
   const carries = items.some(item => item.status !== "failed");
   // Something to send (words, or what the tray carries, ready or still on its way), and nothing that failed.
@@ -379,6 +391,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const pickGif = (chosen: Gif) => {
     tray.dispatch({ type: "add", item: { id: `gif-${crypto.randomUUID()}`, kind: "gif", gif: chosen, status: "ready" } });
     setGif(null);
+  };
+
+  const chooseMention = (index: number) => {
+    const member = candidates[index];
+    const node = field.current;
+    if (!mention || !member || !node) return;
+    const next = insertMention(text, mention, member.id);
+    // Use the native insertion command when available so Undo treats the choice as one edit.
+    node.focus({ preventScroll: true });
+    node.setSelectionRange(mention.start, mention.end);
+    let inserted = false;
+    try { inserted = document.execCommand("insertText", false, next.text.slice(mention.start, next.caret)); } catch { /* fall back below */ }
+    if (!inserted || node.value !== next.text) {
+      if (editing) setEditText(next.text); else draft.setText(next.text);
+    }
+    setSelection({ start: next.caret, end: next.caret });
+    setDismissedMention({ text: next.text, start: next.caret, end: next.caret });
+    requestAnimationFrame(() => { node.focus({ preventScroll: true }); node.setSelectionRange(next.caret, next.caret); });
   };
 
   const runSlashAt = (index: number) => {
@@ -591,7 +621,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       {link && !editing ? <LinkBar prefill={link.prefill} onAdd={addLink} onClose={() => { setLink(null); focus(); }} /> : null}
       <GifPicker open={gif} onClose={() => setGif(null)} onPick={pickGif} onClosed={focus} onAnnounce={announce}>
         <div className={styles.row}>
-          {slash.length ? <SlashMenu id={listId} options={slash} active={slashActive} onRun={runSlashAt} onHover={setSlashIndex} /> : null}
+          {candidates.length ? <MentionMenu id={`${listId}-mentions`} members={candidates} active={mentionActive} onChoose={chooseMention} onHover={setMentionIndex} /> : null}
+          {slash.length && !candidates.length ? <SlashMenu id={listId} options={slash} active={slashActive} onRun={runSlashAt} onHover={setSlashIndex} /> : null}
           <ComposerActions side="start">
             {editing ? (
               <IconAction label="Add a file, a link or a GIF" icon={<Plus strokeWidth={1.75} aria-hidden="true" />} unavailable="Finish or cancel the edit first: attachments go with a new message" tooltipSide="top" />
@@ -612,13 +643,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   placeholder={placeholder}
                   aria-label={label}
                   aria-keyshortcuts={sendKeys.aria}
-                  aria-autocomplete={editing ? undefined : "list"}
-                  aria-controls={slash.length ? listId : undefined}
-                  aria-activedescendant={slash.length ? optionId(listId, slash[slashActive]!) : undefined}
+                  aria-autocomplete="list"
+                  aria-controls={candidates.length ? `${listId}-mentions` : slash.length ? listId : undefined}
+                  aria-activedescendant={candidates.length ? mentionOptionId(`${listId}-mentions`, mentionActive) : slash.length ? optionId(listId, slash[slashActive]!) : undefined}
                   data-composer-field=""
                   enterKeyHint="send"
                   onChange={event => {
                     const value = event.target.value;
+                    setSelection({ start: event.target.selectionStart, end: event.target.selectionEnd });
+                    setMentionIndex(0);
                     if (editing) {
                       setEditText(value);
                       return;
@@ -628,7 +661,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                     if (!value.startsWith("/")) setSlashDismissed(false);
                     reportActivity(value.trim() ? "typing" : null, address);
                   }}
+                  onFocus={event => setSelection({ start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd })}
+                  onBlur={() => setSelection(null)}
+                  onSelect={event => {
+                    setSelection({ start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd });
+                  }}
                   onKeyDown={event => {
+                    if (candidates.length && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey) {
+                      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                        event.preventDefault();
+                        setMentionIndex((mentionActive + (event.key === "ArrowDown" ? 1 : -1) + candidates.length) % candidates.length);
+                      } else if (event.key === "Tab" || event.key === "Enter") {
+                        event.preventDefault();
+                        chooseMention(mentionActive);
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        if (selection) setDismissedMention({ text, ...selection });
+                      }
+                      return;
+                    }
                     if (!slash.length || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return;
                     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                       event.preventDefault();

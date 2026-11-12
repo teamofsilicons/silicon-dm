@@ -212,6 +212,9 @@
   box-shadow: var(--shadow-floating);
 }
 .slashList { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; }
+.mentionList { display: grid; max-height: 320px; overflow-y: auto; gap: 1px; }
+.mentionPerson { display: grid; min-width: 0; gap: 1px; line-height: 1.3; overflow-wrap: anywhere; }
+.mentionId { color: var(--text-muted); font-size: var(--text-xs); }
 .slashOption {
   --sq-r: 11px;
   --sq-fill: transparent;

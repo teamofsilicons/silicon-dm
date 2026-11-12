@@ -1361,3 +1361,32 @@ test("new lines grow smoothly, keep the caret visible, and preserve native writi
     await context.close();
   }
 });
+
+test("Markdown links in a message show the label and keep the destination", async ({ browser }) => {
+  const group = await newGroup("Markdown links");
+  const text = "Three more worth knowing:\n\n• [HackerRank Orchestrate](https://www.hackerrank.com/hackerrank-orchestrate-december26) - online\n\n• [TimeNet](https://challenge.timenet.ai/) - online";
+  await send("bo", group, { message: text });
+  const advanced = "## Plans\n\n> **Bold** and ~~old~~\n\n- [x] Done\n- [ ] Next\n\n| Name | Status |\n| --- | --- |\n| App | Ready |\n\n[unsafe](javascript:alert(1))\n\n![Remote image](https://example.invalid/pixel.png)\n\n<script>alert(1)</script>";
+  await send("bo", group, { message: advanced });
+  const context = await signedIn(browser, "ada");
+  const page = await context.newPage();
+  await page.goto(`/c/${encodeURIComponent(group)}`);
+  const message = row(page, "Three more worth knowing:");
+  const first = message.getByRole("link", { name: "HackerRank Orchestrate", exact: true });
+  const second = message.getByRole("link", { name: "TimeNet", exact: true });
+  await expect(first).toHaveAttribute("href", "https://www.hackerrank.com/hackerrank-orchestrate-december26");
+  await expect(first).toHaveAttribute("target", "_blank");
+  await expect(second).toHaveAttribute("href", "https://challenge.timenet.ai/");
+  await expect(message).not.toContainText("](https://");
+  const formatted = row(page, "Plans");
+  await expect(formatted.getByRole("heading", { name: "Plans", level: 2 })).toBeVisible();
+  await expect(formatted.locator("blockquote strong")).toHaveText("Bold");
+  await expect(formatted.locator("del")).toHaveText("old");
+  await expect(formatted.getByRole("checkbox").first()).toBeChecked();
+  await expect(formatted.getByRole("table")).toContainText("Ready");
+  await expect(formatted.getByRole("link", { name: "unsafe" })).toHaveCount(0);
+  await expect(formatted.locator('img[src*="example.invalid"]')).toHaveCount(0);
+  await expect(formatted.getByRole("link", { name: "Remote image" })).toHaveAttribute("href", "https://example.invalid/pixel.png");
+  await expect(formatted.locator("script")).toHaveCount(0);
+  await context.close();
+});

@@ -1,40 +1,22 @@
 "use client";
 
 /**
- * Message text as React elements, from lib/chat/markdown.ts's tree: paragraphs, line breaks, links (http and https
- * only, opening in a new tab), inline code, code blocks with a copy button, bold, italic and lists. Text never becomes
- * markup (no dangerouslySetInnerHTML), so what anyone writes stays what they wrote.
+ * Message text as React elements: Markdown and GitHub-style tables, task lists, and strikethrough. Links use only
+ * HTTP(S), raw HTML stays text, and remote images are links rather than automatic requests. Code blocks keep their
+ * copy control. The source is never injected as HTML.
  *
  * Very long messages (the service allows 100 million characters) show their first part with a way to show the rest,
  * so one message cannot stall the thread.
  */
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { isValidElement, memo, useEffect, useRef, useState } from "react";
+import Markdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { CopyButton } from "@/components/silicon-ui/copy-button/copy-button";
-import { parseMarkdown, type Block, type Inline } from "@/lib/chat/markdown";
+import type { Block } from "@/lib/chat/markdown";
 import { cutAtWord } from "./thread-model";
 import styles from "./thread.module.css";
 
 const SHOWN_AT_FIRST = 12_000;
-
-function renderInline(nodes: Inline[], key = "i"): ReactNode[] {
-  return nodes.map((node, index) => {
-    const id = `${key}-${index}`;
-    switch (node.type) {
-      case "text":
-        return node.text;
-      case "break":
-        return <br key={id} />;
-      case "code":
-        return <code key={id} className={styles.inlineCode} data-sq="surface">{node.text}</code>;
-      case "strong":
-        return <strong key={id}>{renderInline(node.children, id)}</strong>;
-      case "em":
-        return <em key={id}>{renderInline(node.children, id)}</em>;
-      case "link":
-        return <a key={id} href={node.href} target="_blank" rel="noopener noreferrer nofollow" className={styles.link}>{node.text}</a>;
-    }
-  });
-}
 
 /**
  * A code block scrolls inside itself, so the keyboard must be able to reach it (WCAG 2.1.1). It is one of its message's
@@ -80,27 +62,38 @@ function CodeBlockView({ block }: { block: Extract<Block, { type: "code" }> }) {
   );
 }
 
-function renderBlocks(blocks: Block[]): ReactNode[] {
-  return blocks.map((block, index) => {
-    if (block.type === "paragraph") return <p key={index} className={styles.paragraph}>{renderInline(block.children, `p${index}`)}</p>;
-    if (block.type === "code") return <CodeBlockView key={index} block={block} />;
-    const List = block.ordered ? "ol" : "ul";
-    return (
-      <List key={index} className={styles.list} start={block.ordered && block.start !== 1 ? block.start : undefined}>
-        {block.items.map((item, at) => <li key={at}>{renderInline(item, `l${index}-${at}`)}</li>)}
-      </List>
-    );
-  });
+/** Only explicit web links can navigate; images never load on their own. */
+function webUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:" ? value : undefined;
+  } catch { return undefined; }
 }
+
+const markdownComponents: Components = {
+  p: ({ children }) => <p className={styles.paragraph}>{children}</p>,
+  a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noopener noreferrer nofollow" className={styles.link}>{children}</a> : <>{children}</>,
+  img: ({ src, alt }) => typeof src === "string" && src ? <a href={src} target="_blank" rel="noopener noreferrer nofollow" className={styles.link}>{alt || "Open image"}</a> : <>{alt}</>,
+  code: ({ children }) => <code className={styles.inlineCode} data-sq="surface">{children}</code>,
+  pre: ({ children }) => {
+    if (!isValidElement<{ className?: string; children?: unknown }>(children)) return <pre>{children}</pre>;
+    const content = children.props.children;
+    if (typeof content !== "string") return <pre>{children}</pre>;
+    const language = /^language-(.+)$/.exec(children.props.className ?? "")?.[1] ?? null;
+    return <CodeBlockView block={{ type: "code", language, text: content.replace(/\n$/, "") }} />;
+  },
+  ul: ({ children }) => <ul className={styles.list}>{children}</ul>,
+  ol: ({ children, start }) => <ol className={styles.list} start={start}>{children}</ol>,
+  table: ({ children }) => <div className={styles.tableScroll} tabIndex={0} role="region" aria-label="Message table"><table className={styles.markdownTable}>{children}</table></div>,
+};
 
 export const RichText = memo(function RichText({ text }: { text: string }) {
   const [all, setAll] = useState(false);
   const long = text.length > SHOWN_AT_FIRST && !all;
   const shown = long ? cutAtWord(text, SHOWN_AT_FIRST) : text;
-  const blocks = useMemo(() => parseMarkdown(shown), [shown]);
   return (
     <div className={styles.richText}>
-      {renderBlocks(blocks)}
+      <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents} urlTransform={value => webUrl(value)}>{shown}</Markdown>
       {long ? (
         <button type="button" className={styles.showAll} onClick={() => setAll(true)}>
           Show the whole message ({text.length.toLocaleString("en-US")} characters)

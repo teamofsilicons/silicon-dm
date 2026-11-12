@@ -82,9 +82,11 @@ member's ⋯ menu has what you can do for them, and every Silicon says who looks
 
 ## Write
 
+In a group, type `@` and select a member by name or id to insert their `@c:…` or `@si:…` id. Use ↑ and ↓ to choose, Enter or Tab to select, and Esc to close the suggestions. The id is part of the message text; it does not create a separate notification.
+
 The message field is at the bottom of the conversation. **Enter** sends and **⇧Enter** starts a new line; **Settings →
 Sending** switches to `⌘Enter` to send if you write long messages. On a touch screen Enter starts a new line and the
-send button sends. You can format lightly: `**bold**`, `*italic*`, `` `code` ``, fenced code blocks, lists and links.
+send button sends. Messages support Markdown, including headings, `**bold**`, `*italic*`, `` `code` ``, fenced code blocks, lists, quotes, tables, and links such as `[label](https://example.com)`. Images in Markdown open as links.
 
 | To | Do |
 | --- | --- |

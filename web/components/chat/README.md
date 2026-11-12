@@ -132,7 +132,7 @@ Unread counts stop at 1,000 at the service and show as "999+" (`format.ts` `unre
 | `presence.ts` | This tab's lease and activity: `reportActivity(activity, conversation)` is about the composer's own conversation (an upload goes on in its own after you move on), else the one on screen. Others' presence for the open conversation only, every 15 s, every 4 s while someone's activity shows. Someone's activity shows only when the service says it per conversation (contracts `features.presence_activity`, `scope: "conversation"`: renew_presence takes `conversation_id`, GET presence `?conversation=`); otherwise it may be about another conversation and is not shown (`presenceHere`). On such a service activity about no conversation is not sent at all, and a renewal refused for its conversation (left, only invited) renews the lease alone. |
 | `unread-total.ts` | "(n) DM" over every conversation: the service's total from the list's first page, minus the rows it covered, plus the loaded rows now (`noteListHead`, `noteListPage`, `useUnreadTotal`). |
 | `address.ts` | Addresses and titles, `custodianFromRef` and `custodianWords` ("Looked after by Ada Marlow"). |
-| `timeline.ts`, `markdown.ts` | Day dividers, the New messages divider and runs of one sender within 5 minutes; markdown-lite to a tree (`thread/rich-text.tsx` renders it as React elements, never HTML). Both pure and tested. |
+| `timeline.ts`, `markdown.ts` | Day dividers, the New messages divider and runs of one sender within 5 minutes; markdown-lite to a tree for previews; `thread/rich-text.tsx` renders Markdown and tables as React elements, never raw HTML. Both are tested. |
 | `preview.ts`, `format.ts`, `media.ts`, `compose.ts`, `codes.ts` | Row lines, times and sizes, attachment kinds, edit content and reply previews, code order. |
 | `settings.ts` | This browser's preferences (`dm:settings:v1`): `sendWith`, `notifications`, `autoplaySpeech`, `playbackSpeed`, `listenModeByDefault`, `detailsOpen`. |
 | `title.ts`, `hydrated.ts`, `storage.ts`, `notifications.ts` | "(n) DM" ("999+" from 1,000); render-after-hydration; storage that never throws (and `freezeStorage`); opt-in notifications, never for a conversation another tab shows (`trackScreen`, `setScreenConversation`). |
@@ -202,7 +202,7 @@ Rows carry `data-message-row`, `data-message-code`, `data-conversation`, `data-s
 named with its sender and time: the shortcuts, receipts, tests and agents rely on them.
 
 ### Composer and uploads (`composer/**`, `lib/upload/**`, `app/api/uploads/**`, `lib/server/briefcase.ts`)
-`composer.tsx`: the field (1–10 lines, "Message <name>"), Enter / ⇧Enter / ⌘Enter, reply and edit bars, ↑ edits, ⇧⌘.
+`composer.tsx`: the field (1–10 lines, "Message <name>"), group-member suggestions at `@` (insert their account id as text; no separate mention notification), Enter / ⇧Enter / ⌘Enter, reply and edit bars, ↑ edits, ⇧⌘.
 selects, the Esc chain, drafts (asked for only when the list says there is one: `draftHint`, `lib/chat/drafts.ts`), the
 outbox, typing activity. The tray (`tray.ts` pure, `tray-store.ts` one tray per
 account and conversation outside React, so uploads and a waiting send survive a change of conversation; `send-latch.ts`
