@@ -20,9 +20,9 @@ const MOD = process.platform === "darwin" ? "Meta" : "Control";
 const stamp = () => `${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 5)}`;
 
 /** A browser signed in to the website as one of the stack's identities (ada, bo, cy, di). */
-async function signedIn(browser: Browser, who: string, viewport = { width: 1440, height: 900 }) {
+async function signedIn(browser: Browser, who: string, viewport = { width: 1440, height: 900 }, touch = false) {
   const { account, ...cookie } = JSON.parse(execFileSync("node", [HELPER, "cookie", who], { encoding: "utf8" })) as { account: { id: string }; name: string; value: string; domain: string; path: string };
-  const context = await browser.newContext({ baseURL: BASE, viewport, locale: "en-US", timezoneId: "Asia/Kolkata" });
+  const context = await browser.newContext({ baseURL: BASE, viewport, hasTouch: touch, isMobile: touch, locale: "en-US", timezoneId: "Asia/Kolkata" });
   await context.addCookies([cookie as never]);
   const page = await context.newPage();
   return { context, page, id: account.id };
@@ -569,6 +569,66 @@ test("a group owner uploads and removes a picture seen by another member", async
   await panel.getByRole("button", { name: "Remove picture" }).click();
   await expect(panel.getByRole("button", { name: "Add picture" })).toBeVisible();
   await expect.poll(async () => reopened.locator('img[src^="/api/uploads/file"]').count(), { timeout: 15_000 }).toBe(0);
+  await ada.context.close();
+  await bo.context.close();
+});
+
+test("group member suggestions complete a mention at the caret and send the chosen id", async ({ browser }) => {
+  const ada = await signedIn(browser, "ada");
+  const bo = await signedIn(browser, "bo");
+  const name = `Mention check ${stamp()}`;
+  const created = await call(ada.context, "POST", "/api/v1/groups", { type: "create_group", data: { name, member_ids: [bo.id] } });
+  expect(created.status).toBe(201);
+  const group = created.json!.data!.id as string;
+  const accepted = await call(bo.context, "POST", `/api/v1/groups/${encodeURIComponent(group)}/accept`, { type: "accept_group_invitation", data: {} });
+  expect(accepted.status).toBe(200);
+  await ada.page.goto(`/c/${encodeURIComponent(group)}`);
+  const field = ada.page.getByRole("textbox", { name: `Message ${name}` });
+  await expect(field).toBeVisible();
+  await ada.page.waitForFunction(() => { const node = document.querySelector("[data-composer-field]"); return !!node && Object.keys(node).some(key => key.startsWith("__reactProps")); });
+  await field.fill("Hello @dmc-b");
+  const list = ada.page.getByRole("listbox", { name: "Group members" });
+  await expect(list.getByRole("option", { name: new RegExp(bo.id) })).toBeVisible();
+  await field.press("Escape");
+  await expect(list).toHaveCount(0);
+  await field.press("o");
+  await expect(list.getByRole("option", { name: new RegExp(bo.id) })).toBeVisible();
+  await field.press("Enter");
+  await expect(field).toHaveValue(`Hello @${bo.id} `);
+  await expect(list).toHaveCount(0);
+  await field.fill("Hello @dmc-bo later");
+  await field.evaluate((node: HTMLTextAreaElement) => node.setSelectionRange(13, 13));
+  await field.press("ArrowLeft");
+  await expect(list.getByRole("option", { name: new RegExp(bo.id) })).toBeVisible();
+  await list.getByRole("option", { name: new RegExp(bo.id) }).click();
+  await expect(field).toHaveValue(`Hello @${bo.id} later`);
+  await field.press("Enter");
+  await expect(ada.page.locator("article[data-message-code]").getByText(`Hello @${bo.id} later`)).toBeVisible();
+  await bo.page.goto(`/c/${encodeURIComponent(group)}`);
+  await expect(bo.page.locator("article[data-message-code]").getByText(`Hello @${bo.id} later`)).toBeVisible();
+  await ada.context.close();
+  await bo.context.close();
+});
+
+
+test("a group member suggestion can be tapped on a phone", async ({ browser }) => {
+  const ada = await signedIn(browser, "ada", { width: 390, height: 844 }, true);
+  const bo = await signedIn(browser, "bo");
+  const name = `Touch mention ${stamp()}`;
+  const created = await call(ada.context, "POST", "/api/v1/groups", { type: "create_group", data: { name, member_ids: [bo.id] } });
+  expect(created.status).toBe(201);
+  const group = created.json!.data!.id as string;
+  const accepted = await call(bo.context, "POST", `/api/v1/groups/${encodeURIComponent(group)}/accept`, { type: "accept_group_invitation", data: {} });
+  expect(accepted.status).toBe(200);
+  await ada.page.goto(`/c/${encodeURIComponent(group)}`);
+  const field = ada.page.getByRole("textbox", { name: `Message ${name}` });
+  await expect(field).toBeVisible();
+  await ada.page.waitForFunction(() => { const node = document.querySelector("[data-composer-field]"); return !!node && Object.keys(node).some(key => key.startsWith("__reactProps")); });
+  await field.fill("Hi @dmc-b");
+  const option = ada.page.getByRole("listbox", { name: "Group members" }).getByRole("option", { name: new RegExp(bo.id) });
+  await expect(option).toBeVisible();
+  await option.tap();
+  await expect(field).toHaveValue(`Hi @${bo.id} `);
   await ada.context.close();
   await bo.context.close();
 });

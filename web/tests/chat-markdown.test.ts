@@ -80,3 +80,27 @@ test("hostile input stays linear: thousands of stray markers parse quickly", () 
   parseMarkdown(`${"**".repeat(30_000)}`);
   assert.ok(Date.now() - started < 3000, `took ${Date.now() - started} ms`);
 });
+
+test("Markdown links show their labels and keep safe web destinations", () => {
+  assert.deepEqual(parseInline("• [HackerRank Orchestrate](https://www.hackerrank.com/hackerrank-orchestrate-december26) - online"), [
+    { type: "text", text: "• " },
+    { type: "link", text: "HackerRank Orchestrate", href: "https://www.hackerrank.com/hackerrank-orchestrate-december26" },
+    { type: "text", text: " - online" },
+  ]);
+  assert.deepEqual(parseInline("[Page](https://example.com/a_(b)) [TimeNet](<https://challenge.timenet.ai/>)"), [
+    { type: "link", text: "Page", href: "https://example.com/a_(b)" },
+    { type: "text", text: " " },
+    { type: "link", text: "TimeNet", href: "https://challenge.timenet.ai/" },
+  ]);
+  assert.equal(plainPreview("Read [TimeNet](https://challenge.timenet.ai/) today"), "Read TimeNet today");
+  for (const text of ["[bad](javascript:alert(1))", "[bad](data:text/html,hi)", "[bad](file:///etc/passwd)", "[bad](https://)"]) {
+    assert.ok(parseInline(text).every(node => node.type !== "link"), text);
+  }
+  assert.deepEqual(parseInline("`[literal](https://example.com)`"), [{ type: "code", text: "[literal](https://example.com)" }]);
+});
+
+test("unclosed Markdown links do not make large messages stall", () => {
+  const started = Date.now();
+  parseInline("[oops ".repeat(20_000));
+  assert.ok(Date.now() - started < 3000, `took ${Date.now() - started} ms`);
+});

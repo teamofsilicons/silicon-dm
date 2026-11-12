@@ -2,11 +2,11 @@
  * Markdown-lite for message text: what people and Silicons actually write in chat, and nothing that could run.
  *
  *   paragraphs (blank lines), line breaks, `inline code`, ```fenced code``` (with an optional language),
- *   **bold** / __bold__, *italic* / _italic_, lists ("- ", "* ", "1. "), and links: bare http(s):// and www. addresses.
+ *   **bold** / __bold__, *italic* / _italic_, lists ("- ", "* ", "1. "), and links: [label](https://…), bare http(s):// and www. addresses.
  *
- * The parser returns a tree (never HTML); components/chat/thread/rich-text.tsx renders it as React elements, so text
- * can never become markup. Only http and https links are produced. Every rule is linear: a long or hostile message
- * (the service allows 100 million characters) costs time in proportion to its length.
+ * The parser returns a tree (never HTML) for compact previews. The thread renders Markdown separately in
+ * components/chat/thread/rich-text.tsx. Only http and https links are produced here. Every rule is bounded, so a long
+ * or hostile message (the service allows 100 million characters) costs time in proportion to its length.
  */
 
 export type Inline =
@@ -104,6 +104,50 @@ function linkAt(text: string, start: number): { href: string; text: string; end:
   return { href, text: raw, end: start + raw.length };
 }
 
+/** A Markdown link, limited to web addresses. A bounded scan keeps stray brackets cheap. */
+function markdownLinkAt(source: string, start: number): { href: string; text: string; end: number } | null {
+  if (source[start - 1] === "!") return null; // Images are never fetched just because someone wrote them.
+  const limit = Math.min(source.length, start + 8192);
+  let label = "";
+  let depth = 0;
+  let at = start + 1;
+  for (; at < limit; at++) {
+    const char = source[at]!;
+    if (char === "\n") return null;
+    if (char === "\\" && at + 1 < limit && "\\[]()".includes(source[at + 1]!)) { label += source[++at]; continue; }
+    if (char === "[") depth++;
+    if (char === "]") {
+      if (depth === 0) break;
+      depth--;
+    }
+    label += char;
+  }
+  if (!label || source[at] !== "]" || source[at + 1] !== "(") return null;
+  at += 2;
+  const angle = source[at] === "<";
+  if (angle) at++;
+  let raw = "";
+  depth = 0;
+  for (; at < limit; at++) {
+    const char = source[at]!;
+    if (char === "\n" || /\s/.test(char)) return null;
+    if (char === "\\" && at + 1 < limit && "\\()".includes(source[at + 1]!)) { raw += source[++at]; continue; }
+    if (angle && char === ">") { at++; break; }
+    if (!angle && char === "(") depth++;
+    if (!angle && char === ")") {
+      if (depth === 0) break;
+      depth--;
+    }
+    raw += char;
+  }
+  if (source[at] !== ")" || depth !== 0 || !/^https?:\/\//i.test(raw)) return null;
+  try {
+    const url = new URL(raw);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.hostname) return null;
+  } catch { return null; }
+  return { href: raw, text: label, end: at + 1 };
+}
+
 /** How far an inline code span or an emphasis may reach for its closing marker. */
 const REACH = 4000;
 
@@ -147,6 +191,15 @@ export function parseInline(source: string): Inline[] {
       text += fence;
       index += ticks;
       continue;
+    }
+    if (char === "[") {
+      const link = markdownLinkAt(source, index);
+      if (link) {
+        pushText();
+        out.push({ type: "link", href: link.href, text: link.text });
+        index = link.end;
+        continue;
+      }
     }
     if ((char === "h" || char === "H" || char === "w" || char === "W") && !isWord(source[index - 1])) {
       const link = linkAt(source, index);
