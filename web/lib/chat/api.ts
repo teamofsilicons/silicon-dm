@@ -165,7 +165,7 @@ export const getGroup = (id: string, options: { view?: string | null; signal?: A
 export const createGroup = (input: { name: string; description?: string; member_ids?: string[] }, idempotencyKey: string | true = true) =>
   dm<ConversationSummary & { group: GroupDetails }>("/api/v1/groups", { method: "POST", body: { type: "create_group", data: input }, idempotencyKey });
 
-export const updateGroup = (id: string, input: { name: string; description?: string }, version: number) =>
+export const updateGroup = (id: string, input: { name: string; description?: string; picture_url?: string }, version: number) =>
   dm<GroupDetails>(groupPath(id), { method: "PATCH", body: { type: "update_group", data: input }, headers: { "If-Match": String(version) }, idempotencyKey: true });
 
 type MemberChange = "invite_group_members" | "remove_group_members" | "add_group_owners" | "remove_group_owners";

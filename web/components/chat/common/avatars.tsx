@@ -8,6 +8,7 @@
 import { Avatar } from "@/components/silicon-ui/avatar/avatar";
 import { accountName } from "@/lib/chat/address";
 import type { AccountRef, Presence } from "@/lib/chat/types";
+import { displayUrl, isBriefcaseFile } from "@/lib/upload/display";
 import styles from "./common.module.css";
 
 export type FaceSize = "row" | "header" | "bubble" | "small";
@@ -43,12 +44,12 @@ export function AccountAvatar({ account, size = "row", presence, className, deco
 }
 
 /** A group's face: the initials of its name on the beige of the current item. */
-export function GroupAvatar({ name, size = "row", className, decorative }: FaceProps & { name: string }) {
-  return <Avatar name={name} size={BASE[size]} className={[styles.face, styles.groupFace, className].filter(Boolean).join(" ")} data-size={size} aria-hidden={decorative ? true : undefined} />;
+export function GroupAvatar({ name, pictureUrl, size = "row", className, decorative }: FaceProps & { name: string; pictureUrl?: string }) {
+  return <Avatar name={name} src={pictureUrl && isBriefcaseFile(pictureUrl) ? displayUrl(pictureUrl) : undefined} size={BASE[size]} className={[styles.face, styles.groupFace, className].filter(Boolean).join(" ")} data-size={size} aria-hidden={decorative ? true : undefined} />;
 }
 
 /** The face of a conversation: the group's, or the one other account's. */
-export function ConversationAvatar({ group, others, presence, ...face }: FaceProps & { group?: { name: string } | null; others: AccountRef[]; presence?: Presence | null }) {
-  if (group || others.length !== 1) return <GroupAvatar name={group?.name ?? others.map(accountName).join(" ")} {...face} />;
+export function ConversationAvatar({ group, others, presence, ...face }: FaceProps & { group?: { name: string; picture_url?: string } | null; others: AccountRef[]; presence?: Presence | null }) {
+  if (group || others.length !== 1) return <GroupAvatar name={group?.name ?? others.map(accountName).join(" ")} pictureUrl={group?.picture_url} {...face} />;
   return <AccountAvatar account={others[0]!} presence={presence} {...face} />;
 }

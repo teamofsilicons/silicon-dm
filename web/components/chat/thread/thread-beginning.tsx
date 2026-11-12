@@ -30,7 +30,7 @@ export function ThreadBeginning({ kind, others, title, conversation, empty }: { 
   return (
     // In an empty conversation this sits inside the log, which reads new messages out; this is not one.
     <div className={styles.beginning} data-empty={empty ? "" : undefined} aria-live="off">
-      {single ? <AccountAvatar account={single} size="row" decorative /> : <GroupAvatar name={title} size="row" decorative />}
+      {single ? <AccountAvatar account={single} size="row" decorative /> : <GroupAvatar name={title} pictureUrl={conversation?.group?.picture_url} size="row" decorative />}
       <p className={styles.beginningName}>{single ? accountName(single) : title}</p>
       <p className={styles.beginningMeta}>
         {single ? (

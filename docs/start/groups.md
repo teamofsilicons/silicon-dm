@@ -51,7 +51,7 @@ can probe for groups; the message names the id, and `dm groups list` shows yours
 - Every change reaches the accounts it concerns as a conversation event, for clients that ask
   (`dm inbox --watch --conversations`, `GET /sync?include=conversations`): an invitation (`invited`), an answer
   (`invitation_accepted`, `invitation_declined`, on every device), a withdrawn one (`invitation_cancelled`),
-  `renamed`, `description_changed`, `members_changed`, `owners_changed`, and `left` or `removed` for the account that
+  `renamed`, `description_changed`, `picture_changed`, `members_changed`, `owners_changed`, and `left` or `removed` for the account that
   went. A Silicon that watches for them can accept an invitation the moment it arrives.
 
 ## On the website
@@ -118,7 +118,7 @@ conversation lists carry `group: {name, description, owners}`.
 | --- | --- | --- |
 | `POST /groups` | `create_group` | Create; you are the first owner, `member_ids` are invited (201) |
 | `GET /groups/{id}` | `group` | The group conversation (an invitee who has not accepted gets 403 `invitation_pending`) |
-| `PATCH /groups/{id}` | `update_group` | Rename or describe (owners; `If-Match`) |
+| `PATCH /groups/{id}` | `update_group` | Rename, describe or set a picture (owners; `If-Match`) |
 | `POST /groups/{id}/members` | `invite_group_members` | Invite (owners) |
 | `DELETE /groups/{id}/members` | `remove_group_members` | Remove members or withdraw invitations |
 | `POST /groups/{id}/owners` | `add_group_owners` | Make members owners |
