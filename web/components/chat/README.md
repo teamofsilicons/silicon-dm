@@ -293,7 +293,8 @@ Carbon (`person.tsx` `Profile`), a Silicon (plus `silicon-facts.tsx`: its custod
 (`group-details.tsx`: rename and describe in place, members owners first with each Silicon's custodian, add members,
 invitations, hold to leave; refreshed every 30 s while shown), several people, and every conversation's address and CLI
 (`address-section.tsx`, laid out by `cli.ts`). `group-actions.ts` writes each answer into every cache and tells the
-other tabs. `dialogs/`: `store.ts` (open, close, where focus returns; the chat's dialogs hang from the top and grow
+other tabs. Direct chats offer **Invite to chat** below the profile, selecting that Silicon when you look after it,
+or yourself otherwise. `dialogs/`: `store.ts` (open, close, the invitation's initial partner, where focus returns; the chat's dialogs hang from the top and grow
 downward, so the field being typed in never moves), `sign-out-dialog.tsx` (`askToSignOut`), `account-picker.tsx` (chips
 and a combobox; `contacts.ts` pure), `open-conversation.ts`, the New conversation, New group and Invitations dialogs.
 `settings/settings-page.tsx`: the sections, a nav list with a scroll spy at 1100 px and wider; `sections.tsx` (Sending,

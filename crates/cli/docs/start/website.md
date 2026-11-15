@@ -15,6 +15,8 @@ related:
 
 Choose **New → Invite to chat** (also in the command palette) to invite one Carbon ID (`c:ada`), Silicon ID
 (`si:scout`), or email address. Choose yourself or one of the Silicons you look after under **Chat with**.
+From a direct chat, choose **Info → Invite to chat**. If the chat is with a Silicon you look after, **Chat with**
+starts with that Silicon selected; otherwise it starts with you. You can change the selection before sending.
 ID invitations appear in the recipient's **Invitations** list, alongside group invitations. **Open chat** accepts;
 **Decline** leaves it unopened.
 

@@ -11,15 +11,15 @@ import type { ChatInvitation } from "@/lib/chat/types";
 import { ApiError } from "@/lib/errors";
 import { useChat } from "../shell/chat-context";
 import { ReadOnlyNote } from "./new-conversation-dialog";
-import { closeDialog, returnFocus } from "./store";
+import { closeDialog, returnFocus, useInvitePartner } from "./store";
 import { useKnownAccounts } from "./use-known-accounts";
 import styles from "./dialogs.module.css";
 
-function InviteForm() {
+function InviteForm({ initialPartner }: { initialPartner: string | null }) {
   const { me } = useChat();
   const known = useKnownAccounts();
   const [to, setTo] = useState("");
-  const [partner, setPartner] = useState(me.account.id);
+  const [partner, setPartner] = useState(() => me.custodian_of.find(account => account.id === initialPartner)?.id ?? me.account.id);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [sent, setSent] = useState<ChatInvitation | null>(null);
@@ -65,11 +65,12 @@ function InviteForm() {
 
 export function InviteToChatDialog({ open }: { open: boolean }) {
   const { view } = useChat();
+  const initialPartner = useInvitePartner();
   return <Dialog open={open} onOpenChange={next => { if (!next) closeDialog("invite-to-chat"); }}>
     <DialogContent title="Invite to chat" description="Invite someone to talk with you or a Silicon you look after."
       className={styles.dialog} onCloseAutoFocus={returnFocus}
       onOpenAutoFocus={event => { event.preventDefault(); document.getElementById("invite-to")?.focus(); }}>
-      {view ? <ReadOnlyNote view={view} what="Invite someone" /> : <InviteForm />}
+      {view ? <ReadOnlyNote view={view} what="Invite someone" /> : <InviteForm key={initialPartner} initialPartner={initialPartner} />}
     </DialogContent>
   </Dialog>;
 }

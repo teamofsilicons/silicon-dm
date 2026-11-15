@@ -1,6 +1,69 @@
 import { expect, test, type BrowserContext } from "@playwright/test";
 import { accountsSession, captureViews, runAccounts, sameOrigin, sessionOf, signIn, signInOnHostedPages, uniqueEmail } from "./support";
 
+for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 900 }, { width: 390, height: 844 }]) {
+  test(`invite from chat Info selects your Silicon and returns focus (${viewport.width}px)`, async ({ browser }) => {
+    const sender = await accountsSession(browser, "carbon");
+    try {
+      const page = await sender.newPage();
+      await page.setViewportSize(viewport);
+      await page.emulateMedia({ colorScheme: viewport.width === 390 ? "dark" : "light", reducedMotion: "reduce" });
+      await signIn(page, runAccounts().carbon.email);
+      // Resolve Scout in this test's DM database before reading /me's custodian list.
+      const conversation = await sender.request.post("/api/api/v1/conversations", {
+        headers: sameOrigin({ "idempotency-key": crypto.randomUUID(), "x-dm-contract-version": "4" }),
+        data: { type: "create_conversation", data: { participant_ids: ["si:dmc-scout"] } },
+      });
+      expect(conversation.ok()).toBe(true);
+      await page.goto("/c/si:dmc-scout");
+      const info = page.getByRole("button", { name: "Show details", exact: true });
+      await expect(info).toBeVisible();
+      if (await info.getAttribute("aria-pressed") !== "true") await info.click();
+      const inviteButton = page.locator("[data-details-panel]").getByRole("button", { name: "Invite to chat" });
+      await expect(inviteButton).toBeVisible();
+      await page.screenshot({ path: `screens/chat-info-${viewport.width}.png` });
+      await inviteButton.focus();
+      await inviteButton.press("Enter");
+      const dialog = page.getByRole("dialog", { name: "Invite to chat" });
+      await expect(dialog.getByLabel("Invite", { exact: true })).toBeFocused();
+      await expect(dialog.getByLabel("Chat with")).toHaveValue("si:dmc-scout");
+      if (viewport.width < 1100) await expect(page.locator("[data-details-panel]")).not.toBeVisible();
+      await expect(dialog).toHaveCSS("opacity", "1");
+      await page.screenshot({ path: `screens/chat-info-invite-${viewport.width}.png` });
+      await dialog.getByRole("button", { name: "Cancel" }).click();
+      await expect(dialog).not.toBeVisible();
+      await expect(viewport.width < 1100 ? info : inviteButton).toBeFocused();
+
+      if (viewport.width < 1100) await info.click();
+      await inviteButton.click();
+      await dialog.getByLabel("Invite", { exact: true }).fill(uniqueEmail("info-invite"));
+      const sent = page.waitForResponse(response => response.url().endsWith("/api/api/v1/chat-invitations") && response.request().method() === "POST");
+      await dialog.getByRole("button", { name: "Send invitation" }).click();
+      const response = await sent;
+      expect(response.status()).toBe(201);
+      const invitation = (await response.json()).data;
+      expect(invitation.partner.id).toBe("si:dmc-scout");
+      expect(invitation.mail_status).toBe("simulated");
+      await dialog.getByRole("button", { name: "Done" }).click();
+      await expect(viewport.width < 1100 ? info : inviteButton).toBeFocused();
+
+      // New starts with yourself again; a previous Info selection must not leak.
+      await page.goto("/c");
+      await page.getByRole("button", { name: "New conversation or group" }).click();
+      await page.getByRole("menuitem", { name: "Invite to chat" }).click();
+      await expect(dialog.getByLabel("Chat with")).toHaveValue(runAccounts().carbon.id);
+      await dialog.getByRole("button", { name: "Cancel" }).click();
+
+      // In a Carbon's chat, the invitation starts with yourself selected.
+      await page.goto(`/c/${runAccounts().friend.id}`);
+      await expect(info).toBeVisible();
+      if (await info.getAttribute("aria-pressed") !== "true") await info.click();
+      await inviteButton.click();
+      await expect(dialog.getByLabel("Chat with")).toHaveValue(runAccounts().carbon.id);
+    } finally { await sender.close(); }
+  });
+}
+
 async function invite(context: BrowserContext, to: string) {
   const response = await context.request.post("/api/api/v1/chat-invitations", {
     headers: sameOrigin({ "idempotency-key": crypto.randomUUID(), "x-dm-contract-version": "4" }),
