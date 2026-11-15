@@ -44,6 +44,8 @@ pub struct Settings {
     pub reporting: Option<ReportingSettings>,
     /// Bug reports one account may send in an hour (`DM_REPORTS_PER_HOUR`, default 10).
     pub reports_per_hour: u32,
+    /// Website origin used in chat invitation emails (`DM_WEB_URL`).
+    pub web_url: Url,
     /// Voices, speech rendering and transcription through Deepgram.
     pub speech: SpeechSettings,
     /// Tracing filter directive.
@@ -640,6 +642,7 @@ impl Settings {
                 })
                 .transpose()?,
             reports_per_hour: parse_or("DM_REPORTS_PER_HOUR", "10")?,
+            web_url: parse_or("DM_WEB_URL", "https://dm.teamofsilicons.com")?,
             speech: SpeechSettings::from_env()?,
             log_filter: parse_or("DM_LOG_FILTER", "info,silicon_dm=debug")?,
         };
@@ -659,6 +662,7 @@ impl Settings {
     }
 
     fn validate(&self) -> Result<(), SettingsError> {
+        validate_web_url(&self.web_url, self.environment)?;
         if let Some(reporting) = &self.reporting {
             validate_url(
                 "DM_POSTMARK_EMAIL_URL",
@@ -868,6 +872,17 @@ fn duration_milliseconds(name: &'static str, default: u64) -> Result<Duration, S
         return Err(invalid(name, "must be positive"));
     }
     Ok(Duration::from_millis(milliseconds))
+}
+
+fn validate_web_url(url: &Url, environment: RuntimeEnvironment) -> Result<(), SettingsError> {
+    validate_url("DM_WEB_URL", url, environment)?;
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return Err(invalid(
+            "DM_WEB_URL",
+            "must be a website origin, without a path, query or fragment",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_url(

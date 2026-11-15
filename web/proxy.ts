@@ -39,7 +39,7 @@ function contentSecurityPolicy(nonce: string, env: ServerEnv): string {
 
 /** Workspace addresses: the nav's sections and everything under them. */
 function inWorkspace(pathname: string): boolean {
-  return appConfig.nav.some(item => pathname === item.href || pathname.startsWith(`${item.href}/`)) || pathname === appConfig.home;
+  return pathname.startsWith("/invite/") || appConfig.nav.some(item => pathname === item.href || pathname.startsWith(`${item.href}/`)) || pathname === appConfig.home;
 }
 
 export async function proxy(request: NextRequest) {

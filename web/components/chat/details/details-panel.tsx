@@ -13,9 +13,13 @@
  * The shell decides where the panel shows (components/chat/shell/details.tsx); this renders its content only, with
  * no padding or title of its own. A custodian's "Viewing as" view shows everything and changes nothing.
  */
+import { MessageSquarePlus } from "lucide-react";
+import { Button } from "@/components/silicon-ui/button/button";
 import { accountName, custodianWords, directParticipants, otherParticipants, sameAccount } from "@/lib/chat/address";
 import type { AccountRef, ConversationSummary, Presence } from "@/lib/chat/types";
+import { openDialog } from "../dialogs/store";
 import { useChat } from "../shell/chat-context";
+import { useDetails } from "../shell/details";
 import { AddressSection } from "./address-section";
 import { GroupDetailsPanel } from "./group-details";
 import { PersonRow, Profile, usePersonBasics } from "./person";
@@ -33,11 +37,19 @@ function othersOf(conversation: ConversationSummary | undefined, address: string
 
 export function DetailsPanel({ conversation, address, presence }: { conversation: ConversationSummary | undefined; address: string; presence: Map<string, Presence> }) {
   const { me, view, viewed, perspective } = useChat();
+  const details = useDetails();
   const viewedName = viewed ? accountName(viewed) : view;
   const basics = usePersonBasics();
   const isGroup = address.startsWith("g:") || !!conversation?.group;
   const others = isGroup ? [] : othersOf(conversation, address, perspective);
   const single = others.length === 1 ? others[0]! : null;
+  const invitePartner = single && !single.deleted && me.custodian_of.some(account => sameAccount(account, single)) ? single.id : me.account.id;
+  const invite = () => {
+    // A drawer or sheet steps aside for the form; its Info button stays available for focus on return.
+    const returnFocusTo = details.mode === "wide" ? null : document.getElementById("conversation-info");
+    if (details.mode !== "wide") details.setOpen(false);
+    openDialog("invite-to-chat", { invitePartner, returnFocusTo });
+  };
   // The custodian named in a Silicon's facts is not named again under "who else reads it".
   const named = single?.type === "silicon" ? custodianOf(single, conversation, me) : null;
   const custodians = (conversation?.visible_to_custodians ?? []).filter(custodian => !sameAccount(custodian, me.account) && !(named && named !== "you" && sameAccount(custodian, named)));
@@ -48,7 +60,12 @@ export function DetailsPanel({ conversation, address, presence }: { conversation
         <GroupDetailsPanel address={address} conversation={conversation} presence={presence} />
       ) : single ? (
         <>
-          <Profile account={single} presence={presence.get(single.id)} />
+          <Profile account={single} presence={presence.get(single.id)}>
+            {!view ? <Button variant="secondary" onClick={invite}>
+              <MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden="true" />
+              Invite to chat
+            </Button> : null}
+          </Profile>
           {single.type === "silicon" ? <SiliconFacts silicon={single} conversation={conversation} me={me} /> : null}
         </>
       ) : (

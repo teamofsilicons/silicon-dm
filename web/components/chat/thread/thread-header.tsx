@@ -95,7 +95,7 @@ export function ThreadHeader({ address, view, title, kind, conversation, others,
             once it loads; a direct conversation's other is in its address). */}
         <ListenModeToggle address={address} silicons={conversation || kind !== "group" ? others.some(account => account.type === "silicon") : null} />
         {/* A toggle keeps one name; whether it is pressed says if the details show (ARIA's toggle button). */}
-        <IconAction label="Show details" shortcut="details.toggle" icon={<Info strokeWidth={1.75} aria-hidden="true" />} pressed={details.open} onClick={details.toggle} />
+        <IconAction id="conversation-info" label="Show details" shortcut="details.toggle" icon={<Info strokeWidth={1.75} aria-hidden="true" />} pressed={details.open} onClick={details.toggle} />
         <DropdownMenuRoot>
           <Tooltip content="More" side="bottom">
             <DropdownMenuTrigger asChild>

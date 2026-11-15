@@ -611,6 +611,25 @@ pub struct Invitation {
 pub struct Invitations {
     pub items: Vec<Invitation>,
 }
+/// An invitation to a direct chat, addressed to an account or a verified email.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatInvitation {
+    pub id: uuid::Uuid,
+    pub inviter: Actor,
+    pub partner: Actor,
+    pub recipient: Option<Actor>,
+    pub email: Option<String>,
+    pub status: String,
+    pub conversation_id: Option<String>,
+    pub created_at: String,
+    pub expires_at: String,
+    pub mail_status: String,
+    pub url: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatInvitations {
+    pub items: Vec<ChatInvitation>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Conversation {
     #[serde(default, skip_serializing_if = "Option::is_none")]

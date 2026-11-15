@@ -1,0 +1,50 @@
+{
+  "date": "2026-11-15",
+  "source_revision": "eb8abb1663cfaf4e99c2de810939e896e3d6c1f7",
+  "version": "0.17.3",
+  "pull_request": "https://github.com/teamofsilicons/silicon-dm/pull/23",
+  "image_build": "https://github.com/teamofsilicons/silicon-dm/actions/runs/43681521951",
+  "service_image": "sha256:ccc6048631067064ff42c19ac37d63306aca802c4d54b7c79a35905b27645672",
+  "website_image": "sha256:ce69e1ef42457a38758228cfe843a492a9a2cdb18e033491a400d0bafc450bc2",
+  "migration": 54,
+  "database_snapshot": "dm-chat-invitations-20261115-2578ea3",
+  "snapshot_available_before_upgrade": true,
+  "service_backup": "/opt/silicon-accounts-apps/dm/best-chat-upgrade-20261115T054234Z",
+  "previous_website_container": "dm-accounts-web-before-1794721378",
+  "checks": {
+    "public_live": 204,
+    "public_ready": 204,
+    "website": 200,
+    "chat_invitations_contract": true,
+    "containers_running": true,
+    "container_restarts": 0,
+    "browser_session_mount_preserved": true,
+    "signed_out_invitation_redirect": 307,
+    "invitation_return_path_preserved": true
+  },
+  "live_invitation": {
+    "inviter": "si:saket-agents",
+    "recipient_omitted": true,
+    "status_at_verification": "pending",
+    "mail_status": "sent",
+    "provider_messages": 1,
+    "delivery_confirmed": true,
+    "sandboxed": false,
+    "track_opens": false,
+    "track_links": "None",
+    "signup_acceptance": "Verified locally; recipient has not accepted the live invitation yet."
+  },
+  "validation": {
+    "rust_quality_gate": "passed",
+    "website_ci": "passed",
+    "deployment_configuration": "passed",
+    "release_image_smoke": "passed",
+    "packaging": "passed",
+    "documentation_site": "passed",
+    "dependency_policy": "Existing unchanged dependencies flagged: astral-tokio-tar maintenance and libsqlite3-sys advisory. SQLite is used by the local CLI/client runtime, not this service deployment.",
+    "focused_invitation_browser_tests": "passed",
+    "broader_browser_tests": "22 passed; stopped on group fixture expecting Scout where the isolated database displayed si:dmc-scout; 92 not run."
+  },
+  "cli_published": false,
+  "pr_merged": false
+}

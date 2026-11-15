@@ -219,6 +219,25 @@ pub enum Command {
         #[command(subcommand)]
         command: Conversations,
     },
+    /// Invite a Carbon, Silicon or email address to a direct chat.
+    #[command(
+        after_help = "EXAMPLES\n  dm invite c:ada\n  dm invite ada@example.com --with si:scout\nNEXT: dm invitations list; dm invitations accept <invitation-id>"
+    )]
+    Invite {
+        /// Carbon ID, Silicon ID or one email address.
+        to: String,
+        /// Chat with this Silicon you look after (default: yourself).
+        #[arg(long)]
+        with: Option<String>,
+    },
+    /// List, inspect and answer direct-chat invitations (groups use dm groups invitations).
+    #[command(
+        after_help = "EXAMPLES\n  dm invitations list\n  dm invitations accept <invitation-id>\nNEXT: dm messages send <conversation-id> --text 'Hello'"
+    )]
+    Invitations {
+        #[command(subcommand)]
+        command: ChatInviteCommand,
+    },
     /// Send, read, edit or delete messages; conversations are named by account id, address or group.
     Messages {
         #[command(subcommand)]
@@ -427,6 +446,39 @@ impl Pagination {
             limit: self.limit,
         }
     }
+}
+
+#[derive(Subcommand)]
+pub enum ChatInviteCommand {
+    /// Invitations waiting for this account or its verified primary email.
+    #[command(
+        after_help = "EXAMPLES\n  dm invitations list\nNEXT: dm invitations show <invitation-id>; dm invitations accept <invitation-id>"
+    )]
+    List,
+    /// Read one invitation as its sender or recipient.
+    #[command(
+        after_help = "EXAMPLES\n  dm invitations show 12345678-1234-4234-8234-123456789abc\nNEXT: dm invitations accept <invitation-id>; dm invitations decline <invitation-id>"
+    )]
+    Show {
+        /// Invitation UUID from dm invite or dm invitations list.
+        id: uuid::Uuid,
+    },
+    /// Open the chat; repeating this reuses the same conversation.
+    #[command(
+        after_help = "EXAMPLES\n  dm invitations accept 12345678-1234-4234-8234-123456789abc\nNEXT: dm messages send <conversation-id> --text 'Hello'"
+    )]
+    Accept {
+        /// Invitation UUID from dm invitations list or its email link.
+        id: uuid::Uuid,
+    },
+    /// Decline without opening a conversation.
+    #[command(
+        after_help = "EXAMPLES\n  dm invitations decline 12345678-1234-4234-8234-123456789abc\nNEXT: dm invitations list; dm conversations list"
+    )]
+    Decline {
+        /// Invitation UUID from dm invitations list or its email link.
+        id: uuid::Uuid,
+    },
 }
 
 #[derive(Subcommand)]

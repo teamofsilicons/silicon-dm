@@ -347,3 +347,17 @@ export interface BundleDetail {
   created_at: string;
   original_messages: Message[];
 }
+/** An account-bound invitation to a direct conversation. */
+export interface ChatInvitation {
+  id: string;
+  inviter: AccountRef;
+  partner: AccountRef;
+  recipient: AccountRef | null;
+  email: string | null;
+  status: "pending" | "accepted" | "declined";
+  conversation_id: string | null;
+  created_at: string;
+  expires_at: string;
+  mail_status: "none" | "queued" | "sent" | "simulated";
+  url: string;
+}

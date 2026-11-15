@@ -9,6 +9,7 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod infrastructure;
+pub mod invitation_mail;
 pub mod logging;
 /// `dm-migrate` operator commands (identity re-key at cutover).
 pub mod operator;

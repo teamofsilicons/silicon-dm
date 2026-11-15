@@ -14,7 +14,7 @@
 import { useInfiniteQuery, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { ApiError } from "@/lib/errors";
-import { getConversation, getGroup, getMe, listConversations, listInvitations, listMessages } from "./api";
+import { getConversation, getGroup, getMe, getContracts, listConversations, listInvitations, listMessages, listChatInvitations } from "./api";
 import { mergeListHead, mergeNewestMessages, messagesOldestFirst, summariesOf, type ConversationPages, type MessagePages } from "./cache";
 import { useConversationEvents } from "./features";
 import { chatKeys } from "./keys";
@@ -22,6 +22,15 @@ import type { ConversationSummary, Me, Message, Page } from "./types";
 import { noteListHead, noteListPage } from "./unread-total";
 
 const VIEW_POLL_MS = 10_000;
+
+/** Direct-chat invitations are separate from the existing group-invitation contract. */
+export function useChatInvitations(enabled = true) {
+  const contracts = useQuery({ queryKey: ["dm", "contracts"], queryFn: ({ signal }) => getContracts(signal), staleTime: 300_000 });
+  const supported = !!contracts.data?.features?.chat_invitations;
+  const query = useQuery({ queryKey: chatKeys.chatInvitations, queryFn: ({ signal }) => listChatInvitations(signal),
+    enabled: enabled && supported, refetchInterval: 15_000, staleTime: 10_000, meta: { toast: false } });
+  return { ...query, supported };
+}
 const SAFETY_REFRESH_MS = 60_000;
 /** The whole list is asked for again this often (a conversation gone without an event, an account's new id further down). */
 const FULL_REFRESH_MS = 10 * 60_000;

@@ -15,6 +15,23 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Operation {
+    CreateChatInvitation {
+        to: String,
+        with: Option<String>,
+        idempotency_key: String,
+    },
+    ListChatInvitations,
+    GetChatInvitation {
+        id: uuid::Uuid,
+    },
+    AcceptChatInvitation {
+        id: uuid::Uuid,
+        idempotency_key: String,
+    },
+    DeclineChatInvitation {
+        id: uuid::Uuid,
+        idempotency_key: String,
+    },
     Me,
     Delivery,
     ListGroups {
@@ -308,6 +325,9 @@ impl Operation {
                 | Self::SetVoice { .. }
                 | Self::ResetVoice { .. }
                 | Self::CreateGroup { .. }
+                | Self::CreateChatInvitation { .. }
+                | Self::AcceptChatInvitation { .. }
+                | Self::DeclineChatInvitation { .. }
                 | Self::UpdateGroup { .. }
                 | Self::InviteGroupMembers { .. }
                 | Self::RemoveGroupMembers { .. }
@@ -357,6 +377,27 @@ impl Operation {
     /// Calls only the public DM client. Presence writes additionally need a device ID.
     pub async fn execute(&self, client: &Client) -> Result<Value> {
         Ok(match self {
+            Self::CreateChatInvitation {
+                to,
+                with,
+                idempotency_key,
+            } => serde_json::to_value(
+                client
+                    .invite_to_chat(to, with.as_deref(), idempotency_key)
+                    .await?,
+            )?,
+            Self::ListChatInvitations => serde_json::to_value(client.chat_invitations().await?)?,
+            Self::GetChatInvitation { id } => {
+                serde_json::to_value(client.chat_invitation(*id).await?)?
+            }
+            Self::AcceptChatInvitation {
+                id,
+                idempotency_key,
+            } => serde_json::to_value(client.accept_chat_invitation(*id, idempotency_key).await?)?,
+            Self::DeclineChatInvitation {
+                id,
+                idempotency_key,
+            } => serde_json::to_value(client.decline_chat_invitation(*id, idempotency_key).await?)?,
             Self::ListGroups { page } => serde_json::to_value(client.groups(page).await?)?,
             Self::GetGroup { group_id } => serde_json::to_value(client.group(group_id).await?)?,
             Self::CreateGroup {

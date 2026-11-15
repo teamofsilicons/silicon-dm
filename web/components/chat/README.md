@@ -12,6 +12,7 @@ first (the Writings look with light, dark and system appearance).
 | `/c` | The inbox: the list (the sidebar on wide screens, the page itself on phones) | `app/(workspace)/c/page.tsx` → `shell/inbox-view.tsx` |
 | `/c/<address>` | A conversation (`c:ada::si:scout`, `g:product-design`, a UUID for one kept for its history). Any other name the service takes for it (`si:scout`, `si:scout::c:ada`) moves to its own address, keeping `?for=` and `#code`: everything kept for a conversation is keyed by the address the service writes | `app/(workspace)/c/[address]/page.tsx` → `shell/conversation-route.tsx` → `thread/conversation-view.tsx` (keyed by address) |
 | `/c/<address>#<code>` | Opens at a message and highlights it | `thread/message-list.tsx` |
+| `/invite/<id>` | Accepts an account-bound chat invitation and opens its conversation, preserving the address through sign-in and signup | `app/(workspace)/invite/[id]/page.tsx` → `dialogs/chat-invitation.tsx` |
 | `?for=si:x` | A custodian's read-only view of a Silicon's conversations (list and threads) | `shell/chat-context.tsx` (`view`, `perspective`, `readOnly`) |
 | `/c?new=1`, `/c?new=group` | Opens New conversation / New group | `shell/chat-app.tsx` (`DialogFromAddress`) |
 | `/settings#<section>` | Settings: `voice`, `listening`, `sending`, `keyboard`, `notifications`, `account`, `report`; `?silicon=si:x` puts that Silicon first in `#voice`. An address naming no section (`#reach`, which 0.17.0 and older linked to) opens at the top | `settings/settings-page.tsx` |
@@ -292,7 +293,8 @@ Carbon (`person.tsx` `Profile`), a Silicon (plus `silicon-facts.tsx`: its custod
 (`group-details.tsx`: rename and describe in place, members owners first with each Silicon's custodian, add members,
 invitations, hold to leave; refreshed every 30 s while shown), several people, and every conversation's address and CLI
 (`address-section.tsx`, laid out by `cli.ts`). `group-actions.ts` writes each answer into every cache and tells the
-other tabs. `dialogs/`: `store.ts` (open, close, where focus returns; the chat's dialogs hang from the top and grow
+other tabs. Direct chats offer **Invite to chat** below the profile, selecting that Silicon when you look after it,
+or yourself otherwise. `dialogs/`: `store.ts` (open, close, the invitation's initial partner, where focus returns; the chat's dialogs hang from the top and grow
 downward, so the field being typed in never moves), `sign-out-dialog.tsx` (`askToSignOut`), `account-picker.tsx` (chips
 and a combobox; `contacts.ts` pure), `open-conversation.ts`, the New conversation, New group and Invitations dialogs.
 `settings/settings-page.tsx`: the sections, a nav list with a scroll spy at 1100 px and wider; `sections.tsx` (Sending,

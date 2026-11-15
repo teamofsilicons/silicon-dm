@@ -141,3 +141,9 @@ Briefcase's own limits then apply, set by its operators:
   default. At 100 Mbit/s that carries about 10 GB, so the largest files need Briefcase's operators to raise it.
 - **Its temporary disk**, which holds each file while it is checked, bounds the largest single file
   ([the Briefcase side](../operations/deployment.md#uploads-the-briefcase-side)).
+
+## Chat invitations
+
+At most 20 new invitations per sender per hour; a matching pending invitation is reused without more mail.
+Invitations expire after 14 days. One recipient per request, by Carbon ID, Silicon ID or email (at most 254 bytes).
+The pending list returns at most 100 invitations, newest first. Each change requires an idempotency key.

@@ -3,6 +3,7 @@
 mod accounts;
 mod allow_list;
 mod bundles;
+pub(crate) mod chat_invitations;
 mod conversation_events;
 mod conversations;
 mod delivery;

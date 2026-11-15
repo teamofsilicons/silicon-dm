@@ -52,3 +52,8 @@
   .invitationActions { grid-column: 2; justify-content: flex-start; margin-inline-start: calc(-1 * var(--space-group)); }
   .invitationError { grid-column: 1 / -1; }
 }
+.invitePartner { display: grid; gap: var(--space-2); font-size: var(--text-sm); }
+.invitePartner select { min-width: 0; width: 100%; padding: var(--space-3); color: var(--foreground); background: var(--surface); border: 1px solid var(--border-strong); font: inherit; }
+.invitePartner select:focus-visible { box-shadow: var(--focus-edge); outline: none; --focus-outline: transparent; }
+.inviteLanding { max-width: 36rem; padding: var(--space-8); margin: auto; display: grid; gap: var(--space-4); }
+.inviteLanding h1 { font-family: var(--font-serif); font-weight: 400; color: var(--accent-ink); }

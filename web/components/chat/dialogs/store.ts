@@ -12,9 +12,10 @@
  */
 import { useSyncExternalStore } from "react";
 
-export type ChatDialog = "new-conversation" | "new-group" | "invitations" | "shortcuts" | "sign-out";
+export type ChatDialog = "new-conversation" | "new-group" | "invite-to-chat" | "invitations" | "shortcuts" | "sign-out";
 
 let open: ChatDialog | null = null;
+let invitePartner: string | null = null;
 let opener: HTMLElement | null = null;
 const listeners = new Set<() => void>();
 
@@ -61,9 +62,10 @@ function openerOf(active: Element | null): HTMLElement | null {
   return (trigger && document.getElementById(trigger)) || document.querySelector<HTMLElement>(`[aria-controls="${CSS.escape(menu.id)}"]`) || null;
 }
 
-export function openDialog(dialog: ChatDialog): void {
+export function openDialog(dialog: ChatDialog, options?: { invitePartner?: string; returnFocusTo?: HTMLElement | null }): void {
   if (open === dialog) return;
-  if (typeof document !== "undefined" && !open) opener = openerOf(document.activeElement);
+  if (typeof document !== "undefined" && !open) opener = options?.returnFocusTo ?? openerOf(document.activeElement);
+  invitePartner = dialog === "invite-to-chat" ? options?.invitePartner ?? null : null;
   open = dialog;
   emit();
 }
@@ -81,6 +83,18 @@ export function useOpenDialog(): ChatDialog | null {
       return () => listeners.delete(listener);
     },
     () => open,
+    () => null,
+  );
+}
+
+/** The account selected by a chat's Info action; New and the palette start with yourself. */
+export function useInvitePartner(): string | null {
+  return useSyncExternalStore(
+    listener => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    () => invitePartner,
     () => null,
   );
 }

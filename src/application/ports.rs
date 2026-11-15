@@ -171,6 +171,12 @@ pub trait IdentityProvider: Send + Sync {
     /// `None` for an account that never signed in to DM or removed its access.
     async fn member_profile(&self, uuid: &str) -> AppResult<Option<MemberProfile>>;
 
+    /// The caller's current verified primary email, read from Accounts userinfo.
+    /// Missing email scope or an unverified address never proves an invitation recipient.
+    async fn verified_email(&self, _context: &AuthContext) -> AppResult<Option<String>> {
+        Ok(None)
+    }
+
     /// Verifies a webhook delivery's signature over the raw body and parses it.
     ///
     /// # Errors

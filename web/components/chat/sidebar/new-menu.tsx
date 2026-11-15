@@ -31,6 +31,7 @@ export function NewMenu({ disabledReason }: { disabledReason?: string | null }) 
       <DropdownMenuContent align="end">
         <DropdownMenuItem icon={<MessageSquarePlus size={16} strokeWidth={1.75} />} shortcut={keys("conversation.new")} onSelect={() => openDialog("new-conversation")}>New conversation</DropdownMenuItem>
         <DropdownMenuItem icon={<Users size={16} strokeWidth={1.75} />} shortcut={keys("group.new")} onSelect={() => openDialog("new-group")}>New group</DropdownMenuItem>
+        <DropdownMenuItem icon={<MessageSquarePlus size={16} strokeWidth={1.75} />} onSelect={() => openDialog("invite-to-chat")}>Invite to chat</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenuRoot>
   );

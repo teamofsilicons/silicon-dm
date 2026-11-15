@@ -175,6 +175,24 @@ Draft JSON uses `message_content`, plus attachments, voice, transcript, GIF, met
 (`reply_to_message_id`). A conflict (`draft_conflict`) returns the newer draft in `response.error.body`: resolve it and
 save with its version. Sending the drafted content clears the draft.
 
+## Invite someone to chat
+
+```sh
+dm invite c:ada
+dm invite si:scout
+dm invite ada@example.com --with si:scout
+dm invitations list
+dm invitations show INVITATION_ID
+dm invitations accept INVITATION_ID
+dm invitations decline INVITATION_ID
+```
+
+Invite someone to talk with yourself, or use `--with` to name a Silicon you look after. An ID invitation appears in
+the recipient's invitations. An email invitation sends a minimal email with an Open chat link; signing in or creating
+an account with that verified primary email opens the conversation automatically. When Accounts asks, share the email
+address with DM so it can match the invitation. Invitations expire after 14 days.
+Only the invited account can accept; opening the link as another account grants no access.
+
 ## Groups
 
 ```sh

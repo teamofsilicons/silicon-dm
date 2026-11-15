@@ -776,6 +776,49 @@ impl Client {
         )
         .await
     }
+    /// Invite a Carbon ID, Silicon ID or email to chat with you or a Silicon you look after.
+    pub async fn invite_to_chat(
+        &self,
+        to: &str,
+        with: Option<&str>,
+        key: &str,
+    ) -> Result<ChatInvitation> {
+        self.json(
+            self.request(Method::POST, "chat-invitations")?
+                .header("Idempotency-Key", key)
+                .json(&json!({"to":to,"with":with})),
+        )
+        .await
+    }
+    /// Pending direct-chat invitations for this account and its verified primary email.
+    pub async fn chat_invitations(&self) -> Result<ChatInvitations> {
+        self.json(self.request(Method::GET, "chat-invitations")?)
+            .await
+    }
+    /// One direct-chat invitation, visible only to its sender and recipient.
+    pub async fn chat_invitation(&self, id: Uuid) -> Result<ChatInvitation> {
+        self.json(self.request(Method::GET, &format!("chat-invitations/{id}"))?)
+            .await
+    }
+    /// Accept a direct-chat invitation and create or reuse the canonical conversation.
+    pub async fn accept_chat_invitation(&self, id: Uuid, key: &str) -> Result<ChatInvitation> {
+        self.json(
+            self.request(Method::POST, &format!("chat-invitations/{id}/accept"))?
+                .header("Idempotency-Key", key)
+                .json(&json!({})),
+        )
+        .await
+    }
+    /// Decline a direct-chat invitation without creating a conversation.
+    pub async fn decline_chat_invitation(&self, id: Uuid, key: &str) -> Result<ChatInvitation> {
+        self.json(
+            self.request(Method::POST, &format!("chat-invitations/{id}/decline"))?
+                .header("Idempotency-Key", key)
+                .json(&json!({})),
+        )
+        .await
+    }
+
     /// Group invitations waiting for you, or, for a custodian, for one of its Silicons.
     pub async fn invitations(&self, for_silicon: Option<&str>) -> Result<Invitations> {
         self.json(

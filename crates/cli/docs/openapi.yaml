@@ -1017,6 +1017,135 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
+  /api/v1/chat-invitations:
+    get:
+      operationId: listChatInvitations
+      summary: Pending chat invitations addressed to your account or verified primary email.
+      description: Returns at most 100 pending invitations, newest first. Own session only; email matching requires the email scope.
+      responses:
+        '200':
+          description: Pending direct-chat invitations.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data]
+                properties:
+                  type: {const: chat_invitations}
+                  data:
+                    type: object
+                    required: [items]
+                    properties:
+                      items: {type: array, items: {$ref: '#/components/schemas/ChatInvitation'}}
+              example: {type: chat_invitations, data: {items: []}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      operationId: inviteToChat
+      summary: Invite one Carbon ID, Silicon ID or email address to chat.
+      description: >-
+        Chat with yourself (default) or a Silicon you currently look after. Invitations last 14 days.
+        At most 20 new invitations per sender per hour. An existing pending invitation to the same
+        recipient and partner is reused without sending another email. Email delivery is durable and
+        retried; 201 means stored, not delivered. Non-production delivery is simulated.
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, data]
+              properties:
+                type: {const: chat_invitation.create}
+                data:
+                  type: object
+                  additionalProperties: false
+                  required: [to]
+                  properties:
+                    to: {type: string, description: 'One c:id, si:id or email address.'}
+                    with: {type: [string, 'null'], description: 'Your own id, or a Silicon you look after; defaults to yourself.'}
+            example: {type: chat_invitation.create, data: {to: ada@example.com, with: 'si:scout'}}
+      responses:
+        '201': {$ref: '#/components/responses/ChatInvitationResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/chat-invitations/{invitation_id}:
+    parameters:
+      - {$ref: '#/components/parameters/ChatInvitationId'}
+    get:
+      operationId: getChatInvitation
+      summary: Inspect an invitation as its sender or recipient.
+      responses:
+        '200': {$ref: '#/components/responses/ChatInvitationResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /api/v1/chat-invitations/{invitation_id}/accept:
+    parameters:
+      - {$ref: '#/components/parameters/ChatInvitationId'}
+    post:
+      operationId: acceptChatInvitation
+      summary: Accept and create or reuse the direct conversation.
+      description: >-
+        Own session only. The recipient must match the permanent account ID or a current verified
+        primary email from Silicon Accounts. Repeated answers are safe; a different answer is refused.
+        An accepted invitation remains bound to the accepting account even if its email changes.
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, data]
+              properties:
+                type: {const: chat_invitation.accept}
+                data: {type: object, additionalProperties: false}
+            example: {type: chat_invitation.accept, data: {}}
+      responses:
+        '200': {$ref: '#/components/responses/ChatInvitationResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+  /api/v1/chat-invitations/{invitation_id}/decline:
+    parameters:
+      - {$ref: '#/components/parameters/ChatInvitationId'}
+    post:
+      operationId: declineChatInvitation
+      summary: Decline without creating a conversation.
+      description: >-
+        Own session only. The recipient must match the permanent account ID or a current verified
+        primary email from Silicon Accounts. Repeated answers are safe; a different answer is refused.
+        An accepted invitation remains bound to the accepting account even if its email changes.
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, data]
+              properties:
+                type: {const: chat_invitation.decline}
+                data: {type: object, additionalProperties: false}
+            example: {type: chat_invitation.decline, data: {}}
+      responses:
+        '200': {$ref: '#/components/responses/ChatInvitationResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
   /api/v1/invitations:
     get:
       operationId: listInvitations
@@ -1410,6 +1539,12 @@ components:
         the account, with receiving app `dm`. Accepted only on routes that list it, for the
         scopes they name, and only from issuers DM is configured to trust.
   parameters:
+    ChatInvitationId:
+      name: invitation_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+      example: 12345678-1234-4234-8234-123456789abc
     ConversationId:
       name: conversation_id
       in: path
@@ -1498,6 +1633,30 @@ components:
                     maxItems: 100
                     items: {$ref: '#/components/schemas/AccountSelector'}
   responses:
+    ChatInvitationResult:
+      description: A chat invitation, visible only to its sender and recipient.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [type, data]
+            properties:
+              type: {enum: [chat_invitation.create, chat_invitation, chat_invitation.accept, chat_invitation.decline]}
+              data: {$ref: '#/components/schemas/ChatInvitation'}
+          example:
+            type: chat_invitation.create
+            data:
+              id: 12345678-1234-4234-8234-123456789abc
+              inviter: {type: carbon, id: 'c:ada', uuid: 11111111-1111-4111-8111-111111111111}
+              partner: {type: silicon, id: 'si:scout', uuid: 22222222-2222-4222-8222-222222222222}
+              recipient: null
+              email: bo@example.com
+              status: pending
+              conversation_id: null
+              created_at: '2026-11-15T12:00:00Z'
+              expires_at: '2026-11-29T12:00:00Z'
+              mail_status: queued
+              url: https://dm.teamofsilicons.com/invite/12345678-1234-4234-8234-123456789abc
     Error:
       description: Refused, with a machine-readable code and an explanation.
       content:
@@ -1619,6 +1778,24 @@ components:
                 properties:
                   items: {type: array, items: {$ref: '#/components/schemas/Gif'}}
   schemas:
+    ChatInvitation:
+      type: object
+      required: [id, inviter, partner, recipient, email, status, conversation_id, created_at, expires_at, mail_status, url]
+      properties:
+        id: {type: string, format: uuid}
+        inviter: {$ref: '#/components/schemas/AccountRef'}
+        partner: {$ref: '#/components/schemas/AccountRef'}
+        recipient:
+          anyOf:
+            - {$ref: '#/components/schemas/AccountRef'}
+            - {type: 'null'}
+        email: {type: [string, 'null'], description: Present for email invitations only.}
+        status: {enum: [pending, accepted, declined]}
+        conversation_id: {type: [string, 'null'], description: Canonical conversation address after acceptance.}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        mail_status: {enum: [none, queued, sent, simulated]}
+        url: {type: string, format: uri, description: Opens the invitation after sign-in or signup; possession alone never grants access.}
     AccountSelector:
       type: string
       description: An account's current id (`c:handle`, `si:handle`) or its permanent, case-sensitive uuid.
@@ -1780,7 +1957,7 @@ components:
       properties:
         name: {type: string}
         description: {type: string}
-        picture_url: {type: string, description: Public picture link, when set.}
+        picture_url: {type: string, description: "Public picture link, when set."}
         version: {type: integer, minimum: 1}
         owners: {type: array, minItems: 1, items: {$ref: '#/components/schemas/AccountRef'}}
         members: {type: array, items: {$ref: '#/components/schemas/AccountRef'}, description: 'Accepted members, owners included.'}
@@ -1789,7 +1966,7 @@ components:
       type: object
       required: [name, description, owners]
       properties:
-        picture_url: {type: string, description: Public picture link, when set.}
+        picture_url: {type: string, description: "Public picture link, when set."}
         name: {type: string}
         description: {type: string}
         owners: {type: array, items: {$ref: '#/components/schemas/AccountRef'}}
