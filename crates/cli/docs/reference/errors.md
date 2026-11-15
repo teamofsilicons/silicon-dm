@@ -263,6 +263,18 @@ These codes come from the command itself, before it sends anything or after the 
 `dm logout` always signs this machine out. When Silicon Accounts does not confirm that it ended the sign-in, the
 output says `"revoked": false` and a `warning` says why; end that sign-in at Silicon Accounts if it is still listed.
 
+## Chat invitations
+
+| Code | Status | What happened | What to do |
+| --- | --- | --- | --- |
+| `invitation_recipient_required` | 403 | The signed-in account does not own the invitation. A link alone grants no access. | Sign in to the invited ID, or verify the invited email, make it primary in Silicon Accounts, and share email with DM. |
+| `invitation_partner_forbidden` | 403 | The sender cannot invite someone to this chat partner; a Silicon may have changed custodians. | Invite to yourself or a Silicon you currently look after. |
+| `invitation_unavailable` | 410 | The invitation expired or was answered differently. | Ask for a new invitation or open the existing conversation. |
+
+Chat invitations also use `validation_error` (invalid recipient), `rate_limited` (20 new invitations per sender per
+hour), `conflict` (an idempotency key reused for different input), and `dependency_unavailable` (email delivery is not
+configured in production, or Accounts cannot verify the recipient).
+
 ## From the relay
 
 The relay's loopback API ([The relay](../learn/relay.md#loopback-api)) answers its own refusals in the same shape. A

@@ -643,6 +643,29 @@ impl IdentityProvider for AccountsAdapter {
         }
     }
 
+    async fn verified_email(&self, context: &AuthContext) -> AppResult<Option<String>> {
+        if context.is_silicon() || !context.scopes.contains("email") {
+            return Ok(None);
+        }
+        let Some(token) = context.access_token() else {
+            return Ok(None);
+        };
+        let app = self
+            .inner
+            .client
+            .as_app(&self.inner.app_id, self.inner.app_secret.expose_secret());
+        let info = app
+            .userinfo(token.expose_secret())
+            .await
+            .map_err(|error| Self::lookup_error(context.actor.id.as_str(), &error))?;
+        if info.account.uuid != context.actor.id.as_str()
+            || info.account.email_verified != Some(true)
+        {
+            return Ok(None);
+        }
+        Ok(info.account.email.map(|email| email.trim().to_lowercase()))
+    }
+
     fn verify_webhook(&self, headers: &http::HeaderMap, body: &[u8]) -> AppResult<VerifiedEvent> {
         let header = |name: &str| {
             headers

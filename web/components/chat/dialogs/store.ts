@@ -12,7 +12,7 @@
  */
 import { useSyncExternalStore } from "react";
 
-export type ChatDialog = "new-conversation" | "new-group" | "invitations" | "shortcuts" | "sign-out";
+export type ChatDialog = "new-conversation" | "new-group" | "invite-to-chat" | "invitations" | "shortcuts" | "sign-out";
 
 let open: ChatDialog | null = null;
 let opener: HTMLElement | null = null;

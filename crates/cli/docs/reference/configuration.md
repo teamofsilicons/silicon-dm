@@ -147,6 +147,18 @@ were sent in either way.
 
 Attachments are external links; no upload credentials are required by the service.
 
+### Chat invitation email
+
+Set `DM_WEB_URL` to the website origin, default `https://dm.teamofsilicons.com`. Invitation links use this trusted
+origin, never a request header. Production requires HTTPS; a local test website may use loopback HTTP.
+Chat invitations share the Postmark settings below and send from `dm@teamofsilicons.com`. Production email
+invitations require a configured transport; without it the request returns `503 dependency_unavailable`.
+Outside production, invitation emails are **always simulated**, even if a Postmark token is present.
+
+Invitations are saved before acknowledgement and the API's worker sends queued mail with bounded backoff.
+Expired and answered invitations are not sent. Open and link tracking are disabled. A crash after Postmark accepts
+a message but before the transaction commits can deliver a duplicate; `Metadata.invitation_id` identifies it.
+
 ### Bug report notifications
 
 Set `DM_POSTMARK_SERVER_TOKEN` on the API service to send report notifications. The default `DM_POSTMARK_EMAIL_URL` is

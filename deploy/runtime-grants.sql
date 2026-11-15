@@ -19,6 +19,7 @@ GRANT EXECUTE ON FUNCTION dm_private.assert_message_outbox_complete(uuid) TO :"r
 GRANT EXECUTE ON FUNCTION dm_private.assert_bundle_shape(uuid) TO :"runtime_role";
 GRANT EXECUTE ON FUNCTION dm_private.assert_draft_attachment_limit(uuid, dm.actor_kind, text) TO :"runtime_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA dm TO :"runtime_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON dm.chat_invitations TO :"runtime_role";
 -- Named for review: the voice, speech and read-position tables of 0043 (covered above too).
 GRANT SELECT, INSERT, UPDATE, DELETE ON dm.account_voices, dm.speech_audio, dm.speech_renders,
     dm.speech_usage, dm.conversation_read_states TO :"runtime_role";

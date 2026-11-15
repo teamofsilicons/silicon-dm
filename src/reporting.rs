@@ -208,6 +208,9 @@ pub(crate) async fn run(state: AppState, cancellation: CancellationToken) {
                 if let Some(Err(error)) = cancellation.run_until_cancelled(deliver_one(&state)).await {
                     tracing::warn!(failure="report_queue",code=error.code(),"Report worker will retry");
                 }
+                if let Some(Err(error)) = cancellation.run_until_cancelled(crate::invitation_mail::deliver_one(&state)).await {
+                    tracing::warn!(code=error.code(), "Chat invitation email worker will retry");
+                }
             }
         }
     }

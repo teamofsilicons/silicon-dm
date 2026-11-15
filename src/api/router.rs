@@ -50,6 +50,22 @@ fn build_api_router(state: AppState) -> Router {
         .route("/groups/{group_id}/leave", post(groups::leave))
         .route("/invitations", get(groups::invitations))
         .route(
+            "/chat-invitations",
+            get(super::chat_invitations::list).post(super::chat_invitations::create),
+        )
+        .route(
+            "/chat-invitations/{invitation_id}",
+            get(super::chat_invitations::get),
+        )
+        .route(
+            "/chat-invitations/{invitation_id}/accept",
+            post(super::chat_invitations::accept),
+        )
+        .route(
+            "/chat-invitations/{invitation_id}/decline",
+            post(super::chat_invitations::decline),
+        )
+        .route(
             "/allow-list",
             get(me::allow_list).post(me::allow).delete(me::disallow),
         )

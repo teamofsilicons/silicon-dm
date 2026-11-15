@@ -20,7 +20,7 @@ import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { Button } from "@/components/silicon-ui/button/button";
 import { accountName, conversationTitle, decodeAddress, inboxHref, otherParticipants } from "@/lib/chat/address";
 import { localDraftText, subscribeDrafts } from "@/lib/chat/draft-store";
-import { SEARCH_CONVERSATIONS_CAP, useConversations, useInvitations, useLoadEverything } from "@/lib/chat/hooks";
+import { SEARCH_CONVERSATIONS_CAP, useConversations, useInvitations, useChatInvitations, useLoadEverything } from "@/lib/chat/hooks";
 import { useHydrated } from "@/lib/chat/hydrated";
 import { latestPending, useOutbox } from "@/lib/chat/outbox-store";
 import { useParticipantsPresence } from "@/lib/chat/presence";
@@ -89,6 +89,7 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
   const { me, view, viewed, perspective, readOnly } = useChat();
   const list = useConversations(view);
   const invitations = useInvitations(view);
+  const chatInvitations = useChatInvitations(!view);
   const openAddress = useOpenAddress();
   const outbox = useOutbox();
   const now = useMinuteClock();
@@ -155,7 +156,7 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
     else links[next]!.focus();
   };
 
-  const pending = invitations.data?.items.length ?? 0;
+  const pending = (invitations.data?.items.length ?? 0) + (!view ? chatInvitations.data?.items.length ?? 0 : 0);
   // Only a list that never loaded shows its failure: a refresh that fails (the service restarting, a dropped
   // connection) keeps the conversations on screen, and the sync loop and the next refresh catch up.
   const failure = list.error && !list.data ? ApiError.from(list.error) : null;

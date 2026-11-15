@@ -45,7 +45,7 @@ const atApp = (url: URL | string) => String(url).startsWith(BASE) && !String(url
 async function requestCode(page: Page, email: string): Promise<string> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const after = await lastSeq();
-    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await page.getByRole("button", { name: /^(Continue|Send Me a Code)$/i }).click();
     const codeStep = page.getByRole("group", { name: /^Code from the/ }).first();
     const waiting = page.getByRole("button", { name: /^Try again in \d+:\d\d$/ });
     const outcome = await Promise.race([
@@ -57,7 +57,7 @@ async function requestCode(page: Page, email: string): Promise<string> {
     const waitMs = (minutes * 60 + seconds) * 1000;
     test.info().setTimeout(test.info().timeout + waitMs + 60_000);
     console.log(`the shared stack's code limit for this network: waiting ${Math.round(waitMs / 1000)} s before asking again`);
-    await page.getByRole("button", { name: "Continue", exact: true }).waitFor({ timeout: waitMs + 20_000 });
+    await page.getByRole("button", { name: /^(Continue|Send Me a Code)$/i }).waitFor({ timeout: waitMs + 20_000 });
   }
   throw new Error(`no code could be sent to ${email}: the stack kept refusing (its limit on codes per network)`);
 }
@@ -68,7 +68,7 @@ async function requestCode(page: Page, email: string): Promise<string> {
  * email, the code that arrives, creates the account when it is new, shares what the details pages ask with their
  * defaults, and waits to be back at the kit.
  */
-export async function signInOnHostedPages(page: Page, email: string): Promise<void> {
+export async function signInOnHostedPages(page: Page, email: string, options: { shareEmail?: boolean } = {}): Promise<void> {
   await page.waitForURL(url => url.href.startsWith(ACCOUNTS), { timeout: 30_000 });
   const emailMethod = page.getByRole("button", {name:"Email",exact:true});
   await page.getByRole("heading",{name: new RegExp(`Sign in to ${appConfig.name}`)}).waitFor();
@@ -87,13 +87,15 @@ export async function signInOnHostedPages(page: Page, email: string): Promise<vo
     await page.keyboard.type(code, { delay: 25 });
   }
   // Then: "Create account" for a new address, the app's details page(s), maybe a review page, and back to the app.
-  const next = page.getByRole("button", { name: /^(Create account|Finish setup|Share and continue|Review)$/ });
+  const next = page.getByRole("button", { name: /^(Create account|Finish setup|Share and continue|Review)$/i });
   for (let step = 0; step < 8; step++) {
     const stop = await Promise.race([
       page.waitForURL(atApp, { timeout: 60_000 }).then(() => "app" as const),
       next.first().waitFor({ state: "visible", timeout: 60_000 }).then(() => "button" as const),
     ]);
     if (stop === "app" || atApp(page.url())) break;
+    const emailSharing = page.getByRole("checkbox", { name: /Email address/i });
+    if (options.shareEmail && await emailSharing.isVisible()) await emailSharing.check();
     const button = await next.first().elementHandle({ timeout: 5_000 }).catch(() => null);
     if (!button) continue;
     // The page may move on under the click (the last step sends the browser back to the app).

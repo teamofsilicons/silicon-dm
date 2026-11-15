@@ -93,6 +93,7 @@ pub fn settings(
         },
         reporting: None,
         reports_per_hour: 10,
+        web_url: "http://127.0.0.1:4120".parse()?,
         speech: SpeechSettings::defaults()?,
         log_filter: "warn".to_owned(),
     })

@@ -13,7 +13,8 @@ import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { accountName } from "@/lib/chat/address";
 import { acceptInvitation, declineInvitation } from "@/lib/chat/api";
 import { fullTime } from "@/lib/chat/format";
-import { useInvitations } from "@/lib/chat/hooks";
+import { useInvitations, useChatInvitations } from "@/lib/chat/hooks";
+import { ChatInvitationRow } from "./chat-invitation";
 import { chatKeys } from "@/lib/chat/keys";
 import { announceConversationsChanged } from "@/lib/chat/news";
 import type { Invitation } from "@/lib/chat/types";
@@ -107,23 +108,27 @@ function InvitationRow({ invitation }: { invitation: Invitation }) {
 export function InvitationsDialog({ open }: { open: boolean }) {
   const { view, viewed } = useChat();
   const invitations = useInvitations(view);
+  const chats = useChatInvitations(!view);
+  const chatItems = !view ? chats.data?.items ?? [] : [];
   const name = viewed ? accountName(viewed) : view;
   const items = invitations.data?.items ?? [];
   return (
     <Dialog open={open} onOpenChange={next => { if (!next) closeDialog("invitations"); }}>
       <DialogContent title="Invitations"
-        description={view ? `Groups ${name} is invited to. You may decline for it; only ${name} can accept.` : "Groups you are invited to. Joining shows you their whole history."}
+        description={view ? `Groups ${name} is invited to. You may decline for it; only ${name} can accept.` : "Chat and group invitations. Accepting a group invitation shows its whole history."}
         className={styles.dialog} onCloseAutoFocus={returnFocus}>
         {/* A failed refresh keeps what was loaded (it is asked for again soon); only a list never loaded says why. */}
         {invitations.error && !invitations.data ? <ErrorAlert error={ApiError.from(invitations.error)} title="Invitations could not be loaded" action={<Button size="sm" variant="secondary" onClick={() => void invitations.refetch()}>Try again</Button>} /> : null}
+        {!view && chats.error && !chats.data ? <ErrorAlert error={ApiError.from(chats.error)} title="Chat invitations could not be loaded" /> : null}
+        {chatItems.length ? <ul role="list" className={styles.invitations} aria-label="Chat invitations">{chatItems.map(invitation => <ChatInvitationRow key={invitation.id} invitation={invitation} />)}</ul> : null}
         {items.length ? (
           <ul role="list" className={styles.invitations} aria-label={`${items.length} ${items.length === 1 ? "invitation" : "invitations"}`}>
             {items.map(invitation => <InvitationRow key={invitation.conversation_id} invitation={invitation} />)}
           </ul>
-        ) : invitations.isPending ? (
+        ) : invitations.isPending || (!view && chats.supported && chats.isPending) ? (
           <p className={styles.quiet} role="status">Looking for invitations…</p>
-        ) : invitations.error && !invitations.data ? null : (
-          <p className={styles.quiet} role="status">No invitations are waiting. When someone invites {name ?? "you"} to a group, it shows here.</p>
+        ) : chatItems.length || (invitations.error && !invitations.data) || (!view && chats.error && !chats.data) ? null : (
+          <p className={styles.quiet} role="status">No invitations are waiting. When someone invites {name ?? "you"} to chat or to a group, it shows here.</p>
         )}
       </DialogContent>
     </Dialog>

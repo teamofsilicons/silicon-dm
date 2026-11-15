@@ -10,6 +10,7 @@ pub use router::build_router;
 pub mod webhook;
 
 mod access;
+mod chat_invitations;
 mod contracts;
 mod groups;
 mod me;

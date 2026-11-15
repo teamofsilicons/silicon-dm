@@ -11,6 +11,7 @@ import { request, seg, type QueryValue, type RequestOptions } from "@/lib/client
 import { ensureFreshSession, markSignedOut } from "@/lib/client/session";
 import type {
   AccountVoice,
+  ChatInvitation,
   Activity,
   BundleDetail,
   ConversationSummary,
@@ -54,6 +55,19 @@ const forQuery = (view?: string | null) => (view ? { for: view } : undefined);
 /* Accounts ---------------------------------------------------------------------------------------------------------- */
 
 export const getMe = (signal?: AbortSignal) => dm<Me>("/api/v1/me", { signal });
+
+export function inviteToChat(to: string, withAccount: string, idempotencyKey: string) {
+  return dm<ChatInvitation>("/api/v1/chat-invitations", {
+    method: "POST", body: { type: "chat_invitation.create", data: { to, with: withAccount } }, idempotencyKey,
+  });
+}
+export const listChatInvitations = (signal?: AbortSignal) => dm<{ items: ChatInvitation[] }>("/api/v1/chat-invitations", { signal });
+export const getChatInvitation = (id: string, signal?: AbortSignal) => dm<ChatInvitation>(`/api/v1/chat-invitations/${seg(id)}`, { signal });
+export function answerChatInvitation(id: string, answer: "accept" | "decline") {
+  return dm<ChatInvitation>(`/api/v1/chat-invitations/${seg(id)}/${answer}`, {
+    method: "POST", body: { type: `chat_invitation.${answer}`, data: {} }, idempotencyKey: `chat-invitation:${id}:${answer}`,
+  });
+}
 
 /* Conversations ----------------------------------------------------------------------------------------------------- */
 

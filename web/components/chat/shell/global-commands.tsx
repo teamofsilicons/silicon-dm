@@ -137,6 +137,7 @@ export function GlobalCommands() {
     commands.push(
       { id: "conversation.new", label: "New conversation", group: "Actions", icon: icon(MessageSquarePlus), shortcutId: "conversation.new", keywords: ["start", "message", "write"], run: () => openDialog("new-conversation") },
       { id: "group.new", label: "New group", group: "Actions", icon: icon(Users), shortcutId: "group.new", keywords: ["create"], run: () => openDialog("new-group") },
+      { id: "chat.invite", label: "Invite to chat", group: "Actions", icon: icon(Mail), keywords: ["email", "invite", "share", "silicon"], run: () => openDialog("invite-to-chat") },
       { id: "go.invitations", label: "Invitations", group: "Actions", icon: icon(Mail), shortcutId: "go.invitations", keywords: ["groups", "invites", "accept"], run: () => openDialog("invitations") },
       { id: "conversations.markAllRead", label: "Mark everything read", group: "Actions", icon: icon(Inbox), shortcutId: "conversations.markAllRead", keywords: ["clear", "unread"], run: () => void markEverythingRead() },
       { id: "shortcuts.open", label: "Keyboard shortcuts", group: "Actions", icon: icon(Keyboard), shortcutId: "shortcuts.open", keywords: ["keys", "cheatsheet", "help"], run: () => openDialog("shortcuts") },

@@ -17,6 +17,7 @@ export const chatKeys = {
   /** An account's presence; its activity is about `conversation` when the service says activity per conversation. */
   presence: (account: string, conversation?: string | null) => ["dm", "presence", account, conversation ?? ""] as const,
   invitations: (view?: string | null) => ["dm", "invitations", viewKey(view)] as const,
+  chatInvitations: ["dm", "chat-invitations"] as const,
   group: (id: string, view?: string | null) => ["dm", "group", id, viewKey(view)] as const,
   gifs: (kind: "trending" | "recent" | "search", query = "") => ["dm", "gifs", kind, query] as const,
   voices: ["dm", "voices"] as const,

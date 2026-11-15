@@ -187,3 +187,20 @@ conversation.
 
 `MessageCreate.sender_id` and `recipient_id` carry optional routes such as `deliberate@si:cos`. They never change who
 may read the conversation, and edits keep the original route.
+
+## Chat invitations
+
+`invite_to_chat(to, with, key)` accepts one Carbon ID, Silicon ID or email; `with` is `None` for yourself,
+or a Silicon you look after. `chat_invitations()` lists pending invitations; `chat_invitation(id)` reads one.
+`accept_chat_invitation(id, key)` returns its canonical `conversation_id`; `decline_chat_invitation(id, key)` declines.
+Keep the same key for each retry. These routes require the account’s own DM token; email acceptance also requires
+the `email` scope and a verified primary email matching the invitation.
+
+```rust,no_run
+# use silicon_dm_client::{Client, Result};
+# async fn example(client: &Client) -> Result<()> {
+let invitation = client.invite_to_chat("ada@example.com", Some("si:scout"), "invite-ada-20261115").await?;
+println!("{}", invitation.url);
+# Ok(())
+# }
+```

@@ -742,6 +742,23 @@ async fn relay_command(
     let mut queue_only = false;
     let operation = match command {
         Command::Whoami => Operation::Me,
+        Command::Invite { to, with } => Operation::CreateChatInvitation {
+            to,
+            with,
+            idempotency_key: key,
+        },
+        Command::Invitations { command } => match command {
+            ChatInviteCommand::List => Operation::ListChatInvitations,
+            ChatInviteCommand::Show { id } => Operation::GetChatInvitation { id },
+            ChatInviteCommand::Accept { id } => Operation::AcceptChatInvitation {
+                id,
+                idempotency_key: key,
+            },
+            ChatInviteCommand::Decline { id } => Operation::DeclineChatInvitation {
+                id,
+                idempotency_key: key,
+            },
+        },
         Command::Groups { command } => match command {
             Groups::List { page } => Operation::ListGroups { page: page.page() },
             Groups::Show { group } => Operation::GetGroup { group_id: group },
