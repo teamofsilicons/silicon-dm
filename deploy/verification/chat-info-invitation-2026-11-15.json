@@ -1,0 +1,36 @@
+{
+  "date": "2026-11-15",
+  "scope": "Website invitation entry in direct-chat Info",
+  "source_revision": "77c6ba63cdd47077c05db68b8e4abf6322767523",
+  "version": "0.17.3",
+  "pull_request": "https://github.com/teamofsilicons/silicon-dm/pull/23",
+  "image_build": "https://github.com/teamofsilicons/silicon-dm/actions/runs/43685503929",
+  "website_image": "sha256:912fbf48815868e4ee23e55430b894daf483fd46224b91348c5fbd6a738c3b27",
+  "website_archive_sha256": "68e65104f49636402ec1662796aa27c7e868c4849baf4a6f0679da8b8b0e9ae1",
+  "previous_website_image": "sha256:ce69e1ef42457a38758228cfe843a492a9a2cdb18e033491a400d0bafc450bc2",
+  "previous_website_container": "dm-accounts-web-before-1794724251",
+  "retained_service_revision": "eb8abb1663cfaf4e99c2de810939e896e3d6c1f7",
+  "database_changes": false,
+  "checks": {
+    "website": 200,
+    "public_live": 204,
+    "public_ready": 204,
+    "container_running": true,
+    "container_restarts": 0,
+    "browser_session_mount_preserved": true,
+    "info_invitation_bundle": true,
+    "info_invitation_chunk_public": true
+  },
+  "validation": {
+    "typecheck": "passed",
+    "lint": "passed",
+    "website_unit_tests": "363 passed",
+    "production_build": "passed",
+    "browser_tests": "5 invitation flows plus account setup passed. Info at desktop, tablet and phone widths; owned Silicon preselection; Carbon-chat and New defaults; sending; keyboard focus; ID acceptance; email signup and automatic conversation opening.",
+    "visual_review": "Light desktop Info and dark phone Info and invitation form inspected.",
+    "website_ci": "passed",
+    "dependency_policy": "Failed; no dependency changes in this website release. See the earlier chat-invitations release record and CI."
+  },
+  "authenticated_production_browser_test": false,
+  "pr_merged": false
+}
