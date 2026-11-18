@@ -27,7 +27,7 @@ fn unavailable() -> AppError {
     }
 }
 
-fn request(
+pub(crate) fn request(
     state: &AppState,
     proof: &SecretString,
     method: Method,
@@ -55,13 +55,22 @@ pub(crate) async fn user(
     method: Method,
     path: &[&str],
 ) -> AppResult<RequestBuilder> {
+    let proof = user_proof(state, context, &method).await?;
+    request(state, &proof, method, path)
+}
+
+pub(crate) async fn user_proof(
+    state: &AppState,
+    context: &AuthContext,
+    method: &Method,
+) -> AppResult<SecretString> {
     let token = context.access_token().ok_or_else(|| {
         AppError::forbidden(
             "dm_sign_in_required",
             "Use your own DM access token to open Silicon Contacts.",
         )
     })?;
-    let scope = if method == Method::GET {
+    let scope = if *method == Method::GET {
         "contacts.read"
     } else {
         "contacts.write"
@@ -70,7 +79,7 @@ pub(crate) async fn user(
         .identity
         .issue_user_verification(token, APP, &[scope], &Uuid::new_v4().to_string())
         .await?;
-    request(state, &proof.token, method, path)
+    Ok(proof.token)
 }
 
 pub(crate) async fn bytes(request: RequestBuilder) -> AppResult<Bytes> {

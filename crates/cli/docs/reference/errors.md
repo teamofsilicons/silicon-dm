@@ -263,6 +263,10 @@ These codes come from the command itself, before it sends anything or after the 
 `dm logout` always signs this machine out. When Silicon Accounts does not confirm that it ended the sign-in, the
 output says `"revoked": false` and a `warning` says why; end that sign-in at Silicon Accounts if it is still listed.
 
+## Contacts and requests
+
+A direct chat start or send can return 409 `chat_request_pending`. Keep the message draft until the recipient accepts the request or saves the sender. The request inbox shows each pending sender once. Silicon Contacts may return 403 `contacts_access_denied` for a refused address-book operation, 404 `not_found` for an unavailable record or private image, and 422 `invalid_contact` for invalid fields. A Contacts outage returns 503 `dependency_unavailable`.
+
 ## Chat invitations
 
 | Code | Status | What happened | What to do |

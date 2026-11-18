@@ -54,6 +54,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Page through your Silicon Contacts address book.
           content:
@@ -132,6 +133,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Save a contact in your address book.
           content:
@@ -199,6 +201,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Replace the complete saved contact details.
           content:
@@ -271,6 +274,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Read a saved contact by account ID or UUID.
           content:
@@ -321,6 +325,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Remove a contact by permanent UUID.
           content:
@@ -355,6 +360,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Fuzzy matching saved contacts and known chat peers, ranked by trust.
           content:
@@ -404,12 +410,13 @@ paths:
   /api/v1/people/lookup:
     get:
       operationId: lookupPerson
-      summary: Look up the permitted profile for an exact Carbon or Silicon ID.
+      summary: Resolve a saved contact or available Accounts profile by exact Carbon or Silicon ID.
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
-          description: Look up the permitted profile for an exact Carbon or Silicon ID.
+          description: Resolve a saved contact or available Accounts profile by exact Carbon or Silicon ID.
           content:
             application/json:
               schema:
@@ -446,6 +453,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Upload a private PNG, JPEG or WebP to your address book.
           content:
@@ -492,6 +500,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Read your own private contact thumbnail.
           content:
@@ -515,6 +524,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Read the incoming direct message preference.
           content:
@@ -547,6 +557,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Set the incoming direct message preference.
           content:
@@ -604,6 +615,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: List your pending chat requests.
           content:
@@ -664,6 +676,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Accept or decline your chat request. Repeating the same decision is safe.
           content:
@@ -732,6 +745,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '406': {$ref: '#/components/responses/Error'}
         '200':
           description: Read the standalone interface integration guide.
           content:
@@ -748,6 +762,7 @@ paths:
       tags:
       - Accounts
       responses:
+        '406': {$ref: '#/components/responses/Error'}
         '200':
           description: Read the complete versioned OpenAPI description.
           content:
@@ -766,6 +781,7 @@ paths:
       - Messages
       summary: Discover attachment availability and size limit.
       responses:
+        '405': {description: Unsupported HTTP method.}
         '200':
           description: Upload settings.
           content:
@@ -792,6 +808,7 @@ paths:
       - Messages
       summary: Stream the raw file to the account’s own Briefcase.
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: The saved attachment link.
           content:
@@ -890,6 +907,7 @@ paths:
       - Messages
       summary: Poll a pending upload owned by this account.
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: The saved attachment link.
           content:
@@ -953,6 +971,7 @@ paths:
       - Messages
       summary: Cancel a pending upload owned by this account.
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: Cancellation status.
           content:
@@ -988,6 +1007,7 @@ paths:
       - Messages
       summary: Fetch the contents or headers of a Briefcase message attachment.
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: File response.
           content:
@@ -1016,6 +1036,7 @@ paths:
       - Messages
       summary: Fetch the contents or headers of a Briefcase message attachment.
       responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '200':
           description: File response.
           content:
@@ -2785,6 +2806,15 @@ components:
           type:
           - string
           - 'null'
+        trust:
+          type: integer
+          minimum: 0
+          maximum: 255
+          description: Saved contact trust. Known unsaved peers may have trust zero.
+        photo_id:
+          type: [string, 'null']
+          format: uuid
+          description: Owner-private picture. Fetch pfp_url from the DM service with the caller's bearer.
         status:
           type: string
       required:

@@ -80,7 +80,7 @@ const nextConfig: NextConfig = {
       { source: "/api/interface/uploads/:path*", headers: [
         {key:"Access-Control-Allow-Origin",value:"*"},
         {key:"Access-Control-Allow-Methods",value:"GET, HEAD, POST, DELETE, OPTIONS"},
-        {key:"Access-Control-Allow-Headers",value:"Authorization, Content-Type, Range, If-Range, If-None-Match"},
+        {key:"Access-Control-Allow-Headers",value:"Authorization, Content-Type, Range, If-Range, If-None-Match, X-DM-Contract-Version, Idempotency-Key"},
         {key:"Access-Control-Expose-Headers",value:"ETag, Content-Range, Accept-Ranges, Retry-After"}] },
       // The font files never change in place (a new cut gets a new name).
       { source: "/fonts/:path*", headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }] },

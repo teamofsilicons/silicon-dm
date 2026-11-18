@@ -65,7 +65,7 @@ export function refOf(p: Profile): AccountRef {
     id: p.id,
     type: p.kind,
     display_name: p.display_name || undefined,
-    pfp_url: p.pfp_url || undefined,
+    pfp_url: p.pfp_url?.startsWith("/api/v1/contact-photos/") ? `/api${p.pfp_url}` : p.pfp_url || undefined,
     deleted: p.status === "deleted",
   };
 }

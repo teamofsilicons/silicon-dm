@@ -35,7 +35,7 @@ async fn preference(app: &TestApp, token: &str, enabled: bool) -> Result<(), Box
 async fn pending(app: &TestApp, token: &str) -> Result<Vec<Value>, BoxError> {
     let r = app.get("/api/v1/chat-requests", token).await?;
     expect_status(&r, StatusCode::OK)?;
-    Ok(r.1["items"].as_array().ok_or("no request list")?.to_vec())
+    Ok(r.1["items"].as_array().ok_or("no request list")?.clone())
 }
 
 #[tokio::test]
@@ -177,5 +177,33 @@ async fn standalone_people_use_private_contact_names_trust_and_fuzzy_search() ->
     assert_eq!(matches[0]["trust"], 190);
     assert!(matches[0]["photo_id"].is_string());
     assert_eq!(matches[1]["id"], "si:meteor");
+    assert_eq!(
+        matches[0]["pfp_url"],
+        "/api/v1/contact-photos/e15b0802-b722-4097-89c0-c86ebc40ef8d"
+    );
+    Mock::given(method("GET"))
+        .and(path("/v1/lookup"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"uuid":"Mas","id":"si:master","kind":"silicon","display_name":"Public account"}),
+        ))
+        .mount(&app.accounts.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/contacts/Mas"))
+        .and(header("Authorization", "Proof sap_user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(saved(
+            "Mas",
+            "si:master",
+            "Master",
+            190,
+            false,
+        )))
+        .mount(&app.accounts.server)
+        .await;
+    let exact = app
+        .get("/api/v1/people/lookup?q=si%3Amaster", &token)
+        .await?;
+    expect_status(&exact, StatusCode::OK)?;
+    assert_eq!(exact.1, matches[0]);
     app.close().await
 }

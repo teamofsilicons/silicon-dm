@@ -593,7 +593,7 @@ impl Client {
         )
         .await
     }
-    /// Resolve the publicly available name and picture of one exact account.
+    /// Resolve a saved or publicly available name and picture by exact account ID.
     pub async fn lookup_person(&self, id: &str) -> Result<Value> {
         self.json(
             self.request(Method::GET, "people/lookup")?

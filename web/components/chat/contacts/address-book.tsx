@@ -136,7 +136,7 @@ function Editor({
       </label>
       <label>
         Notes
-        <textarea rows={3} maxLength={10000} value={note} onChange={(e) => setNote(e.target.value)} />
+        <textarea aria-label="Notes" rows={3} maxLength={10000} value={note} onChange={(e) => setNote(e.target.value)} />
       </label>
       <label>
         Contact photo

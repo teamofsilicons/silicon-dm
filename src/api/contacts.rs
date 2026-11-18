@@ -44,8 +44,20 @@ pub(super) async fn lookup(
             "Enter a complete Carbon or Silicon ID, or its permanent account identifier.",
         ));
     }
-    let req = contacts::user(&s, &c, Method::GET, &["lookup"]).await?;
-    Ok(Json(contacts::json(req.query(&[("q", id)])).await?))
+    let proof = contacts::user_proof(&s, &c, &Method::GET).await?;
+    let req = contacts::request(&s, &proof, Method::GET, &["lookup"])?;
+    let profile = contacts::json(req.query(&[("q", id)])).await?;
+    let uuid = profile["uuid"]
+        .as_str()
+        .ok_or(AppError::DependencyUnavailable {
+            dependency: "silicon_contacts",
+        })?;
+    let saved = contacts::request(&s, &proof, Method::GET, &["contacts", uuid])?;
+    match contacts::json(saved).await {
+        Ok(contact) => Ok(Json(contact_profile(&contact))),
+        Err(err) if err.status() == http::StatusCode::NOT_FOUND => Ok(Json(profile)),
+        Err(err) => Err(err),
+    }
 }
 
 #[derive(Deserialize)]
@@ -154,6 +166,20 @@ pub(super) struct Search {
     limit: Option<usize>,
 }
 
+fn contact_profile(contact: &Value) -> Value {
+    let mut profile = contact["account"].clone();
+    profile["display_name"] = contact["name"].clone();
+    profile["trust"] = contact["trust"].clone();
+    profile["photo_id"] = contact["photo_id"].clone();
+    if let Some(id) = contact["photo_id"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+    {
+        profile["pfp_url"] = Value::String(format!("/api/v1/contact-photos/{id}"));
+    }
+    profile
+}
+
 fn fuzzy(haystack: &str, needle: &str) -> bool {
     let mut chars = haystack.chars();
     needle
@@ -210,11 +236,7 @@ pub(super) async fn people(
                 by_id.remove(uuid);
                 continue;
             }
-            let mut profile = item["account"].clone();
-            profile["display_name"] = item["name"].clone();
-            profile["trust"] = item["trust"].clone();
-            profile["photo_id"] = item["photo_id"].clone();
-            by_id.insert(uuid.to_owned(), profile);
+            by_id.insert(uuid.to_owned(), contact_profile(item));
         }
         offset += items.len();
         if u64::try_from(offset).unwrap_or(u64::MAX) >= page["total"].as_u64().unwrap_or_default()
