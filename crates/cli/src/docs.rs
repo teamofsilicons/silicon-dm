@@ -46,6 +46,8 @@ enum Topic {
     Groups,
     /// Build a reliable typed integration.
     Building,
+    /// Use the complete DM API from a standalone Silicon Interface.
+    Interfaces,
     /// Why messages are waiting, sent, delivered, read or failed, and why receipts are explicit.
     #[value(alias = "receipts")]
     MessageStates,
