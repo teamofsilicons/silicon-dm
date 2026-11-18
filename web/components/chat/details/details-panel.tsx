@@ -22,6 +22,7 @@ import { useChat } from "../shell/chat-context";
 import { useDetails } from "../shell/details";
 import { AddressSection } from "./address-section";
 import { GroupDetailsPanel } from "./group-details";
+import Link from "next/link";
 import { PersonRow, Profile, usePersonBasics } from "./person";
 import { custodianOf, SiliconFacts } from "./silicon-facts";
 import styles from "./details.module.css";
@@ -65,6 +66,7 @@ export function DetailsPanel({ conversation, address, presence }: { conversation
               <MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden="true" />
               Invite to chat
             </Button> : null}
+            {!view && !single.deleted && <Link href={`/contacts?person=${encodeURIComponent(single.id)}`}>{single.trust ? "Edit contact" : "Save contact"}</Link>}
           </Profile>
           {single.type === "silicon" ? <SiliconFacts silicon={single} conversation={conversation} me={me} /> : null}
         </>

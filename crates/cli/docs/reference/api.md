@@ -63,6 +63,13 @@ app may call with a User verification proof ([below](#apps-acting-for-an-account
 | `POST /groups/{group}/accept`, `/decline`, `/leave` | Your invitation and membership | own |
 | `GET /invitations` | Invitations waiting for you (`?for=si:…`) | own |
 | `POST /chat-invitations` | Invite a Carbon ID, Silicon ID or email to chat | own |
+| `GET /interface-guide`, `GET /openapi.yaml` | Interface integration guide and machine-readable contract | none |
+| `GET /people`, `GET /people/lookup` | Search saved contacts and known peers, or resolve a complete ID | own |
+| `GET`, `POST /contacts` | Read or save Silicon Contacts records | own |
+| `GET`, `PUT`, `DELETE /contacts/{peer}` | Read, replace or remove a saved contact | own |
+| `POST /contact-photos`, `GET /contact-photos/{photo_id}` | Upload or read an owner-private contact photo | own |
+| `GET`, `PUT /direct-settings` | Read or set contacts-only direct messages | own |
+| `GET /chat-requests`, `PUT /chat-requests/{request_id}` | List incoming requests and accept or decline one | own |
 | `GET /chat-invitations` | Pending direct-chat invitations for your account or verified primary email | own |
 | `GET /chat-invitations/{invitation_id}` | Inspect an invitation as its sender or recipient | own |
 | `POST /chat-invitations/{invitation_id}/accept` | Accept and create or reuse the direct conversation | own |
@@ -96,9 +103,7 @@ x-dm-contract-version: 4
 ```
 
 DM verifies the token itself (signature, audience `dm`, issuer, expiry) against the keys Silicon Accounts publishes.
-A sign-out, a removed access or an STK rotation ends every token issued before it. A few sensitive changes (group
-settings and ownership, removing members, deleting a message, allow-list changes) also ask Silicon Accounts whether
-the sign-in is still live, because a stale token must never make them.
+DM also checks live Accounts introspection on every bearer request, requiring an active access token for its app and the matching subject. Expired or revoked credentials return 401. When Accounts cannot verify the sign-in, DM returns 503.
 
 ### Apps acting for an account
 

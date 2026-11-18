@@ -168,7 +168,9 @@ impl AccountsAdapter {
     }
 
     async fn verify_locally(&self, token: &str) -> AppResult<silicon_accounts_client::Claims> {
-        let options = VerifyOptions::for_app(&self.inner.app_id).with_issuer(&self.inner.issuer);
+        let mut options =
+            VerifyOptions::for_app(&self.inner.app_id).with_issuer(&self.inner.issuer);
+        options.leeway_seconds = 0;
         let jwks = self.jwks(false).await?;
         match verify_access_token(&jwks, token, &options) {
             Err(silicon_accounts_client::Error::Token(TokenError::UnknownKey { .. })) => {
@@ -234,11 +236,7 @@ impl AccountsAdapter {
             .insert(key, (Instant::now(), verdict));
     }
 
-    async fn authenticate_bearer(
-        &self,
-        token: &SecretString,
-        requirement: AuthRequirement,
-    ) -> AppResult<AuthContext> {
+    async fn authenticate_bearer(&self, token: &SecretString) -> AppResult<AuthContext> {
         let raw = token.expose_secret();
         let claims = self.verify_locally(raw).await?;
         let kind = match claims.kind {
@@ -257,8 +255,8 @@ impl AccountsAdapter {
                 "The access token's subject is not a Silicon Accounts uuid.",
             ));
         }
-        if requirement.live {
-            // These routes must see a sign-out at once, so Silicon Accounts is asked every
+        {
+            // Bearer-authenticated routes must see a sign-out at once, so Silicon Accounts is asked every
             // time; only a negative answer is reused (an ended sign-in never comes back).
             let key = *blake3::hash(raw.as_bytes()).as_bytes();
             let active = if matches!(self.cached_live(&key).await, Some(LiveVerdict::Inactive)) {
@@ -426,7 +424,10 @@ impl AccountsAdapter {
                 dependency: "accounts",
             }
         })?;
-        Ok(introspection.active && introspection.sub.as_deref() == Some(sub))
+        Ok(introspection.active
+            && introspection.sub.as_deref() == Some(sub)
+            && introspection.token_type.as_deref() == Some("access_token")
+            && introspection.client_id.as_deref() == Some(self.inner.app_id.as_str()))
     }
 
     async fn spend_lookup(&self) -> AppResult<()> {
@@ -565,9 +566,7 @@ impl IdentityProvider for AccountsAdapter {
             ));
         }
         match credential {
-            PresentedCredential::Bearer(token) => {
-                self.authenticate_bearer(token, requirement).await
-            }
+            PresentedCredential::Bearer(token) => self.authenticate_bearer(token).await,
             PresentedCredential::Proof(proof) => self.authenticate_proof(proof, requirement).await,
         }
     }

@@ -200,3 +200,6 @@
   .brand, .newButton, .invitations, .row, .viewAs { transition: none; }
   .skeletonRow i { animation: none; }
 }
+
+.sections { display:flex; gap:1.15rem; padding:0 1rem .45rem; font-size:.8125rem; }
+.sections a { color:inherit; text-underline-offset: .25em; }

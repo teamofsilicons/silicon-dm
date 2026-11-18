@@ -38,7 +38,9 @@ import { after, type NextRequest, type NextResponse } from "next/server";
 import { claimUploadSlot, cleanFileName, contentTypeFor, declaredFile, discardBody, failureOf, keepSaving, restarting, saveToBriefcase, SAVING_TIMING, stopping, storedName, tooManyUploads, trackUpload, UploadFailure, UploadProof, uploadsSettings, type SavedUpload } from "@/lib/server/briefcase";
 import { EnvError, serverEnv } from "@/lib/server/env";
 import { json, misconfigured } from "@/lib/server/responses";
-import { errorBody, readSession, sameOriginProblem } from "@/lib/server/session";
+import { errorBody } from "@/lib/server/session";
+
+import { uploadIdentity, uploadOriginProblem } from "@/lib/server/upload-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -78,7 +80,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
     throw error;
   }
-  const problem = sameOriginProblem(request);
+  const problem = uploadOriginProblem(request);
   if (problem) {
     discardBody(request.body);
     return json(403, errorBody("cross_site_request", problem, "Use this site's own pages."));
@@ -87,8 +89,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (stopping()) return refuse(restarting());
   const settings = uploadsSettings();
   if (!settings.enabled) return refuse(new UploadFailure(503, "uploads_not_configured", settings.reason, "Send a link instead (+\u00a0→\u00a0Add a link)."));
-  const session = readSession(request);
-  if (!session) return refuse(new UploadFailure(401, "signed_out", "This browser is not signed in (no session, or it ended).", "Sign in again."));
+  const session = await uploadIdentity(request);
+  if (session instanceof Response) { discardBody(request.body); return session; }
   if (session.ae - Date.now() < TOKEN_MARGIN_MS) {
     return refuse(new UploadFailure(401, "session_refresh_needed", "Your sign-in needs renewing before the file can be saved.", "This page renews it and sends the file again by itself; if this stays, reload the page."));
   }

@@ -282,6 +282,12 @@ pub(crate) async fn start_conversation(
         .parse()
         .map_err(|_| AppError::validation("invalid idempotency key"))?
     };
+    super::chat_requests::check(
+        state,
+        &context.actor,
+        &others.iter().map(|a| a.uuid.clone()).collect::<Vec<_>>(),
+    )
+    .await?;
     let conversation = state
         .store
         .create_conversation(CreateConversationCommand {

@@ -12,7 +12,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { fileResponseHeaders, publicFileTarget, sameBriefcaseFile, uploadsSettings } from "@/lib/server/briefcase";
 import { json } from "@/lib/server/responses";
-import { errorBody, readSession } from "@/lib/server/session";
+import { errorBody } from "@/lib/server/session";
+
+import { uploadIdentity } from "@/lib/server/upload-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +29,8 @@ const ANSWER_TIMEOUT_MS = 60_000;
 async function handle(request: NextRequest): Promise<NextResponse> {
   const settings = uploadsSettings();
   if (!settings.enabled) return json(503, errorBody("uploads_not_configured", settings.reason, "Ask the sender for another link."));
-  if (!readSession(request)) return json(401, errorBody("signed_out", "Files from messages are shown to signed-in browsers only.", "Sign in again."));
+  const identity = await uploadIdentity(request);
+  if (identity instanceof Response) return identity;
   const target = publicFileTarget(settings, request.nextUrl.searchParams.get("url"));
   if ("problem" in target) return json(400, errorBody("invalid_file_link", target.problem, "Open the file from its message."));
   const download = target.download || request.nextUrl.searchParams.get("download") === "1";

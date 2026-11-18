@@ -34,6 +34,8 @@ pub struct Settings {
     pub data_key: DataKey,
     /// Ting delivery; disabled unless `DM_TING_URL` is set.
     pub ting: TingSettings,
+    /// Silicon Contacts API origin.
+    pub contacts_url: Url,
     /// Giphy settings.
     pub providers: ProviderSettings,
     /// Presence lease policy (named after the retired realtime protocol it came from).
@@ -641,6 +643,7 @@ impl Settings {
                     })
                 })
                 .transpose()?,
+            contacts_url: parse_or("DM_CONTACTS_URL", "https://contacts.teamofsilicons.com")?,
             reports_per_hour: parse_or("DM_REPORTS_PER_HOUR", "10")?,
             web_url: parse_or("DM_WEB_URL", "https://dm.teamofsilicons.com")?,
             speech: SpeechSettings::from_env()?,
@@ -663,6 +666,7 @@ impl Settings {
 
     fn validate(&self) -> Result<(), SettingsError> {
         validate_web_url(&self.web_url, self.environment)?;
+        validate_url("DM_CONTACTS_URL", &self.contacts_url, self.environment)?;
         if let Some(reporting) = &self.reporting {
             validate_url(
                 "DM_POSTMARK_EMAIL_URL",

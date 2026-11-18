@@ -15,6 +15,7 @@ import { inboxHref } from "@/lib/chat/address";
 import { useTitle } from "@/lib/chat/title";
 import { ListeningSettings, VoiceSettings } from "../voice/settings-parts";
 import { useChat } from "../shell/chat-context";
+import { DirectSettings } from "../contacts/requests";
 import { KeyboardSection } from "./keyboard-section";
 import { AccountSection, NotificationsSection, ReportSection, SendingSection } from "./sections";
 import styles from "./settings.module.css";
@@ -110,6 +111,7 @@ export function SettingsPage() {
     { id: "voice", title: "Voice", description: "How your Silicons sound when you listen to them, and how you sound.", icon: icon(Volume2), body: <VoiceSettings /> },
     { id: "listening", title: "Listening", description: "Listen to messages, and Listen mode.", icon: icon(Headphones), body: <ListeningSettings /> },
     { id: "sending", title: "Sending", description: "Which keys send a message.", icon: icon(Send), body: <SendingSection /> },
+    { id: "direct-messages", title: "Direct messages", description: "Choose who can start a chat with you.", icon: icon(Send), body: <DirectSettings /> },
     { id: "keyboard", title: "Keyboard", description: "Every shortcut, and your own keys for them.", icon: icon(Keyboard), body: <KeyboardSection /> },
     { id: "notifications", title: "Notifications", description: "When this browser tells you about new messages.", icon: icon(Bell), body: <NotificationsSection /> },
     { id: "account", title: "Account", description: "Who you are signed in as.", icon: icon(CircleUserRound), body: <AccountSection /> },

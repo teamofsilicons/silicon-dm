@@ -21,7 +21,9 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Plus } from "lucide-react";
 import { Avatar } from "@/components/silicon-ui/avatar/avatar";
 import { motionTokens } from "@/components/silicon-ui/lib/motion-tokens";
-import { AccountChip, KindMarker } from "@/components/foundation/account/account-chip";
+import { PersonPreview } from "./person-preview";
+import { useExactPerson } from "@/lib/chat/contacts";
+import { KindMarker } from "@/components/foundation/account/account-chip";
 import { accountName } from "@/lib/chat/address";
 import type { AccountRef } from "@/lib/chat/types";
 import { accountKey, isListed, keySet, matchAccounts, typedAccount } from "./contacts";
@@ -81,6 +83,7 @@ export const AccountPicker = forwardRef<AccountPickerHandle, AccountPickerProps>
   const excluded = useMemo(() => keySet(exclude), [exclude]);
   const offer = useMemo(() => suggestions.filter(account => !isListed(account, chosen) && !isListed(account, excluded)), [suggestions, chosen, excluded]);
 
+  const exact=useExactPerson(text,offer.find(p=>p.id===text.trim().toLowerCase()));
   const options = useMemo<Option[]>(() => {
     // Without `showRecent` the people show as you type, or when ↓ asks for them in the empty field.
     if (!text.trim() && !showRecent && !browsing) return [];
@@ -89,10 +92,10 @@ export const AccountPicker = forwardRef<AccountPickerHandle, AccountPickerProps>
     if (!typed?.ok || matches.some(option => option.account.id === typed.account.id) || isListed(typed.account, chosen) || isListed(typed.account, excluded)) return matches;
     // An id nobody in the list has is offered as typed: first when it is a whole new id, after the people whose ids
     // start with it while it may still be the start of one of theirs ("c:dmc-" → Bo, Cy… first).
-    const option = { kind: "typed" as const, account: typed.account };
+    const option:Option = exact ? {kind:"account",account:exact} : {kind:"typed",account:typed.account};
     const prefix = offer.some(account => account.id.startsWith(typed.account.id));
     return prefix ? [...matches.slice(0, listSize), option] : [option, ...matches].slice(0, listSize + 1);
-  }, [offer, text, listSize, showRecent, browsing, chosen, excluded]);
+  }, [offer, text, listSize, showRecent, browsing, chosen, excluded, exact]);
 
   const expanded = !disabled && options.length > 0 && (!!text.trim() || browsing);
   // Text that is neither someone listed nor an id (an id already chosen or left out says so when it is added).
@@ -248,7 +251,7 @@ export const AccountPicker = forwardRef<AccountPickerHandle, AccountPickerProps>
                   animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
                   exit={reduced ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, scale: 0.92, transition: { duration: motionTokens.duration.instant } }}
                   transition={reduced ? { duration: motionTokens.duration.instant } : { ...motionTokens.spring.morph, opacity: { duration: motionTokens.duration.fast } }}>
-                  <AccountChip account={{ id: account.id, uuid: account.uuid, kind: account.type, display_name: account.display_name, pfp_url: account.pfp_url }} variant="chip"
+                  <PersonPreview account={account} variant="chip"
                     state={flagged.includes(account.id) ? "problem" : undefined} onRemove={disabled ? undefined : () => remove(account)} removeLabel={`Remove ${accountName(account)}${account.display_name ? ` (${account.id})` : ""}`} />
                 </motion.li>
               ))}
@@ -291,8 +294,8 @@ export const AccountPicker = forwardRef<AccountPickerHandle, AccountPickerProps>
       </div>
       {problem ? <p id={problemId} className={styles.problem} role="alert">{problem}</p> : null}
       {description ? <p id={hintId} className={styles.hint}>{description}</p> : null}
-      <div id={listId} role="listbox" aria-label={text.trim() ? `Accounts matching ${text.trim()}` : "From your conversations"} className={styles.list} hidden={!options.length || disabled}>
-        {!text.trim() && options.length ? <div className={styles.listLabel} aria-hidden="true">From your conversations</div> : null}
+      <div id={listId} role="listbox" aria-label={text.trim() ? `Accounts matching ${text.trim()}` : "Contacts and conversations"} className={styles.list} hidden={!options.length || disabled}>
+        {!text.trim() && options.length ? <div className={styles.listLabel} aria-hidden="true">Contacts and conversations</div> : null}
         {options.map((option, index) => (
           <div key={`${option.kind}:${accountKey(option.account)}`} id={optionId(index)} role="option" aria-selected={index === activeIndex}
             className={styles.option} data-sq="surface" data-active={index === activeIndex ? "" : undefined}
@@ -317,7 +320,7 @@ export const AccountPicker = forwardRef<AccountPickerHandle, AccountPickerProps>
       </div>
       {/* Always there (empty, it takes no room), so the words are heard when they come: a query that matches no one
           says so, and how to name someone who is not in the list yet. */}
-      <p className={styles.listEmpty} aria-live="polite">{nobody ? `No one you talk to matches “${text.trim()}”. Type an id such as c:ada for a Carbon or si:scout for a Silicon.` : ""}</p>
+      <p className={styles.listEmpty} aria-live="polite">{nobody ? `No one matches “${text.trim()}”. Type an id such as c:ada for a Carbon or si:scout for a Silicon.` : ""}</p>
       <span className="sr-only" aria-live="polite">{notice}</span>
     </div>
   );

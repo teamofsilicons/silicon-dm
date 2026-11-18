@@ -1,4 +1,4 @@
-import { AudioLines, Headphones, Keyboard, MessageCircle, Radio, Settings2, ShieldCheck, TerminalSquare } from "lucide-react";
+import { CircleUserRound, AudioLines, Headphones, Keyboard, MessageCircle, Radio, Settings2, ShieldCheck, TerminalSquare } from "lucide-react";
 import type { AppConfig } from "./app-config.types";
 
 export const appConfig: AppConfig = {
@@ -13,6 +13,8 @@ export const appConfig: AppConfig = {
   home: "/c",
   nav: [
     { href: "/c", label: "Messages", icon: MessageCircle, keywords: ["conversations", "inbox", "chats"] },
+    { href: "/contacts", label: "Contacts", icon: CircleUserRound, keywords: ["address book","trust"] },
+    { href: "/requests", label: "Requests", icon: MessageCircle, keywords:["chat requests"] },
     { href: "/settings", label: "Settings", icon: Settings2, keywords: ["preferences", "voice", "keyboard", "notifications"] },
   ],
   links: { docs: "https://docs.dm.teamofsilicons.com", store: "https://apps.teamofsilicons.com/apps/dm" },

@@ -540,6 +540,78 @@ impl Client {
     pub async fn me(&self) -> Result<Me> {
         self.json(self.request(Method::GET, "me")?).await
     }
+    /// Search the account's address book and known peers by name or ID.
+    pub async fn people(&self, query: &str, limit: u16) -> Result<Value> {
+        self.json(
+            self.request(Method::GET, "people")?
+                .query(&[("q", query), ("limit", &limit.to_string())]),
+        )
+        .await
+    }
+    /// Resolve the publicly available name and picture of one exact account.
+    pub async fn lookup_person(&self, id: &str) -> Result<Value> {
+        self.json(
+            self.request(Method::GET, "people/lookup")?
+                .query(&[("q", id)]),
+        )
+        .await
+    }
+    /// Read one page from the signed-in account's Silicon Contacts address book.
+    pub async fn contacts(&self, offset: u32, limit: u32) -> Result<Value> {
+        self.json(
+            self.request(Method::GET, "contacts")?
+                .query(&[("offset", offset), ("limit", limit)]),
+        )
+        .await
+    }
+    /// Save the complete editable contact record, including its peer ID.
+    pub async fn save_contact(&self, details: &Value) -> Result<Value> {
+        self.json(self.request(Method::POST, "contacts")?.json(details))
+            .await
+    }
+    /// Get the owner's saved record for this UUID.
+    pub async fn contact(&self, peer: Uuid) -> Result<Value> {
+        self.json(self.request(Method::GET, &format!("contacts/{peer}"))?)
+            .await
+    }
+    /// Replace all editable fields of a saved contact.
+    pub async fn update_contact(&self, peer: Uuid, details: &Value) -> Result<Value> {
+        self.json(
+            self.request(Method::PUT, &format!("contacts/{peer}"))?
+                .json(details),
+        )
+        .await
+    }
+    /// Remove a saved contact by permanent UUID.
+    pub async fn remove_contact(&self, peer: Uuid) -> Result<Value> {
+        self.json(self.request(Method::DELETE, &format!("contacts/{peer}"))?)
+            .await
+    }
+    /// Get the incoming DM preference.
+    pub async fn direct_settings(&self) -> Result<Value> {
+        self.json(self.request(Method::GET, "direct-settings")?)
+            .await
+    }
+    /// Enable or disable contacts-only DMs.
+    pub async fn set_contacts_only(&self, enabled: bool) -> Result<Value> {
+        self.json(
+            self.request(Method::PUT, "direct-settings")?
+                .json(&json!({"contacts_only":enabled})),
+        )
+        .await
+    }
+    /// List pending requests addressed to this account.
+    pub async fn chat_requests(&self) -> Result<Value> {
+        self.json(self.request(Method::GET, "chat-requests")?).await
+    }
+    /// Accept or decline a pending DM request.
+    pub async fn answer_chat_request(&self, id: Uuid, accept: bool) -> Result<Value> {
+        self.json(
+            self.request(Method::PUT, &format!("chat-requests/{id}"))?
+                .json(&json!({"accept":accept})),
+        )
+        .await
+    }
     /// Whether updates reach the signed-in account through Ting, and how to sync without it.
     pub async fn delivery(&self) -> Result<Delivery> {
         self.json(self.request(Method::GET, "delivery")?).await

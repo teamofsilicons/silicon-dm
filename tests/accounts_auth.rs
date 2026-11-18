@@ -127,6 +127,7 @@ async fn a_rotated_signing_key_is_picked_up_from_the_jwks() -> Result<(), BoxErr
     // Accounts rotates: the JWKS now also publishes a new key; DM refetches on the unknown kid.
     let rotated = TestKey::new(11, "test-key-2");
     app.accounts.server.reset().await;
+    app.accounts.live_introspection().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/.well-known/jwks.json"))
         .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({

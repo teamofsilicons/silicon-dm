@@ -13,6 +13,7 @@
  */
 import { useInfiniteQuery, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import { labeledChat, labeledGroup, labeledMessage, useBook } from "./contacts";
 import { ApiError } from "@/lib/errors";
 import { getConversation, getGroup, getMe, getContracts, listConversations, listInvitations, listMessages, listChatInvitations } from "./api";
 import { mergeListHead, mergeNewestMessages, messagesOldestFirst, summariesOf, type ConversationPages, type MessagePages } from "./cache";
@@ -83,7 +84,8 @@ export function useConversations(view: string | null, initial?: Page<Conversatio
     staleTime: view ? 5000 : 30_000,
     meta: { toast: false },
   });
-  const items = useMemo(() => summariesOf(query.data), [query.data]);
+  const {project} = useBook();
+  const items = useMemo(() => summariesOf(query.data).map(c => labeledChat(c,project)), [query.data,project]);
   return { ...query, items };
 }
 
@@ -208,7 +210,9 @@ export function useConversation(address: string, view: string | null) {
     refetchInterval: retryWhileAway,
     meta: { toast: false },
   });
-  return { conversation: fromList ?? single.data, error: fromList ? null : single.error, loading: !fromList && (waitForList || single.isPending) };
+  const {project}=useBook();
+  const singleChat=useMemo(()=>single.data ? labeledChat(single.data,project) : undefined,[single.data,project]);
+  return { conversation: fromList ?? singleChat, error: fromList ? null : single.error, loading: !fromList && (waitForList || single.isPending) };
 }
 
 /**
@@ -244,7 +248,8 @@ export function useMessages(address: string, view: string | null) {
     }, VIEW_POLL_MS);
     return () => window.clearInterval(timer);
   }, [address, view, queryClient]);
-  const messages = useMemo<Message[]>(() => messagesOldestFirst(query.data), [query.data]);
+  const {project}=useBook();
+  const messages = useMemo<Message[]>(() => messagesOldestFirst(query.data).map(m=>labeledMessage(m,project)), [query.data,project]);
   return { ...query, messages };
 }
 
@@ -268,7 +273,9 @@ export function useInvitations(view: string | null) {
 
 /** A group's details (owners, members, pending invitations), for the details panel. */
 export function useGroup(id: string | null, view: string | null) {
+  const {project}=useBook();
   return useQuery({
+    select: (data:Awaited<ReturnType<typeof getGroup>>) => ({...labeledChat(data,project),group:labeledGroup(data.group,project)}),
     queryKey: chatKeys.group(id ?? "", view),
     queryFn: ({ signal }) => getGroup(id!, { view, signal }),
     enabled: !!id,

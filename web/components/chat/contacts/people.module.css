@@ -1,0 +1,15 @@
+.page { max-width: 48rem; margin-inline: auto; padding: clamp(1.25rem, 5vw, 4rem); height: 100%; overflow-y: auto; color: var(--ink); }
+.page h1 { font-family: var(--font-serif, Georgia), serif; font-size: clamp(2rem, 4vw, 3rem); font-weight: 400; margin: .6em 0 .2em; }
+.top, .toolbar, .actions, .inline { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
+.top, .toolbar, .actions, .muted { font-size: .875rem; }
+.muted { opacity: .72; }
+.toolbar { margin-block: 1.6rem 1rem; justify-content: space-between; }
+.page a, .actions button { color: inherit; text-underline-offset: .2em; }
+.page input:not([type=checkbox]), .page textarea { background: transparent; color: inherit; border: 1px solid currentColor; padding: .6rem .75rem; font: inherit; min-width: 0; }
+.page input[type=file] { border: 0; padding-inline: 0; }
+.form { display: grid; gap: 1rem; margin-block: 1.5rem; max-width: 32rem; }
+.form h2 { font-size: 1.25rem; margin: 0; }
+.form > label:not(.inline) { display: grid; gap: .35rem; }
+.list { list-style: none; padding: 0; }
+.list li { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .65rem; padding-block: .8rem; border-bottom: 1px solid var(--line, #8885); }
+.actions button:not([class]) { font: inherit; background: none; border: 0; text-decoration: underline; cursor: pointer; }

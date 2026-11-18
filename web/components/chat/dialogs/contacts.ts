@@ -66,9 +66,14 @@ export function matchAccounts(accounts: AccountRef[], query: string, limit = 6):
     else if (name.startsWith(text)) score = 3;
     else if (name.split(/\s+/).some(word => word.startsWith(text))) score = 2;
     else if (id.includes(text) || name.includes(text)) score = 1;
+    else if ([id,name].some(v => {
+      let at=0;
+      for(const letter of v) if(letter===text[at]) at++;
+      return at===text.length;
+    })) score=0.5;
     if (score) scored.push({ account, score, index });
   });
-  return scored.sort((a, b) => b.score - a.score || a.index - b.index).slice(0, limit).map(entry => entry.account);
+  return scored.sort((a, b) => Number(b.score===5)-Number(a.score===5) || (b.account.trust ?? 0)-(a.account.trust ?? 0) || b.score - a.score || a.index - b.index).slice(0, limit).map(entry => entry.account);
 }
 
 /** The kind an id names (`c:` a Carbon, `si:` a Silicon), for an account known only by what was typed. */

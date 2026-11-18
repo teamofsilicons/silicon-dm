@@ -13,6 +13,7 @@ export interface AccountRef {
   /** The current id, `c:handle` or `si:handle` (the uuid for a deleted account). */
   id: string;
   uuid?: string;
+  trust?: number;
   display_name?: string;
   pfp_url?: string;
   deleted?: boolean;
