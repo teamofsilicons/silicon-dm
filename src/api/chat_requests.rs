@@ -45,7 +45,8 @@ pub(super) async fn check_conversation(s: &AppState, c: &AuthContext, id: Uuid) 
         "SELECT p.actor_id FROM conversation_participants p
         JOIN conversations conv ON conv.id=p.conversation_id AND NOT conv.is_group
         JOIN direct_preferences pref ON pref.owner=p.actor_id AND pref.contacts_only
-        WHERE p.conversation_id=$1 AND p.actor_id<>$2",
+        WHERE p.conversation_id=$1 AND p.actor_id<>$2
+        AND EXISTS (SELECT 1 FROM conversation_participants mine WHERE mine.conversation_id=$1 AND mine.actor_id=$2)",
     )
     .bind(id)
     .bind(c.actor.id.as_str())

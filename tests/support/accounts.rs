@@ -253,8 +253,8 @@ impl FakeAccounts {
     pub async fn live_introspection(&self) {
         Mock::given(method("POST"))
             .and(path("/v1/oauth/introspect"))
-            .with_priority(10)
             .respond_with(LiveIntrospection)
+            .with_priority(10)
             .mount(&self.server)
             .await;
     }

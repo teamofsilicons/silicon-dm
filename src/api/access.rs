@@ -258,6 +258,7 @@ pub(crate) async fn start_conversation(
         .canonical_direct_conversation(&participants)
         .await?
     {
+        super::chat_requests::check_conversation(state, context, existing).await?;
         return Ok(existing);
     }
     if let Some(deleted) = others.iter().find(|other| other.deleted) {

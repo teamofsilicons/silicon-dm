@@ -54,7 +54,7 @@ export function knownAccounts(conversations: ConversationSummary[], me: { accoun
  */
 export function matchAccounts(accounts: AccountRef[], query: string, limit = 6): AccountRef[] {
   const text = query.trim().toLowerCase();
-  if (!text) return accounts.slice(0, limit);
+  if (!text) return [...accounts].sort((a, b) => (b.trust ?? 0) - (a.trust ?? 0)).slice(0, limit);
   const scored: Array<{ account: AccountRef; score: number; index: number }> = [];
   accounts.forEach((account, index) => {
     const id = account.id.toLowerCase();
