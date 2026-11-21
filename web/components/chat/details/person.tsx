@@ -19,6 +19,9 @@ import type { AccountRef, Presence } from "@/lib/chat/types";
 import { notify, notifyError } from "@/lib/notify";
 import { AccountAvatar } from "../common/avatars";
 import { refocusIfLost } from "../common/refocus";
+import { useRouter } from "next/navigation";
+import { useBook } from "@/lib/chat/contacts";
+import { UserRoundPlus } from "lucide-react";
 import { useStartConversation } from "../dialogs/open-conversation";
 import { useChat } from "../shell/chat-context";
 import { useDetails } from "../shell/details";
@@ -42,9 +45,11 @@ export function usePersonBasics(): (account: AccountRef) => PersonAction[] {
   const { perspective, readOnly } = useChat();
   const details = useDetails();
   const start = useStartConversation();
+  const router=useRouter(), book=useBook();
   return useCallback((account: AccountRef) => {
     const list: PersonAction[] = [];
     if (!sameAccount(account, perspective) && !readOnly && !account.deleted) {
+      list.push({label:book.items.some(c=>c.uuid===account.uuid) ? "Edit contact" : "Save contact", icon:<UserRoundPlus size={16}/>,onSelect:()=>router.push(`/contacts?person=${encodeURIComponent(account.id)}`)});
       list.push({
         label: `Message ${firstName(account)}`,
         icon: <MessageCircle size={16} strokeWidth={1.75} />,
@@ -56,7 +61,7 @@ export function usePersonBasics(): (account: AccountRef) => PersonAction[] {
     }
     list.push({ label: "Copy id", icon: <Copy size={16} strokeWidth={1.75} />, onSelect: () => void copyText(account.id, "Id") });
     return list;
-  }, [details, perspective, readOnly, start]);
+  }, [details, perspective, readOnly, start, router,book.items]);
 }
 
 /** What someone is doing or when they were last here, as the header says it; null when DM does not know. */

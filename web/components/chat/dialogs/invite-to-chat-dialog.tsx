@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import { Button } from "@/components/silicon-ui/button/button";
 import { Dialog, DialogContent } from "@/components/silicon-ui/dialog/dialog";
-import { Input } from "@/components/silicon-ui/input/input";
+import { RecipientField } from "./recipient-field";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { accountName } from "@/lib/chat/address";
 import { inviteToChat } from "@/lib/chat/api";
@@ -43,11 +43,7 @@ function InviteForm({ initialPartner }: { initialPartner: string | null }) {
     <div className={styles.actions}><Button onClick={() => closeDialog("invite-to-chat")}>Done</Button></div>
   </div>;
   return <form className={styles.form} onSubmit={event => { event.preventDefault(); void submit(); }}>
-    <Input id="invite-to" label="Invite" placeholder="c:ada, si:scout, or ada@example.com" value={to}
-      onChange={event => setTo(event.target.value)} required maxLength={254} disabled={busy}
-      autoComplete="off" autoCapitalize="none" spellCheck={false} list="invite-accounts"
-      description="One Carbon ID, Silicon ID, or email address." />
-    <datalist id="invite-accounts">{known.map(account => <option key={account.id} value={account.id}>{accountName(account)}</option>)}</datalist>
+    <RecipientField id="invite-to" label="Invite" value={to} onChange={setTo} people={known} allowEmail disabled={busy} />
     <label className={styles.invitePartner}>Chat with
       <select value={partner} onChange={event => setPartner(event.target.value)} disabled={busy}>
         <option value={me.account.id}>You ({me.account.id})</option>

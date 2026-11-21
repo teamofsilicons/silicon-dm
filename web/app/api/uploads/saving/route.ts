@@ -23,7 +23,9 @@
 import type { NextRequest, NextResponse } from "next/server";
 import { askSaving, cancelSaving, SAVING_TIMING, unknownSaving, type SavingOutcome, type UploadFailure } from "@/lib/server/briefcase";
 import { json } from "@/lib/server/responses";
-import { errorBody, readSession, sameOriginProblem } from "@/lib/server/session";
+import { errorBody } from "@/lib/server/session";
+
+import { uploadIdentity, uploadOriginProblem } from "@/lib/server/upload-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -36,9 +38,9 @@ function failed(failure: UploadFailure): NextResponse {
 }
 
 /** The signed-in account and the save it names, or the answer that refuses. */
-function caller(request: NextRequest): { owner: string; id: string } | NextResponse {
-  const session = readSession(request);
-  if (!session) return json(401, errorBody("signed_out", "This browser is not signed in (no session, or it ended).", "Sign in again."));
+async function caller(request: NextRequest): Promise<{ owner: string; id: string } | NextResponse> {
+  const session = await uploadIdentity(request);
+  if (session instanceof Response) return session;
   const id = request.nextUrl.searchParams.get("id")?.toLowerCase() ?? "";
   if (!ID.test(id)) return failed(unknownSaving());
   return { owner: session.acct.uuid, id };
@@ -51,7 +53,7 @@ function answer(id: string, outcome: SavingOutcome): NextResponse {
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const who = caller(request);
+  const who = await caller(request);
   if (who instanceof Response) return who;
   const raw = request.nextUrl.searchParams.get("wait");
   const seconds = raw === null ? SAVING_TIMING.waitMs / 1000 : Number(raw);
@@ -61,9 +63,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 }
 
 export async function DELETE(request: NextRequest): Promise<NextResponse> {
-  const problem = sameOriginProblem(request);
+  const problem = uploadOriginProblem(request);
   if (problem) return json(403, errorBody("cross_site_request", problem, "Use this site's own pages."));
-  const who = caller(request);
+  const who = await caller(request);
   if (who instanceof Response) return who;
   const outcome = await cancelSaving(who.id, who.owner);
   if (!outcome) return failed(unknownSaving());

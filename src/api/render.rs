@@ -43,7 +43,11 @@ pub(super) async fn responses(
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_owned();
-    let eligible = path.starts_with("/api/v1/") && path != "/api/v1/contracts";
+    let eligible = path.starts_with("/api/v1/")
+        && !matches!(
+            path.split('/').nth(3),
+            Some("contracts" | "contacts" | "contact-photos" | "people")
+        );
     // Lists and single conversation reads both answer summaries.
     let summary = path == "/api/v1/conversations"
         || (request.method() == axum::http::Method::GET

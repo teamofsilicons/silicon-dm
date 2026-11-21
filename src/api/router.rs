@@ -69,6 +69,52 @@ fn build_api_router(state: AppState) -> Router {
             "/allow-list",
             get(me::allow_list).post(me::allow).delete(me::disallow),
         )
+        .route(
+            "/contacts",
+            get(super::contacts::list).post(super::contacts::add),
+        )
+        .route(
+            "/contacts/{peer}",
+            get(super::contacts::get)
+                .put(super::contacts::update)
+                .delete(super::contacts::remove),
+        )
+        .route(
+            "/contact-photos",
+            post(super::contacts::upload).layer(DefaultBodyLimit::max(
+                crate::infrastructure::contacts::PHOTO_LIMIT,
+            )),
+        )
+        .route("/contact-photos/{photo_id}", get(super::contacts::photo))
+        .route("/people", get(super::contacts::people))
+        .route("/people/lookup", get(super::contacts::lookup))
+        .route(
+            "/direct-settings",
+            get(super::chat_requests::preferences).put(super::chat_requests::configure),
+        )
+        .route("/chat-requests", get(super::chat_requests::list))
+        .route(
+            "/chat-requests/{request_id}",
+            put(super::chat_requests::answer),
+        )
+        .route(
+            "/interface-guide",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+                    include_str!("../../docs/start/interfaces.md"),
+                )
+            }),
+        )
+        .route(
+            "/openapi.yaml",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "application/yaml")],
+                    include_str!("../../openapi.yaml"),
+                )
+            }),
+        )
         .route("/me", get(me::me))
         .route("/accounts", get(me::accounts))
         .route("/voices", get(speech::voices))
@@ -252,10 +298,41 @@ pub fn build_router(state: AppState) -> Router {
         .layer(PropagateRequestIdLayer::new(request_id_header))
         .layer(CatchPanicLayer::new());
 
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([
+            Method::GET,
+            Method::HEAD,
+            Method::PUT,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::IF_MATCH,
+            header::IF_NONE_MATCH,
+            header::RANGE,
+            header::IF_RANGE,
+            HeaderName::from_static("idempotency-key"),
+            HeaderName::from_static("x-dm-contract-version"),
+        ])
+        .expose_headers([
+            header::ETAG,
+            header::RETRY_AFTER,
+            header::CONTENT_RANGE,
+            header::ACCEPT_RANGES,
+            HeaderName::from_static("x-dm-contract-version"),
+            HeaderName::from_static("x-request-id"),
+            HeaderName::from_static("x-dm-voice"),
+            HeaderName::from_static("x-dm-duration-ms"),
+        ]);
     api.layer(DefaultBodyLimit::max(maximum_body))
         .layer(middleware)
         .layer(axum::middleware::from_fn(silicon_dm_protocol::responses))
         .layer(axum::middleware::map_response(prevent_response_caching))
+        .layer(cors)
 }
 
 #[cfg(test)]
@@ -314,7 +391,14 @@ mod tests {
             .filter(|line| line.starts_with("  /") && line.ends_with(':'))
             .map(|line| normalized(line.trim().trim_end_matches(':')))
             .collect();
-        let routes = routes();
+        let mut routes = routes();
+        for suffix in ["", "/config", "/file", "/saving"] {
+            let path = format!("/api/interface/uploads{suffix}");
+            let handler = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("web/app{path}/route.ts"));
+            assert!(handler.is_file(), "missing website handler for {path}");
+            routes.push(path);
+        }
         assert!(routes.len() > 30, "found the routes: {routes:?}");
         let missing: Vec<&String> = routes
             .iter()

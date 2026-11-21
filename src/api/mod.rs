@@ -18,3 +18,6 @@ mod receipts;
 mod render;
 mod speech;
 mod sync;
+
+mod chat_requests;
+mod contacts;

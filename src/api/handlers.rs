@@ -281,6 +281,7 @@ async fn send(
     mut body: MessageCreate,
 ) -> AppResult<(StatusCode, Json<Message>)> {
     state.store.require_current(conversation_id).await?;
+    super::chat_requests::check_conversation(state, context, conversation_id).await?;
     resolve_routing(state, context, &mut body).await?;
     let speech =
         prepare_message_speech(state, &context.actor, conversation_id, &mut body, None).await?;
@@ -335,6 +336,7 @@ pub(super) async fn create_message_bundle(
         ));
     }
     bundle.validate().map_err(AppError::validation)?;
+    super::chat_requests::check_conversation(&state, &context, path.conversation_id).await?;
     resolve_routing(&state, &context, &mut bundle.display_message).await?;
     let speech = prepare_message_speech(
         &state,

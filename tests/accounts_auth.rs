@@ -127,6 +127,7 @@ async fn a_rotated_signing_key_is_picked_up_from_the_jwks() -> Result<(), BoxErr
     // Accounts rotates: the JWKS now also publishes a new key; DM refetches on the unknown kid.
     let rotated = TestKey::new(11, "test-key-2");
     app.accounts.server.reset().await;
+    app.accounts.live_introspection().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/.well-known/jwks.json"))
         .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
@@ -212,14 +213,14 @@ async fn a_token_from_the_cutoffs_own_second_is_decided_by_silicon_accounts() ->
     let fresh = app
         .accounts
         .token_with(&ada, &json!({"iat": second, "nbf": second - 1}));
+    // The original sign-in is still live before access is removed.
+    expect_status(&app.get("/api/v1/me", &ended).await?, StatusCode::OK)?;
     app.accounts
         .introspection_of(&ended, false, "a8K", Some(1))
         .await;
     app.accounts
         .introspection_of(&fresh, true, "a8K", Some(1))
         .await;
-    // Before any sign-out nothing needs asking.
-    expect_status(&app.get("/api/v1/me", &ended).await?, StatusCode::OK)?;
     let at = event.format(&time::format_description::well_known::Rfc3339)?;
     let (headers, body) = webhook(
         "membership.access_removed",
@@ -233,7 +234,7 @@ async fn a_token_from_the_cutoffs_own_second_is_decided_by_silicon_accounts() ->
         assert_eq!(refused.1["error"]["code"], "session_revoked");
         expect_status(&app.get("/api/v1/me", &fresh).await?, StatusCode::OK)?;
     }
-    // Each token was asked about once: the answer is kept for that token and cutoff.
+    // An ended token stays refused and each use of the fresh token is checked live.
     app.accounts.server.verify().await;
     app.close().await
 }
@@ -293,11 +294,11 @@ async fn sensitive_routes_ask_accounts_whether_the_sign_in_is_still_live() -> Re
         .await?;
     assert_eq!(refused.0, StatusCode::UNAUTHORIZED, "{}", refused.1);
     assert_eq!(refused.1["error"]["code"], "session_revoked");
-    // Ordinary reads never ask.
+    // Ordinary reads also check the sign-in live.
     expect_status(
         &app.get("/api/v1/allow-list", &app.accounts.token(&cos))
             .await?,
-        StatusCode::OK,
+        StatusCode::UNAUTHORIZED,
     )?;
     app.close().await
 }

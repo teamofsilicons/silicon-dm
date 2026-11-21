@@ -147,3 +147,7 @@ Briefcase's own limits then apply, set by its operators:
 At most 20 new invitations per sender per hour; a matching pending invitation is reused without more mail.
 Invitations expire after 14 days. One recipient per request, by Carbon ID, Silicon ID or email (at most 254 bytes).
 The pending list returns at most 100 invitations, newest first. Each change requires an idempotency key.
+
+## Contacts and requests
+
+Trust ranges from 1 to 255. A contact name may be up to 200 bytes and a note up to 10,000 bytes. A custom contact photo accepts PNG, JPEG or WebP up to 5 MB. Suggestions return up to 100 matches. A sender can create up to 100 new chat requests per hour. Repeated attempts to reach the same recipient reuse the existing request.

@@ -222,7 +222,7 @@ impl FakeAccounts {
         Mock::given(method("POST"))
             .and(path("/v1/oauth/introspect"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "active": active, "sub": sub, "token_type": "Bearer"})))
+                "active": active, "sub": sub, "token_type": "access_token", "client_id": APP_ID})))
             .mount(&self.server)
             .await;
     }
@@ -235,7 +235,7 @@ impl FakeAccounts {
             .and(path("/v1/oauth/introspect"))
             .and(body_string_contains(token))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "active": active, "sub": sub, "token_type": "Bearer"})));
+                "active": active, "sub": sub, "token_type": "access_token", "client_id": APP_ID})));
         match times {
             Some(times) => {
                 mock.with_priority(1)
@@ -254,6 +254,7 @@ impl FakeAccounts {
         Mock::given(method("POST"))
             .and(path("/v1/oauth/introspect"))
             .respond_with(LiveIntrospection)
+            .with_priority(10)
             .mount(&self.server)
             .await;
     }
@@ -371,6 +372,6 @@ impl wiremock::Respond for LiveIntrospection {
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .and_then(|claims| claims["sub"].as_str().map(str::to_owned))
             .unwrap_or_default();
-        ResponseTemplate::new(200).set_body_json(json!({"active": !sub.is_empty(), "sub": sub}))
+        ResponseTemplate::new(200).set_body_json(json!({"active": !sub.is_empty(), "sub": sub, "token_type":"access_token", "client_id":APP_ID}))
     }
 }

@@ -1,6 +1,7 @@
 //! PostgreSQL and external-service adapters.
 
 pub mod accounts;
+pub(crate) mod contacts;
 /// Deepgram: speech (Voice Agent) and transcription.
 pub mod deepgram;
 pub mod giphy;

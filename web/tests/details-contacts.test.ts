@@ -57,3 +57,11 @@ test("a refusal's words name the chosen ids it is about", async () => {
   assert.deepEqual(idsNamedIn("No Silicon Accounts account has the id c:bo now.", chosen), ["c:bo"]);
   assert.deepEqual(idsNamedIn("Something else went wrong.", chosen), []);
 });
+
+test("saved contact trust orders empty and fuzzy suggestions while an exact ID wins", () => {
+  const trusted = { ...scout, display_name: "Scribe Tool", trust: 195 };
+  const ordinary = { ...quill, display_name: "Scribe Tool", trust: 1 };
+  assert.deepEqual(matchAccounts([ordinary, trusted], "srbt"), [trusted, ordinary]);
+  assert.deepEqual(matchAccounts([ordinary, trusted], ""), [trusted, ordinary]);
+  assert.deepEqual(matchAccounts([trusted, ordinary], ordinary.id), [ordinary]);
+});

@@ -20,6 +20,7 @@ import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { Button } from "@/components/silicon-ui/button/button";
 import { accountName, conversationTitle, decodeAddress, inboxHref, otherParticipants } from "@/lib/chat/address";
 import { localDraftText, subscribeDrafts } from "@/lib/chat/draft-store";
+import { useRequests, useBook } from "@/lib/chat/contacts";
 import { SEARCH_CONVERSATIONS_CAP, useConversations, useInvitations, useChatInvitations, useLoadEverything } from "@/lib/chat/hooks";
 import { useHydrated } from "@/lib/chat/hydrated";
 import { latestPending, useOutbox } from "@/lib/chat/outbox-store";
@@ -88,6 +89,8 @@ function SearchStatus({ searching, found, looking }: { searching: boolean; found
 export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar" | "page" }) {
   const { me, view, viewed, perspective, readOnly } = useChat();
   const list = useConversations(view);
+  const book=useBook();
+  const requests=useRequests(book.owner);
   const invitations = useInvitations(view);
   const chatInvitations = useChatInvitations(!view);
   const openAddress = useOpenAddress();
@@ -171,6 +174,9 @@ export function ConversationsPane({ variant = "sidebar" }: { variant?: "sidebar"
         <NewMenu disabledReason={readOnly ? `You are viewing ${view}'s conversations; go back to yours to start one.` : null} />
       </div>
 
+      {!view && <nav aria-label="Inbox sections" className={styles.sections}>
+        <Link href="/c">Chats</Link><Link href="/contacts">Contacts</Link><Link href="/requests">Requests{requests.data?.items.length ? ` (${requests.data.items.length})` : ""}</Link>
+      </nav>}
       <div ref={searchField} className={styles.search} role="search" onKeyDown={event => { if (event.key === "ArrowDown") moveFocus(event); }}>
         <SearchField
           label="Search conversations"

@@ -8,6 +8,8 @@ permissions:
 
 jobs:
   images:
+    permissions:
+      contents: write
     name: ARM64 ${{ matrix.image }} image
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
@@ -89,11 +91,22 @@ jobs:
           sha256sum --check SHA256SUMS
 
       - uses: actions/upload-artifact@v4
+        id: deployment_archive
+        continue-on-error: true
         with:
           name: dm-deployment-${{ matrix.image }}
           path: artifacts/
           if-no-files-found: error
           compression-level: 0
+
+      - name: Retain the checked image when Actions artifact storage is unavailable
+        if: steps.deployment_archive.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd artifacts && zip -q "../$IMAGE_KIND.zip" ./*)
+          gh release create "candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$IMAGE_KIND" --draft --target "$GITHUB_SHA" \
+            --title "DM $IMAGE_KIND deployment candidate" --notes "Checksum-verified ARM64 image." "$IMAGE_KIND.zip"
 
       - name: Export matching migration bootstrap image
         if: matrix.image == 'backend'
@@ -117,9 +130,20 @@ jobs:
           sha256sum --check SHA256SUMS
 
       - uses: actions/upload-artifact@v4
+        id: bootstrap_archive
+        continue-on-error: true
         if: matrix.image == 'backend'
         with:
           name: dm-deployment-bootstrap
           path: bootstrap-artifacts/
           if-no-files-found: error
           compression-level: 0
+
+      - name: Retain the matching bootstrap image when artifact storage is unavailable
+        if: matrix.image == 'backend' && steps.bootstrap_archive.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd bootstrap-artifacts && zip -q ../bootstrap.zip ./*)
+          gh release create "candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-bootstrap" --draft --target "$GITHUB_SHA" \
+            --title "DM bootstrap deployment candidate" --notes "Matching ARM64 migration image." bootstrap.zip

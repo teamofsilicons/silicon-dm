@@ -66,6 +66,7 @@ pub fn settings(
             request_timeout: Duration::from_secs(5),
             proof_issuers: ProofIssuers::parse(proof_issuers)?,
         },
+        contacts_url: accounts.issuer().parse()?,
         data_key: DataKey::from_bytes([42; 32]),
         ting: TingSettings {
             base_url: None,
@@ -157,6 +158,7 @@ impl TestApp {
         configure: impl FnOnce(&mut Settings),
     ) -> Result<Self, BoxError> {
         let accounts = FakeAccounts::start().await;
+        accounts.live_introspection().await;
         let mut settings = settings(&database.url, &accounts, proof_issuers)?;
         configure(&mut settings);
         let store = PostgresStore::connect(&settings.database).await?;

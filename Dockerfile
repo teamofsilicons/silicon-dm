@@ -6,7 +6,7 @@ FROM rust:${RUST_VERSION}-bookworm AS builder
 
 WORKDIR /build
 
-COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs openapi.yaml ./
 COPY migrations ./migrations
 COPY src ./src
 COPY crates ./crates

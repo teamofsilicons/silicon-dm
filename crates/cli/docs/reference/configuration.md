@@ -62,6 +62,7 @@ Sign-in is Silicon Accounts only:
 | `DM_APP_ID` | no | DM's app id in Silicon Accounts (default `dm`) |
 | `DM_APP_SECRET` | yes | DM's app secret |
 | `DM_ACCOUNTS_WEBHOOK_SECRET` | yes | The app webhook signing secret (`whsec_…`); webhooks arrive at `/webhook/` |
+| `DM_CONTACTS_URL` | no | Silicon Contacts service origin. Defaults to https://contacts.teamofsilicons.com. |
 | `DM_ACCOUNTS_REQUEST_TIMEOUT_SECONDS` | no | Timeout of each call to Silicon Accounts (default 5) |
 | `DM_DATA_KEY` | yes | 32 random bytes, base64 (`openssl rand -base64 32`): keys sync cursors and the encryption of stored proofs. Keep it stable and backed up |
 | `DM_PROOF_ISSUERS` | no | Apps whose User verification proofs DM accepts, per scope (`dm.messages.write=interface,…`); empty accepts none |

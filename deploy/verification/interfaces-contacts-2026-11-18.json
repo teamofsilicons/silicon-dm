@@ -1,0 +1,69 @@
+{
+  "version": "0.18.0",
+  "verified_at": "2026-11-18T01:38:55.500405+00:00",
+  "production": {
+    "dm_revision": "ddba1d9b29e79a7d6221df9c38e4380d41915f1e",
+    "services": {
+      "dm-accounts-api": "sha256:f50dde1def794e11b2503ef13c283c52a9e6174e2d284d33410cc682c7fefe3a",
+      "dm-accounts-worker": "sha256:f50dde1def794e11b2503ef13c283c52a9e6174e2d284d33410cc682c7fefe3a",
+      "dm-accounts-web": "sha256:9afc31fb4c0278bbf61154a6236a8d6aa3245d833a5dab9585f6717490d55e29"
+    },
+    "contacts_revision": "ed367fcf9384ab67eb355e234cb0d47f598a0a03",
+    "contacts_predeploy_backup": "dm-check-20261118T011605Z.dump",
+    "dm_rds_predeploy_snapshot": "dm-pre-interface-contacts-20261118",
+    "database_migration": 55,
+    "runtime_table_privileges_verified": [
+      "dm.direct_preferences",
+      "dm.chat_requests"
+    ],
+    "ready_status": 204,
+    "deployment_image_workflow": "https://github.com/teamofsilicons/silicon-dm/actions/runs/44216277086",
+    "contacts_candidate_workflow": "https://github.com/teamofsilicons/silicon-contacts/actions/runs/44212181090"
+  },
+  "interface": {
+    "resource_app_id": "dm",
+    "http_contract": 4,
+    "openapi_paths": 59,
+    "openapi_operations": 80,
+    "routine_auth": "DM-scoped bearer with live Silicon Accounts introspection",
+    "published_catalog_guide": "https://api.dm.teamofsilicons.com/api/v1/interface-guide",
+    "catalog": "https://apps.teamofsilicons.com/v1/apps/dm",
+    "catalog_authors": [
+      "c:saket",
+      "si:saket-agents"
+    ],
+    "human_guide": "https://docs.dm.teamofsilicons.com/start/interfaces/",
+    "openapi": "https://api.dm.teamofsilicons.com/api/v1/openapi.yaml",
+    "guide_sha256": "c4980c45b9a26d900e2db1e7de6824406bdb105b66e4e92f25e3525fe358a3f8",
+    "openapi_sha256": "996ca5855d12b91dede1bcd3229e7befd0e3f7e39ca8676c3a38edb820ea5839"
+  },
+  "verification": {
+    "production_browser": [
+      "Chromium on a separate origin reads the guide, contract, inbox, contacts, people and requests with a DM bearer and zero cookies.",
+      "The standalone interface reaches upload configuration and an authenticated upload-status lookup.",
+      "A CORS-preflighted preference write round-tripped and the original setting was restored.",
+      "Saving an alias, note, trust and private photo in the native form created the same record in Silicon Contacts.",
+      "An edit in Silicon Contacts reappeared in DM with the private image. A fuzzy match selected the saved identity.",
+      "The native request inbox and direct-message setting rendered, and the contacts page fit a mobile viewport.",
+      "The production catalog points to the working public guide."
+    ],
+    "production_attachments": [
+      "Different app access token refused by DM and uploads",
+      "Separate-origin browser uploaded and downloaded matching bytes through Briefcase",
+      "Temporary file moved to the owner bin"
+    ],
+    "browser_test_context": "Separate-origin Chromium connected directly to production. Native form and mobile checks used the locally served release build against production with the shared Silicon identity.",
+    "cross_service_test": "Both HTTP services and PostgreSQL running locally. The Carbon opted into contacts-only DMs. A Silicon received a 409 and the Carbon saw a single request. Saving the Silicon in DM allowed the next message and was visible in Silicon Contacts. After acceptance, removing the contact preserved permission for the pair.",
+    "dm_browser_unit_tests": 364,
+    "contacts_service_http_cli_checks": 167,
+    "presentation": "All 30 documentation pages built and passed navigation, canonical link and machine-readable content checks.",
+    "isolated_mutations": "No production invitation or chat message sent. Temporary contacts were removed, attachment test files moved to the owner bin, and the original DM preference restored."
+  },
+  "dependency_audit": {
+    "status": "Two findings predate this release. Both dependency versions are present on the production base branch.",
+    "findings": {
+      "RUSTSEC-2026-0440": "astral-tokio-tar 0.6.4 through the test container harness",
+      "RUSTSEC-2026-0459": "libsqlite3-sys 0.36.0 through the CLI relay SQLite database"
+    }
+  }
+}

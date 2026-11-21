@@ -70,7 +70,7 @@ function NewConversationForm() {
         suggestions={known} exclude={[me.account]} excludedReason={account => `${account.id} is you. Choose who you want to talk with.`}
         flagged={error ? idsNamedIn(`${error.message} ${error.hint ?? ""}`, accounts) : []}
         description="Choose more than one for a conversation of several." />
-      {error ? <div ref={errorBox}><ErrorAlert error={error} title="The conversation could not be opened" /></div> : null}
+      {error?.code === "chat_request_pending" ? <p role="status">Chat request sent. You can message them after they accept.</p> : error ? <div ref={errorBox}><ErrorAlert error={error} title="The conversation could not be opened" /></div> : null}
       <div className={styles.actions}>
         <Button type="button" variant="ghost" onClick={() => closeDialog("new-conversation")}>Cancel</Button>
         <Button type="submit" loading={busy}>Start conversation</Button>

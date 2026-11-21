@@ -36,6 +36,7 @@ use crate::{
 
 pub use accounts::{Applied, StoredAccount, valid_public_id};
 pub use allow_list::AllowListEntry;
+pub(crate) use conversations::{canonical_or_insert_in, canonicalize_participants};
 pub use delivery::{Pruned, SYNC_RETENTION};
 pub use http_presence::PresenceLease;
 pub use presence::ActivityView;

@@ -12,6 +12,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { CommandMenu } from "@/components/foundation/shell/command-menu";
 import type { SessionAccount } from "@/lib/account";
+import { ContactProvider } from "@/lib/chat/contacts";
 import { useHydrated } from "@/lib/chat/hydrated";
 import { chatKeys } from "@/lib/chat/keys";
 import type { ConversationSummary, Invitation, Me, Page } from "@/lib/chat/types";
@@ -92,7 +93,7 @@ export function ChatApp({ account, accountsUrl, tingOrigin, initialMe, initialCo
   });
   return (
     <ChatProvider tingOrigin={tingOrigin} account={account} accountsUrl={accountsUrl} initialMe={initialMe}>
-      <ShortcutsProvider>
+      <ContactProvider owner={account.uuid}><ShortcutsProvider>
         <DetailsProvider>
           <ChatRuntime />
           <GlobalCommands />
@@ -102,7 +103,7 @@ export function ChatApp({ account, accountsUrl, tingOrigin, initialMe, initialCo
           <DialogFromAddress />
           <ToastPlace />
         </DetailsProvider>
-      </ShortcutsProvider>
+      </ShortcutsProvider></ContactProvider>
     </ChatProvider>
   );
 }

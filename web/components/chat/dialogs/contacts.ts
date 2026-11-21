@@ -54,7 +54,7 @@ export function knownAccounts(conversations: ConversationSummary[], me: { accoun
  */
 export function matchAccounts(accounts: AccountRef[], query: string, limit = 6): AccountRef[] {
   const text = query.trim().toLowerCase();
-  if (!text) return accounts.slice(0, limit);
+  if (!text) return [...accounts].sort((a, b) => (b.trust ?? 0) - (a.trust ?? 0)).slice(0, limit);
   const scored: Array<{ account: AccountRef; score: number; index: number }> = [];
   accounts.forEach((account, index) => {
     const id = account.id.toLowerCase();
@@ -66,9 +66,14 @@ export function matchAccounts(accounts: AccountRef[], query: string, limit = 6):
     else if (name.startsWith(text)) score = 3;
     else if (name.split(/\s+/).some(word => word.startsWith(text))) score = 2;
     else if (id.includes(text) || name.includes(text)) score = 1;
+    else if ([id,name].some(v => {
+      let at=0;
+      for(const letter of v) if(letter===text[at]) at++;
+      return at===text.length;
+    })) score=0.5;
     if (score) scored.push({ account, score, index });
   });
-  return scored.sort((a, b) => b.score - a.score || a.index - b.index).slice(0, limit).map(entry => entry.account);
+  return scored.sort((a, b) => Number(b.score===5)-Number(a.score===5) || (b.account.trust ?? 0)-(a.account.trust ?? 0) || b.score - a.score || a.index - b.index).slice(0, limit).map(entry => entry.account);
 }
 
 /** The kind an id names (`c:` a Carbon, `si:` a Silicon), for an account known only by what was typed. */

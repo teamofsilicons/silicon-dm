@@ -317,7 +317,7 @@ impl PostgresStore {
 }
 
 /// Finds the canonical conversation of the set, or creates it in the @accounts partition.
-pub(super) async fn canonical_or_insert_in(
+pub(crate) async fn canonical_or_insert_in(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     creator: &ActorRef,
     participants: &[ActorRef],

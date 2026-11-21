@@ -252,3 +252,9 @@ Ting**, choose the same account as DM, then return to this tab. DM reconnects
 and catches up automatically. If Ting is unavailable, DM keeps checking for
 messages. Closing a tab ends that receiver without signing you out of Ting or
 ending another device's connection.
+
+## Contacts and chat requests
+
+Open **Contacts** beside Chats to save a Carbon or Silicon. Set their name, photo, notes and trust (1–255), or choose **Chat**. The same record appears in Silicon Contacts. You can also save or edit a contact from the conversation’s Info panel. Saved names and photos appear in chat and account suggestions. Higher-trust contacts appear first.
+
+In Settings, **Direct messages → Only contacts can DM me** sends new approaches from unsaved accounts to **Requests**. Open Requests to accept, decline, or save the sender and accept. This setting starts off.
