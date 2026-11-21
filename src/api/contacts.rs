@@ -24,7 +24,7 @@ pub(super) async fn list(
     Authenticated(c): Authenticated,
     ApiQuery(page): ApiQuery<Page>,
 ) -> AppResult<Json<Value>> {
-    let req = contacts::user(&s, &c, Method::GET, &["contacts"]).await?;
+    let (_proof, req) = contacts::user(&s, &c, Method::GET, &["contacts"]).await?;
     Ok(Json(contacts::json(req.query(&page)).await?))
 }
 
@@ -45,14 +45,14 @@ pub(super) async fn lookup(
         ));
     }
     let proof = contacts::user_proof(&s, &c, &Method::GET).await?;
-    let req = contacts::request(&s, &proof, Method::GET, &["lookup"])?;
+    let req = contacts::request(&s, &proof.token, Method::GET, &["lookup"])?;
     let profile = contacts::json(req.query(&[("q", id)])).await?;
     let uuid = profile["uuid"]
         .as_str()
         .ok_or(AppError::DependencyUnavailable {
             dependency: "silicon_contacts",
         })?;
-    let saved = contacts::request(&s, &proof, Method::GET, &["contacts", uuid])?;
+    let saved = contacts::request(&s, &proof.token, Method::GET, &["contacts", uuid])?;
     match contacts::json(saved).await {
         Ok(contact) => Ok(Json(contact_profile(&contact))),
         Err(err) if err.status() == http::StatusCode::NOT_FOUND => Ok(Json(profile)),
@@ -74,23 +74,16 @@ pub(super) async fn get(
     Authenticated(c): Authenticated,
     ApiPath(PeerPath { peer }): ApiPath<PeerPath>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(
-        contacts::json(contacts::user(&s, &c, Method::GET, &["contacts", &peer]).await?).await?,
-    ))
+    let (_proof, req) = contacts::user(&s, &c, Method::GET, &["contacts", &peer]).await?;
+    Ok(Json(contacts::json(req).await?))
 }
 pub(super) async fn add(
     State(s): State<AppState>,
     Authenticated(c): Authenticated,
     ApiJson(body): ApiJson<Value>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(
-        contacts::json(
-            contacts::user(&s, &c, Method::POST, &["contacts"])
-                .await?
-                .json(&body),
-        )
-        .await?,
-    ))
+    let (_proof, req) = contacts::user(&s, &c, Method::POST, &["contacts"]).await?;
+    Ok(Json(contacts::json(req.json(&body)).await?))
 }
 pub(super) async fn update(
     State(s): State<AppState>,
@@ -98,23 +91,16 @@ pub(super) async fn update(
     ApiPath(PeerPath { peer }): ApiPath<PeerPath>,
     ApiJson(body): ApiJson<Value>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(
-        contacts::json(
-            contacts::user(&s, &c, Method::PUT, &["contacts", &peer])
-                .await?
-                .json(&body),
-        )
-        .await?,
-    ))
+    let (_proof, req) = contacts::user(&s, &c, Method::PUT, &["contacts", &peer]).await?;
+    Ok(Json(contacts::json(req.json(&body)).await?))
 }
 pub(super) async fn remove(
     State(s): State<AppState>,
     Authenticated(c): Authenticated,
     ApiPath(PeerPath { peer }): ApiPath<PeerPath>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(
-        contacts::json(contacts::user(&s, &c, Method::DELETE, &["contacts", &peer]).await?).await?,
-    ))
+    let (_proof, req) = contacts::user(&s, &c, Method::DELETE, &["contacts", &peer]).await?;
+    Ok(Json(contacts::json(req).await?))
 }
 
 pub(super) async fn upload(
@@ -128,10 +114,8 @@ pub(super) async fn upload(
         .and_then(|v| v.to_str().ok())
         .filter(|v| v.starts_with("multipart/form-data;"))
         .ok_or_else(|| AppError::invalid("Upload a PNG, JPEG or WebP as multipart form data."))?;
-    let req = contacts::user(&s, &c, Method::POST, &["photos"])
-        .await?
-        .header(header::CONTENT_TYPE, content_type)
-        .body(body);
+    let (_proof, req) = contacts::user(&s, &c, Method::POST, &["photos"]).await?;
+    let req = req.header(header::CONTENT_TYPE, content_type).body(body);
     let mut result = contacts::json(req).await?;
     let id = result["id"]
         .as_str()
@@ -147,7 +131,7 @@ pub(super) async fn photo(
     Authenticated(c): Authenticated,
     ApiPath(PhotoPath { photo_id: id }): ApiPath<PhotoPath>,
 ) -> AppResult<Response> {
-    let req = contacts::user(&s, &c, Method::GET, &["photos", &id.to_string()]).await?;
+    let (_proof, req) = contacts::user(&s, &c, Method::GET, &["photos", &id.to_string()]).await?;
     Ok((
         [
             (header::CONTENT_TYPE, "image/png"),
@@ -212,7 +196,7 @@ pub(super) async fn people(
         .into_iter()
         .filter_map(|p| Some((p["uuid"].as_str()?.to_owned(), p)))
         .collect();
-    let req = contacts::user(&s, &c, Method::GET, &["contacts"]).await?;
+    let (_proof, req) = contacts::user(&s, &c, Method::GET, &["contacts"]).await?;
     let mut offset = 0;
     loop {
         let page = contacts::json(

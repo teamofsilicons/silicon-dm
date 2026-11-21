@@ -205,5 +205,23 @@ async fn standalone_people_use_private_contact_names_trust_and_fuzzy_search() ->
         .await?;
     expect_status(&exact, StatusCode::OK)?;
     assert_eq!(exact.1, matches[0]);
+    // One proof per request (people, lookup), each revoked so grants never pile up.
+    let mut revoked = 0;
+    for _ in 0..100 {
+        revoked = app
+            .accounts
+            .server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.path() == "/v1/proofs/revoke")
+            .count();
+        if revoked >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(revoked, 2);
     app.close().await
 }

@@ -4,12 +4,15 @@ use http::{Method, StatusCode, header};
 use reqwest::{Client, RequestBuilder};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{Value, json};
-use std::{sync::LazyLock, time::Duration};
+use std::{
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 use uuid::Uuid;
 
 use crate::{
     AppError, AppResult,
-    application::{auth::AuthContext, state::AppState},
+    application::{auth::AuthContext, ports::IdentityProvider, state::AppState},
 };
 
 const APP: &str = "silicon-contacts";
@@ -49,21 +52,44 @@ pub(crate) fn request(
         ))
 }
 
+/// A User verification for one DM request. Each issue is a separate grant on the
+/// account's "acts for you" list, so dropping it revokes the proof family.
+pub(crate) struct UserProof {
+    pub(crate) token: SecretString,
+    id: String,
+    identity: Arc<dyn IdentityProvider>,
+}
+
+impl Drop for UserProof {
+    fn drop(&mut self) {
+        let (identity, id) = (self.identity.clone(), std::mem::take(&mut self.id));
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = identity.revoke_proof(&id).await {
+                    tracing::warn!(?error, "could not revoke Silicon Contacts proof");
+                }
+            });
+        }
+    }
+}
+
+/// Keep the returned proof alive until the request's response has been read.
 pub(crate) async fn user(
     state: &AppState,
     context: &AuthContext,
     method: Method,
     path: &[&str],
-) -> AppResult<RequestBuilder> {
+) -> AppResult<(UserProof, RequestBuilder)> {
     let proof = user_proof(state, context, &method).await?;
-    request(state, &proof, method, path)
+    let request = request(state, &proof.token, method, path)?;
+    Ok((proof, request))
 }
 
 pub(crate) async fn user_proof(
     state: &AppState,
     context: &AuthContext,
     method: &Method,
-) -> AppResult<SecretString> {
+) -> AppResult<UserProof> {
     let token = context.access_token().ok_or_else(|| {
         AppError::forbidden(
             "dm_sign_in_required",
@@ -79,7 +105,11 @@ pub(crate) async fn user_proof(
         .identity
         .issue_user_verification(token, APP, &[scope], &Uuid::new_v4().to_string())
         .await?;
-    Ok(proof.token)
+    Ok(UserProof {
+        token: proof.token,
+        id: proof.proof_id,
+        identity: state.identity.clone(),
+    })
 }
 
 pub(crate) async fn bytes(request: RequestBuilder) -> AppResult<Bytes> {
